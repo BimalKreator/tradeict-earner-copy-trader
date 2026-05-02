@@ -11,8 +11,8 @@ export function DashboardHeader() {
   }
 
   return (
-    <header className="glass-card sticky top-0 z-40 border-b border-glassBorder px-4 py-4 md:px-8">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
+    <header className="glass-card sticky top-0 z-40 border-b border-glassBorder px-6 py-4 md:px-8 lg:px-10">
+      <div className="flex items-center justify-between gap-4">
         <div>
           <span className="text-xs font-medium uppercase tracking-widest text-primary">
             TradeICT
