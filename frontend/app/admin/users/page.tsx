@@ -115,7 +115,7 @@ export default function AdminUsersPage() {
       )}
 
       <div className="glass-card border border-glassBorder overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="scroll-table overflow-x-auto">
           <table className="w-full min-w-[640px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>

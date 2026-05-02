@@ -3,6 +3,7 @@ import {
   type PrismaClient,
   SubscriptionStatus,
 } from "@prisma/client";
+import { logUserActivity } from "../services/userActivityService.js";
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
 export async function recordTradePnl(
@@ -110,6 +111,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
           multiplier,
           status: SubscriptionStatus.ACTIVE,
         },
+      });
+
+      void logUserActivity(prisma, {
+        userId,
+        kind: "SUBSCRIPTION_CREATED",
+        message: `Subscribed with multiplier ${multiplier}x`,
       });
 
       res.status(201).json(subscription);

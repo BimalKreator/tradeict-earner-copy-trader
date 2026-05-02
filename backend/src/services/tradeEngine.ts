@@ -15,6 +15,8 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
+import { notifyTradeExecuted } from "./telegramService.js";
+import { logUserActivity } from "./userActivityService.js";
 
 /** Puppeteer v24 typings omit legacy helpers expected by puppeteer-extra; runtime is fine. */
 const puppeteer = addExtra(vanillaPuppeteer as unknown as VanillaPuppeteer);
@@ -101,6 +103,27 @@ async function recordTrade(
       userId: args.userId,
       strategyId: args.strategyId,
       tradeProfit: args.pnl,
+    });
+  }
+
+  if (args.status === TradeStatus.OPEN) {
+    void notifyTradeExecuted(prisma, {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.symbol,
+      side: args.side,
+      size: args.size,
+      entryPrice: args.entryPrice,
+    }).catch((err) => {
+      console.warn("[telegram] notifyTradeExecuted:", err);
+    });
+  }
+
+  if (args.status === TradeStatus.FAILED) {
+    void logUserActivity(prisma, {
+      userId: args.userId,
+      kind: "TRADE_SKIPPED",
+      message: `Trade skipped: ${args.symbol} ${args.side} @ ${args.entryPrice} (size ${args.size})`,
     });
   }
 }

@@ -51,6 +51,9 @@ model User {
   status        UserStatus          @default(ACTIVE)
   otpCode       String?
   otpExpiry     DateTime?
+  telegramChatId       String?              @unique
+  telegramLinkToken    String?              @unique
+  telegramLinkExpires  DateTime?
   createdAt     DateTime            @default(now())
 
   deltaApiKeys  DeltaApiKey[]
@@ -60,6 +63,17 @@ model User {
   transactions  Transaction[]
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
+  activities    UserActivity[]
+}
+
+model UserActivity {
+  id        String   @id @default(uuid())
+  userId    String
+  kind      String
+  message   String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Strategy {

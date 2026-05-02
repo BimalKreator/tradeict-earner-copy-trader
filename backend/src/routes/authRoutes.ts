@@ -6,6 +6,11 @@ import {
   type PrismaClient,
   Role,
 } from "@prisma/client";
+import { authenticateJwt } from "../middleware/authMiddleware.js";
+import {
+  createTelegramLinkToken,
+  telegramLinkExpiry,
+} from "../services/telegramService.js";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 
@@ -128,6 +133,40 @@ export function createAuthRoutes(prisma: PrismaClient): Router {
       );
 
       res.status(200).json({ token });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/telegram-link-token", authenticateJwt(), async (req, res, next) => {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const linkToken = createTelegramLinkToken();
+      const expiresAt = telegramLinkExpiry();
+
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          telegramLinkToken: linkToken,
+          telegramLinkExpires: expiresAt,
+        },
+      });
+
+      const botUsername = process.env.TELEGRAM_BOT_USERNAME?.trim();
+      const deepLink = botUsername
+        ? `https://t.me/${botUsername}?start=${linkToken}`
+        : undefined;
+
+      res.status(200).json({
+        linkToken,
+        expiresAt: expiresAt.toISOString(),
+        ...(deepLink ? { deepLink } : {}),
+      });
     } catch (err) {
       next(err);
     }

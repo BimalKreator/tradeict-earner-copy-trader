@@ -13,8 +13,14 @@ import { PrismaClient } from "@prisma/client";
 import { createAdminRoutes } from "./routes/adminRoutes.js";
 import { createAuthRoutes } from "./routes/authRoutes.js";
 import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
+import { createAnalyticsRoutes } from "./routes/analyticsRoutes.js";
+import { createLeaderboardRoutes } from "./routes/leaderboardRoutes.js";
 import { createWalletRoutes } from "./routes/walletRoutes.js";
 import { initBillingCronJobs } from "./services/billingService.js";
+import {
+  initTelegramBot,
+  initTelegramCronJobs,
+} from "./services/telegramService.js";
 
 const PORT = 5000;
 
@@ -28,6 +34,8 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 initBillingCronJobs(prisma);
+initTelegramBot(prisma);
+initTelegramCronJobs(prisma);
 
 const app = express();
 
@@ -36,6 +44,8 @@ app.use(express.json());
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
+app.use("/api/analytics", createAnalyticsRoutes(prisma));
+app.use("/api/leaderboard", createLeaderboardRoutes(prisma));
 app.use("/api/subscriptions", createSubscriptionRoutes(prisma));
 app.use("/api/wallet", createWalletRoutes(prisma));
 

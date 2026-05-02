@@ -1,0 +1,24 @@
+.react-calendar-heatmap {
+  font-family: inherit;
+}
+
+.react-calendar-heatmap .color-empty {
+  fill: rgba(255, 255, 255, 0.06);
+}
+
+.react-calendar-heatmap .color-profit {
+  fill: rgb(34 197 94);
+}
+
+.react-calendar-heatmap .color-loss {
+  fill: rgb(239 68 68);
+}
+
+.react-calendar-heatmap .color-neutral {
+  fill: rgba(255, 255, 255, 0.12);
+}
+
+.react-calendar-heatmap text {
+  fill: rgba(255, 255, 255, 0.35);
+  font-size: 9px;
+}

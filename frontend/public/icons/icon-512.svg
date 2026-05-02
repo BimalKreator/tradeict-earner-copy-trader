@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="TradeICT">
+  <defs>
+    <linearGradient id="bg512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0A84FF;stop-opacity:0.4"/>
+      <stop offset="100%" style="stop-color:#080808;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg512)"/>
+  <rect x="42" y="42" width="428" height="428" rx="86" fill="none" stroke="rgba(10,132,255,0.5)" stroke-width="5"/>
+  <text x="256" y="318" text-anchor="middle" font-family="system-ui,sans-serif" font-size="152" font-weight="700" fill="#ffffff">T</text>
+</svg>
