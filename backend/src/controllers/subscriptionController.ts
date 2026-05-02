@@ -4,6 +4,44 @@ import {
   SubscriptionStatus,
 } from "@prisma/client";
 
+/** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
+export async function recordTradePnl(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    tradeProfit: number;
+  },
+): Promise<void> {
+  if (!Number.isFinite(args.tradeProfit)) {
+    console.warn("[recordTradePnl] skip: tradeProfit is not finite");
+    return;
+  }
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+    select: { profitShare: true },
+  });
+
+  if (!strategy) {
+    console.warn(
+      `[recordTradePnl] skip: strategy not found (${args.strategyId})`,
+    );
+    return;
+  }
+
+  const commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
+
+  await prisma.pnLRecord.create({
+    data: {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      profitAmount: args.tradeProfit,
+      commissionAmount,
+    },
+  });
+}
+
 export function createSubscriptionController(prisma: PrismaClient) {
   async function subscribe(
     req: Request,

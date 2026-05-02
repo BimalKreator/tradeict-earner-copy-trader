@@ -14,6 +14,7 @@ import { createAdminRoutes } from "./routes/adminRoutes.js";
 import { createAuthRoutes } from "./routes/authRoutes.js";
 import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
 import { createWalletRoutes } from "./routes/walletRoutes.js";
+import { initBillingCronJobs } from "./services/billingService.js";
 
 const PORT = 5000;
 
@@ -25,6 +26,8 @@ if (!connectionString) {
 const pool = new pg.Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+
+initBillingCronJobs(prisma);
 
 const app = express();
 

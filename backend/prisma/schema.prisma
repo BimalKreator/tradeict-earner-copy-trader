@@ -37,6 +37,12 @@ enum TransactionStatus {
   REJECTED
 }
 
+enum InvoiceStatus {
+  UNPAID
+  PAID
+  OVERDUE
+}
+
 model User {
   id            String              @id @default(uuid())
   email         String              @unique
@@ -52,6 +58,8 @@ model User {
   trades        Trade[]
   wallet        Wallet?
   transactions  Transaction[]
+  invoices      Invoice[]
+  pnlRecords    PnLRecord[]
 }
 
 model Strategy {
@@ -67,6 +75,7 @@ model Strategy {
 
   subscriptions UserSubscription[]
   trades        Trade[]
+  pnlRecords    PnLRecord[]
 }
 
 model UserSubscription {
@@ -79,6 +88,7 @@ model UserSubscription {
 
   user       User                @relation(fields: [userId], references: [id])
   strategy   Strategy            @relation(fields: [strategyId], references: [id])
+  invoices   Invoice[]
 }
 
 model Trade {
@@ -139,4 +149,32 @@ model DeltaApiKey {
   apiSecret String
 
   user      User   @relation(fields: [userId], references: [id])
+}
+
+model Invoice {
+  id               String        @id @default(uuid())
+  userId           String
+  amount           Float
+  status           InvoiceStatus @default(UNPAID)
+  dueDate          DateTime
+  createdAt        DateTime      @default(now())
+  subscriptionId   String?
+  billingPeriodEnd DateTime?
+
+  user         User              @relation(fields: [userId], references: [id])
+  subscription UserSubscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([subscriptionId, billingPeriodEnd])
+}
+
+model PnLRecord {
+  id               String   @id @default(uuid())
+  userId           String
+  strategyId       String
+  profitAmount     Float
+  commissionAmount Float
+  timestamp        DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id])
+  strategy Strategy @relation(fields: [strategyId], references: [id])
 }

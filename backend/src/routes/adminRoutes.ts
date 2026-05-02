@@ -1,15 +1,21 @@
 import { Router } from "express";
 import {
   type PrismaClient,
+  InvoiceStatus,
   Role,
   UserStatus,
 } from "@prisma/client";
+import {
+  authenticateJwt,
+  requireAdmin,
+} from "../middleware/authMiddleware.js";
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
+  const adminOnly = [authenticateJwt(), requireAdmin(prisma)];
 
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });
@@ -288,6 +294,56 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const { id } = req.params;
       await prisma.strategy.delete({ where: { id } });
       res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/revenue", ...adminOnly, async (_req, res, next) => {
+    try {
+      const now = new Date();
+      const monthStart = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+      );
+
+      const [
+        paidAgg,
+        pendingAgg,
+        projectedAgg,
+        invoices,
+      ] = await Promise.all([
+        prisma.invoice.aggregate({
+          where: { status: InvoiceStatus.PAID },
+          _sum: { amount: true },
+        }),
+        prisma.invoice.aggregate({
+          where: {
+            status: {
+              in: [InvoiceStatus.UNPAID, InvoiceStatus.OVERDUE],
+            },
+          },
+          _sum: { amount: true },
+        }),
+        prisma.pnLRecord.aggregate({
+          where: { timestamp: { gte: monthStart } },
+          _sum: { commissionAmount: true },
+        }),
+        prisma.invoice.findMany({
+          orderBy: { dueDate: "desc" },
+          include: {
+            user: { select: { email: true } },
+          },
+        }),
+      ]);
+
+      res.json({
+        stats: {
+          totalRevenueReceived: paidAgg._sum.amount ?? 0,
+          pendingDuesUnpaid: pendingAgg._sum.amount ?? 0,
+          projectedEarnings: projectedAgg._sum.commissionAmount ?? 0,
+        },
+        invoices,
+      });
     } catch (err) {
       next(err);
     }

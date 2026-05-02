@@ -14,6 +14,7 @@ import {
   fetchDeltaTicker,
   type TradeSide,
 } from "./exchangeService.js";
+import { recordTradePnl } from "../controllers/subscriptionController.js";
 
 /** Puppeteer v24 typings omit legacy helpers expected by puppeteer-extra; runtime is fine. */
 const puppeteer = addExtra(vanillaPuppeteer as unknown as VanillaPuppeteer);
@@ -73,6 +74,8 @@ async function recordTrade(
     size: number;
     entryPrice: number;
     status: TradeStatus;
+    exitPrice?: number | null;
+    pnl?: number | null;
   },
 ) {
   await prisma.trade.create({
@@ -84,8 +87,128 @@ async function recordTrade(
       size: args.size,
       entryPrice: args.entryPrice,
       status: args.status,
+      ...(args.exitPrice != null ? { exitPrice: args.exitPrice } : {}),
+      ...(args.pnl != null ? { pnl: args.pnl } : {}),
     },
   });
+
+  if (
+    args.status === TradeStatus.CLOSED &&
+    args.pnl != null &&
+    Number.isFinite(args.pnl)
+  ) {
+    await recordTradePnl(prisma, {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      tradeProfit: args.pnl,
+    });
+  }
+}
+
+function realizedPnlUsd(args: {
+  side: TradeSide;
+  entryPrice: number;
+  exitPrice: number;
+  size: number;
+}): number {
+  const diff = args.exitPrice - args.entryPrice;
+  return args.side === "BUY" ? diff * args.size : -diff * args.size;
+}
+
+function entryPriceMatches(stored: number, cosmic: number): boolean {
+  const eps = Math.max(1e-8, Math.abs(cosmic) * 1e-6);
+  return Math.abs(stored - cosmic) <= eps;
+}
+
+/**
+ * Marks the follower's matching OPEN trade CLOSED and writes PnL + commission row.
+ */
+async function closeFollowerTradeAndRecordPnl(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    cosmic: CosmicLedTrade;
+    sizedPosition: number;
+    exitPrice: number;
+  },
+): Promise<void> {
+  const candidates = await prisma.trade.findMany({
+    where: {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.cosmic.symbol,
+      side: args.cosmic.side,
+      status: TradeStatus.OPEN,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const open = candidates.find((t) =>
+    entryPriceMatches(t.entryPrice, args.cosmic.entryPrice),
+  );
+
+  if (!open) return;
+
+  const tradeProfit = realizedPnlUsd({
+    side: args.cosmic.side,
+    entryPrice: args.cosmic.entryPrice,
+    exitPrice: args.exitPrice,
+    size: args.sizedPosition,
+  });
+
+  await prisma.trade.update({
+    where: { id: open.id },
+    data: {
+      exitPrice: args.exitPrice,
+      pnl: tradeProfit,
+      status: TradeStatus.CLOSED,
+    },
+  });
+
+  await recordTradePnl(prisma, {
+    userId: args.userId,
+    strategyId: args.strategyId,
+    tradeProfit,
+  });
+}
+
+async function processRemovedCosmicPositions(
+  prisma: PrismaClient,
+  strategies: { id: string }[],
+  removed: CosmicLedTrade[],
+): Promise<void> {
+  for (const cosmic of removed) {
+    let exitPrice: number | undefined;
+    try {
+      const t = await fetchDeltaTicker(cosmic.symbol);
+      exitPrice = t.last;
+    } catch {
+      exitPrice = undefined;
+    }
+    if (exitPrice === undefined || !Number.isFinite(exitPrice)) continue;
+
+    for (const strategy of strategies) {
+      const subs = await prisma.userSubscription.findMany({
+        where: {
+          strategyId: strategy.id,
+          status: SubscriptionStatus.ACTIVE,
+          user: { status: UserStatus.ACTIVE },
+        },
+      });
+
+      for (const sub of subs) {
+        const userSize = cosmic.size * sub.multiplier;
+        await closeFollowerTradeAndRecordPnl(prisma, {
+          userId: sub.userId,
+          strategyId: strategy.id,
+          cosmic,
+          sizedPosition: userSize,
+          exitPrice,
+        });
+      }
+    }
+  }
 }
 
 async function processNewCosmicTrade(
@@ -369,11 +492,40 @@ async function runEngineLoop(
   prisma: PrismaClient,
   page: Page,
   cancelled: { value: boolean },
-  dedupe: { lastId: string | undefined },
+  dedupe: {
+    lastId: string | undefined;
+    prevOpenById: Map<string, CosmicLedTrade>;
+  },
 ): Promise<void> {
   while (!cancelled.value) {
     try {
       const scraped = await scrapeOpenPositions(page);
+      const currentOpen = new Map(scraped.map((t) => [t.id, t]));
+
+      const removed: CosmicLedTrade[] = [];
+      for (const [id, trade] of dedupe.prevOpenById) {
+        if (!currentOpen.has(id)) {
+          removed.push(trade);
+        }
+      }
+
+      if (removed.length > 0) {
+        const strategiesForClose = await prisma.strategy.findMany({
+          where: {
+            subscriptions: {
+              some: { status: SubscriptionStatus.ACTIVE },
+            },
+          },
+        });
+        await processRemovedCosmicPositions(
+          prisma,
+          strategiesForClose,
+          removed,
+        );
+      }
+
+      dedupe.prevOpenById = currentOpen;
+
       const latest = pickLatestTrade(scraped);
 
       if (!latest) {
@@ -431,7 +583,10 @@ async function runEngineLoop(
  */
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
-  const dedupe = { lastId: undefined as string | undefined };
+  const dedupe = {
+    lastId: undefined as string | undefined,
+    prevOpenById: new Map<string, CosmicLedTrade>(),
+  };
 
   void (async () => {
     let browser: Browser | undefined;
