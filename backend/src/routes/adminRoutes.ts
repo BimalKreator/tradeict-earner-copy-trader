@@ -3,7 +3,7 @@ import {
   type PrismaClient,
   Role,
   UserStatus,
-} from "../../generated/prisma/client.js";
+} from "@prisma/client";
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));

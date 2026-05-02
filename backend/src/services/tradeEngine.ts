@@ -3,12 +3,12 @@ import type { VanillaPuppeteer } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import vanillaPuppeteer from "puppeteer";
 import type { Browser, Page } from "puppeteer";
-import type { PrismaClient } from "../../generated/prisma/client.js";
 import {
+  type PrismaClient,
   SubscriptionStatus,
   TradeStatus,
   UserStatus,
-} from "../../generated/prisma/client.js";
+} from "@prisma/client";
 import {
   executeTrade,
   fetchDeltaTicker,

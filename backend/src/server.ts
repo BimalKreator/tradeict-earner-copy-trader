@@ -9,7 +9,7 @@ import cors from "cors";
 import express from "express";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "@prisma/client";
 import { createAdminRoutes } from "./routes/adminRoutes.js";
 import { createAuthRoutes } from "./routes/authRoutes.js";
 import { startTradeEngine } from "./services/tradeEngine.js";

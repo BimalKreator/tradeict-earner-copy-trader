@@ -5,7 +5,7 @@ import { Router } from "express";
 import {
   type PrismaClient,
   Role,
-} from "../../generated/prisma/client.js";
+} from "@prisma/client";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 
