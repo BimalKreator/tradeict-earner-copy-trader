@@ -38,6 +38,8 @@ model User {
   password      String
   role          Role                @default(USER)
   status        UserStatus          @default(ACTIVE)
+  otpCode       String?
+  otpExpiry     DateTime?
   createdAt     DateTime            @default(now())
 
   deltaApiKeys  DeltaApiKey[]

@@ -11,6 +11,10 @@ const statusValues = new Set<string>(Object.values(UserStatus));
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
 
+  router.get("/engine-status", (_req, res) => {
+    res.json({ status: "running" });
+  });
+
   router.get("/users", async (_req, res, next) => {
     try {
       const users = await prisma.user.findMany({
