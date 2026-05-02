@@ -7,6 +7,7 @@ const links = [
   { href: "/admin", label: "Dashboard" },
   { href: "/admin/users", label: "Users" },
   { href: "/admin/strategies", label: "Strategies" },
+  { href: "/admin/funds", label: "Funds" },
 ];
 
 export function AdminSidebar() {

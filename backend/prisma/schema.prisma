@@ -31,6 +31,12 @@ enum TradeStatus {
   FAILED
 }
 
+enum TransactionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
   id            String              @id @default(uuid())
   email         String              @unique
@@ -45,6 +51,7 @@ model User {
   subscriptions UserSubscription[]
   trades        Trade[]
   wallet        Wallet?
+  transactions  Transaction[]
 }
 
 model Strategy {
@@ -98,11 +105,11 @@ model Wallet {
   pendingFees Float         @default(0.0)
   overdueDays Int           @default(0)
 
-  user        User          @relation(fields: [userId], references: [id])
-  transactions Transaction[]
+  user         User              @relation(fields: [userId], references: [id])
+  transactions WalletTransaction[]
 }
 
-model Transaction {
+model WalletTransaction {
   id        String   @id @default(uuid())
   walletId  String
   amount    Float
@@ -110,7 +117,18 @@ model Transaction {
   status    String
   createdAt DateTime @default(now())
 
-  wallet    Wallet   @relation(fields: [walletId], references: [id])
+  wallet Wallet @relation(fields: [walletId], references: [id])
+}
+
+model Transaction {
+  id         String            @id @default(uuid())
+  userId     String
+  amount     Float
+  utrNumber  String            @unique
+  status     TransactionStatus @default(PENDING)
+  createdAt  DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id])
 }
 
 model DeltaApiKey {
