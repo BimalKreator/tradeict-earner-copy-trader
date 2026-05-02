@@ -12,6 +12,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { createAdminRoutes } from "./routes/adminRoutes.js";
 import { createAuthRoutes } from "./routes/authRoutes.js";
+import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
 import { createWalletRoutes } from "./routes/walletRoutes.js";
 
 const PORT = 5000;
@@ -32,6 +33,7 @@ app.use(express.json());
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
+app.use("/api/subscriptions", createSubscriptionRoutes(prisma));
 app.use("/api/wallet", createWalletRoutes(prisma));
 
 app.use(
