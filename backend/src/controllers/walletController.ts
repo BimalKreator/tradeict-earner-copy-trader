@@ -41,10 +41,10 @@ export function createWalletController(prisma: PrismaClient) {
 
       const tx = await prisma.transaction.create({
         data: {
-          userId,
           amount,
           utrNumber,
           status: TransactionStatus.PENDING,
+          user: { connect: { id: userId } },
         },
       });
 
@@ -67,16 +67,18 @@ export function createWalletController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const items = await prisma.transaction.findMany({
-        orderBy: { createdAt: "desc" },
-        include: {
-          user: {
-            select: {
-              id: true,
-              email: true,
-            },
+      const transactionListInclude = {
+        user: {
+          select: {
+            id: true,
+            email: true,
           },
         },
+      } satisfies Prisma.TransactionInclude;
+
+      const items = await prisma.transaction.findMany({
+        orderBy: { createdAt: "desc" },
+        include: transactionListInclude,
       });
       res.json(items);
     } catch (err) {

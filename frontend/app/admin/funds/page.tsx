@@ -19,7 +19,7 @@ type WalletTx = {
   id: string;
   userId: string;
   amount: number;
-  utrNumber: string;
+  utrNumber: string | null;
   status: "PENDING" | "APPROVED" | "REJECTED";
   createdAt: string;
   user: TxUser;
@@ -272,7 +272,7 @@ export default function AdminFundsPage() {
                         ₹{tx.amount.toLocaleString("en-IN")}
                       </td>
                       <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-white/75">
-                        {tx.utrNumber}
+                        {tx.utrNumber ?? "—"}
                       </td>
                       <td className="px-4 py-3 text-white/55 tabular-nums">
                         {new Date(tx.createdAt).toLocaleString()}
