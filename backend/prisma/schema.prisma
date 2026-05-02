@@ -1,0 +1,123 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAUSED
+  OVERDUE
+}
+
+enum TradeStatus {
+  OPEN
+  CLOSED
+  FAILED
+}
+
+model User {
+  id            String              @id @default(uuid())
+  email         String              @unique
+  password      String
+  role          Role                @default(USER)
+  status        UserStatus          @default(ACTIVE)
+  createdAt     DateTime            @default(now())
+
+  deltaApiKeys  DeltaApiKey[]
+  subscriptions UserSubscription[]
+  trades        Trade[]
+  wallet        Wallet?
+}
+
+model Strategy {
+  id            String               @id @default(uuid())
+  title         String
+  description   String
+  cosmicApiKey  String
+  slippage      Float                @default(0.5)
+  monthlyFee    Float
+  profitShare   Float                @default(20.0)
+  minCapital    Float
+  createdAt     DateTime             @default(now())
+
+  subscriptions UserSubscription[]
+  trades        Trade[]
+}
+
+model UserSubscription {
+  id         String              @id @default(uuid())
+  userId     String
+  strategyId String
+  multiplier Float               @default(1.0)
+  status     SubscriptionStatus  @default(ACTIVE)
+  joinedDate DateTime            @default(now())
+
+  user       User                @relation(fields: [userId], references: [id])
+  strategy   Strategy            @relation(fields: [strategyId], references: [id])
+}
+
+model Trade {
+  id         String      @id @default(uuid())
+  userId     String
+  strategyId String
+  symbol     String
+  side       String
+  size       Float
+  entryPrice Float
+  exitPrice  Float?
+  pnl        Float?
+  status     TradeStatus @default(OPEN)
+  createdAt  DateTime    @default(now())
+
+  user       User        @relation(fields: [userId], references: [id])
+  strategy   Strategy    @relation(fields: [strategyId], references: [id])
+}
+
+model Wallet {
+  id          String        @id @default(uuid())
+  userId      String        @unique
+  balance     Float         @default(0.0)
+  pendingFees Float         @default(0.0)
+  overdueDays Int           @default(0)
+
+  user        User          @relation(fields: [userId], references: [id])
+  transactions Transaction[]
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  walletId  String
+  amount    Float
+  type      String
+  status    String
+  createdAt DateTime @default(now())
+
+  wallet    Wallet   @relation(fields: [walletId], references: [id])
+}
+
+model DeltaApiKey {
+  id        String @id @default(uuid())
+  userId    String
+  nickname  String
+  apiKey    String
+  apiSecret String
+
+  user      User   @relation(fields: [userId], references: [id])
+}
