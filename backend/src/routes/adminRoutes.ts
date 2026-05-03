@@ -10,6 +10,7 @@ import {
   authenticateJwt,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
+import { fetchCosmicOpenPositions } from "../services/cosmicClient.js";
 import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
 
 const roleValues = new Set<string>(Object.values(Role));
@@ -163,7 +164,25 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const strategies = await prisma.strategy.findMany({
         orderBy: { createdAt: "desc" },
       });
-      res.json(strategies);
+      const scraperEnvReady = Boolean(
+        process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
+      );
+      res.json(
+        strategies.map((s) => {
+          const { cosmicPassword, ...rest } = s;
+          const hasPwd = Boolean(cosmicPassword?.trim());
+          const credPresent = Boolean(s.cosmicEmail?.trim() && hasPwd);
+          return {
+            ...rest,
+            hasCosmicPassword: hasPwd,
+            cosmicConnection: {
+              scraperEnvReady,
+              credentialsPresent: credPresent,
+              ready: scraperEnvReady && credPresent,
+            },
+          };
+        }),
+      );
     } catch (err) {
       next(err);
     }
@@ -272,7 +291,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           res.status(400).json({ error: "cosmicPassword must be a string" });
           return;
         }
-        data.cosmicPassword = body.cosmicPassword;
+        if (body.cosmicPassword !== "") {
+          data.cosmicPassword = body.cosmicPassword;
+        }
       }
       if (body.performanceMetrics !== undefined) {
         if (body.performanceMetrics === null) {
@@ -398,6 +419,90 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     try {
       const strategies = await getAdminGroupedLiveTrades(prisma);
       res.json({ strategies });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Runs one Puppeteer scrape with stored Cosmic credentials (can take ~30–120s).
+   */
+  router.post("/strategies/:id/cosmic-probe", ...adminOnly, async (req, res, next) => {
+    try {
+      const rawId = req.params.id;
+      const id =
+        typeof rawId === "string"
+          ? rawId
+          : Array.isArray(rawId)
+            ? rawId[0]
+            : undefined;
+      if (!id) {
+        res.status(400).json({ error: "Missing strategy id" });
+        return;
+      }
+      const strategy = await prisma.strategy.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          cosmicEmail: true,
+          cosmicPassword: true,
+        },
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      const scraperEnvReady = Boolean(
+        process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
+      );
+      const credentialsPresent = Boolean(
+        strategy.cosmicEmail?.trim() && strategy.cosmicPassword?.trim(),
+      );
+
+      if (!scraperEnvReady) {
+        res.json({
+          ok: false,
+          positionCount: 0,
+          strategyTitle: strategy.title,
+          scraperEnvReady,
+          credentialsPresent,
+          message:
+            "Server is missing COSMIC_SCRAPER_LOGIN_URL. Set it to the Cosmic login page URL and restart the API.",
+        });
+        return;
+      }
+
+      if (!credentialsPresent) {
+        res.json({
+          ok: false,
+          positionCount: 0,
+          strategyTitle: strategy.title,
+          scraperEnvReady,
+          credentialsPresent,
+          message:
+            "Save Cosmic Login Email and Password on this strategy before testing.",
+        });
+        return;
+      }
+
+      const positions = await fetchCosmicOpenPositions(
+        strategy.cosmicEmail,
+        strategy.cosmicPassword ?? "",
+      );
+
+      res.json({
+        ok: true,
+        positionCount: positions.length,
+        strategyTitle: strategy.title,
+        scraperEnvReady,
+        credentialsPresent,
+        message:
+          positions.length === 0
+            ? "Scrape completed but no positions were parsed. Either there are no open trades, login/selectors failed, or COSMIC_SCRAPER_RESPONSE_FILTER / positions URL does not match Cosmic."
+            : `Parsed ${positions.length} open Cosmic position(s).`,
+      });
     } catch (err) {
       next(err);
     }

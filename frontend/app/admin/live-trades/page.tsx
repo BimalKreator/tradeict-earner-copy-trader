@@ -28,6 +28,10 @@ type StrategySection = {
   strategyId: string;
   strategyTitle: string;
   groups: Group[];
+  cosmicMeta?: {
+    scraperEnvConfigured: boolean;
+    credentialsPresent: boolean;
+  };
 };
 
 function fmtPrice(n: number | null | undefined): string {
@@ -230,9 +234,34 @@ export default function AdminLiveTradesPage() {
               </p>
 
               {s.groups.length === 0 ? (
-                <p className="mt-6 text-sm text-white/50">
-                  No open Cosmic positions for this strategy (or Cosmic API unavailable).
-                </p>
+                <div className="mt-6 space-y-2 text-sm text-white/50">
+                  <p>No open Cosmic positions were parsed for this strategy.</p>
+                  {!s.cosmicMeta?.scraperEnvConfigured ? (
+                    <p className="text-amber-200/85">
+                      API env missing{" "}
+                      <code className="rounded bg-white/10 px-1 text-[11px] text-white/70">
+                        COSMIC_SCRAPER_LOGIN_URL
+                      </code>
+                      — the headless browser never opens Cosmic. Set it on the server and restart.
+                    </p>
+                  ) : null}
+                  {s.cosmicMeta?.scraperEnvConfigured &&
+                  !s.cosmicMeta?.credentialsPresent ? (
+                    <p className="text-amber-200/85">
+                      Strategy has no saved Cosmic email/password — add them under Admin → Strategies → Edit.
+                    </p>
+                  ) : null}
+                  {s.cosmicMeta?.scraperEnvConfigured &&
+                  s.cosmicMeta?.credentialsPresent ? (
+                    <p>
+                      If the master account does have open trades, check Puppeteer selectors and{" "}
+                      <code className="rounded bg-white/10 px-1 text-[11px] text-white/70">
+                        COSMIC_SCRAPER_RESPONSE_FILTER
+                      </code>{" "}
+                      on the API host. Use <strong className="text-white/70">Strategies → Test scrape</strong> to debug.
+                    </p>
+                  ) : null}
+                </div>
               ) : (
                 <div className="mt-6 space-y-8">
                   {s.groups.map((g, gi) => (

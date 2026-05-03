@@ -24,6 +24,11 @@ export type AdminStrategyLiveSection = {
     strategyId: string;
     strategyTitle: string;
     groups: AdminCosmicGroupRow[];
+    /** Why Cosmic rows might be empty (does not prove login succeeded). */
+    cosmicMeta: {
+        scraperEnvConfigured: boolean;
+        credentialsPresent: boolean;
+    };
 };
 export declare function getUserLiveTradeRows(prisma: PrismaClient, userId: string): Promise<UserLiveTradeRow[]>;
 export declare function getAdminGroupedLiveTrades(prisma: PrismaClient): Promise<AdminStrategyLiveSection[]>;

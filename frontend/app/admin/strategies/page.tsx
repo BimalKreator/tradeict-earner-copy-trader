@@ -8,7 +8,14 @@ type Strategy = {
   title: string;
   description: string;
   cosmicEmail: string;
+  /** Omitted from list API — use hasCosmicPassword + cosmicConnection. */
   cosmicPassword?: string;
+  hasCosmicPassword?: boolean;
+  cosmicConnection?: {
+    scraperEnvReady: boolean;
+    credentialsPresent: boolean;
+    ready: boolean;
+  };
   performanceMetrics?: PerformanceMetricsPayload | unknown;
   slippage: number;
   monthlyFee: number;
@@ -276,6 +283,9 @@ export default function AdminStrategiesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [probingId, setProbingId] = useState<string | null>(null);
+  const [probeNotice, setProbeNotice] = useState<string | null>(null);
+  const [savedCosmicPassword, setSavedCosmicPassword] = useState(false);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -322,6 +332,7 @@ export default function AdminStrategiesPage() {
 
   function resetForm() {
     setEditingId(null);
+    setSavedCosmicPassword(false);
     setTitle("");
     setDescription("");
     setCosmicEmail("");
@@ -347,16 +358,19 @@ export default function AdminStrategiesPage() {
   function openCreateModal() {
     resetForm();
     setFormError(null);
+    setProbeNotice(null);
     setModalOpen(true);
   }
 
   function openEditModal(s: Strategy) {
     setEditingId(s.id);
     setFormError(null);
+    setProbeNotice(null);
+    setSavedCosmicPassword(Boolean(s.hasCosmicPassword));
     setTitle(s.title);
     setDescription(s.description);
     setCosmicEmail(s.cosmicEmail);
-    setCosmicPassword(s.cosmicPassword ?? "");
+    setCosmicPassword("");
     setSlippage(String(s.slippage));
     setMonthlyFee(String(s.monthlyFee));
     setProfitShare(String(s.profitShare));
@@ -377,6 +391,50 @@ export default function AdminStrategiesPage() {
     setHeatmapText(h.heatmapText);
 
     setModalOpen(true);
+  }
+
+  async function probeCosmic(id: string) {
+    setProbeNotice(null);
+    setProbingId(id);
+    try {
+      const res = await fetch(`${API_BASE}/admin/strategies/${id}/cosmic-probe`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const body: unknown = await res.json().catch(() => ({}));
+      const errMsg =
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      if (!res.ok) {
+        setProbeNotice(errMsg ?? `Cosmic probe failed (${res.status}).`);
+        return;
+      }
+      const msg =
+        typeof body === "object" &&
+        body !== null &&
+        "message" in body &&
+        typeof (body as { message?: unknown }).message === "string"
+          ? (body as { message: string }).message
+          : `Probe finished (${res.status})`;
+      const count =
+        typeof body === "object" &&
+        body !== null &&
+        "positionCount" in body &&
+        typeof (body as { positionCount?: unknown }).positionCount === "number"
+          ? (body as { positionCount: number }).positionCount
+          : undefined;
+      setProbeNotice(
+        count !== undefined ? `${msg} (positions: ${count})` : msg,
+      );
+    } catch {
+      setProbeNotice("Cosmic probe request failed.");
+    } finally {
+      setProbingId(null);
+    }
   }
 
   async function handleSubmitStrategy(e: React.FormEvent) {
@@ -426,18 +484,22 @@ export default function AdminStrategiesPage() {
       title,
       description,
       cosmicEmail,
-      cosmicPassword,
       slippage: slippageNum,
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
       minCapital: minCapitalNum,
     };
+    const isEdit = editingId !== null;
+    if (isEdit) {
+      if (cosmicPassword.trim()) payload.cosmicPassword = cosmicPassword.trim();
+    } else {
+      payload.cosmicPassword = cosmicPassword;
+    }
     if (performanceMetrics !== undefined) {
       payload.performanceMetrics = performanceMetrics;
     }
 
     try {
-      const isEdit = editingId !== null;
       const res = await fetch(
         isEdit
           ? `${API_BASE}/admin/strategies/${editingId}`
@@ -477,7 +539,9 @@ export default function AdminStrategiesPage() {
             Strategies
           </h1>
           <p className="mt-1 text-sm text-white/55">
-            Cosmic master login (email/password for headless scrape) and optional performance metrics.
+            Cosmic master login (Puppeteer scrape). Status badges reflect server env (
+            <code className="text-white/60">COSMIC_SCRAPER_LOGIN_URL</code>) and saved credentials.
+            Use <span className="text-white/75">Test scrape</span> to verify the bot can read positions.
           </p>
         </div>
         <button
@@ -495,6 +559,19 @@ export default function AdminStrategiesPage() {
         </div>
       )}
 
+      {probeNotice && (
+        <div className="mb-6 rounded-lg border border-primary/35 bg-primary/10 px-4 py-3 text-sm text-white/85">
+          <span>{probeNotice}</span>
+          <button
+            type="button"
+            onClick={() => setProbeNotice(null)}
+            className="ml-3 text-xs text-primary underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
           <table className="w-full min-w-[1020px] text-left text-sm">
@@ -506,6 +583,7 @@ export default function AdminStrategiesPage() {
                 <th className="px-4 py-3 font-medium text-white/70">Monthly fee</th>
                 <th className="px-4 py-3 font-medium text-white/70">Profit %</th>
                 <th className="px-4 py-3 font-medium text-white/70">Min capital</th>
+                <th className="px-4 py-3 font-medium text-white/70">Cosmic</th>
                 <th className="px-4 py-3 font-medium text-white/70">Created</th>
                 <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
@@ -513,13 +591,13 @@ export default function AdminStrategiesPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
                     Loading strategies…
                   </td>
                 </tr>
               ) : strategies.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
                     No strategies found.
                   </td>
                 </tr>
@@ -539,6 +617,31 @@ export default function AdminStrategiesPage() {
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.monthlyFee}</td>
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.profitShare}</td>
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.minCapital}</td>
+                    <td className="max-w-[200px] px-4 py-3 align-top">
+                      <div className="flex flex-col gap-2">
+                        {s.cosmicConnection?.ready ? (
+                          <span className="inline-flex w-fit items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300 ring-1 ring-emerald-500/35">
+                            Connected (ready)
+                          </span>
+                        ) : s.cosmicConnection?.credentialsPresent === false ? (
+                          <span className="inline-flex w-fit items-center rounded-full bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-200/95 ring-1 ring-amber-500/30">
+                            Needs Cosmic login
+                          </span>
+                        ) : (
+                          <span className="inline-flex w-fit items-center rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] font-medium text-white/55 ring-1 ring-white/15">
+                            Scraper off (env)
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          disabled={probingId === s.id}
+                          onClick={() => void probeCosmic(s.id)}
+                          className="w-fit rounded-md border border-glassBorder bg-black/30 px-2 py-1 text-[11px] font-medium text-primary transition hover:bg-white/5 disabled:opacity-45"
+                        >
+                          {probingId === s.id ? "Testing scrape…" : "Test scrape"}
+                        </button>
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-white/55 tabular-nums">
                       {new Date(s.createdAt).toLocaleString()}
                     </td>
@@ -636,8 +739,17 @@ export default function AdminStrategiesPage() {
                     value={cosmicPassword}
                     onChange={(e) => setCosmicPassword(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                    placeholder="Master Cosmic account password"
+                    placeholder={
+                      editingId && savedCosmicPassword
+                        ? "Leave blank to keep saved password"
+                        : "Master Cosmic account password"
+                    }
                   />
+                  {editingId && savedCosmicPassword ? (
+                    <p className="mt-1 text-[11px] text-white/45">
+                      A password is already stored. Enter a new one only if you want to replace it.
+                    </p>
+                  ) : null}
                 </label>
               </div>
 

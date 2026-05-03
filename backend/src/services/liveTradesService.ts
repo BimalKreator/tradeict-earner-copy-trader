@@ -44,6 +44,11 @@ export type AdminStrategyLiveSection = {
   strategyId: string;
   strategyTitle: string;
   groups: AdminCosmicGroupRow[];
+  /** Why Cosmic rows might be empty (does not prove login succeeded). */
+  cosmicMeta: {
+    scraperEnvConfigured: boolean;
+    credentialsPresent: boolean;
+  };
 };
 
 function compactSymbolKey(s: string): string {
@@ -225,11 +230,19 @@ export async function getAdminGroupedLiveTrades(
     },
   });
 
+  const scraperEnvConfigured = Boolean(
+    process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
+  );
+
   const out: AdminStrategyLiveSection[] = [];
 
   const followerPositionsCache = new Map<string, DeltaLivePosition[]>();
 
   for (const strat of strategies) {
+    const credentialsPresent = Boolean(
+      strat.cosmicEmail?.trim() && strat.cosmicPassword?.trim(),
+    );
+
     let cosmicList: CosmicLedTrade[] = [];
     try {
       cosmicList = await fetchCosmicOpenPositions(
@@ -272,7 +285,12 @@ export async function getAdminGroupedLiveTrades(
     const groups: AdminCosmicGroupRow[] = [];
 
     if (cosmicList.length === 0) {
-      out.push({ strategyId: strat.id, strategyTitle: strat.title, groups });
+      out.push({
+        strategyId: strat.id,
+        strategyTitle: strat.title,
+        groups,
+        cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+      });
       continue;
     }
 
@@ -315,6 +333,7 @@ export async function getAdminGroupedLiveTrades(
       strategyId: strat.id,
       strategyTitle: strat.title,
       groups,
+      cosmicMeta: { scraperEnvConfigured, credentialsPresent },
     });
   }
 

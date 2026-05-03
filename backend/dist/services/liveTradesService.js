@@ -146,9 +146,11 @@ export async function getAdminGroupedLiveTrades(prisma) {
             cosmicPassword: true,
         },
     });
+    const scraperEnvConfigured = Boolean(process.env.COSMIC_SCRAPER_LOGIN_URL?.trim());
     const out = [];
     const followerPositionsCache = new Map();
     for (const strat of strategies) {
+        const credentialsPresent = Boolean(strat.cosmicEmail?.trim() && strat.cosmicPassword?.trim());
         let cosmicList = [];
         try {
             cosmicList = await fetchCosmicOpenPositions(strat.cosmicEmail, strat.cosmicPassword);
@@ -183,7 +185,12 @@ export async function getAdminGroupedLiveTrades(prisma) {
         }
         const groups = [];
         if (cosmicList.length === 0) {
-            out.push({ strategyId: strat.id, strategyTitle: strat.title, groups });
+            out.push({
+                strategyId: strat.id,
+                strategyTitle: strat.title,
+                groups,
+                cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+            });
             continue;
         }
         for (const c of cosmicList) {
@@ -219,6 +226,7 @@ export async function getAdminGroupedLiveTrades(prisma) {
             strategyId: strat.id,
             strategyTitle: strat.title,
             groups,
+            cosmicMeta: { scraperEnvConfigured, credentialsPresent },
         });
     }
     return out;
