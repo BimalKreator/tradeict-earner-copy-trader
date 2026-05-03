@@ -34,7 +34,10 @@ app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
 app.use("/api/analytics", createAnalyticsRoutes(prisma));
 app.use("/api/leaderboard", createLeaderboardRoutes(prisma));
-app.use("/api/subscriptions", createSubscriptionRoutes(prisma));
+const subscriptionRoutes = createSubscriptionRoutes(prisma);
+app.use("/api/subscriptions", subscriptionRoutes);
+/** Alias when `NEXT_PUBLIC_API_URL` is the origin without `/api` (e.g. `http://host:5000`). */
+app.use("/subscriptions", subscriptionRoutes);
 app.use("/api/wallet", createWalletRoutes(prisma));
 app.use((err, _req, res, _next) => {
     console.error(err);

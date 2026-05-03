@@ -97,6 +97,7 @@ export function createSubscriptionController(prisma) {
         performanceMetrics: true,
         createdAt: true,
     };
+    /** Strategies available in the marketplace (all rows; schema has no archived flag). */
     async function listStrategies(_req, res, next) {
         try {
             const userId = _req.userId;

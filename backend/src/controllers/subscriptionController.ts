@@ -137,6 +137,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     createdAt: true,
   } as const;
 
+  /** Strategies available in the marketplace (all rows; schema has no archived flag). */
   async function listStrategies(
     _req: Request,
     res: Response,
