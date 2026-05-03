@@ -8,6 +8,10 @@ export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR =
 export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK =
   '[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 
+/** Cosmic wraps each position row with `bg-table-row` + arbitrary grid template columns. */
+export const COSMIC_PORTFOLIO_ROW_BG_FALLBACK =
+  'div.bg-table-row[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
+
 export type PortfolioDomExtract = {
   walletTotalBalance: string | null;
   positions: Record<string, unknown>[];
@@ -21,7 +25,7 @@ export async function extractCosmicPortfolioDom(
   page: Page,
 ): Promise<PortfolioDomExtract> {
   return page.evaluate(
-    (primarySel: string, fallbackSel: string) => {
+    (primarySel: string, fallbackSel: string, bgRowSel: string) => {
       function parseNum(s: string): number | null {
         const cleaned = s.replace(/,/g, "").replace(/[^\d.-]/g, "");
         if (!cleaned) return null;
@@ -55,6 +59,9 @@ export async function extractCosmicPortfolioDom(
       let rowEls = Array.from(document.querySelectorAll(primarySel));
       if (rowEls.length === 0) {
         rowEls = Array.from(document.querySelectorAll(fallbackSel));
+      }
+      if (rowEls.length === 0) {
+        rowEls = Array.from(document.querySelectorAll(bgRowSel));
       }
 
       const instrumentRe =
@@ -97,14 +104,34 @@ export async function extractCosmicPortfolioDom(
         return false;
       }
 
-      function mutedValueAfterLabel(
-        row: Element,
-        label: string,
-      ): number | null {
+      /**
+       * Cosmic portfolio columns use value-first layout:
+       * `<span class="text-pnl-value-muted">0.01</span><span>Size</span>` — read muted span *before* label.
+       */
+      function mutedImmediatelyAboveLabel(labelSpan: Element): number | null {
+        let el: Element | null = labelSpan.previousElementSibling;
+        while (el) {
+          if (el instanceof HTMLElement) {
+            if (el.tagName === "SPAN" && spanIsMuted(el))
+              return parseNum(text(el));
+            const direct = el.querySelector(
+              ":scope > span.text-pnl-value-muted, :scope > span[class*='text-pnl-value-muted']",
+            );
+            if (direct && spanIsMuted(direct))
+              return parseNum(text(direct));
+          }
+          el = el.previousElementSibling;
+        }
+        return null;
+      }
+
+      function mutedForLabel(row: Element, label: string): number | null {
         const spans = Array.from(row.querySelectorAll("span"));
         for (let i = 0; i < spans.length; i++) {
           const sp = spans[i];
           if (!sp || !labelMatches(text(sp), label)) continue;
+          const above = mutedImmediatelyAboveLabel(sp);
+          if (above !== null) return above;
           for (let j = i + 1; j < spans.length; j++) {
             const cand = spans[j];
             if (!cand) continue;
@@ -115,6 +142,18 @@ export async function extractCosmicPortfolioDom(
       }
 
       function symbolFromRowSpans(row: Element): string {
+        for (const img of row.querySelectorAll("img[alt]")) {
+          const a = (img as HTMLImageElement).alt.trim();
+          if (a && instrumentRe.test(a)) return a;
+          const norm = normalizeKey(a);
+          if (
+            norm.length >= 5 &&
+            /^[A-Z0-9]+$/.test(norm) &&
+            (/USD|USDT|PERP$/i.test(norm) || norm.includes("USD"))
+          ) {
+            return norm;
+          }
+        }
         for (const sp of row.querySelectorAll("span")) {
           const t = text(sp);
           if (instrumentRe.test(t)) return t;
@@ -200,8 +239,8 @@ export async function extractCosmicPortfolioDom(
         }
 
         const mutedNums = mutedNumbersInRow(row);
-        let size = mutedValueAfterLabel(row, "Size");
-        let avgPrice = mutedValueAfterLabel(row, "Avg Price");
+        let size = mutedForLabel(row, "Size");
+        let avgPrice = mutedForLabel(row, "Avg Price");
         if (size === null && mutedNums.length > 0) size = mutedNums[0]!;
         if (avgPrice === null && mutedNums.length > 1) avgPrice = mutedNums[1]!;
 
@@ -233,5 +272,6 @@ export async function extractCosmicPortfolioDom(
     },
     COSMIC_PORTFOLIO_ROW_GRID_SELECTOR,
     COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK,
+    COSMIC_PORTFOLIO_ROW_BG_FALLBACK,
   );
 }

@@ -18,7 +18,7 @@
 import vanillaPuppeteer from "puppeteer";
 import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, extractCosmicPortfolioDom, } from "./cosmicPortfolioDomExtract.js";
+import { COSMIC_PORTFOLIO_ROW_BG_FALLBACK, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, extractCosmicPortfolioDom, } from "./cosmicPortfolioDomExtract.js";
 /** Puppeteer ≥24 typings omit legacy APIs expected by puppeteer-extra's VanillaPuppeteer shim. */
 const puppeteer = addExtra(vanillaPuppeteer);
 puppeteer.use(StealthPlugin());
@@ -28,12 +28,23 @@ async function waitForPortfolioPositionGrid(page) {
         await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, {
             timeout: 30_000,
         });
+        return;
     }
     catch {
+        /* primary escaped class may not match; try substring then Cosmic row wrapper */
+    }
+    try {
         await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, {
             timeout: 30_000,
         });
+        return;
     }
+    catch {
+        /* last resort: bg-table-row + grid template fragment */
+    }
+    await page.waitForSelector(COSMIC_PORTFOLIO_ROW_BG_FALLBACK, {
+        timeout: 30_000,
+    });
 }
 async function tryFillInput(page, selectorsCsv, value) {
     const selectors = selectorsCsv
@@ -126,9 +137,9 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
             timeout: 90_000,
         });
         const emailSelectors = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
-            'input[type="email"],input[name="email"],input[name="username"],input[name="Email"],#email';
+            '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
         const passwordSelectors = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
-            'input[type="password"],input[name="password"],#password';
+            '#password,input[type="password"],input[name="password"]';
         const submitSelectors = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
             'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
         const filledEmail = await tryFillInput(page, emailSelectors, email);

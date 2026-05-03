@@ -2,12 +2,14 @@
 export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR = ".grid-cols-\\[1\\.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\\]";
 /** Fallback when compiled class string differs slightly in DOM. */
 export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK = '[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
+/** Cosmic wraps each position row with `bg-table-row` + arbitrary grid template columns. */
+export const COSMIC_PORTFOLIO_ROW_BG_FALLBACK = 'div.bg-table-row[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 /**
  * Parses Cosmic `/portfolio` DOM using the canonical grid row class and label/value rules.
  * Caller should navigate to portfolio and `waitForSelector` the grid before invoking.
  */
 export async function extractCosmicPortfolioDom(page) {
-    return page.evaluate((primarySel, fallbackSel) => {
+    return page.evaluate((primarySel, fallbackSel, bgRowSel) => {
         function parseNum(s) {
             const cleaned = s.replace(/,/g, "").replace(/[^\d.-]/g, "");
             if (!cleaned)
@@ -38,6 +40,9 @@ export async function extractCosmicPortfolioDom(page) {
         let rowEls = Array.from(document.querySelectorAll(primarySel));
         if (rowEls.length === 0) {
             rowEls = Array.from(document.querySelectorAll(fallbackSel));
+        }
+        if (rowEls.length === 0) {
+            rowEls = Array.from(document.querySelectorAll(bgRowSel));
         }
         const instrumentRe = /^[A-Z][A-Z0-9]{1,}(USD|USDT|PERP|-USD|_PERP)$/i;
         function normalizeKey(raw) {
@@ -73,12 +78,33 @@ export async function extractCosmicPortfolioDom(page) {
                 return true;
             return false;
         }
-        function mutedValueAfterLabel(row, label) {
+        /**
+         * Cosmic portfolio columns use value-first layout:
+         * `<span class="text-pnl-value-muted">0.01</span><span>Size</span>` — read muted span *before* label.
+         */
+        function mutedImmediatelyAboveLabel(labelSpan) {
+            let el = labelSpan.previousElementSibling;
+            while (el) {
+                if (el instanceof HTMLElement) {
+                    if (el.tagName === "SPAN" && spanIsMuted(el))
+                        return parseNum(text(el));
+                    const direct = el.querySelector(":scope > span.text-pnl-value-muted, :scope > span[class*='text-pnl-value-muted']");
+                    if (direct && spanIsMuted(direct))
+                        return parseNum(text(direct));
+                }
+                el = el.previousElementSibling;
+            }
+            return null;
+        }
+        function mutedForLabel(row, label) {
             const spans = Array.from(row.querySelectorAll("span"));
             for (let i = 0; i < spans.length; i++) {
                 const sp = spans[i];
                 if (!sp || !labelMatches(text(sp), label))
                     continue;
+                const above = mutedImmediatelyAboveLabel(sp);
+                if (above !== null)
+                    return above;
                 for (let j = i + 1; j < spans.length; j++) {
                     const cand = spans[j];
                     if (!cand)
@@ -90,6 +116,17 @@ export async function extractCosmicPortfolioDom(page) {
             return null;
         }
         function symbolFromRowSpans(row) {
+            for (const img of row.querySelectorAll("img[alt]")) {
+                const a = img.alt.trim();
+                if (a && instrumentRe.test(a))
+                    return a;
+                const norm = normalizeKey(a);
+                if (norm.length >= 5 &&
+                    /^[A-Z0-9]+$/.test(norm) &&
+                    (/USD|USDT|PERP$/i.test(norm) || norm.includes("USD"))) {
+                    return norm;
+                }
+            }
             for (const sp of row.querySelectorAll("span")) {
                 const t = text(sp);
                 if (instrumentRe.test(t))
@@ -170,8 +207,8 @@ export async function extractCosmicPortfolioDom(page) {
                 }
             }
             const mutedNums = mutedNumbersInRow(row);
-            let size = mutedValueAfterLabel(row, "Size");
-            let avgPrice = mutedValueAfterLabel(row, "Avg Price");
+            let size = mutedForLabel(row, "Size");
+            let avgPrice = mutedForLabel(row, "Avg Price");
             if (size === null && mutedNums.length > 0)
                 size = mutedNums[0];
             if (avgPrice === null && mutedNums.length > 1)
@@ -194,6 +231,6 @@ export async function extractCosmicPortfolioDom(page) {
             });
         }
         return { walletTotalBalance, positions };
-    }, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK);
+    }, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, COSMIC_PORTFOLIO_ROW_BG_FALLBACK);
 }
 //# sourceMappingURL=cosmicPortfolioDomExtract.js.map

@@ -3,6 +3,8 @@ import type { Page } from "puppeteer";
 export declare const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR = ".grid-cols-\\[1\\.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\\]";
 /** Fallback when compiled class string differs slightly in DOM. */
 export declare const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK = "[class*=\"1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\"]";
+/** Cosmic wraps each position row with `bg-table-row` + arbitrary grid template columns. */
+export declare const COSMIC_PORTFOLIO_ROW_BG_FALLBACK = "div.bg-table-row[class*=\"1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\"]";
 export type PortfolioDomExtract = {
     walletTotalBalance: string | null;
     positions: Record<string, unknown>[];
