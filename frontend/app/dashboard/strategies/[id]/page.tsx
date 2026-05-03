@@ -26,9 +26,8 @@ import {
 } from "recharts";
 
 import "../../analytics/analytics-heatmap.css";
-import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = `${getPublicApiBase()}/subscriptions`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type PerformanceMetrics = {
   pnlChart?: { labels?: string[]; values?: number[] };
@@ -135,9 +134,12 @@ export default function StrategyPerformancePage() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/strategies/${encodeURIComponent(id)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${API_BASE}/subscriptions/strategies/${encodeURIComponent(id)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       if (res.status === 401) {
         setUnauthorized(true);
         setStrategy(null);

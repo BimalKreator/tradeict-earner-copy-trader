@@ -11,9 +11,8 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = `${getPublicApiBase()}/subscriptions`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type StrategyListItem = {
   id: string;
@@ -157,7 +156,7 @@ export default function StrategyMarketplacePage() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/strategies`, {
+      const res = await fetch(`${API_BASE}/subscriptions/strategies`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 401) {
@@ -222,7 +221,7 @@ export default function StrategyMarketplacePage() {
     setModalError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/subscribe`, {
+      const res = await fetch(`${API_BASE}/subscriptions/subscribe`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

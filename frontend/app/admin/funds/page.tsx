@@ -11,9 +11,7 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const API_BASE = `${getPublicApiBase()}/wallet`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type TxUser = { id: string; email: string };
 
@@ -55,7 +53,7 @@ export default function AdminFundsPage() {
     setForbidden(false);
 
     try {
-      const res = await fetch(`${API_BASE}/transactions`, {
+      const res = await fetch(`${API_BASE}/wallet/transactions`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -108,7 +106,7 @@ export default function AdminFundsPage() {
     setRowAction((prev) => ({ ...prev, [id]: key }));
 
     try {
-      const res = await fetch(`${API_BASE}/approve`, {
+      const res = await fetch(`${API_BASE}/wallet/approve`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

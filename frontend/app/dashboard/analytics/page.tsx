@@ -24,9 +24,8 @@ import {
 
 import "react-calendar-heatmap/dist/styles.css";
 import "./analytics-heatmap.css";
-import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = `${getPublicApiBase()}/analytics`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type CalendarDay = { date: string; profit: number };
 
@@ -141,11 +140,11 @@ export default function AnalyticsPage() {
 
       const [calRes, cumRes, actRes] = await Promise.all([
         fetch(
-          `${API_BASE}/calendar?year=${year}&month=${month}`,
+          `${API_BASE}/analytics/calendar?year=${year}&month=${month}`,
           { headers },
         ),
-        fetch(`${API_BASE}/cumulative-strategies`, { headers }),
-        fetch(`${API_BASE}/activity?limit=75`, { headers }),
+        fetch(`${API_BASE}/analytics/cumulative-strategies`, { headers }),
+        fetch(`${API_BASE}/analytics/activity?limit=75`, { headers }),
       ]);
 
       if (calRes.status === 401 || cumRes.status === 401 || actRes.status === 401) {

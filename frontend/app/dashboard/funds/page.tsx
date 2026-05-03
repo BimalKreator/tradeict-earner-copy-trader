@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = `${getPublicApiBase()}/wallet`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 /** Replace with your real UPI VPA when you have one */
 const DISPLAY_UPI_ID = "tradeict-earner@okbank";
@@ -45,7 +44,7 @@ export default function DashboardFundsPage() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/topup`, {
+      const res = await fetch(`${API_BASE}/wallet/topup`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

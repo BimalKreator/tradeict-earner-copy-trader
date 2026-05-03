@@ -13,9 +13,7 @@ import {
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const API_BASE = `${getPublicApiBase()}/leaderboard`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type Period = {
   label: string;
@@ -55,7 +53,7 @@ export default function LeaderboardPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(API_BASE);
+        const res = await fetch(`${API_BASE}/leaderboard`);
         if (!res.ok) throw new Error(`Could not load leaderboard (${res.status})`);
         const json: unknown = await res.json();
         if (

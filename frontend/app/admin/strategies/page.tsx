@@ -1,9 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const API_BASE = `${getPublicApiBase()}/admin`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type Strategy = {
   id: string;
@@ -305,7 +303,7 @@ export default function AdminStrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/strategies`, { headers: authHeaders() });
+      const res = await fetch(`${API_BASE}/admin/strategies`, { headers: authHeaders() });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
@@ -441,7 +439,9 @@ export default function AdminStrategiesPage() {
     try {
       const isEdit = editingId !== null;
       const res = await fetch(
-        isEdit ? `${API_BASE}/strategies/${editingId}` : `${API_BASE}/strategies`,
+        isEdit
+          ? `${API_BASE}/admin/strategies/${editingId}`
+          : `${API_BASE}/admin/strategies`,
         {
           method: isEdit ? "PUT" : "POST",
           headers: authHeaders(),

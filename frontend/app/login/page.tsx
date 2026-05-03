@@ -3,9 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const AUTH_API = `${getPublicApiBase()}/auth`;
+const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "email" | "otp";
 
@@ -25,7 +23,7 @@ function LoginForm() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/send-login-otp`, {
+      const res = await fetch(`${AUTH_API}/auth/send-login-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -55,7 +53,7 @@ function LoginForm() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/verify-otp`, {
+      const res = await fetch(`${AUTH_API}/auth/verify-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

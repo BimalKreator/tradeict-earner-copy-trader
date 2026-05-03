@@ -1,9 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const API_BASE = `${getPublicApiBase()}/admin`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type AdminUser = {
   id: string;
@@ -30,7 +28,7 @@ export default function AdminUsersPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/users`);
+      const res = await fetch(`${API_BASE}/admin/users`);
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
@@ -52,7 +50,7 @@ export default function AdminUsersPage() {
     setSubmitting(true);
     setFormError(null);
     try {
-      const res = await fetch(`${API_BASE}/users`, {
+      const res = await fetch(`${API_BASE}/admin/users`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

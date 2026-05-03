@@ -13,9 +13,7 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const API_BASE = `${getPublicApiBase()}/admin`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type InvoiceStatus = "UNPAID" | "PAID" | "OVERDUE";
 
@@ -86,7 +84,7 @@ export default function AdminRevenuePage() {
     setForbidden(false);
 
     try {
-      const res = await fetch(`${API_BASE}/revenue`, {
+      const res = await fetch(`${API_BASE}/admin/revenue`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 

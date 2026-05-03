@@ -3,9 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
-import { getPublicApiBase } from "@/lib/publicApi";
-
-const AUTH_API = `${getPublicApiBase()}/auth`;
+const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "details" | "otp";
 
@@ -40,7 +38,7 @@ export default function SignupPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/send-otp`, {
+      const res = await fetch(`${AUTH_API}/auth/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -64,7 +62,7 @@ export default function SignupPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/register`, {
+      const res = await fetch(`${AUTH_API}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
