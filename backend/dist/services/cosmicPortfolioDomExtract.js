@@ -22,6 +22,16 @@ export function coerceScraperMappings(raw) {
     }
     return Object.keys(out).length > 0 ? out : undefined;
 }
+/** Later sources override earlier (for `scraperMappings` over legacy `scraperStudioSelectors`). */
+export function mergeScraperMappingsJson(...sources) {
+    const out = {};
+    for (const src of sources) {
+        const m = coerceScraperMappings(src);
+        if (m)
+            Object.assign(out, m);
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
 function buildSerializableMappings(scraperMappings) {
     if (scraperMappings == null)
         return {};

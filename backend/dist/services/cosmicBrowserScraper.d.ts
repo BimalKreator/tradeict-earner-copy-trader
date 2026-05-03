@@ -8,6 +8,10 @@
  * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins).
  * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors.
  * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
+ *
+ * Optional strategy `scraperMappings` (Scraper Studio): single-selector slots
+ * `login_email` / `Login email`, `login_password` / `Login password`, `login_submit` / `Login submit`
+ * override the env CSV lists when present and the selector matches; otherwise env defaults apply.
  * - COSMIC_SCRAPER_RESPONSE_FILTER — substring to match JSON XHR URLs (default: "position").
  * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path fetched in-page after portfolio load.
  *

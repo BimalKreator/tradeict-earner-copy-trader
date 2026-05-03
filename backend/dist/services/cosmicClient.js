@@ -1,13 +1,13 @@
 import { parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
 import { scrapeCosmicPositionsData, } from "./cosmicBrowserScraper.js";
-import { coerceScraperMappings } from "./cosmicPortfolioDomExtract.js";
+import { mergeScraperMappingsJson } from "./cosmicPortfolioDomExtract.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
 /**
  * Logs into Cosmic via headless browser (see `cosmicBrowserScraper.ts` + env vars),
  * collects position JSON, maps symbols to Delta perpetuals, and returns led trades.
  */
 function buildCosmicScrapeOptions(args) {
-    const mapped = coerceScraperMappings(args.scraperMappingsJson);
+    const mapped = mergeScraperMappingsJson(args.scraperStudioSelectorsJson, args.scraperMappingsJson);
     const opts = {};
     if (args.captureScreenshot)
         opts.captureScreenshot = true;
@@ -24,13 +24,20 @@ function tradesFromPayloads(payloads) {
     }
     return [...byId.values()];
 }
-export async function fetchCosmicOpenPositions(cosmicEmail, cosmicPassword, scraperMappingsJson) {
-    const { payloads } = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), buildCosmicScrapeOptions({ scraperMappingsJson }));
+export async function fetchCosmicOpenPositions(cosmicEmail, cosmicPassword, scraperMappingsJson, scraperStudioSelectorsJson) {
+    const { payloads } = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), buildCosmicScrapeOptions({
+        scraperMappingsJson,
+        scraperStudioSelectorsJson,
+    }));
     return tradesFromPayloads(payloads);
 }
 /** Admin probe: same scrape plus optional JPEG screenshot of the logged-in viewport. */
-export async function probeCosmicOpenPositions(cosmicEmail, cosmicPassword, captureScreenshot, scraperMappingsJson) {
-    const { payloads, screenshotBase64, scrapeMeta } = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), buildCosmicScrapeOptions({ captureScreenshot, scraperMappingsJson }));
+export async function probeCosmicOpenPositions(cosmicEmail, cosmicPassword, captureScreenshot, scraperMappingsJson, scraperStudioSelectorsJson) {
+    const { payloads, screenshotBase64, scrapeMeta } = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), buildCosmicScrapeOptions({
+        captureScreenshot,
+        scraperMappingsJson,
+        scraperStudioSelectorsJson,
+    }));
     const out = {
         trades: tradesFromPayloads(payloads),
     };

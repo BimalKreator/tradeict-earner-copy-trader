@@ -14,6 +14,8 @@ export type PortfolioDomExtract = {
 };
 /** Normalize Prisma JSON / API payloads into string selectors for `page.evaluate`. */
 export declare function coerceScraperMappings(raw: unknown): Record<string, string> | undefined;
+/** Later sources override earlier (for `scraperMappings` over legacy `scraperStudioSelectors`). */
+export declare function mergeScraperMappingsJson(...sources: unknown[]): Record<string, string> | undefined;
 /**
  * Resilient Cosmic `/portfolio` parse: optional per-strategy CSS mappings from Scraper Studio,
  * then `bg-table-row` + innerText lines + regex fallbacks.

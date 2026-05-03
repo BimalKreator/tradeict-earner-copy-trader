@@ -5,7 +5,7 @@ import {
   type CosmicScrapeMeta,
   type CosmicScrapeOptions,
 } from "./cosmicBrowserScraper.js";
-import { coerceScraperMappings } from "./cosmicPortfolioDomExtract.js";
+import { mergeScraperMappingsJson } from "./cosmicPortfolioDomExtract.js";
 
 export type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
@@ -17,8 +17,13 @@ export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositio
 function buildCosmicScrapeOptions(args: {
   captureScreenshot?: boolean;
   scraperMappingsJson?: unknown;
+  /** Legacy JSON column name; merged under `scraperMappings` (primary wins). */
+  scraperStudioSelectorsJson?: unknown;
 }): CosmicScrapeOptions | undefined {
-  const mapped = coerceScraperMappings(args.scraperMappingsJson);
+  const mapped = mergeScraperMappingsJson(
+    args.scraperStudioSelectorsJson,
+    args.scraperMappingsJson,
+  );
   const opts: CosmicScrapeOptions = {};
   if (args.captureScreenshot) opts.captureScreenshot = true;
   if (mapped !== undefined) opts.scraperMappings = mapped;
@@ -39,11 +44,15 @@ export async function fetchCosmicOpenPositions(
   cosmicEmail: string,
   cosmicPassword: string,
   scraperMappingsJson?: unknown,
+  scraperStudioSelectorsJson?: unknown,
 ): Promise<CosmicLedTrade[]> {
   const { payloads } = await scrapeCosmicPositionsData(
     cosmicEmail.trim(),
     cosmicPassword.trim(),
-    buildCosmicScrapeOptions({ scraperMappingsJson }),
+    buildCosmicScrapeOptions({
+      scraperMappingsJson,
+      scraperStudioSelectorsJson,
+    }),
   );
   return tradesFromPayloads(payloads);
 }
@@ -54,6 +63,7 @@ export async function probeCosmicOpenPositions(
   cosmicPassword: string,
   captureScreenshot: boolean,
   scraperMappingsJson?: unknown,
+  scraperStudioSelectorsJson?: unknown,
 ): Promise<{
   trades: CosmicLedTrade[];
   screenshotBase64?: string;
@@ -63,7 +73,11 @@ export async function probeCosmicOpenPositions(
     await scrapeCosmicPositionsData(
       cosmicEmail.trim(),
       cosmicPassword.trim(),
-      buildCosmicScrapeOptions({ captureScreenshot, scraperMappingsJson }),
+      buildCosmicScrapeOptions({
+        captureScreenshot,
+        scraperMappingsJson,
+        scraperStudioSelectorsJson,
+      }),
     );
   const out: {
     trades: CosmicLedTrade[];

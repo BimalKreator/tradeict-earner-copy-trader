@@ -38,6 +38,18 @@ export function coerceScraperMappings(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Later sources override earlier (for `scraperMappings` over legacy `scraperStudioSelectors`). */
+export function mergeScraperMappingsJson(
+  ...sources: unknown[]
+): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const src of sources) {
+    const m = coerceScraperMappings(src);
+    if (m) Object.assign(out, m);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function buildSerializableMappings(
   scraperMappings?: Record<string, string> | null,
 ): Record<string, string> {

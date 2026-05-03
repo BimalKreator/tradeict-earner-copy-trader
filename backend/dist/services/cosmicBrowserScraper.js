@@ -8,6 +8,10 @@
  * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins).
  * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors.
  * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
+ *
+ * Optional strategy `scraperMappings` (Scraper Studio): single-selector slots
+ * `login_email` / `Login email`, `login_password` / `Login password`, `login_submit` / `Login submit`
+ * override the env CSV lists when present and the selector matches; otherwise env defaults apply.
  * - COSMIC_SCRAPER_RESPONSE_FILTER — substring to match JSON XHR URLs (default: "position").
  * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path fetched in-page after portfolio load.
  *
@@ -98,6 +102,73 @@ async function tryClick(page, selectorsCsv) {
         }
     }
     return false;
+}
+function normalizedMappingSlotKey(k) {
+    return k.trim().toLowerCase().replace(/\s+/g, "_");
+}
+/**
+ * Resolve one CSS selector from strategy mappings using slot labels (case/spacing insensitive).
+ * E.g. keys "Login email", "login_email", "LOGIN_EMAIL" all match alias `login_email`.
+ */
+function selectorFromScraperMappings(maps, ...slotAliases) {
+    if (!maps || Object.keys(maps).length === 0)
+        return undefined;
+    const want = new Set(slotAliases.map(normalizedMappingSlotKey));
+    for (const [key, val] of Object.entries(maps)) {
+        if (typeof val !== "string" || !val.trim())
+            continue;
+        if (want.has(normalizedMappingSlotKey(key)))
+            return val.trim();
+    }
+    return undefined;
+}
+async function waitSelectorFlexible(page, sel) {
+    try {
+        await page.waitForSelector(sel, { visible: true, timeout: 22_000 });
+        return true;
+    }
+    catch {
+        try {
+            await page.waitForSelector(sel, { timeout: 10_000 });
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+}
+/** Prefer one mapped selector (`page.click` + `page.type`); else env CSV via `tryFillInput`. */
+async function fillUsingMappingThenEnvCsv(page, mappingSel, envSelectorsCsv, value) {
+    if (mappingSel) {
+        try {
+            const ok = await waitSelectorFlexible(page, mappingSel);
+            if (ok) {
+                await page.click(mappingSel, { clickCount: 3 });
+                await page.type(mappingSel, value, { delay: 12 });
+                return true;
+            }
+        }
+        catch {
+            /* fall back */
+        }
+    }
+    return tryFillInput(page, envSelectorsCsv, value);
+}
+/** Prefer mapped submit `page.click`; else env CSV `tryClick`. */
+async function clickSubmitMappingThenEnvCsv(page, mappingSel, envSelectorsCsv) {
+    if (mappingSel) {
+        try {
+            const ok = await waitSelectorFlexible(page, mappingSel);
+            if (ok) {
+                await page.click(mappingSel);
+                return true;
+            }
+        }
+        catch {
+            /* fall back */
+        }
+    }
+    return tryClick(page, envSelectorsCsv);
 }
 /** Same Chromium launch flags as position scraping (stealth + sandbox overrides). */
 export async function launchCosmicStealthBrowser() {
@@ -228,10 +299,13 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
             '#password,input[type="password"],input[name="password"]';
         const submitSelectors = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
             'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
-        const filledEmail = await tryFillInput(page, emailSelectors, email);
-        const filledPass = await tryFillInput(page, passwordSelectors, password);
+        const mapLoginEmail = selectorFromScraperMappings(scraperMappings, "login_email");
+        const mapLoginPassword = selectorFromScraperMappings(scraperMappings, "login_password");
+        const mapLoginSubmit = selectorFromScraperMappings(scraperMappings, "login_submit");
+        const filledEmail = await fillUsingMappingThenEnvCsv(page, mapLoginEmail, emailSelectors, email);
+        const filledPass = await fillUsingMappingThenEnvCsv(page, mapLoginPassword, passwordSelectors, password);
         if (!filledEmail || !filledPass) {
-            console.warn("[cosmic-scraper] Could not locate email/password inputs — check COSMIC_SCRAPER_*_SELECTOR env vars.");
+            console.warn("[cosmic-scraper] Could not locate email/password inputs — check strategy login_* scraperMappings or COSMIC_SCRAPER_*_SELECTOR env vars.");
             return { payloads: [] };
         }
         await Promise.all([
@@ -241,7 +315,7 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
                 timeout: 120_000,
             })
                 .catch(() => { }),
-            tryClick(page, submitSelectors),
+            clickSubmitMappingThenEnvCsv(page, mapLoginSubmit, submitSelectors),
         ]);
         await new Promise((r) => setTimeout(r, 2500));
         const postLogin = process.env.COSMIC_SCRAPER_POST_LOGIN_URL?.trim();
