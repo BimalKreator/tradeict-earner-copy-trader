@@ -6,6 +6,15 @@ import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+function authHeaders(): HeadersInit {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 type LiveRow = {
   entryTime: string | null;
   token: string;
@@ -138,11 +147,10 @@ export default function AdminLiveTradesPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
   const load = useCallback(async () => {
     setError(null);
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) {
       setForbidden(false);
       setLoading(false);
@@ -153,7 +161,7 @@ export default function AdminLiveTradesPage() {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/live-trades/admin/grouped`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders(),
       });
       if (res.status === 401) {
         setError("Session expired. Sign in again.");
@@ -181,7 +189,7 @@ export default function AdminLiveTradesPage() {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     void load();

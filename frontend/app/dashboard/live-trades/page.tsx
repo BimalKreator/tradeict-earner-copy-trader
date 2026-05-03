@@ -6,6 +6,15 @@ import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+function authHeaders(): HeadersInit {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 type LiveRow = {
   strategyId: string;
   strategyTitle: string;
@@ -45,11 +54,10 @@ export default function DashboardLiveTradesPage() {
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
   const load = useCallback(async () => {
     setError(null);
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) {
       setUnauthorized(true);
       setLoading(false);
@@ -60,7 +68,7 @@ export default function DashboardLiveTradesPage() {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders(),
       });
       if (res.status === 401) {
         setUnauthorized(true);
@@ -83,7 +91,7 @@ export default function DashboardLiveTradesPage() {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     void load();
