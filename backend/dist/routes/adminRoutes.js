@@ -412,6 +412,12 @@ export function createAdminRoutes(prisma) {
             if (positions.length > 0) {
                 message = `Parsed ${positions.length} open Cosmic position(s).`;
             }
+            else if (scrapeMeta?.scrapeAbortedReason) {
+                message = `Browser scrape aborted: ${scrapeMeta.scrapeAbortedReason}`;
+            }
+            else if (scrapeMeta?.extractError) {
+                message = `Portfolio DOM extract error: ${scrapeMeta.extractError}`;
+            }
             else if (scrapeMeta !== undefined &&
                 scrapeMeta.domRowsMatched > 0 &&
                 scrapeMeta.domPositionsParsed === 0) {

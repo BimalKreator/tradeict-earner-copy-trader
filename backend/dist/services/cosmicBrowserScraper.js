@@ -231,9 +231,19 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
                 walletBalanceDom: dom.walletTotalBalance,
                 payloadChunkCount: capturedJson.length,
             };
+            if (dom.extractError !== undefined && dom.extractError.length > 0) {
+                scrapeMeta.extractError = dom.extractError;
+            }
         }
         catch (err) {
             console.warn("[cosmic-scraper] Portfolio DOM extract failed:", err instanceof Error ? err.message : err);
+            scrapeMeta = {
+                domRowsMatched: 0,
+                domPositionsParsed: 0,
+                walletBalanceDom: null,
+                payloadChunkCount: capturedJson.length,
+                extractError: err instanceof Error ? err.message : String(err),
+            };
         }
         const out = { payloads: capturedJson };
         if (scrapeMeta !== undefined) {
@@ -257,8 +267,18 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
         return out;
     }
     catch (err) {
-        console.error("[cosmic-scraper] Browser scrape failed:", err instanceof Error ? err.message : err);
-        return { payloads: [] };
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error("[cosmic-scraper] Browser scrape failed:", reason);
+        return {
+            payloads: [],
+            scrapeMeta: {
+                domRowsMatched: 0,
+                domPositionsParsed: 0,
+                walletBalanceDom: null,
+                payloadChunkCount: 0,
+                scrapeAbortedReason: reason,
+            },
+        };
     }
     finally {
         await browser.close();

@@ -24,6 +24,10 @@ export type CosmicScrapeMeta = {
     domPositionsParsed: number;
     walletBalanceDom: string | null;
     payloadChunkCount: number;
+    /** In-page evaluate failed or threw (see logs). */
+    extractError?: string;
+    /** Entire browser scrape threw before finishing (launch/login/goto). */
+    scrapeAbortedReason?: string;
 };
 export type CosmicScrapeResult = {
     payloads: unknown[];
