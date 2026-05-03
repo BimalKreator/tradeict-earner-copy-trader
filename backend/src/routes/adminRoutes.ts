@@ -9,6 +9,7 @@ import {
 import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
 import { probeCosmicOpenPositions } from "../services/cosmicClient.js";
 import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
+import { runScraperStudioInspect } from "../services/scraperStudioInspect.js";
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
@@ -263,6 +264,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         minCapital?: number;
       } = {};
 
+      let scraperSelectorsUpdate:
+        | Prisma.InputJsonValue
+        | typeof Prisma.DbNull
+        | undefined;
+
       if (body.title !== undefined) {
         if (typeof body.title !== "string") {
           res.status(400).json({ error: "title must be a string" });
@@ -335,15 +341,54 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.minCapital = body.minCapital;
       }
+      if (body.scraperStudioSelectors !== undefined) {
+        if (body.scraperStudioSelectors === null) {
+          scraperSelectorsUpdate = Prisma.DbNull;
+        } else if (
+          typeof body.scraperStudioSelectors === "object" &&
+          body.scraperStudioSelectors !== null &&
+          !Array.isArray(body.scraperStudioSelectors)
+        ) {
+          const raw = body.scraperStudioSelectors as Record<string, unknown>;
+          const cleaned: Record<string, string> = {};
+          for (const [k, v] of Object.entries(raw)) {
+            if (typeof k !== "string" || typeof v !== "string") {
+              res.status(400).json({
+                error:
+                  "scraperStudioSelectors must be an object with string keys and string selector values",
+              });
+              return;
+            }
+            const key = k.trim();
+            if (!key) continue;
+            cleaned[key] = v;
+          }
+          scraperSelectorsUpdate = cleaned;
+        } else {
+          res.status(400).json({
+            error:
+              "scraperStudioSelectors must be a JSON object or null to clear",
+          });
+          return;
+        }
+      }
 
-      if (Object.keys(data).length === 0) {
+      if (
+        Object.keys(data).length === 0 &&
+        scraperSelectorsUpdate === undefined
+      ) {
         res.status(400).json({ error: "No valid fields to update" });
         return;
       }
 
       const strategy = await prisma.strategy.update({
         where: { id },
-        data,
+        data: {
+          ...data,
+          ...(scraperSelectorsUpdate !== undefined
+            ? { scraperStudioSelectors: scraperSelectorsUpdate }
+            : {}),
+        },
       });
 
       res.json(strategy);
@@ -539,6 +584,52 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         scrapeMeta: scrapeMeta ?? undefined,
         message,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Visual Scraper Studio: headless inspect — screenshot + visible element boxes/selectors.
+   * Body: `{ url, strategyId?, email?, password? }` — if `strategyId` is set, Cosmic credentials load server-side.
+   */
+  router.post("/scraper-studio/inspect", async (req, res, next) => {
+    try {
+      const { url, email, password, strategyId } = req.body as {
+        url?: unknown;
+        email?: unknown;
+        password?: unknown;
+        strategyId?: unknown;
+      };
+
+      if (typeof url !== "string" || !url.trim()) {
+        res.status(400).json({ error: "url is required" });
+        return;
+      }
+
+      let emailStr = typeof email === "string" ? email : "";
+      let passwordStr = typeof password === "string" ? password : "";
+
+      if (typeof strategyId === "string" && strategyId.trim()) {
+        const strat = await prisma.strategy.findUnique({
+          where: { id: strategyId.trim() },
+          select: { cosmicEmail: true, cosmicPassword: true },
+        });
+        if (!strat) {
+          res.status(404).json({ error: "Strategy not found" });
+          return;
+        }
+        emailStr = strat.cosmicEmail ?? "";
+        passwordStr = strat.cosmicPassword ?? "";
+      }
+
+      const result = await runScraperStudioInspect({
+        url: url.trim(),
+        email: emailStr,
+        password: passwordStr,
+      });
+
+      res.json(result);
     } catch (err) {
       next(err);
     }

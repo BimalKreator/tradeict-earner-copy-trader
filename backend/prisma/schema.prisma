@@ -96,6 +96,8 @@ model Strategy {
   cosmicEmail        String  @default("")
   cosmicPassword     String  @default("")
   performanceMetrics Json?
+  /** Visual Scraper Studio: slot key → CSS selector (e.g. symbol, size, side). */
+  scraperStudioSelectors Json?
   slippage           Float   @default(0.5)
   monthlyFee         Float
   profitShare        Float   @default(20.0)

@@ -15,6 +15,7 @@
  * `.grid-cols-[1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto]` (30s), parses rows via `cosmicPortfolioDomExtract.ts`,
  * then captures a screenshot when `options.captureScreenshot` is true (admin probe sets this when COSMIC_SCRAPER_PROBE_SCREENSHOT is enabled).
  */
+import type { Browser, Page } from "puppeteer";
 export type CosmicScrapeOptions = {
     /** Capture viewport JPEG after portfolio grid is visible (admin probe). */
     captureScreenshot?: boolean;
@@ -34,6 +35,13 @@ export type CosmicScrapeResult = {
     screenshotBase64?: string;
     scrapeMeta?: CosmicScrapeMeta;
 };
+/** Same Chromium launch flags as position scraping (stealth + sandbox overrides). */
+export declare function launchCosmicStealthBrowser(): Promise<Browser>;
+/**
+ * Fills email/password and submits using `COSMIC_SCRAPER_*_SELECTOR` env (Cosmic defaults).
+ * Call after navigating to a login page that matches those selectors.
+ */
+export declare function submitCosmicLoginFormIfPresent(page: Page, email: string, password: string): Promise<boolean>;
 /**
  * Returns JSON blobs captured during navigation / optional in-page fetch,
  * plus DOM-parsed positions from the portfolio grid.

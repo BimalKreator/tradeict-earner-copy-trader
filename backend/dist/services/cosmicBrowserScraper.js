@@ -99,6 +99,48 @@ async function tryClick(page, selectorsCsv) {
     }
     return false;
 }
+/** Same Chromium launch flags as position scraping (stealth + sandbox overrides). */
+export async function launchCosmicStealthBrowser() {
+    return puppeteer.launch({
+        headless: true,
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    });
+}
+/**
+ * Fills email/password and submits using `COSMIC_SCRAPER_*_SELECTOR` env (Cosmic defaults).
+ * Call after navigating to a login page that matches those selectors.
+ */
+export async function submitCosmicLoginFormIfPresent(page, email, password) {
+    const e = email.trim();
+    const p = password.trim();
+    if (!e || !p)
+        return false;
+    const emailSelectors = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
+        '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
+    const passwordSelectors = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
+        '#password,input[type="password"],input[name="password"]';
+    const submitSelectors = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
+        'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+    const filledEmail = await tryFillInput(page, emailSelectors, e);
+    const filledPass = await tryFillInput(page, passwordSelectors, p);
+    if (!filledEmail || !filledPass)
+        return false;
+    await Promise.all([
+        page
+            .waitForNavigation({
+            waitUntil: "domcontentloaded",
+            timeout: 120_000,
+        })
+            .catch(() => { }),
+        tryClick(page, submitSelectors),
+    ]);
+    await new Promise((r) => setTimeout(r, 2500));
+    return true;
+}
 /**
  * Returns JSON blobs captured during navigation / optional in-page fetch,
  * plus DOM-parsed positions from the portfolio grid.
@@ -118,14 +160,7 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
     const capturedJson = [];
     const filter = process.env.COSMIC_SCRAPER_RESPONSE_FILTER?.trim().toLowerCase() ||
         "position";
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-        ],
-    });
+    const browser = await launchCosmicStealthBrowser();
     try {
         const page = await browser.newPage();
         await page.setViewport({ width: 1440, height: 900 });
