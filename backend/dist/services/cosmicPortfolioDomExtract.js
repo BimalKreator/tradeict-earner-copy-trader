@@ -1,17 +1,13 @@
+/** Tailwind arbitrary grid template — Cosmic portfolio position rows. */
+export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR = ".grid-cols-\\[1\\.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\\]";
+/** Fallback when compiled class string differs slightly in DOM. */
+export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK = '[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 /**
- * Parses Cosmic portfolio DOM (wallet + open positions grid).
- * Selectors align with Cosmic UI: text-pnl-value, font-text pairs, grid rows, TP/SL color tokens.
+ * Parses Cosmic `/portfolio` DOM using the canonical grid row class and label/value rules.
+ * Caller should navigate to portfolio and `waitForSelector` the grid before invoking.
  */
 export async function extractCosmicPortfolioDom(page) {
-    const parsed = Number(process.env.COSMIC_SCRAPER_DOM_WAIT_MS?.trim());
-    const waitMs = Number.isFinite(parsed) && parsed >= 3000 ? parsed : 60_000;
-    await page.waitForSelector(".text-pnl-value", { timeout: waitMs }).catch(() => { });
-    await page
-        .waitForSelector('span.font-text, span[class*="font-text"]', {
-        timeout: waitMs,
-    })
-        .catch(() => { });
-    return page.evaluate(() => {
+    return page.evaluate((primarySel, fallbackSel) => {
         function parseNum(s) {
             const cleaned = s.replace(/,/g, "").replace(/[^\d.-]/g, "");
             if (!cleaned)
@@ -22,14 +18,12 @@ export async function extractCosmicPortfolioDom(page) {
         function text(el) {
             return (el?.textContent ?? "").replace(/\s+/g, " ").trim();
         }
-        /** Total Balance near label */
         let walletTotalBalance = null;
         const pnlValueEls = Array.from(document.querySelectorAll(".text-pnl-value"));
         for (const el of pnlValueEls) {
             let scan = el;
-            for (let d = 0; d < 6 && scan; d++) {
-                const blockText = text(scan);
-                if (/total\s*balance/i.test(blockText)) {
+            for (let d = 0; d < 8 && scan; d++) {
+                if (/total\s*balance/i.test(text(scan))) {
                     walletTotalBalance = text(el);
                     break;
                 }
@@ -41,88 +35,89 @@ export async function extractCosmicPortfolioDom(page) {
         if (!walletTotalBalance && pnlValueEls[0]) {
             walletTotalBalance = text(pnlValueEls[0]);
         }
+        let rowEls = Array.from(document.querySelectorAll(primarySel));
+        if (rowEls.length === 0) {
+            rowEls = Array.from(document.querySelectorAll(fallbackSel));
+        }
         const instrumentRe = /^[A-Z][A-Z0-9]{1,}(USD|USDT|PERP|-USD|_PERP)$/i;
-        const tokenSpans = Array.from(document.querySelectorAll("span.font-text, span[class*='font-text']")).filter((s) => instrumentRe.test(text(s)));
-        const seenRows = new WeakSet();
-        const positions = [];
-        for (const tokSpan of tokenSpans) {
-            const symbol = text(tokSpan);
-            if (!symbol)
-                continue;
-            const row = tokSpan.closest('[class*="grid"]') ??
-                tokSpan.closest("div[class*='grid']") ??
-                tokSpan.closest('[class*="Grid"]') ??
-                tokSpan.parentElement?.parentElement ??
-                tokSpan.parentElement;
-            if (!row || seenRows.has(row))
-                continue;
-            seenRows.add(row);
-            let sideRaw = "";
-            if (row.querySelector("span.text-green-500"))
-                sideRaw = "BUY";
-            else if (row.querySelector("span.text-red-500"))
-                sideRaw = "SELL";
-            let size = null;
-            let entry = null;
+        function mutedValueAfterLabel(row, label) {
             const spans = Array.from(row.querySelectorAll("span"));
             for (let i = 0; i < spans.length; i++) {
                 const sp = spans[i];
-                if (!sp)
+                if (!sp || text(sp) !== label)
                     continue;
-                const lab = text(sp);
-                if (lab === "Size") {
-                    const fromNext = text(spans[i + 1]);
-                    const fromSibling = text(sp.nextElementSibling);
-                    size =
-                        parseNum(fromNext) ??
-                            parseNum(fromSibling) ??
-                            parseNum(text(sp.parentElement));
-                    break;
+                for (let j = i + 1; j < spans.length; j++) {
+                    const cand = spans[j];
+                    if (!cand)
+                        continue;
+                    const cls = cand.getAttribute("class") ?? "";
+                    if (cand.classList.contains("text-pnl-value-muted") ||
+                        cls.includes("text-pnl-value-muted")) {
+                        return parseNum(text(cand));
+                    }
                 }
             }
-            for (let i = 0; i < spans.length; i++) {
-                const sp = spans[i];
-                if (!sp)
-                    continue;
-                const lab = text(sp);
-                if (/^(entry|avg\.?\s*entry|average\s*entry)$/i.test(lab)) {
-                    entry = parseNum(text(spans[i + 1]));
-                    break;
-                }
-            }
-            if (entry === null) {
-                const rowText = text(row);
-                const m = rowText.match(/(?:entry|avg\.?\s*entry)\s*[:\s]*([\d,.]+)/i);
-                if (m)
-                    entry = parseNum(m[1] ?? "");
-            }
-            const pnlEl = row.querySelector(".text-pnl-positive, .text-pnl-negative");
-            const unrealizedPnl = text(pnlEl);
+            return null;
+        }
+        function tpSlFromColorDivs(row) {
             let takeProfit = null;
             let stopLoss = null;
-            const allDivs = row.querySelectorAll("div");
-            for (const d of allDivs) {
-                const c = typeof d.className === "string" ? d.className : "";
-                const hasBuy = c.includes("color-buy") ||
-                    c.includes("--color-buy") ||
-                    /\(.*color-buy.*\)/i.test(c);
-                const hasSell = c.includes("color-sell") ||
-                    c.includes("--color-sell") ||
-                    /\(.*color-sell.*\)/i.test(c);
-                if (hasBuy && takeProfit === null) {
+            const divs = row.querySelectorAll("div");
+            for (const d of divs) {
+                const c = typeof d.className === "string"
+                    ? d.className
+                    : String(d.className ?? "");
+                const isBuy = c.includes("text-(--color-buy)") ||
+                    (c.includes("--color-buy") && /\btext-/i.test(c));
+                const isSell = c.includes("text-(--color-sell)") ||
+                    (c.includes("--color-sell") && /\btext-/i.test(c));
+                if (isBuy && takeProfit === null) {
                     const n = parseNum(text(d));
                     if (n !== null)
                         takeProfit = n;
                 }
-                if (hasSell && stopLoss === null) {
+                if (isSell && stopLoss === null) {
                     const n = parseNum(text(d));
                     if (n !== null)
                         stopLoss = n;
                 }
             }
+            return { takeProfit, stopLoss };
+        }
+        const seenRows = new WeakSet();
+        const positions = [];
+        for (const row of rowEls) {
+            if (!(row instanceof HTMLElement))
+                continue;
+            if (seenRows.has(row))
+                continue;
+            seenRows.add(row);
+            let symbol = "";
+            for (const sp of row.querySelectorAll("span")) {
+                const t = text(sp);
+                if (instrumentRe.test(t)) {
+                    symbol = t;
+                    break;
+                }
+            }
+            if (!symbol)
+                continue;
+            let sideRaw = "";
+            for (const sp of row.querySelectorAll("span")) {
+                const t = text(sp);
+                if (t === "BUY" || t === "SELL") {
+                    sideRaw = t;
+                    break;
+                }
+            }
+            const size = mutedValueAfterLabel(row, "Size");
+            const avgPrice = mutedValueAfterLabel(row, "Avg Price");
+            const { takeProfit, stopLoss } = tpSlFromColorDivs(row);
+            const pnlEl = row.querySelector(".text-pnl-positive, .text-pnl-negative");
+            const unrealizedPnl = text(pnlEl);
             if (!sideRaw || size === null)
                 continue;
-            const entryPrice = entry !== null && entry !== 0 ? entry : 0;
+            const entryPrice = avgPrice !== null && Number.isFinite(avgPrice) ? avgPrice : 0;
             positions.push({
                 symbol,
                 side: sideRaw,
@@ -135,6 +130,6 @@ export async function extractCosmicPortfolioDom(page) {
             });
         }
         return { walletTotalBalance, positions };
-    });
+    }, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK);
 }
 //# sourceMappingURL=cosmicPortfolioDomExtract.js.map

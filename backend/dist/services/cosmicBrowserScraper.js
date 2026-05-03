@@ -1,26 +1,40 @@
 /**
- * Headless browser login to Cosmic.trade (or URL from env) and collects JSON position payloads.
+ * Headless browser login to Cosmic.trade (or URL from env) and collects JSON + portfolio DOM.
  *
  * Configure via environment:
  * - COSMIC_SCRAPER_LOGIN_URL — full login page URL (required for scraping).
- * - COSMIC_SCRAPER_POST_LOGIN_URL — optional URL to open after login (positions/dashboard).
+ * - COSMIC_SCRAPER_PORTFOLIO_URL — optional; defaults to https://app.cosmic.trade/portfolio after login.
+ * - COSMIC_SCRAPER_POST_LOGIN_URL — optional intermediate URL before portfolio (rare).
  * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins).
  * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors.
  * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
  * - COSMIC_SCRAPER_RESPONSE_FILTER — substring to match JSON XHR URLs (default: "position").
- * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path e.g. "/api/positions" fetched in-page with credentials after login.
- * - COSMIC_SCRAPER_DOM_WAIT_MS — max wait (ms) for portfolio DOM selectors before parsing (default 60000).
+ * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path fetched in-page after portfolio load.
  *
- * After login, the scraper also parses the portfolio page DOM (wallet `.text-pnl-value`, position rows via `span.font-text`
- * pairs, BUY/SELL via `text-green-500` / `text-red-500`, Size/PnL/TP/SL) and merges rows into the same pipeline as JSON payloads.
+ * After login the scraper navigates to the portfolio page, waits for the Cosmic grid
+ * `.grid-cols-[1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto]` (30s), parses rows via `cosmicPortfolioDomExtract.ts`,
+ * then captures a screenshot when `options.captureScreenshot` is true (admin probe sets this when COSMIC_SCRAPER_PROBE_SCREENSHOT is enabled).
  */
 import vanillaPuppeteer from "puppeteer";
 import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { extractCosmicPortfolioDom } from "./cosmicPortfolioDomExtract.js";
+import { COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, extractCosmicPortfolioDom, } from "./cosmicPortfolioDomExtract.js";
 /** Puppeteer ≥24 typings omit legacy APIs expected by puppeteer-extra's VanillaPuppeteer shim. */
 const puppeteer = addExtra(vanillaPuppeteer);
 puppeteer.use(StealthPlugin());
+const DEFAULT_PORTFOLIO_URL = "https://app.cosmic.trade/portfolio";
+async function waitForPortfolioPositionGrid(page) {
+    try {
+        await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, {
+            timeout: 30_000,
+        });
+    }
+    catch {
+        await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, {
+            timeout: 30_000,
+        });
+    }
+}
 async function tryFillInput(page, selectorsCsv, value) {
     const selectors = selectorsCsv
         .split(",")
@@ -63,8 +77,8 @@ async function tryClick(page, selectorsCsv) {
     return false;
 }
 /**
- * Returns JSON blobs captured during navigation / optional in-page fetch.
- * Caller merges with {@link parseCosmicPositionsPayload}.
+ * Returns JSON blobs captured during navigation / optional in-page fetch,
+ * plus DOM-parsed positions from the portfolio grid.
  */
 export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, options) {
     const email = cosmicEmail.trim();
@@ -139,8 +153,16 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
                 waitUntil: "networkidle2",
                 timeout: 120_000,
             });
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 1000));
         }
+        const portfolioUrl = process.env.COSMIC_SCRAPER_PORTFOLIO_URL?.trim() ||
+            DEFAULT_PORTFOLIO_URL;
+        await page.goto(portfolioUrl, {
+            waitUntil: "networkidle2",
+            timeout: 120_000,
+        });
+        await waitForPortfolioPositionGrid(page);
+        await new Promise((r) => setTimeout(r, 500));
         const fetchPath = process.env.COSMIC_SCRAPER_POSITIONS_FETCH_PATH?.trim();
         if (fetchPath) {
             try {
