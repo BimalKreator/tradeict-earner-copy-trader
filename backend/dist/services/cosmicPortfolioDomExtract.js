@@ -1,89 +1,117 @@
 /**
- * Escaped selectors for Puppeteer `waitForSelector` only — DOM parsing does not use these
- * (avoids querySelector issues with Tailwind arbitrary classes like `grid-cols-[…]`).
+ * Escaped selectors for Puppeteer `waitForSelector` only — parsing uses plain
+ * `div.bg-table-row` + innerText line scans (no Tailwind arbitrary-class selectors).
  */
 export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR = ".grid-cols-\\[1\\.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto\\]";
 export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK = '[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 export const COSMIC_PORTFOLIO_ROW_BG_FALLBACK = 'div.bg-table-row[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 /**
- * Parses Cosmic `/portfolio` rows via `div.bg-table-row` + innerText / label siblings (no bracket CSS).
- * Delta symbol mapping runs later in `parseCosmicPositionsPayload` / `mapCosmicSymbolToDelta`.
+ * Resilient Cosmic `/portfolio` parse: `bg-table-row` + innerText lines + regex.
+ * Delta mapping (`ETHUSD` → `ETHUSDT`) runs later in `parseCosmicPositionsPayload`.
  */
 export async function extractCosmicPortfolioDom(page) {
     try {
         return await page.evaluate(() => {
-            function parseFloatClean(raw) {
-                const n = Number.parseFloat(raw.replace(/[^0-9.-]/g, ""));
-                return Number.isFinite(n) ? n : 0;
-            }
-            function rowInnerText(row) {
-                return row.innerText ?? "";
-            }
             try {
-                let walletTotalBalance = null;
-                const pnlValueEls = Array.from(document.querySelectorAll(".text-pnl-value"));
-                for (const el of pnlValueEls) {
-                    let scan = el;
-                    for (let d = 0; d < 8 && scan; d++) {
-                        const scanText = (scan.textContent ?? "")
-                            .replace(/\s+/g, " ")
-                            .trim();
-                        if (/total\s*balance/i.test(scanText)) {
-                            walletTotalBalance = (el.textContent ?? "")
-                                .replace(/\s+/g, " ")
-                                .trim();
-                            break;
-                        }
-                        scan = scan.parentElement;
-                    }
-                    if (walletTotalBalance)
-                        break;
+                function parseNum(raw) {
+                    const n = Number.parseFloat(raw.replace(/[^0-9.-]/g, ""));
+                    return Number.isFinite(n) ? n : 0;
                 }
-                if (!walletTotalBalance && pnlValueEls[0]) {
-                    walletTotalBalance = (pnlValueEls[0].textContent ?? "")
+                /** Wallet: label row then value (Cosmic wallet card). */
+                let walletTotalBalance = null;
+                const balanceDiv = Array.from(document.querySelectorAll("div.text-xs")).find((d) => (d.innerText ?? "").includes("Total Balance"));
+                if (balanceDiv?.nextElementSibling) {
+                    walletTotalBalance = (balanceDiv.nextElementSibling.textContent ?? "")
                         .replace(/\s+/g, " ")
                         .trim();
                 }
+                if (!walletTotalBalance) {
+                    const pnlValueEls = Array.from(document.querySelectorAll(".text-pnl-value"));
+                    for (const el of pnlValueEls) {
+                        let scan = el;
+                        for (let d = 0; d < 8 && scan; d++) {
+                            const scanText = (scan.textContent ?? "")
+                                .replace(/\s+/g, " ")
+                                .trim();
+                            if (/total\s*balance/i.test(scanText)) {
+                                walletTotalBalance = (el.textContent ?? "")
+                                    .replace(/\s+/g, " ")
+                                    .trim();
+                                break;
+                            }
+                            scan = scan.parentElement;
+                        }
+                        if (walletTotalBalance)
+                            break;
+                    }
+                    if (!walletTotalBalance && pnlValueEls[0]) {
+                        walletTotalBalance = (pnlValueEls[0].textContent ?? "")
+                            .replace(/\s+/g, " ")
+                            .trim();
+                    }
+                }
                 const rows = Array.from(document.querySelectorAll("div.bg-table-row"));
                 const positions = [];
-                const instrumentSpanRe = /^[A-Z][A-Z0-9]{2,}(USD|USDT|PERP)$/i;
+                const skipSymbols = new Set([
+                    "BUY",
+                    "SELL",
+                    "LONG",
+                    "SHORT",
+                    "SIZE",
+                    "PNL",
+                    "CLOSE",
+                    "REVERSE",
+                    "UNKNOWN",
+                ]);
                 for (const row of rows) {
-                    const rowText = rowInnerText(row);
-                    if (!rowText.includes("Size") || !rowText.includes("Avg Price")) {
+                    const text = row.innerText ?? "";
+                    if (!text.includes("Size") || !text.includes("Avg Price"))
                         continue;
-                    }
-                    let symbol = "";
-                    let side = "";
+                    let symbol = "UNKNOWN";
                     const img = row.querySelector("img[alt]");
-                    if (img && img.getAttribute("alt")) {
-                        symbol = (img.getAttribute("alt") ?? "").trim();
+                    if (img?.getAttribute("alt")?.trim()) {
+                        symbol = img.getAttribute("alt").trim();
                     }
                     else {
-                        const symSpan = Array.from(row.querySelectorAll("span")).find((s) => {
-                            const t = (s.innerText ?? "").trim().replace(/\s+/g, "");
-                            return instrumentSpanRe.test(t);
-                        });
-                        if (symSpan)
-                            symbol = symSpan.innerText.trim().replace(/\s+/g, "");
+                        const ins = text.match(/\b([A-Z][A-Z0-9]{2,}(?:USD|USDT|PERP))\b/);
+                        if (ins) {
+                            symbol = ins[1];
+                        }
+                        else {
+                            const loose = text.match(/\b([A-Z]{3,12})\b/g);
+                            if (loose) {
+                                for (const cand of loose) {
+                                    if (!skipSymbols.has(cand)) {
+                                        symbol = cand;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if (rowText.includes("BUY") || rowText.includes("LONG"))
-                        side = "BUY";
-                    else if (rowText.includes("SELL") || rowText.includes("SHORT"))
-                        side = "SELL";
+                    const side = text.includes("BUY") || text.includes("LONG") ? "BUY" : "SELL";
                     let size = 0;
                     let entryPrice = 0;
-                    const sizeSpan = Array.from(row.querySelectorAll("span")).find((s) => (s.innerText ?? "").trim() === "Size");
-                    if (sizeSpan?.previousElementSibling) {
-                        size = parseFloatClean(sizeSpan.previousElementSibling.textContent ?? "");
-                    }
-                    const priceSpan = Array.from(row.querySelectorAll("span")).find((s) => (s.innerText ?? "").trim() === "Avg Price");
-                    if (priceSpan?.previousElementSibling) {
-                        entryPrice = parseFloatClean(priceSpan.previousElementSibling.textContent ?? "");
+                    let unrealizedPnlNum = 0;
+                    const lines = text
+                        .split(/\n/)
+                        .map((l) => l.trim())
+                        .filter((l) => l.length > 0);
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i] === "Size" && i > 0) {
+                            size = parseNum(lines[i - 1]);
+                        }
+                        if (lines[i] === "Avg Price" && i > 0) {
+                            entryPrice = parseNum(lines[i - 1]);
+                        }
+                        if (lines[i] === "PNL" && i > 0) {
+                            unrealizedPnlNum = parseNum(lines[i - 1]);
+                        }
                     }
                     let takeProfit = null;
                     let stopLoss = null;
-                    const tpMatch = rowText.match(/TP:\s*\$?([\d.,]+)/i);
-                    const slMatch = rowText.match(/SL:\s*\$?([\d.,]+)/i);
+                    const tpMatch = text.match(/TP:\s*\$?([\d.,]+)/i);
+                    const slMatch = text.match(/SL:\s*\$?([\d.,]+)/i);
                     if (tpMatch) {
                         const n = Number.parseFloat(tpMatch[1].replace(/,/g, ""));
                         if (Number.isFinite(n))
@@ -94,11 +122,7 @@ export async function extractCosmicPortfolioDom(page) {
                         if (Number.isFinite(n))
                             stopLoss = n;
                     }
-                    const pnlEl = row.querySelector(".text-pnl-positive, .text-pnl-negative");
-                    const unrealizedPnl = pnlEl
-                        ? (pnlEl.textContent ?? "").replace(/\s+/g, " ").trim()
-                        : "";
-                    if (symbol && side && size > 0) {
+                    if (symbol !== "UNKNOWN" && size > 0) {
                         const rowObj = {
                             symbol,
                             side,
@@ -108,8 +132,9 @@ export async function extractCosmicPortfolioDom(page) {
                             takeProfit,
                             openedAt: null,
                         };
-                        if (unrealizedPnl)
-                            rowObj.unrealizedPnl = unrealizedPnl;
+                        if (unrealizedPnlNum !== 0) {
+                            rowObj.unrealizedPnl = unrealizedPnlNum;
+                        }
                         positions.push(rowObj);
                     }
                 }
@@ -119,17 +144,12 @@ export async function extractCosmicPortfolioDom(page) {
                     domRowsMatched: rows.length,
                 };
             }
-            catch (e) {
-                const msg = e instanceof Error
-                    ? e.message
-                    : typeof e === "string"
-                        ? e
-                        : String(e);
+            catch (error) {
                 return {
                     walletTotalBalance: null,
                     positions: [],
                     domRowsMatched: 0,
-                    extractError: msg,
+                    extractError: error instanceof Error ? error.message : String(error),
                 };
             }
         });
