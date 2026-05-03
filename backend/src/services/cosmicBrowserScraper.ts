@@ -9,12 +9,17 @@
  * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
  * - COSMIC_SCRAPER_RESPONSE_FILTER — substring to match JSON XHR URLs (default: "position").
  * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path e.g. "/api/positions" fetched in-page with credentials after login.
+ * - COSMIC_SCRAPER_DOM_WAIT_MS — max wait (ms) for portfolio DOM selectors before parsing (default 60000).
+ *
+ * After login, the scraper also parses the portfolio page DOM (wallet `.text-pnl-value`, position rows via `span.font-text`
+ * pairs, BUY/SELL via `text-green-500` / `text-red-500`, Size/PnL/TP/SL) and merges rows into the same pipeline as JSON payloads.
  */
 
 import type { HTTPResponse, Page } from "puppeteer";
 import vanillaPuppeteer from "puppeteer";
 import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { extractCosmicPortfolioDom } from "./cosmicPortfolioDomExtract.js";
 
 /** Puppeteer ≥24 typings omit legacy APIs expected by puppeteer-extra's VanillaPuppeteer shim. */
 const puppeteer = addExtra(
@@ -204,6 +209,21 @@ export async function scrapeCosmicPositionsData(
           err instanceof Error ? err.message : err,
         );
       }
+    }
+
+    try {
+      const dom = await extractCosmicPortfolioDom(page);
+      if (dom.positions.length > 0 || dom.walletTotalBalance) {
+        capturedJson.push({
+          walletTotalBalance: dom.walletTotalBalance,
+          positions: dom.positions,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        "[cosmic-scraper] Portfolio DOM extract failed:",
+        err instanceof Error ? err.message : err,
+      );
     }
 
     const out: CosmicScrapeResult = { payloads: capturedJson };
