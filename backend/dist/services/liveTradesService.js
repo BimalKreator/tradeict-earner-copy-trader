@@ -159,6 +159,13 @@ export async function getAdminGroupedLiveTrades(prisma) {
         catch {
             cosmicList = [];
         }
+        if (scraperEnvConfigured &&
+            credentialsPresent &&
+            cosmicList.length === 0) {
+            console.warn(`[live-trades] Zero Cosmic positions for "${strat.title}" (${strat.id}). ` +
+                "If the master has open trades: verify login env, DOM scrape (Test scrape), " +
+                "and that symbols map to Delta (e.g. ETHUSD→ETHUSDT).");
+        }
         const subs = await prisma.userSubscription.findMany({
             where: {
                 strategyId: strat.id,

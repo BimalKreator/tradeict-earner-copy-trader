@@ -28,10 +28,26 @@ export function buildCosmicTradeId(parts: {
 }
 
 function normalizeSide(raw: string): TradeSide | null {
-  const u = raw.trim().toUpperCase();
-  if (u === "BUY" || u === "LONG") return "BUY";
-  if (u === "SELL" || u === "SHORT") return "SELL";
+  const t = raw.trim();
+  if (!t) return null;
+  /** Word-aware so "ETHUSD (BUY)" works but "OVERSOLD" does not match SELL. */
+  if (/\b(BUY|LONG)\b/i.test(t)) return "BUY";
+  if (/\b(SELL|SHORT)\b/i.test(t)) return "SELL";
   return null;
+}
+
+/**
+ * Scraper Studio cells often include side text: "ETHUSD (BUY)" — naive normalization
+ * becomes `ETHUSD(BUY)` and Delta mapping fails.
+ */
+function sanitizeInstrumentLabel(raw: string): string {
+  const t = raw.trim();
+  if (!t) return "";
+  const pair = t.match(/\b([A-Z][A-Z0-9]{2,}(?:USD|USDT|PERP))\b/i);
+  if (pair) return pair[1]!.toUpperCase();
+  const head =
+    (t.split(/\(/)[0] ?? t).trim().split(/\s+/)[0] ?? "";
+  return normalizeCosmicSymbolKey(head);
 }
 
 function asNumber(v: unknown): number | null {
@@ -92,14 +108,15 @@ function extractPositionRows(data: unknown): {
   for (const item of list) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
-    const symbol =
+    const symbol = sanitizeInstrumentLabel(
       readStringField(row, [
         "symbol",
         "Symbol",
         "instrument",
         "pair",
         "market",
-      ]) ?? "";
+      ]) ?? "",
+    );
     const sideRaw =
       readStringField(row, ["side", "Side", "direction", "positionSide"]) ??
       "";
