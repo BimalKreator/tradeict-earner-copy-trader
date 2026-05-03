@@ -1,8 +1,8 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { Activity, Loader2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -55,17 +55,9 @@ export default function DashboardLiveTradesPage() {
   const [unauthorized, setUnauthorized] = useState(false);
 
   const load = useCallback(async () => {
-    setError(null);
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    if (!token) {
-      setUnauthorized(true);
-      setLoading(false);
-      setRows([]);
-      return;
-    }
-    setUnauthorized(false);
     setLoading(true);
+    setError(null);
+    setUnauthorized(false);
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
         headers: authHeaders(),

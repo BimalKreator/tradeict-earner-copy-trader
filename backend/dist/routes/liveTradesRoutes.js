@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { authenticateJwt, requireAdmin } from "../middleware/authMiddleware.js";
+import { authenticateToken, isAdmin, } from "../middleware/authMiddleware.js";
 import { getAdminGroupedLiveTrades, getUserLiveTradeRows, } from "../services/liveTradesService.js";
 export function createLiveTradesRoutes(prisma) {
     const router = Router();
-    const jwtAuth = authenticateJwt();
-    const adminOnly = [jwtAuth, requireAdmin(prisma)];
+    const jwtAuth = authenticateToken();
+    const adminOnly = [jwtAuth, isAdmin(prisma)];
     router.get("/me", jwtAuth, async (req, res, next) => {
         try {
             const userId = req.userId;

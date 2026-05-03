@@ -33,6 +33,8 @@ export function authenticateJwt() {
         }
     };
 }
+/** Alias — same as {@link authenticateJwt}. */
+export const authenticateToken = authenticateJwt;
 /**
  * Must run after `authenticateJwt`. Loads user and requires `role === ADMIN`.
  */
@@ -58,5 +60,9 @@ export function requireAdmin(prisma) {
             next(err);
         }
     };
+}
+/** Alias — same as {@link requireAdmin}. */
+export function isAdmin(prisma) {
+    return requireAdmin(prisma);
 }
 //# sourceMappingURL=authMiddleware.js.map

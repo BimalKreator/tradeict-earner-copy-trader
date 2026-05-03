@@ -1,8 +1,8 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { Layers, Loader2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -148,26 +148,13 @@ export default function AdminLiveTradesPage() {
   const [forbidden, setForbidden] = useState(false);
 
   const load = useCallback(async () => {
-    setError(null);
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    if (!token) {
-      setForbidden(false);
-      setLoading(false);
-      setStrategies([]);
-      setError("Not signed in.");
-      return;
-    }
     setLoading(true);
+    setError(null);
+    setForbidden(false);
     try {
       const res = await fetch(`${API_BASE}/live-trades/admin/grouped`, {
         headers: authHeaders(),
       });
-      if (res.status === 401) {
-        setError("Session expired. Sign in again.");
-        setStrategies([]);
-        return;
-      }
       if (res.status === 403) {
         setForbidden(true);
         setStrategies([]);

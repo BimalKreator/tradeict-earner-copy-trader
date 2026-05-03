@@ -5,8 +5,12 @@ import type { PrismaClient } from "@prisma/client";
  * Sets `req.userId` from the `sub` claim.
  */
 export declare function authenticateJwt(): (req: Request, res: Response, next: NextFunction) => void;
+/** Alias — same as {@link authenticateJwt}. */
+export declare const authenticateToken: typeof authenticateJwt;
 /**
  * Must run after `authenticateJwt`. Loads user and requires `role === ADMIN`.
  */
 export declare function requireAdmin(prisma: PrismaClient): (req: Request, res: Response, next: NextFunction) => void;
+/** Alias — same as {@link requireAdmin}. */
+export declare function isAdmin(prisma: PrismaClient): (req: Request, res: Response, next: NextFunction) => void;
 //# sourceMappingURL=authMiddleware.d.ts.map
