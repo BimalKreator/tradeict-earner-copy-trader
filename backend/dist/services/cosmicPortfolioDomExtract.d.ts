@@ -8,6 +8,8 @@ export declare const COSMIC_PORTFOLIO_ROW_BG_FALLBACK = "div.bg-table-row[class*
 export type PortfolioDomExtract = {
     walletTotalBalance: string | null;
     positions: Record<string, unknown>[];
+    /** Rows matched by selectors before per-field validation (admin diagnostics). */
+    domRowsMatched: number;
 };
 /**
  * Parses Cosmic `/portfolio` DOM using the canonical grid row class and label/value rules.

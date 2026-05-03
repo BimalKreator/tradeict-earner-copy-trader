@@ -35,26 +35,43 @@ puppeteer.use(StealthPlugin());
 
 const DEFAULT_PORTFOLIO_URL = "https://app.cosmic.trade/portfolio";
 
-async function waitForPortfolioPositionGrid(page: Page): Promise<void> {
-  try {
-    await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR, {
-      timeout: 30_000,
-    });
-    return;
-  } catch {
-    /* primary escaped class may not match; try substring then Cosmic row wrapper */
-  }
-  try {
-    await page.waitForSelector(COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK, {
-      timeout: 30_000,
-    });
-    return;
-  } catch {
-    /* last resort: bg-table-row + grid template fragment */
-  }
-  await page.waitForSelector(COSMIC_PORTFOLIO_ROW_BG_FALLBACK, {
-    timeout: 30_000,
+const POSITION_ROW_SELECTORS = [
+  COSMIC_PORTFOLIO_ROW_GRID_SELECTOR,
+  COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK,
+  COSMIC_PORTFOLIO_ROW_BG_FALLBACK,
+] as const;
+
+/** Scroll so lazy-mounted portfolio rows can render (Cosmic / Next.js). */
+async function settlePortfolioDom(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const h = Math.max(
+      document.body?.scrollHeight ?? 0,
+      document.documentElement?.scrollHeight ?? 0,
+    );
+    window.scrollTo(0, h);
   });
+  await new Promise((r) => setTimeout(r, 1500));
+}
+
+async function waitForPortfolioPositionGrid(page: Page): Promise<void> {
+  let lastErr: unknown;
+  for (const sel of POSITION_ROW_SELECTORS) {
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 25_000 });
+      return;
+    } catch (e1) {
+      lastErr = e1;
+      try {
+        await page.waitForSelector(sel, { timeout: 10_000 });
+        return;
+      } catch (e2) {
+        lastErr = e2;
+      }
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(String(lastErr ?? "portfolio row selectors timed out"));
 }
 
 export type CosmicScrapeOptions = {
@@ -62,9 +79,17 @@ export type CosmicScrapeOptions = {
   captureScreenshot?: boolean;
 };
 
+export type CosmicScrapeMeta = {
+  domRowsMatched: number;
+  domPositionsParsed: number;
+  walletBalanceDom: string | null;
+  payloadChunkCount: number;
+};
+
 export type CosmicScrapeResult = {
   payloads: unknown[];
   screenshotBase64?: string;
+  scrapeMeta?: CosmicScrapeMeta;
 };
 
 async function tryFillInput(
@@ -157,7 +182,7 @@ export async function scrapeCosmicPositionsData(
 
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1365, height: 900 });
+    await page.setViewport({ width: 1440, height: 900 });
 
     page.on("response", async (response: HTTPResponse) => {
       try {
@@ -199,19 +224,19 @@ export async function scrapeCosmicPositionsData(
     await Promise.all([
       page
         .waitForNavigation({
-          waitUntil: "networkidle2",
+          waitUntil: "domcontentloaded",
           timeout: 120_000,
         })
         .catch(() => {}),
       tryClick(page, submitSelectors),
     ]);
 
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 2500));
 
     const postLogin = process.env.COSMIC_SCRAPER_POST_LOGIN_URL?.trim();
     if (postLogin) {
       await page.goto(postLogin, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
       await new Promise((r) => setTimeout(r, 1000));
@@ -221,9 +246,11 @@ export async function scrapeCosmicPositionsData(
       process.env.COSMIC_SCRAPER_PORTFOLIO_URL?.trim() ||
       DEFAULT_PORTFOLIO_URL;
     await page.goto(portfolioUrl, {
-      waitUntil: "networkidle2",
+      waitUntil: "domcontentloaded",
       timeout: 120_000,
     });
+
+    await settlePortfolioDom(page);
 
     try {
       await waitForPortfolioPositionGrid(page);
@@ -232,9 +259,11 @@ export async function scrapeCosmicPositionsData(
         "[cosmic-scraper] Portfolio grid selector timed out — continuing anyway (DOM may still parse):",
         err instanceof Error ? err.message : err,
       );
+      await settlePortfolioDom(page);
       await new Promise((r) => setTimeout(r, 4000));
     }
 
+    await settlePortfolioDom(page);
     await new Promise((r) => setTimeout(r, 500));
 
     const fetchPath = process.env.COSMIC_SCRAPER_POSITIONS_FETCH_PATH?.trim();
@@ -261,14 +290,19 @@ export async function scrapeCosmicPositionsData(
       }
     }
 
+    let scrapeMeta: CosmicScrapeMeta | undefined;
     try {
       const dom = await extractCosmicPortfolioDom(page);
-      if (dom.positions.length > 0 || dom.walletTotalBalance) {
-        capturedJson.push({
-          walletTotalBalance: dom.walletTotalBalance,
-          positions: dom.positions,
-        });
-      }
+      capturedJson.push({
+        walletTotalBalance: dom.walletTotalBalance,
+        positions: dom.positions,
+      });
+      scrapeMeta = {
+        domRowsMatched: dom.domRowsMatched,
+        domPositionsParsed: dom.positions.length,
+        walletBalanceDom: dom.walletTotalBalance,
+        payloadChunkCount: capturedJson.length,
+      };
     } catch (err) {
       console.warn(
         "[cosmic-scraper] Portfolio DOM extract failed:",
@@ -277,6 +311,9 @@ export async function scrapeCosmicPositionsData(
     }
 
     const out: CosmicScrapeResult = { payloads: capturedJson };
+    if (scrapeMeta !== undefined) {
+      out.scrapeMeta = scrapeMeta;
+    }
 
     if (options?.captureScreenshot) {
       try {

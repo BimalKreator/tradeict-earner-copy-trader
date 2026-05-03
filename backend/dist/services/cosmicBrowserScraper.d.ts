@@ -19,9 +19,16 @@ export type CosmicScrapeOptions = {
     /** Capture viewport JPEG after portfolio grid is visible (admin probe). */
     captureScreenshot?: boolean;
 };
+export type CosmicScrapeMeta = {
+    domRowsMatched: number;
+    domPositionsParsed: number;
+    walletBalanceDom: string | null;
+    payloadChunkCount: number;
+};
 export type CosmicScrapeResult = {
     payloads: unknown[];
     screenshotBase64?: string;
+    scrapeMeta?: CosmicScrapeMeta;
 };
 /**
  * Returns JSON blobs captured during navigation / optional in-page fetch,

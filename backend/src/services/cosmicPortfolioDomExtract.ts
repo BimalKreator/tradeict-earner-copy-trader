@@ -15,6 +15,8 @@ export const COSMIC_PORTFOLIO_ROW_BG_FALLBACK =
 export type PortfolioDomExtract = {
   walletTotalBalance: string | null;
   positions: Record<string, unknown>[];
+  /** Rows matched by selectors before per-field validation (admin diagnostics). */
+  domRowsMatched: number;
 };
 
 /**
@@ -63,6 +65,26 @@ export async function extractCosmicPortfolioDom(
       if (rowEls.length === 0) {
         rowEls = Array.from(document.querySelectorAll(bgRowSel));
       }
+      if (rowEls.length === 0) {
+        const broadRows = (requireCursorPointer: boolean): Element[] =>
+          Array.from(document.querySelectorAll("div.bg-table-row")).filter(
+            (el) => {
+              const c =
+                typeof el.className === "string"
+                  ? el.className
+                  : String(el.className ?? "");
+              return (
+                c.includes("grid-cols") &&
+                c.includes("1.5fr") &&
+                (!requireCursorPointer || c.includes("cursor-pointer"))
+              );
+            },
+          );
+        rowEls = broadRows(true);
+        if (rowEls.length === 0) rowEls = broadRows(false);
+      }
+
+      const domRowsMatched = rowEls.length;
 
       const instrumentRe =
         /^[A-Z][A-Z0-9]{1,}(USD|USDT|PERP|-USD|_PERP)$/i;
@@ -268,7 +290,7 @@ export async function extractCosmicPortfolioDom(
         });
       }
 
-      return { walletTotalBalance, positions };
+      return { walletTotalBalance, positions, domRowsMatched };
     },
     COSMIC_PORTFOLIO_ROW_GRID_SELECTOR,
     COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK,

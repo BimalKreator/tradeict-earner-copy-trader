@@ -1,6 +1,9 @@
 import type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 import { parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
-import { scrapeCosmicPositionsData } from "./cosmicBrowserScraper.js";
+import {
+  scrapeCosmicPositionsData,
+  type CosmicScrapeMeta,
+} from "./cosmicBrowserScraper.js";
 
 export type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
@@ -35,17 +38,29 @@ export async function probeCosmicOpenPositions(
   cosmicEmail: string,
   cosmicPassword: string,
   captureScreenshot: boolean,
-): Promise<{ trades: CosmicLedTrade[]; screenshotBase64?: string }> {
-  const { payloads, screenshotBase64 } = await scrapeCosmicPositionsData(
-    cosmicEmail.trim(),
-    cosmicPassword.trim(),
-    captureScreenshot ? { captureScreenshot: true } : undefined,
-  );
-  const out: { trades: CosmicLedTrade[]; screenshotBase64?: string } = {
+): Promise<{
+  trades: CosmicLedTrade[];
+  screenshotBase64?: string;
+  scrapeMeta?: CosmicScrapeMeta;
+}> {
+  const { payloads, screenshotBase64, scrapeMeta } =
+    await scrapeCosmicPositionsData(
+      cosmicEmail.trim(),
+      cosmicPassword.trim(),
+      captureScreenshot ? { captureScreenshot: true } : undefined,
+    );
+  const out: {
+    trades: CosmicLedTrade[];
+    screenshotBase64?: string;
+    scrapeMeta?: CosmicScrapeMeta;
+  } = {
     trades: tradesFromPayloads(payloads),
   };
   if (screenshotBase64 !== undefined && screenshotBase64.length > 0) {
     out.screenshotBase64 = screenshotBase64;
+  }
+  if (scrapeMeta !== undefined) {
+    out.scrapeMeta = scrapeMeta;
   }
   return out;
 }

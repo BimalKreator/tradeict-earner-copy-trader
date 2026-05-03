@@ -488,12 +488,41 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const captureScreenshot =
         process.env.COSMIC_SCRAPER_PROBE_SCREENSHOT === "true";
 
-      const { trades: positions, screenshotBase64 } =
+      const { trades: positions, screenshotBase64, scrapeMeta } =
         await probeCosmicOpenPositions(
           strategy.cosmicEmail,
           strategy.cosmicPassword ?? "",
           captureScreenshot,
         );
+
+      let message: string;
+      if (positions.length > 0) {
+        message = `Parsed ${positions.length} open Cosmic position(s).`;
+      } else if (
+        scrapeMeta !== undefined &&
+        scrapeMeta.domRowsMatched > 0 &&
+        scrapeMeta.domPositionsParsed === 0
+      ) {
+        message =
+          `Found ${scrapeMeta.domRowsMatched} position row(s) in the page DOM but field parsing yielded 0 positions — markup may have changed (symbol/side/size/avg columns).`;
+      } else if (
+        scrapeMeta !== undefined &&
+        scrapeMeta.domRowsMatched === 0 &&
+        scrapeMeta.walletBalanceDom
+      ) {
+        message =
+          "Portfolio wallet loaded but no position rows matched selectors — scroll/tab issue or Cosmic layout changed; check COSMIC_SCRAPER_PROBE_SCREENSHOT and API logs.";
+      } else if (
+        scrapeMeta !== undefined &&
+        scrapeMeta.domRowsMatched === 0 &&
+        !scrapeMeta.walletBalanceDom
+      ) {
+        message =
+          "No wallet row or position rows detected — login likely failed (wrong credentials, 2FA, or selectors). Confirm COSMIC_SCRAPER_LOGIN_URL and strategy Cosmic username/password.";
+      } else {
+        message =
+          "Scrape finished but no position payloads were produced — DOM extract may have failed; check API logs for [cosmic-scraper].";
+      }
 
       res.json({
         ok: true,
@@ -503,10 +532,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         credentialsPresent,
         screenshotPreview: Boolean(screenshotBase64),
         screenshotBase64: screenshotBase64 ?? undefined,
-        message:
-          positions.length === 0
-            ? "Scrape completed but no positions were parsed. Either there are no open trades, login/selectors failed, or COSMIC_SCRAPER_RESPONSE_FILTER / positions URL does not match Cosmic."
-            : `Parsed ${positions.length} open Cosmic position(s).`,
+        scrapeMeta: scrapeMeta ?? undefined,
+        message,
       });
     } catch (err) {
       next(err);
