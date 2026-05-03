@@ -170,6 +170,51 @@ async function clickSubmitMappingThenEnvCsv(page, mappingSel, envSelectorsCsv) {
     }
     return tryClick(page, envSelectorsCsv);
 }
+/**
+ * Match Scraper Studio reliability: wait for Cosmic `#username` / `#password` (or mapped / env fallbacks)
+ * so React/hydration finishes before `tryFillInput` races empty `$`.
+ */
+async function waitForCosmicLoginShell(page, scraperMappings, emailSelectorsCsv, passwordSelectorsCsv) {
+    const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
+    const mapPwd = selectorFromScraperMappings(scraperMappings, "login_password");
+    const tryVisible = async (sel, ms) => {
+        try {
+            await page.waitForSelector(sel, { visible: true, timeout: ms });
+            return true;
+        }
+        catch {
+            return false;
+        }
+    };
+    if (mapEmail)
+        await tryVisible(mapEmail, 12_000);
+    if (mapPwd)
+        await tryVisible(mapPwd, 12_000);
+    let sawUser = await tryVisible("#username", 45_000);
+    if (!sawUser) {
+        const fb = emailSelectorsCsv.split(",")[0]?.trim();
+        if (fb)
+            sawUser = await tryVisible(fb, 22_000);
+    }
+    let sawPwd = await tryVisible("#password", 45_000);
+    if (!sawPwd) {
+        const fb = passwordSelectorsCsv.split(",")[0]?.trim();
+        if (fb)
+            sawPwd = await tryVisible(fb, 22_000);
+    }
+    if (!sawUser || !sawPwd) {
+        await new Promise((r) => setTimeout(r, 1200));
+    }
+}
+function scrapeMetaEarly(explain) {
+    return {
+        domRowsMatched: 0,
+        domPositionsParsed: 0,
+        walletBalanceDom: null,
+        payloadChunkCount: 0,
+        scrapeAbortedReason: explain,
+    };
+}
 /** Same Chromium launch flags as position scraping (stealth + sandbox overrides). */
 export async function launchCosmicStealthBrowser() {
     return puppeteer.launch({
@@ -261,15 +306,27 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
     const loginUrl = process.env.COSMIC_SCRAPER_LOGIN_URL?.trim();
     if (!loginUrl) {
         console.warn("[cosmic-scraper] COSMIC_SCRAPER_LOGIN_URL is not set — cannot scrape Cosmic positions.");
-        return { payloads: [] };
+        return {
+            payloads: [],
+            scrapeMeta: scrapeMetaEarly("COSMIC_SCRAPER_LOGIN_URL is not set on the API server — headless login never starts."),
+        };
     }
     if (!email || !password) {
         console.warn("[cosmic-scraper] Strategy is missing cosmicEmail or cosmicPassword — skip scrape.");
-        return { payloads: [] };
+        return {
+            payloads: [],
+            scrapeMeta: scrapeMetaEarly("Strategy has empty cosmicEmail or cosmicPassword in the database."),
+        };
     }
     const capturedJson = [];
     const filter = process.env.COSMIC_SCRAPER_RESPONSE_FILTER?.trim().toLowerCase() ||
         "position";
+    const emailSelectors = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
+        '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
+    const passwordSelectors = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
+        '#password,input[type="password"],input[name="password"]';
+    const submitSelectors = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
+        'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
     const browser = await launchCosmicStealthBrowser();
     try {
         const page = await browser.newPage();
@@ -293,20 +350,28 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
             waitUntil: "domcontentloaded",
             timeout: 90_000,
         });
-        const emailSelectors = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
-            '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
-        const passwordSelectors = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
-            '#password,input[type="password"],input[name="password"]';
-        const submitSelectors = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
-            'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+        await waitForCosmicLoginShell(page, scraperMappings, emailSelectors, passwordSelectors);
         const mapLoginEmail = selectorFromScraperMappings(scraperMappings, "login_email");
         const mapLoginPassword = selectorFromScraperMappings(scraperMappings, "login_password");
         const mapLoginSubmit = selectorFromScraperMappings(scraperMappings, "login_submit");
         const filledEmail = await fillUsingMappingThenEnvCsv(page, mapLoginEmail, emailSelectors, email);
         const filledPass = await fillUsingMappingThenEnvCsv(page, mapLoginPassword, passwordSelectors, password);
         if (!filledEmail || !filledPass) {
-            console.warn("[cosmic-scraper] Could not locate email/password inputs — check strategy login_* scraperMappings or COSMIC_SCRAPER_*_SELECTOR env vars.");
-            return { payloads: [] };
+            let pageUrl = "(unknown)";
+            try {
+                pageUrl = page.url();
+            }
+            catch {
+                /* ignore */
+            }
+            const hint = "Could not fill Cosmic login fields after navigating to COSMIC_SCRAPER_LOGIN_URL. " +
+                `Current URL: ${pageUrl}. ` +
+                "Map login_email, login_password, login_submit in Scraper Studio or set COSMIC_SCRAPER_EMAIL_SELECTOR / PASSWORD_SELECTOR on the API host.";
+            console.warn("[cosmic-scraper]", hint);
+            return {
+                payloads: [],
+                scrapeMeta: scrapeMetaEarly(hint),
+            };
         }
         await Promise.all([
             page

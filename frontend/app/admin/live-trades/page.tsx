@@ -31,6 +31,7 @@ type CosmicScrapeDiagnostics = {
   domRowsMatched?: number;
   domPositionsParsed?: number;
   walletBalanceDom?: string | null;
+  /** Present when the scrape stopped before any portfolio payload (login/env/etc.). */
   scrapeAbortedReason?: string;
   extractError?: string;
 };
@@ -266,6 +267,15 @@ export default function AdminLiveTradesPage() {
                       <p className="mb-1 text-[10px] uppercase tracking-wide text-white/40">
                         Last scrape diagnostics
                       </p>
+                      {s.cosmicMeta.lastScrape.scrapeAbortedReason &&
+                      s.cosmicMeta.lastScrape.payloadChunkCount === 0 ? (
+                        <p className="mb-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-100/95 normal-case">
+                          <span className="font-semibold text-amber-50/90">
+                            Scrape stopped early:{" "}
+                          </span>
+                          {s.cosmicMeta.lastScrape.scrapeAbortedReason}
+                        </p>
+                      ) : null}
                       <p>
                         payloadChunks={s.cosmicMeta.lastScrape.payloadChunkCount}{" "}
                         · rowsInPayloads=
@@ -287,7 +297,8 @@ export default function AdminLiveTradesPage() {
                           wallet (DOM): {s.cosmicMeta.lastScrape.walletBalanceDom}
                         </p>
                       ) : null}
-                      {s.cosmicMeta.lastScrape.scrapeAbortedReason ? (
+                      {s.cosmicMeta.lastScrape.scrapeAbortedReason &&
+                      s.cosmicMeta.lastScrape.payloadChunkCount > 0 ? (
                         <p className="text-amber-200/90">
                           aborted: {s.cosmicMeta.lastScrape.scrapeAbortedReason}
                         </p>
