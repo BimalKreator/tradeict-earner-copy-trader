@@ -10,6 +10,7 @@ import {
   authenticateJwt,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
+import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
@@ -387,6 +388,16 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         },
         invoices,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** Same payload as `GET /api/live-trades/admin/grouped` — lives under `/api/admin/*` for proxies that only forward admin API paths. */
+  router.get("/live-trades/grouped", ...adminOnly, async (_req, res, next) => {
+    try {
+      const strategies = await getAdminGroupedLiveTrades(prisma);
+      res.json({ strategies });
     } catch (err) {
       next(err);
     }

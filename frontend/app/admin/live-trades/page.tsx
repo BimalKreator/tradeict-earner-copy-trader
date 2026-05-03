@@ -143,7 +143,7 @@ export default function AdminLiveTradesPage() {
     setError(null);
     setForbidden(false);
     try {
-      const res = await fetch(`${API_BASE}/live-trades/admin/grouped`, {
+      const res = await fetch(`${API_BASE}/admin/live-trades/grouped`, {
         headers: {
           Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
         },
