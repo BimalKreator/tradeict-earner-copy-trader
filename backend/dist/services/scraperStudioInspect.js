@@ -1,4 +1,4 @@
-import { launchCosmicStealthBrowser, submitCosmicLoginFormIfPresent, } from "./cosmicBrowserScraper.js";
+import { launchCosmicStealthBrowser, performCosmicInspectLogin, } from "./cosmicBrowserScraper.js";
 const MAX_ELEMENTS = 12_000;
 const MAX_TEXT_LEN = 500;
 function isAllowedHttpUrl(url) {
@@ -38,7 +38,7 @@ export async function runScraperStudioInspect(args) {
         });
         const hasCreds = args.email.trim().length > 0 && args.password.trim().length > 0;
         if (hasCreds) {
-            await submitCosmicLoginFormIfPresent(page, args.email, args.password);
+            await performCosmicInspectLogin(page, args.email, args.password, url);
         }
         await settlePage(page);
         const captureSize = await page.evaluate(() => ({

@@ -197,6 +197,58 @@ export async function submitCosmicLoginFormIfPresent(
 }
 
 /**
+ * Scraper Studio / Cosmic: wait for `#username` & `#password`, fill, submit,
+ * `networkidle2` navigation, then open `targetUrl` (e.g. portfolio) before DOM capture.
+ */
+export async function performCosmicInspectLogin(
+  page: Page,
+  email: string,
+  password: string,
+  targetUrl: string,
+): Promise<void> {
+  const e = email.trim();
+  const p = password.trim();
+  if (!e || !p) return;
+
+  await page.waitForSelector("#username", { visible: true, timeout: 45_000 });
+  await page.waitForSelector("#password", { visible: true, timeout: 45_000 });
+
+  await page.click("#username", { clickCount: 3 });
+  await page.type("#username", e, { delay: 12 });
+  await page.click("#password", { clickCount: 3 });
+  await page.type("#password", p, { delay: 12 });
+
+  const submitSelectors =
+    process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
+    'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+
+  await Promise.all([
+    page.waitForNavigation({
+      waitUntil: "networkidle2",
+      timeout: 180_000,
+    }),
+    (async () => {
+      const ok = await tryClick(page, submitSelectors);
+      if (!ok) {
+        throw new Error(
+          "Cosmic login: submit control not found — set COSMIC_SCRAPER_SUBMIT_SELECTOR",
+        );
+      }
+    })(),
+  ]);
+
+  await new Promise((r) => setTimeout(r, 800));
+
+  const dest = targetUrl.trim();
+  if (!dest) return;
+
+  await page.goto(dest, {
+    waitUntil: "networkidle2",
+    timeout: 180_000,
+  });
+}
+
+/**
  * Returns JSON blobs captured during navigation / optional in-page fetch,
  * plus DOM-parsed positions from the portfolio grid.
  */

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { Prisma, InvoiceStatus, Role, UserStatus, } from "@prisma/client";
+import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
 import { probeCosmicOpenPositions } from "../services/cosmicClient.js";
 import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
@@ -207,7 +208,8 @@ export function createAdminRoutes(prisma) {
             const { id } = req.params;
             const body = req.body;
             const data = {};
-            let scraperSelectorsUpdate;
+            /** Body `null` → clear column (`Prisma.DbNull` at update); object replaces mappings. */
+            let scraperMappingsPatch;
             if (body.title !== undefined) {
                 if (typeof body.title !== "string") {
                     res.status(400).json({ error: "title must be a string" });
@@ -281,19 +283,22 @@ export function createAdminRoutes(prisma) {
                 }
                 data.minCapital = body.minCapital;
             }
-            if (body.scraperStudioSelectors !== undefined) {
-                if (body.scraperStudioSelectors === null) {
-                    scraperSelectorsUpdate = Prisma.DbNull;
+            const mappingsBody = body.scraperMappings !== undefined
+                ? body.scraperMappings
+                : body.scraperStudioSelectors;
+            if (mappingsBody !== undefined) {
+                if (mappingsBody === null) {
+                    scraperMappingsPatch = null;
                 }
-                else if (typeof body.scraperStudioSelectors === "object" &&
-                    body.scraperStudioSelectors !== null &&
-                    !Array.isArray(body.scraperStudioSelectors)) {
-                    const raw = body.scraperStudioSelectors;
+                else if (typeof mappingsBody === "object" &&
+                    mappingsBody !== null &&
+                    !Array.isArray(mappingsBody)) {
+                    const raw = mappingsBody;
                     const cleaned = {};
                     for (const [k, v] of Object.entries(raw)) {
                         if (typeof k !== "string" || typeof v !== "string") {
                             res.status(400).json({
-                                error: "scraperStudioSelectors must be an object with string keys and string selector values",
+                                error: "scraperMappings must be an object with string keys and string selector values",
                             });
                             return;
                         }
@@ -302,30 +307,45 @@ export function createAdminRoutes(prisma) {
                             continue;
                         cleaned[key] = v;
                     }
-                    scraperSelectorsUpdate = cleaned;
+                    scraperMappingsPatch = cleaned;
                 }
                 else {
                     res.status(400).json({
-                        error: "scraperStudioSelectors must be a JSON object or null to clear",
+                        error: "scraperMappings must be a JSON object or null to clear (legacy key scraperStudioSelectors still accepted)",
                     });
                     return;
                 }
             }
             if (Object.keys(data).length === 0 &&
-                scraperSelectorsUpdate === undefined) {
+                scraperMappingsPatch === undefined) {
                 res.status(400).json({ error: "No valid fields to update" });
                 return;
             }
-            const strategy = await prisma.strategy.update({
-                where: { id },
-                data: {
-                    ...data,
-                    ...(scraperSelectorsUpdate !== undefined
-                        ? { scraperStudioSelectors: scraperSelectorsUpdate }
-                        : {}),
-                },
-            });
-            res.json(strategy);
+            try {
+                const strategy = await prisma.strategy.update({
+                    where: { id },
+                    data: {
+                        ...data,
+                        ...(scraperMappingsPatch !== undefined
+                            ? {
+                                scraperMappings: scraperMappingsPatch === null
+                                    ? Prisma.DbNull
+                                    : scraperMappingsPatch,
+                            }
+                            : {}),
+                    },
+                });
+                const { cosmicPassword: _omitPwd, ...safe } = strategy;
+                res.json(safe);
+            }
+            catch (err) {
+                if (err instanceof PrismaClientKnownRequestError &&
+                    err.code === "P2025") {
+                    res.status(404).json({ error: "Strategy not found" });
+                    return;
+                }
+                return next(err);
+            }
         }
         catch (err) {
             next(err);

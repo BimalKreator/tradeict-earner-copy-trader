@@ -43,6 +43,11 @@ export declare function launchCosmicStealthBrowser(): Promise<Browser>;
  */
 export declare function submitCosmicLoginFormIfPresent(page: Page, email: string, password: string): Promise<boolean>;
 /**
+ * Scraper Studio / Cosmic: wait for `#username` & `#password`, fill, submit,
+ * `networkidle2` navigation, then open `targetUrl` (e.g. portfolio) before DOM capture.
+ */
+export declare function performCosmicInspectLogin(page: Page, email: string, password: string, targetUrl: string): Promise<void>;
+/**
  * Returns JSON blobs captured during navigation / optional in-page fetch,
  * plus DOM-parsed positions from the portfolio grid.
  */

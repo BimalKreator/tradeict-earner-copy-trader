@@ -1,7 +1,7 @@
 import type { Page } from "puppeteer";
 import {
   launchCosmicStealthBrowser,
-  submitCosmicLoginFormIfPresent,
+  performCosmicInspectLogin,
 } from "./cosmicBrowserScraper.js";
 
 export type ScraperStudioInspectElement = {
@@ -71,13 +71,10 @@ export async function runScraperStudioInspect(args: {
       timeout: 120_000,
     });
 
-    const hasCreds = args.email.trim().length > 0 && args.password.trim().length > 0;
+    const hasCreds =
+      args.email.trim().length > 0 && args.password.trim().length > 0;
     if (hasCreds) {
-      await submitCosmicLoginFormIfPresent(
-        page,
-        args.email,
-        args.password,
-      );
+      await performCosmicInspectLogin(page, args.email, args.password, url);
     }
 
     await settlePage(page);

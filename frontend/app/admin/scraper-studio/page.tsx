@@ -28,6 +28,8 @@ type StrategyListItem = {
   title: string;
   cosmicEmail: string;
   hasCosmicPassword?: boolean;
+  scraperMappings?: unknown;
+  /** Legacy API field before rename */
   scraperStudioSelectors?: unknown;
 };
 
@@ -121,7 +123,9 @@ export default function AdminScraperStudioPage() {
 
   useEffect(() => {
     const s = strategies.find((x) => x.id === strategyId);
-    setMappings(normalizeSelectors(s?.scraperStudioSelectors));
+    setMappings(
+      normalizeSelectors(s?.scraperMappings ?? s?.scraperStudioSelectors),
+    );
   }, [strategyId, strategies]);
 
   useEffect(() => {
@@ -197,7 +201,7 @@ export default function AdminScraperStudioPage() {
       const res = await fetch(`${apiBase}/admin/strategies/${strategyId}`, {
         method: "PUT",
         headers: authHeaders(),
-        body: JSON.stringify({ scraperStudioSelectors: mappings }),
+        body: JSON.stringify({ scraperMappings: mappings }),
       });
       if (!res.ok) {
         const t = await res.text();
