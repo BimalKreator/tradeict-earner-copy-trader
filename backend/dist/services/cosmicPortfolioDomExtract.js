@@ -72,6 +72,30 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                         return null;
                     }
                 }
+                /**
+                 * Scraper Studio emits root paths (`body > div > …`). Those always fail
+                 * `row.querySelector`. Resolve with `document.querySelector` and accept the node only if it
+                 * sits inside this position row (so multi-row pages stay correct).
+                 */
+                function queryMappedWithinRow(row, sel) {
+                    try {
+                        const local = row.querySelector(sel);
+                        if (local)
+                            return local;
+                    }
+                    catch {
+                        /* selector invalid under subtree */
+                    }
+                    try {
+                        const global = document.querySelector(sel);
+                        if (global && row.contains(global))
+                            return global;
+                    }
+                    catch {
+                        return null;
+                    }
+                    return null;
+                }
                 function textFromEl(el) {
                     if (!el)
                         return "";
@@ -136,7 +160,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     }
                 }
                 const rowSel = lookupSel("position_row", "positionrow");
-                let rows;
+                let rows = [];
                 if (rowSel) {
                     try {
                         rows = Array.from(document.querySelectorAll(rowSel));
@@ -145,13 +169,58 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                         rows = [];
                     }
                 }
-                else {
+                if (rows.length === 0) {
                     rows = Array.from(document.querySelectorAll("div.bg-table-row"));
+                }
+                if (rows.length === 0) {
+                    rows = Array.from(document.querySelectorAll("[class*='bg-table-row']"));
                 }
                 const mappingMode = Boolean(rowSel) ||
                     Boolean(lookupSel("symbol")) ||
                     Boolean(lookupSel("size")) ||
                     Boolean(lookupSel("avg_price", "avgprice", "entry_price"));
+                if (rows.length === 0 && mappingMode) {
+                    const symSel = lookupSel("symbol");
+                    if (symSel) {
+                        try {
+                            const symHits = document.querySelectorAll(symSel);
+                            const seen = new Set();
+                            const inferred = [];
+                            for (const symEl of symHits) {
+                                let rowLike = symEl.closest("div.bg-table-row") ??
+                                    symEl.closest("[class*='bg-table-row']") ??
+                                    symEl.closest('[role="row"]');
+                                if (!rowLike) {
+                                    let p = symEl.parentElement;
+                                    let depth = 0;
+                                    while (p && depth < 12) {
+                                        const cls = p.className;
+                                        const cs = typeof cls === "string" ? cls : String(cls ?? "");
+                                        if (cs.includes("grid") ||
+                                            cs.includes("table-row") ||
+                                            cs.includes("border")) {
+                                            rowLike = p;
+                                            break;
+                                        }
+                                        p = p.parentElement;
+                                        depth++;
+                                    }
+                                }
+                                if (!rowLike)
+                                    rowLike = symEl.parentElement ?? symEl;
+                                if (rowLike && !seen.has(rowLike)) {
+                                    seen.add(rowLike);
+                                    inferred.push(rowLike);
+                                }
+                            }
+                            if (inferred.length > 0)
+                                rows = inferred;
+                        }
+                        catch {
+                            /* ignore */
+                        }
+                    }
+                }
                 const positions = [];
                 const skipSymbols = new Set([
                     "BUY",
@@ -173,7 +242,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     const symSel = lookupSel("symbol");
                     let symbol = "UNKNOWN";
                     if (symSel) {
-                        const el = safeQuery(row, symSel);
+                        const el = queryMappedWithinRow(row, symSel);
                         if (el) {
                             const t = textFromEl(el);
                             if (t)
@@ -206,7 +275,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     const sideSel = lookupSel("side");
                     let side;
                     if (sideSel) {
-                        const el = safeQuery(row, sideSel);
+                        const el = queryMappedWithinRow(row, sideSel);
                         const st = textFromEl(el);
                         side = st ? normalizeSideFromText(st) : normalizeSideFromText(text);
                     }
@@ -218,7 +287,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     let unrealizedPnlNum = 0;
                     const sizeSel = lookupSel("size");
                     if (sizeSel) {
-                        const el = safeQuery(row, sizeSel);
+                        const el = queryMappedWithinRow(row, sizeSel);
                         if (el) {
                             const raw = textFromEl(el);
                             if (raw)
@@ -227,7 +296,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     }
                     const avgSel = lookupSel("avg_price", "avgprice", "entry_price");
                     if (avgSel) {
-                        const el = safeQuery(row, avgSel);
+                        const el = queryMappedWithinRow(row, avgSel);
                         if (el) {
                             const raw = textFromEl(el);
                             if (raw)
@@ -237,7 +306,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     const pnlSel = lookupSel("unrealized_pnl", "pnl", "unrealizedpnl");
                     let pnlMapped = false;
                     if (pnlSel) {
-                        const el = safeQuery(row, pnlSel);
+                        const el = queryMappedWithinRow(row, pnlSel);
                         if (el) {
                             const raw = textFromEl(el);
                             if (raw) {
@@ -275,7 +344,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     let stopLoss = null;
                     const tpSel = lookupSel("take_profit", "takeprofit", "tp");
                     if (tpSel) {
-                        const el = safeQuery(row, tpSel);
+                        const el = queryMappedWithinRow(row, tpSel);
                         if (el) {
                             const raw = textFromEl(el);
                             if (raw) {
@@ -287,7 +356,7 @@ export async function extractCosmicPortfolioDom(page, scraperMappings) {
                     }
                     const slSel = lookupSel("stop_loss", "stoploss", "sl");
                     if (slSel) {
-                        const el = safeQuery(row, slSel);
+                        const el = queryMappedWithinRow(row, slSel);
                         if (el) {
                             const raw = textFromEl(el);
                             if (raw) {

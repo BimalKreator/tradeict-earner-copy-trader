@@ -95,6 +95,27 @@ export async function extractCosmicPortfolioDom(
           }
         }
 
+        /**
+         * Scraper Studio emits root paths (`body > div > …`). Those always fail
+         * `row.querySelector`. Resolve with `document.querySelector` and accept the node only if it
+         * sits inside this position row (so multi-row pages stay correct).
+         */
+        function queryMappedWithinRow(row: Element, sel: string): Element | null {
+          try {
+            const local = row.querySelector(sel);
+            if (local) return local;
+          } catch {
+            /* selector invalid under subtree */
+          }
+          try {
+            const global = document.querySelector(sel);
+            if (global && row.contains(global)) return global;
+          } catch {
+            return null;
+          }
+          return null;
+        }
+
         function textFromEl(el: Element | null): string {
           if (!el) return "";
           const tag = (el as HTMLElement).tagName?.toUpperCase?.() ?? "";
@@ -168,15 +189,21 @@ export async function extractCosmicPortfolioDom(
         }
 
         const rowSel = lookupSel("position_row", "positionrow");
-        let rows: Element[];
+        let rows: Element[] = [];
         if (rowSel) {
           try {
             rows = Array.from(document.querySelectorAll(rowSel));
           } catch {
             rows = [];
           }
-        } else {
+        }
+        if (rows.length === 0) {
           rows = Array.from(document.querySelectorAll("div.bg-table-row"));
+        }
+        if (rows.length === 0) {
+          rows = Array.from(
+            document.querySelectorAll("[class*='bg-table-row']"),
+          );
         }
 
         const mappingMode =
@@ -184,6 +211,50 @@ export async function extractCosmicPortfolioDom(
           Boolean(lookupSel("symbol")) ||
           Boolean(lookupSel("size")) ||
           Boolean(lookupSel("avg_price", "avgprice", "entry_price"));
+
+        if (rows.length === 0 && mappingMode) {
+          const symSel = lookupSel("symbol");
+          if (symSel) {
+            try {
+              const symHits = document.querySelectorAll(symSel);
+              const seen = new Set<Element>();
+              const inferred: Element[] = [];
+              for (const symEl of symHits) {
+                let rowLike =
+                  symEl.closest("div.bg-table-row") ??
+                  symEl.closest("[class*='bg-table-row']") ??
+                  symEl.closest('[role="row"]');
+                if (!rowLike) {
+                  let p: Element | null = symEl.parentElement;
+                  let depth = 0;
+                  while (p && depth < 12) {
+                    const cls = (p as HTMLElement).className;
+                    const cs =
+                      typeof cls === "string" ? cls : String(cls ?? "");
+                    if (
+                      cs.includes("grid") ||
+                      cs.includes("table-row") ||
+                      cs.includes("border")
+                    ) {
+                      rowLike = p;
+                      break;
+                    }
+                    p = p.parentElement;
+                    depth++;
+                  }
+                }
+                if (!rowLike) rowLike = symEl.parentElement ?? symEl;
+                if (rowLike && !seen.has(rowLike)) {
+                  seen.add(rowLike);
+                  inferred.push(rowLike);
+                }
+              }
+              if (inferred.length > 0) rows = inferred;
+            } catch {
+              /* ignore */
+            }
+          }
+        }
 
         const positions: Record<string, unknown>[] = [];
 
@@ -208,7 +279,7 @@ export async function extractCosmicPortfolioDom(
           const symSel = lookupSel("symbol");
           let symbol = "UNKNOWN";
           if (symSel) {
-            const el = safeQuery(row, symSel);
+            const el = queryMappedWithinRow(row, symSel);
             if (el) {
               const t = textFromEl(el);
               if (t) symbol = t;
@@ -241,7 +312,7 @@ export async function extractCosmicPortfolioDom(
           const sideSel = lookupSel("side");
           let side: "BUY" | "SELL";
           if (sideSel) {
-            const el = safeQuery(row, sideSel);
+            const el = queryMappedWithinRow(row, sideSel);
             const st = textFromEl(el);
             side = st ? normalizeSideFromText(st) : normalizeSideFromText(text);
           } else {
@@ -254,7 +325,7 @@ export async function extractCosmicPortfolioDom(
 
           const sizeSel = lookupSel("size");
           if (sizeSel) {
-            const el = safeQuery(row, sizeSel);
+            const el = queryMappedWithinRow(row, sizeSel);
             if (el) {
               const raw = textFromEl(el);
               if (raw) size = parseNum(raw);
@@ -263,7 +334,7 @@ export async function extractCosmicPortfolioDom(
 
           const avgSel = lookupSel("avg_price", "avgprice", "entry_price");
           if (avgSel) {
-            const el = safeQuery(row, avgSel);
+            const el = queryMappedWithinRow(row, avgSel);
             if (el) {
               const raw = textFromEl(el);
               if (raw) entryPrice = parseNum(raw);
@@ -273,7 +344,7 @@ export async function extractCosmicPortfolioDom(
           const pnlSel = lookupSel("unrealized_pnl", "pnl", "unrealizedpnl");
           let pnlMapped = false;
           if (pnlSel) {
-            const el = safeQuery(row, pnlSel);
+            const el = queryMappedWithinRow(row, pnlSel);
             if (el) {
               const raw = textFromEl(el);
               if (raw) {
@@ -315,7 +386,7 @@ export async function extractCosmicPortfolioDom(
 
           const tpSel = lookupSel("take_profit", "takeprofit", "tp");
           if (tpSel) {
-            const el = safeQuery(row, tpSel);
+            const el = queryMappedWithinRow(row, tpSel);
             if (el) {
               const raw = textFromEl(el);
               if (raw) {
@@ -326,7 +397,7 @@ export async function extractCosmicPortfolioDom(
           }
           const slSel = lookupSel("stop_loss", "stoploss", "sl");
           if (slSel) {
-            const el = safeQuery(row, slSel);
+            const el = queryMappedWithinRow(row, slSel);
             if (el) {
               const raw = textFromEl(el);
               if (raw) {
