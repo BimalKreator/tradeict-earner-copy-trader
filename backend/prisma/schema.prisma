@@ -58,8 +58,9 @@ model User {
   telegramLinkExpires  DateTime?
   createdAt     DateTime            @default(now())
 
-  deltaApiKeys  DeltaApiKey[]
-  subscriptions UserSubscription[]
+  deltaApiKeys     DeltaApiKey[]
+  exchangeAccounts ExchangeAccount[]
+  subscriptions    UserSubscription[]
   trades        Trade[]
   wallet        Wallet?
   transactions  Transaction[]
@@ -107,16 +108,33 @@ model Strategy {
 }
 
 model UserSubscription {
-  id         String              @id @default(uuid())
-  userId     String
-  strategyId String
-  multiplier Float               @default(1.0)
-  status     SubscriptionStatus  @default(ACTIVE)
-  joinedDate DateTime            @default(now())
+  id                 String              @id @default(uuid())
+  userId             String
+  strategyId         String
+  exchangeAccountId  String?
+  multiplier         Float               @default(1.0)
+  status             SubscriptionStatus  @default(ACTIVE)
+  joinedDate         DateTime            @default(now())
 
-  user       User                @relation(fields: [userId], references: [id])
-  strategy   Strategy            @relation(fields: [strategyId], references: [id])
-  invoices   Invoice[]
+  user             User             @relation(fields: [userId], references: [id])
+  strategy         Strategy         @relation(fields: [strategyId], references: [id])
+  exchangeAccount  ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id], onDelete: SetNull)
+  invoices         Invoice[]
+}
+
+model ExchangeAccount {
+  id        String   @id @default(uuid())
+  userId    String
+  nickname  String
+  exchange  String   @default("Delta")
+  apiKey    String
+  apiSecret String
+  createdAt DateTime @default(now())
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscriptions  UserSubscription[]
+
+  @@index([userId])
 }
 
 model Trade {

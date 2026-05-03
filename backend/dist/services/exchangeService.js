@@ -1,12 +1,29 @@
 import ccxt from "ccxt";
-import { decryptDeltaSecret } from "../utils/encryption.js";
+import { decryptDeltaSecretOrPlain, } from "../utils/encryption.js";
+/** Map CCXT unified swap symbol (e.g. ETH/USDT:USDT) to compact ETHUSDT-style key. */
+function unifiedSymbolToKey(unifiedSymbol) {
+    const slash = unifiedSymbol.indexOf("/");
+    if (slash === -1)
+        return unifiedSymbol.replace(/[/:]/g, "").toUpperCase();
+    const base = unifiedSymbol.slice(0, slash);
+    const after = unifiedSymbol.slice(slash + 1);
+    const colon = after.indexOf(":");
+    const quote = colon === -1 ? after : after.slice(0, colon);
+    return `${base}${quote}`.toUpperCase();
+}
+function ccxtSideToTradeSide(raw) {
+    const u = (raw ?? "").toLowerCase();
+    if (u === "long" || u === "buy")
+        return "BUY";
+    return "SELL";
+}
 /**
  * Decrypts stored Delta Exchange credentials and submits a market order.
  */
 export async function executeTrade(encryptedApiKey, encryptedApiSecret, symbol, side, size) {
     try {
-        const apiKey = decryptDeltaSecret(encryptedApiKey);
-        const secret = decryptDeltaSecret(encryptedApiSecret);
+        const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
+        const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
         const exchange = new ccxt.delta({
             apiKey,
             secret,
@@ -49,5 +66,85 @@ export async function fetchDeltaTicker(symbol) {
         return {};
     }
     return { last: raw };
+}
+/**
+ * Authenticated: fetch non-flat perpetual positions from Delta India (swap).
+ */
+export async function fetchDeltaOpenPositions(apiKeyStored, apiSecretStored) {
+    const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+    const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+    const exchange = new ccxt.delta({
+        apiKey,
+        secret,
+        enableRateLimit: true,
+        options: {
+            defaultType: "swap",
+        },
+    });
+    await exchange.loadMarkets();
+    const positions = await exchange.fetchPositions();
+    const out = [];
+    for (const p of positions) {
+        const contracts = Number(p.contracts ?? 0);
+        if (!Number.isFinite(contracts) || Math.abs(contracts) < 1e-12)
+            continue;
+        const unified = typeof p.symbol === "string" ? p.symbol : "";
+        if (!unified)
+            continue;
+        const symbolKey = unifiedSymbolToKey(unified);
+        const side = ccxtSideToTradeSide(p.side);
+        const entryPrice = p.entryPrice !== undefined && p.entryPrice !== null
+            ? Number(p.entryPrice)
+            : null;
+        const markPrice = p.markPrice !== undefined && p.markPrice !== null
+            ? Number(p.markPrice)
+            : null;
+        const unrealizedPnl = p.unrealizedPnl !== undefined && p.unrealizedPnl !== null
+            ? Number(p.unrealizedPnl)
+            : null;
+        let stopLoss = null;
+        let takeProfit = null;
+        const info = p.info;
+        if (info && typeof info === "object") {
+            const sl = typeof info.stop_loss_order_price === "number"
+                ? info.stop_loss_order_price
+                : typeof info.stop_loss_price === "number"
+                    ? info.stop_loss_price
+                    : typeof info.stopLossPrice === "number"
+                        ? info.stopLossPrice
+                        : null;
+            const tp = typeof info.take_profit_order_price === "number"
+                ? info.take_profit_order_price
+                : typeof info.take_profit_price === "number"
+                    ? info.take_profit_price
+                    : typeof info.takeProfitPrice === "number"
+                        ? info.takeProfitPrice
+                        : null;
+            if (sl !== null && Number.isFinite(sl))
+                stopLoss = sl;
+            if (tp !== null && Number.isFinite(tp))
+                takeProfit = tp;
+        }
+        let entryTime = null;
+        if (typeof p.datetime === "string" && p.datetime) {
+            entryTime = p.datetime;
+        }
+        else if (p.timestamp != null && Number.isFinite(p.timestamp)) {
+            entryTime = new Date(p.timestamp).toISOString();
+        }
+        out.push({
+            symbol: unified,
+            symbolKey,
+            side,
+            contracts,
+            entryPrice: Number.isFinite(entryPrice ?? NaN) ? entryPrice : null,
+            markPrice: Number.isFinite(markPrice ?? NaN) ? markPrice : null,
+            unrealizedPnl: Number.isFinite(unrealizedPnl ?? NaN) ? unrealizedPnl : null,
+            stopLoss,
+            takeProfit,
+            entryTime,
+        });
+    }
+    return out;
 }
 //# sourceMappingURL=exchangeService.js.map

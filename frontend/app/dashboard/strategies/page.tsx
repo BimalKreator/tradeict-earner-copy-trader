@@ -26,6 +26,12 @@ type StrategyListItem = {
   createdAt: string;
 };
 
+type ExchangeAccountOption = {
+  id: string;
+  nickname: string;
+  exchange: string;
+};
+
 const ACCENTS = [
   "from-sky-500/25 to-transparent",
   "from-violet-500/25 to-transparent",
@@ -138,6 +144,11 @@ export default function StrategyMarketplacePage() {
   const [modalStrategy, setModalStrategy] = useState<StrategyListItem | null>(
     null,
   );
+  const [exchangeAccounts, setExchangeAccounts] = useState<
+    ExchangeAccountOption[]
+  >([]);
+  const [selectedExchangeAccountId, setSelectedExchangeAccountId] =
+    useState("");
   const [multiplier, setMultiplier] = useState(1);
   const [modalError, setModalError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -176,9 +187,42 @@ export default function StrategyMarketplacePage() {
     }
   }, []);
 
+  const loadExchangeAccounts = useCallback(async () => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (!token) {
+      setExchangeAccounts([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/exchange-accounts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setExchangeAccounts([]);
+        return;
+      }
+      const data: unknown = await res.json();
+      const raw =
+        typeof data === "object" &&
+        data !== null &&
+        "accounts" in data &&
+        Array.isArray((data as { accounts: unknown }).accounts)
+          ? (data as { accounts: ExchangeAccountOption[] }).accounts
+          : [];
+      setExchangeAccounts(raw);
+    } catch {
+      setExchangeAccounts([]);
+    }
+  }, []);
+
   useEffect(() => {
     void loadStrategies();
   }, [loadStrategies]);
+
+  useEffect(() => {
+    void loadExchangeAccounts();
+  }, [loadExchangeAccounts]);
 
   useEffect(() => {
     if (!toast) return;
@@ -204,6 +248,19 @@ export default function StrategyMarketplacePage() {
     setModalError(null);
   }
 
+  useEffect(() => {
+    if (!modalStrategy) return;
+    if (exchangeAccounts.length === 0) {
+      setSelectedExchangeAccountId("");
+      return;
+    }
+    setSelectedExchangeAccountId((current) =>
+      exchangeAccounts.some((a) => a.id === current)
+        ? current
+        : (exchangeAccounts[0]?.id ?? ""),
+    );
+  }, [modalStrategy, exchangeAccounts]);
+
   async function handleConfirmSubscribe() {
     if (!modalStrategy) return;
 
@@ -216,6 +273,14 @@ export default function StrategyMarketplacePage() {
 
     const m = clampMultiplier(multiplier);
     setMultiplier(m);
+
+    if (
+      exchangeAccounts.length > 0 &&
+      !selectedExchangeAccountId.trim()
+    ) {
+      setModalError("Select an exchange account for this subscription.");
+      return;
+    }
 
     setSubmitting(true);
     setModalError(null);
@@ -230,6 +295,9 @@ export default function StrategyMarketplacePage() {
         body: JSON.stringify({
           strategyId: modalStrategy.id,
           multiplier: m,
+          ...(selectedExchangeAccountId.trim()
+            ? { exchangeAccountId: selectedExchangeAccountId.trim() }
+            : {}),
         }),
       });
 
@@ -425,7 +493,8 @@ export default function StrategyMarketplacePage() {
               Subscribe to {modalStrategy.title}
             </h2>
             <p className="mt-2 text-sm text-white/50">
-              Choose a multiplier between{" "}
+              Choose which Delta API credentials to use (from Settings) and a
+              multiplier between{" "}
               <span className="tabular-nums text-white/70">0.1×</span> and{" "}
               <span className="tabular-nums text-white/70">10×</span> (step{" "}
               <span className="tabular-nums text-white/70">0.1</span>).
@@ -434,6 +503,38 @@ export default function StrategyMarketplacePage() {
             {modalError && (
               <p className="mt-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
                 {modalError}
+              </p>
+            )}
+
+            {exchangeAccounts.length > 0 ? (
+              <label className="mt-6 block">
+                <span className="text-xs font-medium text-white/60">
+                  Exchange account
+                </span>
+                <select
+                  value={selectedExchangeAccountId}
+                  onChange={(e) =>
+                    setSelectedExchangeAccountId(e.target.value)
+                  }
+                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
+                >
+                  {exchangeAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.nickname} ({a.exchange})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <p className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100/90">
+                No exchange API keys on file. Add keys in{" "}
+                <Link
+                  href="/dashboard/settings"
+                  className="font-medium text-primary underline-offset-2 hover:underline"
+                >
+                  Settings
+                </Link>{" "}
+                to attach credentials to new subscriptions.
               </p>
             )}
 

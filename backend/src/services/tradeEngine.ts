@@ -225,6 +225,7 @@ async function processNewCosmicTrade(
       user: { status: UserStatus.ACTIVE },
     },
     include: {
+      exchangeAccount: true,
       user: {
         include: { deltaApiKeys: true },
       },
@@ -271,9 +272,21 @@ async function processNewCosmicTrade(
 
   for (const sub of subs) {
     const userSize = cosmic.size * sub.multiplier;
-    const keyRow = sub.user.deltaApiKeys[0];
 
-    if (!keyRow) {
+    const creds =
+      sub.exchangeAccount != null
+        ? {
+            apiKey: sub.exchangeAccount.apiKey,
+            apiSecret: sub.exchangeAccount.apiSecret,
+          }
+        : sub.user.deltaApiKeys[0] != null
+          ? {
+              apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+              apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+            }
+          : null;
+
+    if (!creds) {
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
@@ -287,8 +300,8 @@ async function processNewCosmicTrade(
     }
 
     const result = await executeTrade(
-      keyRow.apiKey,
-      keyRow.apiSecret,
+      creds.apiKey,
+      creds.apiSecret,
       cosmic.deltaSymbol,
       cosmic.side,
       userSize,

@@ -59,6 +59,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
       const body = req.body as {
         strategyId?: unknown;
         multiplier?: unknown;
+        exchangeAccountId?: unknown;
       };
 
       const strategyId =
@@ -70,6 +71,32 @@ export function createSubscriptionController(prisma: PrismaClient) {
           : typeof body.multiplier === "string"
             ? Number(body.multiplier)
             : NaN;
+
+      let exchangeAccountId: string | null = null;
+      if (
+        body.exchangeAccountId !== undefined &&
+        body.exchangeAccountId !== null
+      ) {
+        if (typeof body.exchangeAccountId !== "string") {
+          res.status(400).json({ error: "exchangeAccountId must be a string" });
+          return;
+        }
+        const trimmed = body.exchangeAccountId.trim();
+        if (!trimmed) {
+          res.status(400).json({ error: "exchangeAccountId cannot be empty" });
+          return;
+        }
+        const account = await prisma.exchangeAccount.findFirst({
+          where: { id: trimmed, userId },
+        });
+        if (!account) {
+          res.status(400).json({
+            error: "Exchange account not found or does not belong to you",
+          });
+          return;
+        }
+        exchangeAccountId = trimmed;
+      }
 
       if (!strategyId) {
         res.status(400).json({ error: "strategyId is required" });
@@ -110,6 +137,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
           strategyId,
           multiplier,
           status: SubscriptionStatus.ACTIVE,
+          ...(exchangeAccountId !== null
+            ? { exchangeAccountId }
+            : {}),
         },
       });
 

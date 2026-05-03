@@ -293,7 +293,7 @@ export default function AnalyticsPage() {
           UTC days · Green = net profit from recorded PnL · Red = net loss · Gray = flat / no trades
         </p>
 
-        <div className="analytics-calendar-wrap scroll-table mx-auto mt-6 w-full max-w-4xl min-w-0 overflow-x-auto">
+        <div className="analytics-calendar-wrap mx-auto mt-6 w-full max-w-4xl min-w-0 scroll-table overflow-x-auto">
           {loading ? (
             <div className="flex justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-primary" />

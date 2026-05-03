@@ -1,14 +1,23 @@
 /**
- * Monthly PnL calendar (analytics): cap width/height so the SVG viewBox does not
- * scale to full dashboard width (which makes cells enormous on ultrawide layouts).
+ * Monthly PnL calendar (analytics): narrow wrapper + cap SVG scale so rects stay readable.
+ * Heatmap uses SVG <rect> cells; clamp their rendered size (library uses 10-unit squares).
  */
+.analytics-calendar-wrap {
+  max-width: 56rem; /* matches Tailwind max-w-4xl */
+}
+
 .analytics-calendar-wrap svg.react-calendar-heatmap {
   display: block;
   margin-inline: auto;
   width: 100%;
   max-width: 100%;
   height: auto;
-  max-height: min(22rem, 52vh);
+  max-height: min(20rem, 48vh);
+}
+
+.analytics-calendar-wrap svg.react-calendar-heatmap rect {
+  max-width: 40px;
+  max-height: 40px;
 }
 
 .react-calendar-heatmap {

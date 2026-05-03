@@ -5,6 +5,21 @@ export interface ExecuteTradeResult {
     raw?: unknown;
     error?: string;
 }
+/** Normalized open perpetual position from Delta (for dashboards). */
+export interface DeltaLivePosition {
+    /** CCXT unified symbol (e.g. ETH/USDT:USDT) */
+    symbol: string;
+    /** Compact ticker-style id aligned with copy-trade symbols (e.g. ETHUSDT). */
+    symbolKey: string;
+    side: TradeSide;
+    contracts: number;
+    entryPrice: number | null;
+    markPrice: number | null;
+    unrealizedPnl: number | null;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    entryTime: string | null;
+}
 /**
  * Decrypts stored Delta Exchange credentials and submits a market order.
  */
@@ -15,4 +30,8 @@ export declare function executeTrade(encryptedApiKey: string, encryptedApiSecret
 export declare function fetchDeltaTicker(symbol: string): Promise<{
     last?: number;
 }>;
+/**
+ * Authenticated: fetch non-flat perpetual positions from Delta India (swap).
+ */
+export declare function fetchDeltaOpenPositions(apiKeyStored: string, apiSecretStored: string): Promise<DeltaLivePosition[]>;
 //# sourceMappingURL=exchangeService.d.ts.map

@@ -8,6 +8,12 @@ export interface CosmicLedTrade {
     side: TradeSide;
     size: number;
     entryPrice: number;
+    /** Stop loss price when Cosmic API exposes it */
+    stopLoss?: number | null;
+    /** Take-profit / target when Cosmic API exposes it */
+    takeProfit?: number | null;
+    /** Position open time when Cosmic API exposes it (ISO 8601). */
+    openedAt?: string | null;
 }
 /**
  * Build a stable id for deduplication (Cosmic side, before Delta mapping).

@@ -25,4 +25,16 @@ export function decryptDeltaSecret(ciphertext) {
     }
     return plain;
 }
+/** Decrypt stored Delta credentials, or return trimmed plaintext (legacy rows). */
+export function decryptDeltaSecretOrPlain(stored) {
+    const t = stored.trim();
+    if (!t)
+        return t;
+    try {
+        return decryptDeltaSecret(stored);
+    }
+    catch {
+        return t;
+    }
+}
 //# sourceMappingURL=encryption.js.map

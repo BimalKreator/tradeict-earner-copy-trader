@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Menu } from "lucide-react";
+import { Menu, User } from "lucide-react";
 
 type DashboardHeaderProps = {
   onMenuClick: () => void;
@@ -38,13 +39,22 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 hover:text-white"
-        >
-          Logout
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Link
+            href="/dashboard/profile"
+            className="inline-flex items-center gap-2 rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 hover:text-white"
+          >
+            <User className="h-4 w-4 opacity-90" aria-hidden />
+            Profile
+          </Link>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 hover:text-white"
+          >
+            Logout
+          </button>
+        </div>
       </div>
     </header>
   );

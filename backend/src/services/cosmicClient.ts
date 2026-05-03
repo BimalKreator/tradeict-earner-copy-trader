@@ -15,6 +15,12 @@ export interface CosmicLedTrade {
   side: TradeSide;
   size: number;
   entryPrice: number;
+  /** Stop loss price when Cosmic API exposes it */
+  stopLoss?: number | null;
+  /** Take-profit / target when Cosmic API exposes it */
+  takeProfit?: number | null;
+  /** Position open time when Cosmic API exposes it (ISO 8601). */
+  openedAt?: string | null;
 }
 
 /**
@@ -62,8 +68,19 @@ function extractPositionRows(data: unknown): {
   side: string;
   entry: number;
   size: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  openedAt: string | null;
 }[] {
-  const out: { symbol: string; side: string; entry: number; size: number }[] = [];
+  const out: {
+    symbol: string;
+    side: string;
+    entry: number;
+    size: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    openedAt: string | null;
+  }[] = [];
 
   let list: unknown[] = [];
   if (Array.isArray(data)) {
@@ -97,14 +114,62 @@ function extractPositionRows(data: unknown): {
       asNumber(row.contracts) ??
       asNumber(row.qty);
 
+    const stopLoss =
+      asNumber(row.stopLoss) ??
+      asNumber(row.stop_loss) ??
+      asNumber(row.sl) ??
+      asNumber(row.stopPrice);
+    const takeProfit =
+      asNumber(row.takeProfit) ??
+      asNumber(row.take_profit) ??
+      asNumber(row.target) ??
+      asNumber(row.tp) ??
+      asNumber(row.takeProfitPrice);
+
+    let openedAt: string | null = readStringField(row, [
+      "openedAt",
+      "opened_at",
+      "entryTime",
+      "entry_time",
+      "createdAt",
+      "opened",
+    ]);
+    const ts =
+      asNumber(row.timestamp) ??
+      asNumber(row.openedAtMs) ??
+      asNumber(row.created_at_ms);
+    if (!openedAt && ts !== null && ts > 1_000_000_000_000) {
+      openedAt = new Date(ts).toISOString();
+    } else if (!openedAt && ts !== null && ts > 1_000_000_000) {
+      openedAt = new Date(ts * 1000).toISOString();
+    }
+
     if (!symbol || !sideRaw || entry === null || size === null) continue;
-    out.push({ symbol, side: sideRaw, entry, size: Math.abs(size) });
+    out.push({
+      symbol,
+      side: sideRaw,
+      entry,
+      size: Math.abs(size),
+      stopLoss,
+      takeProfit,
+      openedAt,
+    });
   }
 
   return out;
 }
 
-function toLedTrades(rows: { symbol: string; side: string; entry: number; size: number }[]): CosmicLedTrade[] {
+function toLedTrades(
+  rows: {
+    symbol: string;
+    side: string;
+    entry: number;
+    size: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    openedAt: string | null;
+  }[],
+): CosmicLedTrade[] {
   const trades: CosmicLedTrade[] = [];
   for (const row of rows) {
     const side = normalizeSide(row.side);
@@ -129,6 +194,9 @@ function toLedTrades(rows: { symbol: string; side: string; entry: number; size: 
       side,
       size: row.size,
       entryPrice: row.entry,
+      stopLoss: row.stopLoss,
+      takeProfit: row.takeProfit,
+      openedAt: row.openedAt,
     });
   }
   return trades;

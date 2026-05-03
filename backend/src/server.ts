@@ -16,6 +16,9 @@ import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
 import { createAnalyticsRoutes } from "./routes/analyticsRoutes.js";
 import { createLeaderboardRoutes } from "./routes/leaderboardRoutes.js";
 import { createWalletRoutes } from "./routes/walletRoutes.js";
+import { createUserRoutes } from "./routes/userRoutes.js";
+import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
+import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import {
   initTelegramBot,
@@ -44,6 +47,9 @@ app.use(express.json());
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
+app.use("/api/user", createUserRoutes(prisma));
+app.use("/api/exchange-accounts", createExchangeAccountRoutes(prisma));
+app.use("/api/live-trades", createLiveTradesRoutes(prisma));
 app.use("/api/analytics", createAnalyticsRoutes(prisma));
 app.use("/api/leaderboard", createLeaderboardRoutes(prisma));
 
