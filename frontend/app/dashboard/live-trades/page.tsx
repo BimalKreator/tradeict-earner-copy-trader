@@ -6,15 +6,6 @@ import Link from "next/link";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
-function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
-
 type LiveRow = {
   strategyId: string;
   strategyTitle: string;
@@ -60,7 +51,9 @@ export default function DashboardLiveTradesPage() {
     setUnauthorized(false);
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
-        headers: authHeaders(),
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+        },
       });
       if (res.status === 401) {
         setUnauthorized(true);

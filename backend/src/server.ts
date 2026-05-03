@@ -49,7 +49,12 @@ app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
 app.use("/api/user", createUserRoutes(prisma));
 app.use("/api/exchange-accounts", createExchangeAccountRoutes(prisma));
-app.use("/api/live-trades", createLiveTradesRoutes(prisma));
+
+const liveTradesRoutes = createLiveTradesRoutes(prisma);
+app.use("/api/live-trades", liveTradesRoutes);
+/** Alias when `NEXT_PUBLIC_API_URL` is the origin without `/api` (same pattern as `/subscriptions`). */
+app.use("/live-trades", liveTradesRoutes);
+
 app.use("/api/analytics", createAnalyticsRoutes(prisma));
 app.use("/api/leaderboard", createLeaderboardRoutes(prisma));
 
