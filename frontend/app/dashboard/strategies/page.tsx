@@ -11,8 +11,9 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = "http://localhost:5000/api/subscriptions";
+const API_BASE = `${getPublicApiBase()}/subscriptions`;
 
 type StrategyListItem = {
   id: string;

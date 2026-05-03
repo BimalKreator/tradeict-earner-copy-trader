@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = "http://localhost:5000/api/wallet";
+const API_BASE = `${getPublicApiBase()}/wallet`;
 
 /** Replace with your real UPI VPA when you have one */
 const DISPLAY_UPI_ID = "tradeict-earner@okbank";

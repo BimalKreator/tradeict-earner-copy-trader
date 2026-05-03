@@ -24,8 +24,9 @@ import {
 
 import "react-calendar-heatmap/dist/styles.css";
 import "./analytics-heatmap.css";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = "http://localhost:5000/api/analytics";
+const API_BASE = `${getPublicApiBase()}/analytics`;
 
 type CalendarDay = { date: string; profit: number };
 

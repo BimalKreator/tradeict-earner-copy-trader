@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = "http://localhost:5000/api/admin";
+const API_BASE = `${getPublicApiBase()}/admin`;
 
 type AdminUser = {
   id: string;

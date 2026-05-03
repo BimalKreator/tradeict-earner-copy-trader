@@ -13,7 +13,9 @@ import {
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-const API_BASE = "http://localhost:5000/api/leaderboard";
+import { getPublicApiBase } from "@/lib/publicApi";
+
+const API_BASE = `${getPublicApiBase()}/leaderboard`;
 
 type Period = {
   label: string;

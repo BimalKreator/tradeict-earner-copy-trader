@@ -11,7 +11,9 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-const API_BASE = "http://localhost:5000/api/wallet";
+import { getPublicApiBase } from "@/lib/publicApi";
+
+const API_BASE = `${getPublicApiBase()}/wallet`;
 
 type TxUser = { id: string; email: string };
 

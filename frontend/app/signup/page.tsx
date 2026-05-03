@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const AUTH_API = "http://localhost:5000/api/auth";
+const AUTH_API = `${getPublicApiBase()}/auth`;
 
 type Step = "details" | "otp";
 

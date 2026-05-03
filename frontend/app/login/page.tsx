@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const AUTH_API = "http://localhost:5000/api/auth";
+const AUTH_API = `${getPublicApiBase()}/auth`;
 
 type Step = "email" | "otp";
 

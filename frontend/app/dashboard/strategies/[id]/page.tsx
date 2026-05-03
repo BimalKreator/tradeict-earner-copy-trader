@@ -26,8 +26,9 @@ import {
 } from "recharts";
 
 import "../../analytics/analytics-heatmap.css";
+import { getPublicApiBase } from "@/lib/publicApi";
 
-const API_BASE = "http://localhost:5000/api/subscriptions";
+const API_BASE = `${getPublicApiBase()}/subscriptions`;
 
 type PerformanceMetrics = {
   pnlChart?: { labels?: string[]; values?: number[] };

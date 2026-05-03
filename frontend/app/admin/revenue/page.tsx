@@ -13,7 +13,9 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const API_BASE = "http://localhost:5000/api/admin";
+import { getPublicApiBase } from "@/lib/publicApi";
+
+const API_BASE = `${getPublicApiBase()}/admin`;
 
 type InvoiceStatus = "UNPAID" | "PAID" | "OVERDUE";
 
