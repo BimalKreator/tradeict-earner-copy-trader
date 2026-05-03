@@ -60,6 +60,43 @@ export async function extractCosmicPortfolioDom(
       const instrumentRe =
         /^[A-Z][A-Z0-9]{1,}(USD|USDT|PERP|-USD|_PERP)$/i;
 
+      function normalizeKey(raw: string): string {
+        return raw.replace(/[/\s_-]/g, "").toUpperCase();
+      }
+
+      function spanIsMuted(cand: Element): boolean {
+        const cls = cand.getAttribute("class") ?? "";
+        return (
+          cand.classList.contains("text-pnl-value-muted") ||
+          cls.includes("text-pnl-value-muted")
+        );
+      }
+
+      /** Numbers from muted value spans in DOM order (Cosmic Size / Avg Price columns). */
+      function mutedNumbersInRow(row: Element): number[] {
+        const nums: number[] = [];
+        for (const el of row.querySelectorAll("span")) {
+          if (!spanIsMuted(el)) continue;
+          const n = parseNum(text(el));
+          if (n !== null) nums.push(n);
+        }
+        return nums;
+      }
+
+      function labelMatches(spanPlain: string, label: string): boolean {
+        const a = spanPlain.replace(/\s+/g, " ").trim().toLowerCase();
+        const b = label.replace(/\s+/g, " ").trim().toLowerCase();
+        if (a === b) return true;
+        if (b === "size" && /^size\b/i.test(a)) return true;
+        if (
+          (b === "avg price" || b.includes("avg")) &&
+          /\bavg\b/i.test(a) &&
+          /\bprice\b/i.test(a)
+        )
+          return true;
+        return false;
+      }
+
       function mutedValueAfterLabel(
         row: Element,
         label: string,
@@ -67,20 +104,45 @@ export async function extractCosmicPortfolioDom(
         const spans = Array.from(row.querySelectorAll("span"));
         for (let i = 0; i < spans.length; i++) {
           const sp = spans[i];
-          if (!sp || text(sp) !== label) continue;
+          if (!sp || !labelMatches(text(sp), label)) continue;
           for (let j = i + 1; j < spans.length; j++) {
             const cand = spans[j];
             if (!cand) continue;
-            const cls = cand.getAttribute("class") ?? "";
-            if (
-              cand.classList.contains("text-pnl-value-muted") ||
-              cls.includes("text-pnl-value-muted")
-            ) {
-              return parseNum(text(cand));
-            }
+            if (spanIsMuted(cand)) return parseNum(text(cand));
           }
         }
         return null;
+      }
+
+      function symbolFromRowSpans(row: Element): string {
+        for (const sp of row.querySelectorAll("span")) {
+          const t = text(sp);
+          if (instrumentRe.test(t)) return t;
+        }
+        for (const sp of row.querySelectorAll("span")) {
+          const t = text(sp);
+          const norm = normalizeKey(t);
+          if (norm.length < 5 || norm.length > 24) continue;
+          if (!/^[A-Z0-9]+$/.test(norm)) continue;
+          const noise = new Set([
+            "BUY",
+            "SELL",
+            "LONG",
+            "SHORT",
+            "MARKET",
+            "LIMIT",
+            "TOTAL",
+            "BALANCE",
+          ]);
+          if (noise.has(norm)) continue;
+          if (
+            /USD$|USDT$|PERP$/i.test(norm) ||
+            (norm.includes("USD") && norm.length >= 6)
+          ) {
+            return norm;
+          }
+        }
+        return "";
       }
 
       function tpSlFromColorDivs(row: Element): {
@@ -121,27 +183,27 @@ export async function extractCosmicPortfolioDom(
         if (seenRows.has(row)) continue;
         seenRows.add(row);
 
-        let symbol = "";
-        for (const sp of row.querySelectorAll("span")) {
-          const t = text(sp);
-          if (instrumentRe.test(t)) {
-            symbol = t;
-            break;
-          }
-        }
+        const symbol = symbolFromRowSpans(row);
         if (!symbol) continue;
 
         let sideRaw = "";
         for (const sp of row.querySelectorAll("span")) {
           const t = text(sp);
-          if (t === "BUY" || t === "SELL") {
-            sideRaw = t;
+          if (t === "BUY" || t === "LONG") {
+            sideRaw = "BUY";
+            break;
+          }
+          if (t === "SELL" || t === "SHORT") {
+            sideRaw = "SELL";
             break;
           }
         }
 
-        const size = mutedValueAfterLabel(row, "Size");
-        const avgPrice = mutedValueAfterLabel(row, "Avg Price");
+        const mutedNums = mutedNumbersInRow(row);
+        let size = mutedValueAfterLabel(row, "Size");
+        let avgPrice = mutedValueAfterLabel(row, "Avg Price");
+        if (size === null && mutedNums.length > 0) size = mutedNums[0]!;
+        if (avgPrice === null && mutedNums.length > 1) avgPrice = mutedNums[1]!;
 
         const { takeProfit, stopLoss } = tpSlFromColorDivs(row);
 

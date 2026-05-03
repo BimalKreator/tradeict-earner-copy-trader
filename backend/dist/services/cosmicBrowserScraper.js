@@ -161,7 +161,13 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
             waitUntil: "networkidle2",
             timeout: 120_000,
         });
-        await waitForPortfolioPositionGrid(page);
+        try {
+            await waitForPortfolioPositionGrid(page);
+        }
+        catch (err) {
+            console.warn("[cosmic-scraper] Portfolio grid selector timed out — continuing anyway (DOM may still parse):", err instanceof Error ? err.message : err);
+            await new Promise((r) => setTimeout(r, 4000));
+        }
         await new Promise((r) => setTimeout(r, 500));
         const fetchPath = process.env.COSMIC_SCRAPER_POSITIONS_FETCH_PATH?.trim();
         if (fetchPath) {
