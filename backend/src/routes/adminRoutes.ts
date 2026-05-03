@@ -173,7 +173,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const body = req.body as Record<string, unknown>;
       const title = body.title;
       const description = body.description;
-      const cosmicApiKey = body.cosmicApiKey;
+      const cosmicEmail = body.cosmicEmail;
       const slippage = body.slippage;
       const monthlyFee = body.monthlyFee;
       const profitShare = body.profitShare;
@@ -182,13 +182,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       if (
         typeof title !== "string" ||
         typeof description !== "string" ||
-        typeof cosmicApiKey !== "string" ||
+        typeof cosmicEmail !== "string" ||
         typeof monthlyFee !== "number" ||
         typeof minCapital !== "number"
       ) {
         res.status(400).json({
           error:
-            "title, description, cosmicApiKey, monthlyFee, and minCapital are required (numbers where applicable)",
+            "title, description, cosmicEmail, monthlyFee, and minCapital are required (numbers where applicable)",
         });
         return;
       }
@@ -200,8 +200,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const cosmicApiSecret =
-        typeof body.cosmicApiSecret === "string" ? body.cosmicApiSecret : "";
+      const cosmicPassword =
+        typeof body.cosmicPassword === "string" ? body.cosmicPassword : "";
       const performanceMetrics = parsePerformanceMetrics(
         body.performanceMetrics,
       );
@@ -210,8 +210,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         data: {
           title,
           description,
-          cosmicApiKey,
-          cosmicApiSecret,
+          cosmicEmail,
+          cosmicPassword,
           ...(performanceMetrics !== undefined
             ? { performanceMetrics }
             : {}),
@@ -236,8 +236,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const data: {
         title?: string;
         description?: string;
-        cosmicApiKey?: string;
-        cosmicApiSecret?: string;
+        cosmicEmail?: string;
+        cosmicPassword?: string;
         performanceMetrics?: Prisma.InputJsonValue | typeof Prisma.DbNull;
         slippage?: number;
         monthlyFee?: number;
@@ -259,19 +259,19 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.description = body.description;
       }
-      if (body.cosmicApiKey !== undefined) {
-        if (typeof body.cosmicApiKey !== "string") {
-          res.status(400).json({ error: "cosmicApiKey must be a string" });
+      if (body.cosmicEmail !== undefined) {
+        if (typeof body.cosmicEmail !== "string") {
+          res.status(400).json({ error: "cosmicEmail must be a string" });
           return;
         }
-        data.cosmicApiKey = body.cosmicApiKey;
+        data.cosmicEmail = body.cosmicEmail;
       }
-      if (body.cosmicApiSecret !== undefined) {
-        if (typeof body.cosmicApiSecret !== "string") {
-          res.status(400).json({ error: "cosmicApiSecret must be a string" });
+      if (body.cosmicPassword !== undefined) {
+        if (typeof body.cosmicPassword !== "string") {
+          res.status(400).json({ error: "cosmicPassword must be a string" });
           return;
         }
-        data.cosmicApiSecret = body.cosmicApiSecret;
+        data.cosmicPassword = body.cosmicPassword;
       }
       if (body.performanceMetrics !== undefined) {
         if (body.performanceMetrics === null) {

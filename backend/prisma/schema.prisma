@@ -93,8 +93,8 @@ model Strategy {
   id                 String  @id @default(uuid())
   title              String
   description        String
-  cosmicApiKey       String
-  cosmicApiSecret    String  @default("")
+  cosmicEmail        String  @default("")
+  cosmicPassword     String  @default("")
   performanceMetrics Json?
   slippage           Float   @default(0.5)
   monthlyFee         Float

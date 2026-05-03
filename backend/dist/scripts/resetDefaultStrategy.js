@@ -25,9 +25,9 @@ async function main() {
         await prisma.strategy.create({
             data: {
                 title: "Intraday Cryptotrading Algo - For Delta Ex India",
-                description: "Automated intraday crypto strategy mirrored from a linked Cosmic Trade account to Delta Exchange (India). Configure Cosmic API credentials on this strategy and set COSMIC_POSITIONS_HTTP_URL in the API environment.",
-                cosmicApiKey: "",
-                cosmicApiSecret: "",
+                description: "Automated intraday crypto strategy mirrored from a linked Cosmic Trade account to Delta Exchange (India). Set cosmic email/password on this strategy and COSMIC_SCRAPER_LOGIN_URL (plus optional selectors) for headless login.",
+                cosmicEmail: "",
+                cosmicPassword: "",
                 performanceMetrics: {},
                 slippage: 0.5,
                 monthlyFee: 0,

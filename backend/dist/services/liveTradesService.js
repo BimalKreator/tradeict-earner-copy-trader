@@ -142,8 +142,8 @@ export async function getAdminGroupedLiveTrades(prisma) {
         select: {
             id: true,
             title: true,
-            cosmicApiKey: true,
-            cosmicApiSecret: true,
+            cosmicEmail: true,
+            cosmicPassword: true,
         },
     });
     const out = [];
@@ -151,7 +151,7 @@ export async function getAdminGroupedLiveTrades(prisma) {
     for (const strat of strategies) {
         let cosmicList = [];
         try {
-            cosmicList = await fetchCosmicOpenPositions(strat.cosmicApiKey, strat.cosmicApiSecret);
+            cosmicList = await fetchCosmicOpenPositions(strat.cosmicEmail, strat.cosmicPassword);
         }
         catch {
             cosmicList = [];

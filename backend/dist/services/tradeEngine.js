@@ -247,7 +247,7 @@ async function runEngineLoop(prisma, cancelled, dedupeByStrategy) {
             for (const strategy of strategies) {
                 let scraped;
                 try {
-                    scraped = await fetchCosmicOpenPositions(strategy.cosmicApiKey, strategy.cosmicApiSecret);
+                    scraped = await fetchCosmicOpenPositions(strategy.cosmicEmail, strategy.cosmicPassword);
                 }
                 catch (err) {
                     console.error(`[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`, err);
@@ -296,8 +296,8 @@ async function runEngineLoop(prisma, cancelled, dedupeByStrategy) {
     }
 }
 /**
- * Polls each subscribed strategy’s linked Cosmic account via HTTP (see `COSMIC_POSITIONS_HTTP_URL`),
- * maps symbols to Delta per `COSMIC_TO_DELTA_SYMBOL`, and mirrors trades for subscribers on Delta Exchange.
+ * Polls each subscribed strategy’s Cosmic account via headless browser login (see `cosmicBrowserScraper.ts`
+ * and `COSMIC_SCRAPER_*` env vars), maps symbols to Delta per `COSMIC_TO_DELTA_SYMBOL`, and mirrors trades for subscribers on Delta Exchange.
  */
 export function startTradeEngine(prisma) {
     const cancelled = { value: false };

@@ -220,8 +220,8 @@ export async function getAdminGroupedLiveTrades(
     select: {
       id: true,
       title: true,
-      cosmicApiKey: true,
-      cosmicApiSecret: true,
+      cosmicEmail: true,
+      cosmicPassword: true,
     },
   });
 
@@ -233,8 +233,8 @@ export async function getAdminGroupedLiveTrades(
     let cosmicList: CosmicLedTrade[] = [];
     try {
       cosmicList = await fetchCosmicOpenPositions(
-        strat.cosmicApiKey,
-        strat.cosmicApiSecret,
+        strat.cosmicEmail,
+        strat.cosmicPassword,
       );
     } catch {
       cosmicList = [];

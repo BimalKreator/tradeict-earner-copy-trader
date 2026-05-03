@@ -7,8 +7,8 @@ type Strategy = {
   id: string;
   title: string;
   description: string;
-  cosmicApiKey: string;
-  cosmicApiSecret?: string;
+  cosmicEmail: string;
+  cosmicPassword?: string;
   performanceMetrics?: PerformanceMetricsPayload | unknown;
   slippage: number;
   monthlyFee: number;
@@ -279,8 +279,8 @@ export default function AdminStrategiesPage() {
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [cosmicApiKey, setCosmicApiKey] = useState("");
-  const [cosmicApiSecret, setCosmicApiSecret] = useState("");
+  const [cosmicEmail, setCosmicEmail] = useState("");
+  const [cosmicPassword, setCosmicPassword] = useState("");
   const [slippage, setSlippage] = useState("0.5");
   const [monthlyFee, setMonthlyFee] = useState("");
   const [profitShare, setProfitShare] = useState("20");
@@ -324,8 +324,8 @@ export default function AdminStrategiesPage() {
     setEditingId(null);
     setTitle("");
     setDescription("");
-    setCosmicApiKey("");
-    setCosmicApiSecret("");
+    setCosmicEmail("");
+    setCosmicPassword("");
     setSlippage("0.5");
     setMonthlyFee("");
     setProfitShare("20");
@@ -355,8 +355,8 @@ export default function AdminStrategiesPage() {
     setFormError(null);
     setTitle(s.title);
     setDescription(s.description);
-    setCosmicApiKey(s.cosmicApiKey);
-    setCosmicApiSecret(s.cosmicApiSecret ?? "");
+    setCosmicEmail(s.cosmicEmail);
+    setCosmicPassword(s.cosmicPassword ?? "");
     setSlippage(String(s.slippage));
     setMonthlyFee(String(s.monthlyFee));
     setProfitShare(String(s.profitShare));
@@ -425,8 +425,8 @@ export default function AdminStrategiesPage() {
     const payload: Record<string, unknown> = {
       title,
       description,
-      cosmicApiKey,
-      cosmicApiSecret,
+      cosmicEmail,
+      cosmicPassword,
       slippage: slippageNum,
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
@@ -477,7 +477,7 @@ export default function AdminStrategiesPage() {
             Strategies
           </h1>
           <p className="mt-1 text-sm text-white/55">
-            Link Cosmic master keys and optional performance metrics for the public strategy page.
+            Cosmic master login (email/password for headless scrape) and optional performance metrics.
           </p>
         </div>
         <button
@@ -574,7 +574,7 @@ export default function AdminStrategiesPage() {
               {editingId ? "Edit strategy" : "Add strategy"}
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              Cosmic credentials identify the master account; performance metrics power charts on the app.
+              Cosmic email/password are used by the server trade engine (Puppeteer login). Performance metrics power charts on the app.
             </p>
 
             <form onSubmit={handleSubmitStrategy} className="mt-6 max-h-[calc(100vh-8rem)] space-y-6 overflow-y-auto pr-1">
@@ -611,28 +611,32 @@ export default function AdminStrategiesPage() {
               <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
                 <h3 className="text-sm font-semibold text-primary">Master account (Cosmic)</h3>
                 <p className="text-xs text-white/55">
-                  Used by the trade engine to poll open positions for this strategy.
+                  Backend logs in with these credentials (see COSMIC_SCRAPER_LOGIN_URL and selectors in API env).
                 </p>
                 <label className="block">
-                  <span className="text-xs font-medium text-white/60">Cosmic API Key</span>
+                  <span className="text-xs font-medium text-white/60">
+                    Cosmic Login Email
+                  </span>
                   <input
-                    type="text"
+                    type="email"
                     required
-                    value={cosmicApiKey}
-                    onChange={(e) => setCosmicApiKey(e.target.value)}
-                    autoComplete="off"
+                    value={cosmicEmail}
+                    onChange={(e) => setCosmicEmail(e.target.value)}
+                    autoComplete="username"
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
                 <label className="block">
-                  <span className="text-xs font-medium text-white/60">Cosmic API Secret</span>
+                  <span className="text-xs font-medium text-white/60">
+                    Cosmic Password
+                  </span>
                   <input
                     type="password"
                     autoComplete="new-password"
-                    value={cosmicApiSecret}
-                    onChange={(e) => setCosmicApiSecret(e.target.value)}
+                    value={cosmicPassword}
+                    onChange={(e) => setCosmicPassword(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                    placeholder="Secret for the linked master account"
+                    placeholder="Master Cosmic account password"
                   />
                 </label>
               </div>
