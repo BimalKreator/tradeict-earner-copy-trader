@@ -399,7 +399,10 @@ export default function AdminStrategiesPage() {
     try {
       const res = await fetch(`${API_BASE}/admin/strategies/${id}/cosmic-probe`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          "Content-Type": "application/json",
+        },
       });
       const body: unknown = await res.json().catch(() => ({}));
       const errMsg =
