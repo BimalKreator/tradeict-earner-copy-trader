@@ -10,9 +10,17 @@
  * - COSMIC_SCRAPER_RESPONSE_FILTER — substring to match JSON XHR URLs (default: "position").
  * - COSMIC_SCRAPER_POSITIONS_FETCH_PATH — optional relative path e.g. "/api/positions" fetched in-page with credentials after login.
  */
+export type CosmicScrapeOptions = {
+    /** Capture viewport JPEG (base64) after login flow — for admin “preview” only. */
+    captureScreenshot?: boolean;
+};
+export type CosmicScrapeResult = {
+    payloads: unknown[];
+    screenshotBase64?: string;
+};
 /**
  * Returns JSON blobs captured during navigation / optional in-page fetch.
  * Caller merges with {@link parseCosmicPositionsPayload}.
  */
-export declare function scrapeCosmicPositionsData(cosmicEmail: string, cosmicPassword: string): Promise<unknown[]>;
+export declare function scrapeCosmicPositionsData(cosmicEmail: string, cosmicPassword: string, options?: CosmicScrapeOptions): Promise<CosmicScrapeResult>;
 //# sourceMappingURL=cosmicBrowserScraper.d.ts.map

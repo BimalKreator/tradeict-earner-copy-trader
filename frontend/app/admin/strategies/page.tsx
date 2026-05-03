@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+
+const ENV_API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+/** Backend prefix: env, or same-origin `/api` when env is missing (typical reverse-proxy setup). */
+function resolveAdminApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (typeof window !== "undefined") {
+    return `${window.location.origin.replace(/\/$/, "")}/api`;
+  }
+  return "";
+}
 
 type Strategy = {
   id: string;
@@ -285,6 +296,7 @@ export default function AdminStrategiesPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [probingId, setProbingId] = useState<string | null>(null);
   const [probeNotice, setProbeNotice] = useState<string | null>(null);
+  const [probeScreenshot, setProbeScreenshot] = useState<string | null>(null);
   const [savedCosmicPassword, setSavedCosmicPassword] = useState(false);
 
   const [title, setTitle] = useState("");
@@ -313,7 +325,10 @@ export default function AdminStrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/strategies`, { headers: authHeaders() });
+      const base = resolveAdminApiBase();
+      const res = await fetch(`${base}/admin/strategies`, {
+        headers: authHeaders(),
+      });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
@@ -395,14 +410,37 @@ export default function AdminStrategiesPage() {
 
   async function probeCosmic(id: string) {
     setProbeNotice(null);
+    setProbeScreenshot(null);
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("token")?.trim() ?? ""
+        : "";
+    if (!token) {
+      setProbeNotice(
+        "Missing login token — sign in from /login on this exact domain (including www vs non-www), then try Test scrape again.",
+      );
+      return;
+    }
+
+    const base = resolveAdminApiBase();
+    if (!base) {
+      setProbeNotice(
+        "NEXT_PUBLIC_API_URL is not set and same-origin /api could not be resolved.",
+      );
+      return;
+    }
+
     setProbingId(id);
     try {
-      const res = await fetch(`${API_BASE}/admin/strategies/${id}/cosmic-probe`, {
+      const res = await fetch(`${base}/admin/strategies/${id}/cosmic-probe`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
+        body: JSON.stringify({}),
+        cache: "no-store",
+        credentials: "include",
       });
       const body: unknown = await res.json().catch(() => ({}));
       const errMsg =
@@ -432,6 +470,18 @@ export default function AdminStrategiesPage() {
           : undefined;
       setProbeNotice(
         count !== undefined ? `${msg} (positions: ${count})` : msg,
+      );
+
+      const shot =
+        typeof body === "object" &&
+        body !== null &&
+        "screenshotBase64" in body &&
+        typeof (body as { screenshotBase64?: unknown }).screenshotBase64 ===
+          "string"
+          ? (body as { screenshotBase64: string }).screenshotBase64
+          : null;
+      setProbeScreenshot(
+        shot && shot.length > 0 ? `data:image/jpeg;base64,${shot}` : null,
       );
     } catch {
       setProbeNotice("Cosmic probe request failed.");
@@ -503,10 +553,11 @@ export default function AdminStrategiesPage() {
     }
 
     try {
+      const base = resolveAdminApiBase();
       const res = await fetch(
         isEdit
-          ? `${API_BASE}/admin/strategies/${editingId}`
-          : `${API_BASE}/admin/strategies`,
+          ? `${base}/admin/strategies/${editingId}`
+          : `${base}/admin/strategies`,
         {
           method: isEdit ? "PUT" : "POST",
           headers: authHeaders(),
@@ -545,6 +596,8 @@ export default function AdminStrategiesPage() {
             Cosmic master login (Puppeteer scrape). Status badges reflect server env (
             <code className="text-white/60">COSMIC_SCRAPER_LOGIN_URL</code>) and saved credentials.
             Use <span className="text-white/75">Test scrape</span> to verify the bot can read positions.
+            Set API env <code className="text-white/60">COSMIC_SCRAPER_PROBE_SCREENSHOT=true</code>{" "}
+            to attach a JPEG preview of the logged-in Cosmic tab after each probe.
           </p>
         </div>
         <button
@@ -563,15 +616,33 @@ export default function AdminStrategiesPage() {
       )}
 
       {probeNotice && (
-        <div className="mb-6 rounded-lg border border-primary/35 bg-primary/10 px-4 py-3 text-sm text-white/85">
-          <span>{probeNotice}</span>
-          <button
-            type="button"
-            onClick={() => setProbeNotice(null)}
-            className="ml-3 text-xs text-primary underline"
-          >
-            Dismiss
-          </button>
+        <div className="mb-6 space-y-4 rounded-lg border border-primary/35 bg-primary/10 px-4 py-3 text-sm text-white/85">
+          <div>
+            <span>{probeNotice}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setProbeNotice(null);
+                setProbeScreenshot(null);
+              }}
+              className="ml-3 text-xs text-primary underline"
+            >
+              Dismiss
+            </button>
+          </div>
+          {probeScreenshot ? (
+            <div className="rounded-lg border border-white/15 bg-black/40 p-2">
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-white/45">
+                Cosmic viewport (probe screenshot)
+              </p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={probeScreenshot}
+                alt="Cosmic session after login attempt"
+                className="max-h-[28rem] w-full max-w-4xl rounded-md object-contain object-top"
+              />
+            </div>
+          ) : null}
         </div>
       )}
 

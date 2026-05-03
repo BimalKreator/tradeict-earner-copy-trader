@@ -1,9 +1,10 @@
 import type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
-/**
- * Logs into Cosmic via headless browser (see `cosmicBrowserScraper.ts` + env vars),
- * collects position JSON, maps symbols to Delta perpetuals, and returns led trades.
- */
 export declare function fetchCosmicOpenPositions(cosmicEmail: string, cosmicPassword: string): Promise<CosmicLedTrade[]>;
+/** Admin probe: same scrape plus optional JPEG screenshot of the logged-in viewport. */
+export declare function probeCosmicOpenPositions(cosmicEmail: string, cosmicPassword: string, captureScreenshot: boolean): Promise<{
+    trades: CosmicLedTrade[];
+    screenshotBase64?: string;
+}>;
 //# sourceMappingURL=cosmicClient.d.ts.map

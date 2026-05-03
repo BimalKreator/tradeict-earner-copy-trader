@@ -61,17 +61,17 @@ async function tryClick(page, selectorsCsv) {
  * Returns JSON blobs captured during navigation / optional in-page fetch.
  * Caller merges with {@link parseCosmicPositionsPayload}.
  */
-export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword) {
+export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, options) {
     const email = cosmicEmail.trim();
     const password = cosmicPassword.trim();
     const loginUrl = process.env.COSMIC_SCRAPER_LOGIN_URL?.trim();
     if (!loginUrl) {
         console.warn("[cosmic-scraper] COSMIC_SCRAPER_LOGIN_URL is not set — cannot scrape Cosmic positions.");
-        return [];
+        return { payloads: [] };
     }
     if (!email || !password) {
         console.warn("[cosmic-scraper] Strategy is missing cosmicEmail or cosmicPassword — skip scrape.");
-        return [];
+        return { payloads: [] };
     }
     const capturedJson = [];
     const filter = process.env.COSMIC_SCRAPER_RESPONSE_FILTER?.trim().toLowerCase() ||
@@ -116,7 +116,7 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword) {
         const filledPass = await tryFillInput(page, passwordSelectors, password);
         if (!filledEmail || !filledPass) {
             console.warn("[cosmic-scraper] Could not locate email/password inputs — check COSMIC_SCRAPER_*_SELECTOR env vars.");
-            return [];
+            return { payloads: [] };
         }
         await Promise.all([
             page
@@ -159,11 +159,27 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword) {
                 console.warn("[cosmic-scraper] In-page positions fetch failed:", err instanceof Error ? err.message : err);
             }
         }
-        return capturedJson;
+        const out = { payloads: capturedJson };
+        if (options?.captureScreenshot) {
+            try {
+                const shot = await page.screenshot({
+                    type: "jpeg",
+                    quality: 68,
+                    encoding: "base64",
+                });
+                if (typeof shot === "string" && shot.length > 0) {
+                    out.screenshotBase64 = shot;
+                }
+            }
+            catch {
+                /* ignore */
+            }
+        }
+        return out;
     }
     catch (err) {
         console.error("[cosmic-scraper] Browser scrape failed:", err instanceof Error ? err.message : err);
-        return [];
+        return { payloads: [] };
     }
     finally {
         await browser.close();

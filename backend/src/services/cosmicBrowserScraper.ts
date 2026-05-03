@@ -22,6 +22,16 @@ const puppeteer = addExtra(
 );
 puppeteer.use(StealthPlugin());
 
+export type CosmicScrapeOptions = {
+  /** Capture viewport JPEG (base64) after login flow — for admin “preview” only. */
+  captureScreenshot?: boolean;
+};
+
+export type CosmicScrapeResult = {
+  payloads: unknown[];
+  screenshotBase64?: string;
+};
+
 async function tryFillInput(
   page: Page,
   selectorsCsv: string,
@@ -77,7 +87,8 @@ async function tryClick(
 export async function scrapeCosmicPositionsData(
   cosmicEmail: string,
   cosmicPassword: string,
-): Promise<unknown[]> {
+  options?: CosmicScrapeOptions,
+): Promise<CosmicScrapeResult> {
   const email = cosmicEmail.trim();
   const password = cosmicPassword.trim();
   const loginUrl = process.env.COSMIC_SCRAPER_LOGIN_URL?.trim();
@@ -86,13 +97,13 @@ export async function scrapeCosmicPositionsData(
     console.warn(
       "[cosmic-scraper] COSMIC_SCRAPER_LOGIN_URL is not set — cannot scrape Cosmic positions.",
     );
-    return [];
+    return { payloads: [] };
   }
   if (!email || !password) {
     console.warn(
       "[cosmic-scraper] Strategy is missing cosmicEmail or cosmicPassword — skip scrape.",
     );
-    return [];
+    return { payloads: [] };
   }
 
   const capturedJson: unknown[] = [];
@@ -147,7 +158,7 @@ export async function scrapeCosmicPositionsData(
       console.warn(
         "[cosmic-scraper] Could not locate email/password inputs — check COSMIC_SCRAPER_*_SELECTOR env vars.",
       );
-      return [];
+      return { payloads: [] };
     }
 
     await Promise.all([
@@ -195,13 +206,29 @@ export async function scrapeCosmicPositionsData(
       }
     }
 
-    return capturedJson;
+    const out: CosmicScrapeResult = { payloads: capturedJson };
+    if (options?.captureScreenshot) {
+      try {
+        const shot = await page.screenshot({
+          type: "jpeg",
+          quality: 68,
+          encoding: "base64",
+        });
+        if (typeof shot === "string" && shot.length > 0) {
+          out.screenshotBase64 = shot;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return out;
   } catch (err) {
     console.error(
       "[cosmic-scraper] Browser scrape failed:",
       err instanceof Error ? err.message : err,
     );
-    return [];
+    return { payloads: [] };
   } finally {
     await browser.close();
   }

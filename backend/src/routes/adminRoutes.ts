@@ -10,7 +10,7 @@ import {
   authenticateJwt,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
-import { fetchCosmicOpenPositions } from "../services/cosmicClient.js";
+import { probeCosmicOpenPositions } from "../services/cosmicClient.js";
 import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
 
 const roleValues = new Set<string>(Object.values(Role));
@@ -487,10 +487,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const positions = await fetchCosmicOpenPositions(
-        strategy.cosmicEmail,
-        strategy.cosmicPassword ?? "",
-      );
+      const captureScreenshot =
+        process.env.COSMIC_SCRAPER_PROBE_SCREENSHOT === "true";
+
+      const { trades: positions, screenshotBase64 } =
+        await probeCosmicOpenPositions(
+          strategy.cosmicEmail,
+          strategy.cosmicPassword ?? "",
+          captureScreenshot,
+        );
 
       res.json({
         ok: true,
@@ -498,6 +503,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         strategyTitle: strategy.title,
         scraperEnvReady,
         credentialsPresent,
+        screenshotPreview: Boolean(screenshotBase64),
+        screenshotBase64: screenshotBase64 ?? undefined,
         message:
           positions.length === 0
             ? "Scrape completed but no positions were parsed. Either there are no open trades, login/selectors failed, or COSMIC_SCRAPER_RESPONSE_FILTER / positions URL does not match Cosmic."
