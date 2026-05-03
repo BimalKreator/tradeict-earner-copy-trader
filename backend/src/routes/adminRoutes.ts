@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  Prisma,
   type PrismaClient,
   InvoiceStatus,
   Role,
@@ -12,6 +13,15 @@ import {
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
+
+function parsePerformanceMetrics(
+  v: unknown,
+): Prisma.InputJsonValue | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return undefined;
+  if (typeof v === "object") return v as Prisma.InputJsonValue;
+  return undefined;
+}
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
@@ -190,11 +200,21 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
+      const cosmicApiSecret =
+        typeof body.cosmicApiSecret === "string" ? body.cosmicApiSecret : "";
+      const performanceMetrics = parsePerformanceMetrics(
+        body.performanceMetrics,
+      );
+
       const strategy = await prisma.strategy.create({
         data: {
           title,
           description,
           cosmicApiKey,
+          cosmicApiSecret,
+          ...(performanceMetrics !== undefined
+            ? { performanceMetrics }
+            : {}),
           slippage,
           monthlyFee,
           profitShare,
@@ -217,6 +237,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         title?: string;
         description?: string;
         cosmicApiKey?: string;
+        cosmicApiSecret?: string;
+        performanceMetrics?: Prisma.InputJsonValue | typeof Prisma.DbNull;
         slippage?: number;
         monthlyFee?: number;
         profitShare?: number;
@@ -243,6 +265,27 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           return;
         }
         data.cosmicApiKey = body.cosmicApiKey;
+      }
+      if (body.cosmicApiSecret !== undefined) {
+        if (typeof body.cosmicApiSecret !== "string") {
+          res.status(400).json({ error: "cosmicApiSecret must be a string" });
+          return;
+        }
+        data.cosmicApiSecret = body.cosmicApiSecret;
+      }
+      if (body.performanceMetrics !== undefined) {
+        if (body.performanceMetrics === null) {
+          data.performanceMetrics = Prisma.DbNull;
+        } else {
+          const pm = parsePerformanceMetrics(body.performanceMetrics);
+          if (pm === undefined) {
+            res.status(400).json({
+              error: "performanceMetrics must be a JSON object",
+            });
+            return;
+          }
+          data.performanceMetrics = pm;
+        }
       }
       if (body.slippage !== undefined) {
         if (typeof body.slippage !== "number") {

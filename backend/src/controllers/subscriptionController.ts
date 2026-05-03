@@ -125,7 +125,73 @@ export function createSubscriptionController(prisma: PrismaClient) {
     }
   }
 
+  const strategySelectPublic = {
+    id: true,
+    title: true,
+    description: true,
+    monthlyFee: true,
+    minCapital: true,
+    profitShare: true,
+    slippage: true,
+    performanceMetrics: true,
+    createdAt: true,
+  } as const;
+
+  async function listStrategies(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = _req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const strategies = await prisma.strategy.findMany({
+        orderBy: { createdAt: "desc" },
+        select: strategySelectPublic,
+      });
+      res.json(strategies);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getStrategy(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const rawId = req.params.id;
+      const id = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof id !== "string" || !id.trim()) {
+        res.status(400).json({ error: "id is required" });
+        return;
+      }
+      const strategy = await prisma.strategy.findUnique({
+        where: { id: id.trim() },
+        select: strategySelectPublic,
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+      res.json(strategy);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     subscribe,
+    listStrategies,
+    getStrategy,
   };
 }

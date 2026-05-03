@@ -89,15 +89,17 @@ model UserActivity {
 }
 
 model Strategy {
-  id            String               @id @default(uuid())
-  title         String
-  description   String
-  cosmicApiKey  String
-  slippage      Float                @default(0.5)
-  monthlyFee    Float
-  profitShare   Float                @default(20.0)
-  minCapital    Float
-  createdAt     DateTime             @default(now())
+  id                 String  @id @default(uuid())
+  title              String
+  description        String
+  cosmicApiKey       String
+  cosmicApiSecret    String  @default("")
+  performanceMetrics Json?
+  slippage           Float   @default(0.5)
+  monthlyFee         Float
+  profitShare        Float   @default(20.0)
+  minCapital         Float
+  createdAt          DateTime @default(now())
 
   subscriptions UserSubscription[]
   trades        Trade[]

@@ -1,14 +1,13 @@
-import { addExtra } from "puppeteer-extra";
-import type { VanillaPuppeteer } from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import vanillaPuppeteer from "puppeteer";
-import type { Browser, Page } from "puppeteer";
 import {
   type PrismaClient,
   SubscriptionStatus,
   TradeStatus,
   UserStatus,
 } from "@prisma/client";
+import {
+  fetchCosmicOpenPositions,
+  type CosmicLedTrade,
+} from "./cosmicClient.js";
 import {
   executeTrade,
   fetchDeltaTicker,
@@ -17,19 +16,6 @@ import {
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
-
-/** Puppeteer v24 typings omit legacy helpers expected by puppeteer-extra; runtime is fine. */
-const puppeteer = addExtra(vanillaPuppeteer as unknown as VanillaPuppeteer);
-puppeteer.use(StealthPlugin());
-
-/** Latest normalized row from Cosmic Open Positions DOM */
-export interface CosmicLedTrade {
-  id: string;
-  symbol: string;
-  side: TradeSide;
-  size: number;
-  entryPrice: number;
-}
 
 const POLL_MIN_MS = 2000;
 const POLL_MAX_MS = 3000;
@@ -43,22 +29,6 @@ function randomPollMs(): number {
     POLL_MIN_MS +
     Math.floor(Math.random() * (POLL_MAX_MS - POLL_MIN_MS + 1))
   );
-}
-
-function normalizeSide(raw: string): TradeSide | null {
-  const u = raw.trim().toUpperCase();
-  if (u === "BUY" || u === "LONG") return "BUY";
-  if (u === "SELL" || u === "SHORT") return "SELL";
-  return null;
-}
-
-function buildTradeId(parts: {
-  symbol: string;
-  side: string;
-  entryPrice: number;
-  size: number;
-}): string {
-  return `${parts.symbol}|${parts.side}|${parts.entryPrice}|${parts.size}`;
 }
 
 function percentSlippage(entry: number, market: number): number {
@@ -160,7 +130,7 @@ async function closeFollowerTradeAndRecordPnl(
     where: {
       userId: args.userId,
       strategyId: args.strategyId,
-      symbol: args.cosmic.symbol,
+      symbol: args.cosmic.deltaSymbol,
       side: args.cosmic.side,
       status: TradeStatus.OPEN,
     },
@@ -198,38 +168,36 @@ async function closeFollowerTradeAndRecordPnl(
 
 async function processRemovedCosmicPositions(
   prisma: PrismaClient,
-  strategies: { id: string }[],
+  strategy: { id: string },
   removed: CosmicLedTrade[],
 ): Promise<void> {
   for (const cosmic of removed) {
     let exitPrice: number | undefined;
     try {
-      const t = await fetchDeltaTicker(cosmic.symbol);
+      const t = await fetchDeltaTicker(cosmic.deltaSymbol);
       exitPrice = t.last;
     } catch {
       exitPrice = undefined;
     }
     if (exitPrice === undefined || !Number.isFinite(exitPrice)) continue;
 
-    for (const strategy of strategies) {
-      const subs = await prisma.userSubscription.findMany({
-        where: {
-          strategyId: strategy.id,
-          status: SubscriptionStatus.ACTIVE,
-          user: { status: UserStatus.ACTIVE },
-        },
-      });
+    const subs = await prisma.userSubscription.findMany({
+      where: {
+        strategyId: strategy.id,
+        status: SubscriptionStatus.ACTIVE,
+        user: { status: UserStatus.ACTIVE },
+      },
+    });
 
-      for (const sub of subs) {
-        const userSize = cosmic.size * sub.multiplier;
-        await closeFollowerTradeAndRecordPnl(prisma, {
-          userId: sub.userId,
-          strategyId: strategy.id,
-          cosmic,
-          sizedPosition: userSize,
-          exitPrice,
-        });
-      }
+    for (const sub of subs) {
+      const userSize = cosmic.size * sub.multiplier;
+      await closeFollowerTradeAndRecordPnl(prisma, {
+        userId: sub.userId,
+        strategyId: strategy.id,
+        cosmic,
+        sizedPosition: userSize,
+        exitPrice,
+      });
     }
   }
 }
@@ -244,7 +212,7 @@ async function processNewCosmicTrade(
 ) {
   let marketPrice: number | undefined;
   try {
-    const t = await fetchDeltaTicker(cosmic.symbol);
+    const t = await fetchDeltaTicker(cosmic.deltaSymbol);
     marketPrice = t.last;
   } catch {
     marketPrice = undefined;
@@ -267,13 +235,15 @@ async function processNewCosmicTrade(
     marketPrice !== undefined &&
     percentSlippage(cosmic.entryPrice, marketPrice) > strategy.slippage
   ) {
-    console.log("Slippage Exceeded");
+    console.log(
+      `[tradeEngine] Slippage exceeded for ${cosmic.deltaSymbol} (${cosmic.cosmicSymbol})`,
+    );
     for (const sub of subs) {
       const userSize = cosmic.size * sub.multiplier;
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.symbol,
+        symbol: cosmic.deltaSymbol,
         side: cosmic.side,
         size: userSize,
         entryPrice: cosmic.entryPrice,
@@ -289,7 +259,7 @@ async function processNewCosmicTrade(
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.symbol,
+        symbol: cosmic.deltaSymbol,
         side: cosmic.side,
         size: userSize,
         entryPrice: cosmic.entryPrice,
@@ -307,7 +277,7 @@ async function processNewCosmicTrade(
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.symbol,
+        symbol: cosmic.deltaSymbol,
         side: cosmic.side,
         size: userSize,
         entryPrice: cosmic.entryPrice,
@@ -319,7 +289,7 @@ async function processNewCosmicTrade(
     const result = await executeTrade(
       keyRow.apiKey,
       keyRow.apiSecret,
-      cosmic.symbol,
+      cosmic.deltaSymbol,
       cosmic.side,
       userSize,
     );
@@ -327,7 +297,7 @@ async function processNewCosmicTrade(
     await recordTrade(prisma, {
       userId: sub.userId,
       strategyId: strategy.id,
-      symbol: cosmic.symbol,
+      symbol: cosmic.deltaSymbol,
       side: cosmic.side,
       size: userSize,
       entryPrice: cosmic.entryPrice,
@@ -336,236 +306,24 @@ async function processNewCosmicTrade(
   }
 }
 
-/** Prefer last row in DOM order — UIs often list newest positions at the bottom. */
+/** Prefer last row in API order — often newest at bottom. */
 function pickLatestTrade(trades: CosmicLedTrade[]): CosmicLedTrade | null {
   if (trades.length === 0) return null;
   return trades[trades.length - 1]!;
 }
 
-/**
- * Scrape Open Positions via DOM. Selectors are configurable — if the site layout
- * changes, update env vars or this evaluate logic without crashing the loop.
- */
-async function scrapeOpenPositions(page: Page): Promise<CosmicLedTrade[]> {
-  const tableSelector =
-    process.env.COSMIC_SEL_POSITIONS_TABLE ?? '[data-testid="open-positions"]';
-  const rowSelector = process.env.COSMIC_SEL_POSITION_ROW ?? "tbody tr";
-  const colSymbol = Number(process.env.COSMIC_COL_SYMBOL ?? "0");
-  const colSide = Number(process.env.COSMIC_COL_SIDE ?? "1");
-  const colEntry = Number(process.env.COSMIC_COL_ENTRY ?? "2");
-  const colSize = Number(process.env.COSMIC_COL_SIZE ?? "3");
-
-  type EvalOut =
-    | { ok: true; rows: { symbol: string; side: string; entry: number; size: number }[] }
-    | { ok: false; error: string };
-
-  let raw: EvalOut;
-  try {
-    raw = await page.evaluate(
-      (cfg): EvalOut => {
-        try {
-          const root = document.querySelector(cfg.tableSelector);
-          if (!root) {
-            return {
-              ok: false,
-              error: `POSITIONS_TABLE_NOT_FOUND:${cfg.tableSelector}`,
-            };
-          }
-          const trs = Array.from(root.querySelectorAll(cfg.rowSelector)).filter(
-            (el) => el.tagName === "TR",
-          );
-          const rows: {
-            symbol: string;
-            side: string;
-            entry: number;
-            size: number;
-          }[] = [];
-
-          for (const tr of trs) {
-            const cells = Array.from(tr.querySelectorAll("th, td"));
-            const text = (i: number) =>
-              (cells[i]?.textContent ?? "").trim();
-
-            const symbol = text(cfg.colSymbol);
-            const sideRaw = text(cfg.colSide);
-            const entryRaw = text(cfg.colEntry).replace(/,/g, "");
-            const sizeRaw = text(cfg.colSize).replace(/,/g, "");
-
-            const entry = Number.parseFloat(entryRaw);
-            const size = Number.parseFloat(sizeRaw);
-            if (
-              !symbol ||
-              !sideRaw ||
-              Number.isNaN(entry) ||
-              Number.isNaN(size)
-            ) {
-              continue;
-            }
-            rows.push({ symbol, side: sideRaw, entry, size });
-          }
-
-          return { ok: true, rows };
-        } catch (e) {
-          return {
-            ok: false,
-            error:
-              e instanceof Error ? e.message : `evaluate_error:${String(e)}`,
-          };
-        }
-      },
-      {
-        tableSelector,
-        rowSelector,
-        colSymbol,
-        colSide,
-        colEntry,
-        colSize,
-      },
-    );
-  } catch (err) {
-    console.warn(
-      "[tradeEngine] page.evaluate failed:",
-      err instanceof Error ? err.message : err,
-    );
-    return [];
-  }
-
-  if (!raw.ok) {
-    console.warn(
-      `[tradeEngine] scrape skipped (DOM): ${raw.error}. Adjust COSMIC_SEL_* / COSMIC_COL_* in .env.`,
-    );
-    return [];
-  }
-
-  const trades: CosmicLedTrade[] = [];
-  for (const row of raw.rows) {
-    const side = normalizeSide(row.side);
-    if (!side) continue;
-    const id = buildTradeId({
-      symbol: row.symbol,
-      side,
-      entryPrice: row.entry,
-      size: row.size,
-    });
-    trades.push({
-      id,
-      symbol: row.symbol,
-      side,
-      size: row.size,
-      entryPrice: row.entry,
-    });
-  }
-  return trades;
-}
-
-async function performLogin(page: Page): Promise<void> {
-  const loginUrl =
-    process.env.COSMIC_LOGIN_URL ??
-    "https://cosmic.trade/login";
-
-  const email = process.env.COSMIC_EMAIL;
-  const password = process.env.COSMIC_PASSWORD;
-  if (!email || !password) {
-    throw new Error("COSMIC_EMAIL and COSMIC_PASSWORD are required");
-  }
-
-  const selEmail =
-    process.env.COSMIC_SEL_EMAIL ?? 'input[type="email"], input[name="email"], #email';
-  const selPassword =
-    process.env.COSMIC_SEL_PASSWORD ??
-    'input[type="password"], input[name="password"], #password';
-  const selLogin =
-    process.env.COSMIC_SEL_LOGIN ??
-    'button[type="submit"], button[data-action="login"], .login-button';
-
-  await page.goto(loginUrl, {
-    waitUntil: "networkidle2",
-    timeout: 90_000,
-  });
-
-  await page.waitForSelector(selEmail, { timeout: 45_000 });
-  await page.waitForSelector(selPassword, { timeout: 45_000 });
-
-  await page.click(selEmail, { clickCount: 3 }).catch(() => {});
-  await page.type(selEmail, email, { delay: 15 });
-
-  await page.click(selPassword, { clickCount: 3 }).catch(() => {});
-  await page.type(selPassword, password, { delay: 15 });
-
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 90_000 }),
-    page.click(selLogin),
-  ]);
-}
-
-async function openPositionsPage(page: Page): Promise<void> {
-  const url =
-    process.env.COSMIC_OPEN_POSITIONS_URL ??
-    process.env.COSMIC_PORTFOLIO_URL ??
-    process.env.COSMIC_TERMINAL_URL ??
-    "https://cosmic.trade/portfolio";
-
-  await page.goto(url, {
-    waitUntil: "networkidle2",
-    timeout: 90_000,
-  });
-}
+type StrategyDedupe = {
+  lastId: string | undefined;
+  prevOpenById: Map<string, CosmicLedTrade>;
+};
 
 async function runEngineLoop(
   prisma: PrismaClient,
-  page: Page,
   cancelled: { value: boolean },
-  dedupe: {
-    lastId: string | undefined;
-    prevOpenById: Map<string, CosmicLedTrade>;
-  },
+  dedupeByStrategy: Map<string, StrategyDedupe>,
 ): Promise<void> {
   while (!cancelled.value) {
     try {
-      const scraped = await scrapeOpenPositions(page);
-      const currentOpen = new Map(scraped.map((t) => [t.id, t]));
-
-      const removed: CosmicLedTrade[] = [];
-      for (const [id, trade] of dedupe.prevOpenById) {
-        if (!currentOpen.has(id)) {
-          removed.push(trade);
-        }
-      }
-
-      if (removed.length > 0) {
-        const strategiesForClose = await prisma.strategy.findMany({
-          where: {
-            subscriptions: {
-              some: { status: SubscriptionStatus.ACTIVE },
-            },
-          },
-        });
-        await processRemovedCosmicPositions(
-          prisma,
-          strategiesForClose,
-          removed,
-        );
-      }
-
-      dedupe.prevOpenById = currentOpen;
-
-      const latest = pickLatestTrade(scraped);
-
-      if (!latest) {
-        await sleep(randomPollMs());
-        continue;
-      }
-
-      if (dedupe.lastId === undefined) {
-        dedupe.lastId = latest.id;
-        await sleep(randomPollMs());
-        continue;
-      }
-      if (latest.id === dedupe.lastId) {
-        await sleep(randomPollMs());
-        continue;
-      }
-
       const strategies = await prisma.strategy.findMany({
         where: {
           subscriptions: {
@@ -574,13 +332,56 @@ async function runEngineLoop(
         },
       });
 
-      if (strategies.length === 0) {
-        dedupe.lastId = latest.id;
-        await sleep(randomPollMs());
-        continue;
-      }
-
       for (const strategy of strategies) {
+        let scraped: CosmicLedTrade[];
+        try {
+          scraped = await fetchCosmicOpenPositions(
+            strategy.cosmicApiKey,
+            strategy.cosmicApiSecret,
+          );
+        } catch (err) {
+          console.error(
+            `[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`,
+            err,
+          );
+          continue;
+        }
+
+        let dedupe = dedupeByStrategy.get(strategy.id);
+        if (!dedupe) {
+          dedupe = { lastId: undefined, prevOpenById: new Map() };
+          dedupeByStrategy.set(strategy.id, dedupe);
+        }
+
+        const currentOpen = new Map(scraped.map((t) => [t.id, t]));
+
+        const removed: CosmicLedTrade[] = [];
+        for (const [id, trade] of dedupe.prevOpenById) {
+          if (!currentOpen.has(id)) {
+            removed.push(trade);
+          }
+        }
+
+        if (removed.length > 0) {
+          await processRemovedCosmicPositions(prisma, strategy, removed);
+        }
+
+        dedupe.prevOpenById = currentOpen;
+
+        const latest = pickLatestTrade(scraped);
+
+        if (!latest) {
+          continue;
+        }
+
+        if (dedupe.lastId === undefined) {
+          dedupe.lastId = latest.id;
+          continue;
+        }
+        if (latest.id === dedupe.lastId) {
+          continue;
+        }
+
         try {
           await processNewCosmicTrade(prisma, strategy, latest);
         } catch (err) {
@@ -589,9 +390,9 @@ async function runEngineLoop(
             err,
           );
         }
-      }
 
-      dedupe.lastId = latest.id;
+        dedupe.lastId = latest.id;
+      }
     } catch (err) {
       console.error("[tradeEngine] loop iteration failed:", err);
     }
@@ -601,37 +402,14 @@ async function runEngineLoop(
 }
 
 /**
- * Logs into Cosmic.trade via stealth Puppeteer, scrapes Open Positions every 2–3s,
- * and mirrors new trades to Delta for subscribers. Returns a disposer that closes the browser.
+ * Polls each subscribed strategy’s linked Cosmic account via HTTP (see `COSMIC_POSITIONS_HTTP_URL`),
+ * maps symbols to Delta per `COSMIC_TO_DELTA_SYMBOL`, and mirrors trades for subscribers on Delta Exchange.
  */
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
-  const dedupe = {
-    lastId: undefined as string | undefined,
-    prevOpenById: new Map<string, CosmicLedTrade>(),
-  };
+  const dedupeByStrategy = new Map<string, StrategyDedupe>();
 
-  void (async () => {
-    let browser: Browser | undefined;
-    try {
-      const launched = await puppeteer.launch({
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-      browser = launched;
-      const page = await launched.newPage();
-      await page.setViewport({ width: 1280, height: 900 });
-
-      await performLogin(page);
-      await openPositionsPage(page);
-
-      await runEngineLoop(prisma, page, cancelled, dedupe);
-    } catch (err) {
-      console.error("[tradeEngine] fatal:", err);
-    } finally {
-      await browser?.close().catch(() => {});
-    }
-  })();
+  void runEngineLoop(prisma, cancelled, dedupeByStrategy);
 
   return () => {
     cancelled.value = true;

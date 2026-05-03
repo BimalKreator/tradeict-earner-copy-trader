@@ -1,65 +1,64 @@
 "use client";
 
 import {
+  Eye,
   LineChart,
+  Loader2,
   Sparkles,
   TrendingUp,
   Wallet,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = "http://localhost:5000/api/subscriptions";
 
-/** Demo listings — replace `id` values with real Strategy IDs from your database for live subscribe. */
-const DUMMY_STRATEGIES = [
-  {
-    id: "00000000-0000-4000-8000-000000000001",
-    title: "HFT Alpha",
-    description:
-      "Ultra-short horizon signals tuned for deep liquidity and tight spreads.",
-    monthlyFee: 79,
-    minCapital: 25000,
-    profitShare: 18,
-    accent: "from-sky-500/25 to-transparent",
-    chartPoints: "0,85 15,72 30,78 45,55 60,62 75,38 90,45 100,28",
-  },
-  {
-    id: "00000000-0000-4000-8000-000000000002",
-    title: "Funding Rate Arbitrage",
-    description:
-      "Neutral basis trades harvesting perpetual funding across venues.",
-    monthlyFee: 49,
-    minCapital: 10000,
-    profitShare: 22,
-    accent: "from-violet-500/25 to-transparent",
-    chartPoints: "0,55 18,48 36,62 52,40 68,52 82,35 100,42",
-  },
-  {
-    id: "00000000-0000-4000-8000-000000000003",
-    title: "Trend Sentinel",
-    description:
-      "Multi-timeframe trend following with volatility-adjusted sizing.",
-    monthlyFee: 59,
-    minCapital: 5000,
-    profitShare: 20,
-    accent: "from-emerald-500/20 to-transparent",
-    chartPoints: "0,70 20,65 40,72 55,50 72,58 88,42 100,48",
-  },
-  {
-    id: "00000000-0000-4000-8000-000000000004",
-    title: "Delta Neutral Yield",
-    description:
-      "Options overlays plus spot/perp hedges targeting smoother equity curves.",
-    monthlyFee: 99,
-    minCapital: 40000,
-    profitShare: 15,
-    accent: "from-amber-500/20 to-transparent",
-    chartPoints: "0,45 22,52 44,38 60,48 78,32 100,38",
-  },
+type StrategyListItem = {
+  id: string;
+  title: string;
+  description: string;
+  monthlyFee: number;
+  minCapital: number;
+  profitShare: number;
+  slippage: number;
+  performanceMetrics: unknown;
+  createdAt: string;
+};
+
+const ACCENTS = [
+  "from-sky-500/25 to-transparent",
+  "from-violet-500/25 to-transparent",
+  "from-emerald-500/20 to-transparent",
+  "from-amber-500/20 to-transparent",
+  "from-rose-500/20 to-transparent",
+  "from-cyan-500/20 to-transparent",
 ] as const;
 
-type StrategyCard = (typeof DUMMY_STRATEGIES)[number];
+function accentForId(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return ACCENTS[Math.abs(h) % ACCENTS.length] ?? ACCENTS[0]!;
+}
+
+type PnlMetrics = { pnlChart?: { labels?: string[]; values?: number[] } };
+
+function pnlValuesToSparklinePoints(pm: unknown): string {
+  if (!pm || typeof pm !== "object") return "0,50 100,50";
+  const pnl = (pm as PnlMetrics).pnlChart;
+  const values = Array.isArray(pnl?.values) ? pnl.values! : [];
+  if (values.length === 0) return "0,50 100,50";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  return values
+    .map((v, i) => {
+      const x = (i / Math.max(values.length - 1, 1)) * 100;
+      const y = 100 - ((v - min) / range) * 80 - 10;
+      return `${x},${y}`;
+    })
+    .join(" ");
+}
 
 function clampMultiplier(n: number): number {
   const rounded = Math.round(n * 10) / 10;
@@ -69,9 +68,11 @@ function clampMultiplier(n: number): number {
 function PnlChartPlaceholder({
   points,
   gradientId,
+  hasData,
 }: {
   points: string;
   gradientId: string;
+  hasData: boolean;
 }) {
   return (
     <div className="relative mt-5 h-36 overflow-hidden rounded-xl border border-white/[0.08] bg-black/35">
@@ -122,18 +123,62 @@ function PnlChartPlaceholder({
         PnL preview
       </div>
       <p className="absolute bottom-2 right-3 text-[10px] text-white/35">
-        Illustrative only
+        {hasData ? "From performance metrics" : "Illustrative only"}
       </p>
     </div>
   );
 }
 
 export default function StrategyMarketplacePage() {
-  const [modalStrategy, setModalStrategy] = useState<StrategyCard | null>(null);
+  const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [unauthorized, setUnauthorized] = useState(false);
+
+  const [modalStrategy, setModalStrategy] = useState<StrategyListItem | null>(
+    null,
+  );
   const [multiplier, setMultiplier] = useState(1);
   const [modalError, setModalError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState(false);
+
+  const loadStrategies = useCallback(async () => {
+    setListLoading(true);
+    setListError(null);
+    setUnauthorized(false);
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (!token) {
+      setUnauthorized(true);
+      setStrategies([]);
+      setListLoading(false);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/strategies`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        setUnauthorized(true);
+        setStrategies([]);
+        return;
+      }
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data: unknown = await res.json();
+      if (!Array.isArray(data)) throw new Error("Invalid response");
+      setStrategies(data as StrategyListItem[]);
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : "Failed to load strategies");
+      setStrategies([]);
+    } finally {
+      setListLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStrategies();
+  }, [loadStrategies]);
 
   useEffect(() => {
     if (!toast) return;
@@ -153,7 +198,7 @@ export default function StrategyMarketplacePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [modalStrategy]);
 
-  function openSubscribe(s: StrategyCard) {
+  function openSubscribe(s: StrategyListItem) {
     setModalStrategy(s);
     setMultiplier(1);
     setModalError(null);
@@ -209,6 +254,20 @@ export default function StrategyMarketplacePage() {
     }
   }
 
+  if (unauthorized) {
+    return (
+      <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-6 py-10 text-center">
+        <p className="text-sm text-white/70">Sign in to browse strategies.</p>
+        <Link
+          href="/login"
+          className="mt-4 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white hover:bg-primary/90"
+        >
+          Go to login
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="relative">
       <header className="mb-10">
@@ -222,79 +281,116 @@ export default function StrategyMarketplacePage() {
           Strategy marketplace
         </h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/55">
-          Explore curated copy-trading strategies. Subscribe with a position
-          multiplier — sizing scales with your risk appetite (demo cards below).
+          Explore copy-trading strategies. View detailed performance or subscribe
+          with a position multiplier.
         </p>
       </header>
 
-      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-2">
-        {DUMMY_STRATEGIES.map((s) => (
-          <article
-            key={s.id}
-            className="glass-card relative flex flex-col overflow-hidden border border-glassBorder p-6 shadow-xl transition hover:border-primary/35 hover:shadow-primary/5"
-          >
-            <div
-              className={`pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b ${s.accent} opacity-90`}
-              aria-hidden
-            />
-            <div className="relative">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold text-white">{s.title}</h2>
-                  <p className="mt-2 text-sm leading-relaxed text-white/55">
-                    {s.description}
-                  </p>
-                </div>
-                <TrendingUp
-                  className="mt-1 h-8 w-8 shrink-0 text-primary/70"
+      {listError && (
+        <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {listError}
+        </div>
+      )}
+
+      {listLoading ? (
+        <div className="flex justify-center py-16">
+          <Loader2 className="h-10 w-10 animate-spin text-primary" aria-hidden />
+        </div>
+      ) : strategies.length === 0 ? (
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-6 py-12 text-center text-sm text-white/55">
+          No strategies available yet.
+        </div>
+      ) : (
+        <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-2">
+          {strategies.map((s) => {
+            const points = pnlValuesToSparklinePoints(s.performanceMetrics);
+            const hasPnl =
+              typeof s.performanceMetrics === "object" &&
+              s.performanceMetrics !== null &&
+              Array.isArray(
+                (s.performanceMetrics as PnlMetrics).pnlChart?.values,
+              ) &&
+              ((s.performanceMetrics as PnlMetrics).pnlChart?.values?.length ??
+                0) > 0;
+            return (
+              <article
+                key={s.id}
+                className="glass-card relative flex flex-col overflow-hidden border border-glassBorder p-6 shadow-xl transition hover:border-primary/35 hover:shadow-primary/5"
+              >
+                <div
+                  className={`pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b ${accentForId(s.id)} opacity-90`}
                   aria-hidden
                 />
-              </div>
+                <div className="relative">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-semibold text-white">{s.title}</h2>
+                      <p className="mt-2 text-sm leading-relaxed text-white/55">
+                        {s.description}
+                      </p>
+                    </div>
+                    <TrendingUp
+                      className="mt-1 h-8 w-8 shrink-0 text-primary/70"
+                      aria-hidden
+                    />
+                  </div>
 
-              <PnlChartPlaceholder
-                points={s.chartPoints}
-                gradientId={`pnl-fill-${s.id.replace(/-/g, "")}`}
-              />
+                  <PnlChartPlaceholder
+                    points={points}
+                    gradientId={`pnl-fill-${s.id.replace(/-/g, "")}`}
+                    hasData={hasPnl}
+                  />
 
-              <dl className="mt-5 grid grid-cols-3 gap-3 text-center">
-                <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                  <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                    Monthly
-                  </dt>
-                  <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
-                    ₹{s.monthlyFee.toLocaleString("en-IN")}
-                  </dd>
-                </div>
-                <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                  <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                    Min cap.
-                  </dt>
-                  <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
-                    ₹{s.minCapital.toLocaleString("en-IN")}
-                  </dd>
-                </div>
-                <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                  <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                    Profit share
-                  </dt>
-                  <dd className="mt-1 text-sm font-semibold tabular-nums text-emerald-300/90">
-                    {s.profitShare}%
-                  </dd>
-                </div>
-              </dl>
+                  <dl className="mt-5 grid grid-cols-3 gap-3 text-center">
+                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                        Monthly
+                      </dt>
+                      <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                        ₹{s.monthlyFee.toLocaleString("en-IN")}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                        Min cap.
+                      </dt>
+                      <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                        ₹{s.minCapital.toLocaleString("en-IN")}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                        Profit share
+                      </dt>
+                      <dd className="mt-1 text-sm font-semibold tabular-nums text-emerald-300/90">
+                        {s.profitShare}%
+                      </dd>
+                    </div>
+                  </dl>
 
-              <button
-                type="button"
-                onClick={() => openSubscribe(s)}
-                className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
-              >
-                <Wallet className="h-4 w-4 opacity-90" aria-hidden />
-                Subscribe
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
+                  <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+                    <Link
+                      href={`/dashboard/strategies/${s.id}`}
+                      className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-glassBorder bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                    >
+                      <Eye className="h-4 w-4 opacity-90" aria-hidden />
+                      View Strategy
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => openSubscribe(s)}
+                      className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
+                    >
+                      <Wallet className="h-4 w-4 opacity-90" aria-hidden />
+                      Subscribe
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
 
       {modalStrategy && (
         <div

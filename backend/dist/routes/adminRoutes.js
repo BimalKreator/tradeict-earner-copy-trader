@@ -1,8 +1,17 @@
 import { Router } from "express";
-import { InvoiceStatus, Role, UserStatus, } from "@prisma/client";
+import { Prisma, InvoiceStatus, Role, UserStatus, } from "@prisma/client";
 import { authenticateJwt, requireAdmin, } from "../middleware/authMiddleware.js";
 const roleValues = new Set(Object.values(Role));
 const statusValues = new Set(Object.values(UserStatus));
+function parsePerformanceMetrics(v) {
+    if (v === undefined)
+        return undefined;
+    if (v === null)
+        return undefined;
+    if (typeof v === "object")
+        return v;
+    return undefined;
+}
 export function createAdminRoutes(prisma) {
     const router = Router();
     const adminOnly = [authenticateJwt(), requireAdmin(prisma)];
@@ -153,11 +162,17 @@ export function createAdminRoutes(prisma) {
                 });
                 return;
             }
+            const cosmicApiSecret = typeof body.cosmicApiSecret === "string" ? body.cosmicApiSecret : "";
+            const performanceMetrics = parsePerformanceMetrics(body.performanceMetrics);
             const strategy = await prisma.strategy.create({
                 data: {
                     title,
                     description,
                     cosmicApiKey,
+                    cosmicApiSecret,
+                    ...(performanceMetrics !== undefined
+                        ? { performanceMetrics }
+                        : {}),
                     slippage,
                     monthlyFee,
                     profitShare,
@@ -195,6 +210,28 @@ export function createAdminRoutes(prisma) {
                     return;
                 }
                 data.cosmicApiKey = body.cosmicApiKey;
+            }
+            if (body.cosmicApiSecret !== undefined) {
+                if (typeof body.cosmicApiSecret !== "string") {
+                    res.status(400).json({ error: "cosmicApiSecret must be a string" });
+                    return;
+                }
+                data.cosmicApiSecret = body.cosmicApiSecret;
+            }
+            if (body.performanceMetrics !== undefined) {
+                if (body.performanceMetrics === null) {
+                    data.performanceMetrics = Prisma.DbNull;
+                }
+                else {
+                    const pm = parsePerformanceMetrics(body.performanceMetrics);
+                    if (pm === undefined) {
+                        res.status(400).json({
+                            error: "performanceMetrics must be a JSON object",
+                        });
+                        return;
+                    }
+                    data.performanceMetrics = pm;
+                }
             }
             if (body.slippage !== undefined) {
                 if (typeof body.slippage !== "number") {

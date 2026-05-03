@@ -9,6 +9,8 @@ type Strategy = {
   title: string;
   description: string;
   cosmicApiKey: string;
+  cosmicApiSecret?: string;
+  performanceMetrics?: PerformanceMetricsPayload | unknown;
   slippage: number;
   monthlyFee: number;
   profitShare: number;
@@ -16,27 +18,293 @@ type Strategy = {
   createdAt: string;
 };
 
+/** Stored in `performanceMetrics` — drives charts / heatmap on the product UI. */
+type PerformanceMetricsPayload = {
+  pnlChart: {
+    labels: string[];
+    values: number[];
+  };
+  backtestSummary: {
+    tradingDays: number;
+    winLossPercent: number;
+    streak: number;
+    avgPerDay: number;
+    maxDrawdown: number;
+  };
+  maxProfitLoss: {
+    labels: string[];
+    profit: number[];
+    loss: number[];
+  };
+  daywiseBreakdown: {
+    heatmap: { date: string; value: number }[];
+  };
+};
+
+function authHeaders(): HeadersInit {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+function parseCommaSeparatedStrings(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseCommaSeparatedNumbers(raw: string): number[] {
+  return raw
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => Number.parseFloat(s))
+    .filter((n) => Number.isFinite(n));
+}
+
+function parseHeatmapText(raw: string): { date: string; value: number }[] {
+  const t = raw.trim();
+  if (!t) return [];
+  try {
+    const parsed: unknown = JSON.parse(t);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((row) => {
+          if (!row || typeof row !== "object") return null;
+          const o = row as Record<string, unknown>;
+          const date =
+            typeof o.date === "string"
+              ? o.date
+              : typeof o.d === "string"
+                ? o.d
+                : "";
+          const val =
+            typeof o.value === "number"
+              ? o.value
+              : typeof o.count === "number"
+                ? o.count
+                : typeof o.v === "number"
+                  ? o.v
+                  : NaN;
+          if (!date || !Number.isFinite(val)) return null;
+          return { date, value: val };
+        })
+        .filter((x): x is { date: string; value: number } => x !== null);
+    }
+  } catch {
+    /* fall through to line format */
+  }
+  const out: { date: string; value: number }[] = [];
+  for (const line of t.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [d, v] = trimmed.split(/[,;\t]/).map((x) => x.trim());
+    if (!d || v === undefined) continue;
+    const num = Number.parseFloat(v);
+    if (!Number.isFinite(num)) continue;
+    out.push({ date: d, value: num });
+  }
+  return out;
+}
+
+function buildPerformanceMetrics(args: {
+  performanceJsonOverride: string;
+  pnlLabels: string;
+  pnlValues: string;
+  tradingDays: string;
+  winLossPercent: string;
+  streak: string;
+  avgPerDay: string;
+  maxDrawdown: string;
+  barLabels: string;
+  barProfit: string;
+  barLoss: string;
+  heatmapText: string;
+}): PerformanceMetricsPayload | undefined {
+  const override = args.performanceJsonOverride.trim();
+  if (override) {
+    try {
+      const parsed: unknown = JSON.parse(override);
+      if (parsed && typeof parsed === "object") {
+        return parsed as PerformanceMetricsPayload;
+      }
+    } catch {
+      throw new Error("Performance JSON override is not valid JSON.");
+    }
+  }
+
+  const labels = parseCommaSeparatedStrings(args.pnlLabels);
+  const values = parseCommaSeparatedNumbers(args.pnlValues);
+  const tradingDays = Number.parseFloat(args.tradingDays);
+  const winLossPercent = Number.parseFloat(args.winLossPercent);
+  const streak = Number.parseFloat(args.streak);
+  const avgPerDay = Number.parseFloat(args.avgPerDay);
+  const maxDrawdown = Number.parseFloat(args.maxDrawdown);
+  const barLab = parseCommaSeparatedStrings(args.barLabels);
+  const barP = parseCommaSeparatedNumbers(args.barProfit);
+  const barL = parseCommaSeparatedNumbers(args.barLoss);
+  const heatmap = parseHeatmapText(args.heatmapText);
+
+  const hasAny =
+    labels.length > 0 ||
+    values.length > 0 ||
+    args.tradingDays.trim() !== "" ||
+    args.winLossPercent.trim() !== "" ||
+    args.streak.trim() !== "" ||
+    args.avgPerDay.trim() !== "" ||
+    args.maxDrawdown.trim() !== "" ||
+    barLab.length > 0 ||
+    barP.length > 0 ||
+    barL.length > 0 ||
+    heatmap.length > 0;
+
+  if (!hasAny) return undefined;
+
+  return {
+    pnlChart: { labels, values },
+    backtestSummary: {
+      tradingDays: Number.isFinite(tradingDays) ? tradingDays : 0,
+      winLossPercent: Number.isFinite(winLossPercent) ? winLossPercent : 0,
+      streak: Number.isFinite(streak) ? streak : 0,
+      avgPerDay: Number.isFinite(avgPerDay) ? avgPerDay : 0,
+      maxDrawdown: Number.isFinite(maxDrawdown) ? maxDrawdown : 0,
+    },
+    maxProfitLoss: {
+      labels: barLab,
+      profit: barP,
+      loss: barL,
+    },
+    daywiseBreakdown: { heatmap },
+  };
+}
+
+function hydratePerformanceFields(pm: unknown): {
+  pnlLabels: string;
+  pnlValues: string;
+  tradingDays: string;
+  winLossPercent: string;
+  streak: string;
+  avgPerDay: string;
+  maxDrawdown: string;
+  barLabels: string;
+  barProfit: string;
+  barLoss: string;
+  heatmapText: string;
+  jsonOverride: string;
+} {
+  const empty = {
+    pnlLabels: "",
+    pnlValues: "",
+    tradingDays: "",
+    winLossPercent: "",
+    streak: "",
+    avgPerDay: "",
+    maxDrawdown: "",
+    barLabels: "",
+    barProfit: "",
+    barLoss: "",
+    heatmapText: "",
+    jsonOverride: "",
+  };
+  if (!pm || typeof pm !== "object") return empty;
+  const o = pm as Record<string, unknown>;
+
+  try {
+    const pc = o.pnlChart as Record<string, unknown> | undefined;
+    const bs = o.backtestSummary as Record<string, unknown> | undefined;
+    const mpl = o.maxProfitLoss as Record<string, unknown> | undefined;
+    const dw = o.daywiseBreakdown as Record<string, unknown> | undefined;
+
+    const labels = Array.isArray(pc?.labels)
+      ? (pc!.labels as unknown[]).map(String).join(", ")
+      : "";
+    const values = Array.isArray(pc?.values)
+      ? (pc!.values as unknown[])
+          .map((x) => (typeof x === "number" ? String(x) : ""))
+          .filter(Boolean)
+          .join(", ")
+      : "";
+
+    const heatArr = dw?.heatmap;
+    let heatmapText = "";
+    if (Array.isArray(heatArr)) {
+      heatmapText = JSON.stringify(heatArr, null, 2);
+    }
+
+    return {
+      pnlLabels: labels,
+      pnlValues: values,
+      tradingDays:
+        typeof bs?.tradingDays === "number" ? String(bs.tradingDays) : "",
+      winLossPercent:
+        typeof bs?.winLossPercent === "number" ? String(bs.winLossPercent) : "",
+      streak: typeof bs?.streak === "number" ? String(bs.streak) : "",
+      avgPerDay: typeof bs?.avgPerDay === "number" ? String(bs.avgPerDay) : "",
+      maxDrawdown:
+        typeof bs?.maxDrawdown === "number" ? String(bs.maxDrawdown) : "",
+      barLabels: Array.isArray(mpl?.labels)
+        ? (mpl!.labels as unknown[]).map(String).join(", ")
+        : "",
+      barProfit: Array.isArray(mpl?.profit)
+        ? (mpl!.profit as unknown[])
+            .map((x) => (typeof x === "number" ? String(x) : ""))
+            .filter(Boolean)
+            .join(", ")
+        : "",
+      barLoss: Array.isArray(mpl?.loss)
+        ? (mpl!.loss as unknown[])
+            .map((x) => (typeof x === "number" ? String(x) : ""))
+            .filter(Boolean)
+            .join(", ")
+        : "",
+      heatmapText,
+      jsonOverride: "",
+    };
+  } catch {
+    return { ...empty, jsonOverride: JSON.stringify(pm, null, 2) };
+  }
+}
+
 export default function AdminStrategiesPage() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [cosmicApiKey, setCosmicApiKey] = useState("");
+  const [cosmicApiSecret, setCosmicApiSecret] = useState("");
   const [slippage, setSlippage] = useState("0.5");
   const [monthlyFee, setMonthlyFee] = useState("");
   const [profitShare, setProfitShare] = useState("20");
   const [minCapital, setMinCapital] = useState("");
 
+  const [performanceJsonOverride, setPerformanceJsonOverride] = useState("");
+  const [pnlLabels, setPnlLabels] = useState("");
+  const [pnlValues, setPnlValues] = useState("");
+  const [tradingDays, setTradingDays] = useState("");
+  const [winLossPercent, setWinLossPercent] = useState("");
+  const [streak, setStreak] = useState("");
+  const [avgPerDay, setAvgPerDay] = useState("");
+  const [maxDrawdown, setMaxDrawdown] = useState("");
+  const [barLabels, setBarLabels] = useState("");
+  const [barProfit, setBarProfit] = useState("");
+  const [barLoss, setBarLoss] = useState("");
+  const [heatmapText, setHeatmapText] = useState("");
+
   const loadStrategies = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/strategies`);
+      const res = await fetch(`${API_BASE}/strategies`, { headers: authHeaders() });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
@@ -53,7 +321,66 @@ export default function AdminStrategiesPage() {
     void loadStrategies();
   }, [loadStrategies]);
 
-  async function handleCreateStrategy(e: React.FormEvent) {
+  function resetForm() {
+    setEditingId(null);
+    setTitle("");
+    setDescription("");
+    setCosmicApiKey("");
+    setCosmicApiSecret("");
+    setSlippage("0.5");
+    setMonthlyFee("");
+    setProfitShare("20");
+    setMinCapital("");
+    setPerformanceJsonOverride("");
+    setPnlLabels("");
+    setPnlValues("");
+    setTradingDays("");
+    setWinLossPercent("");
+    setStreak("");
+    setAvgPerDay("");
+    setMaxDrawdown("");
+    setBarLabels("");
+    setBarProfit("");
+    setBarLoss("");
+    setHeatmapText("");
+  }
+
+  function openCreateModal() {
+    resetForm();
+    setFormError(null);
+    setModalOpen(true);
+  }
+
+  function openEditModal(s: Strategy) {
+    setEditingId(s.id);
+    setFormError(null);
+    setTitle(s.title);
+    setDescription(s.description);
+    setCosmicApiKey(s.cosmicApiKey);
+    setCosmicApiSecret(s.cosmicApiSecret ?? "");
+    setSlippage(String(s.slippage));
+    setMonthlyFee(String(s.monthlyFee));
+    setProfitShare(String(s.profitShare));
+    setMinCapital(String(s.minCapital));
+
+    const h = hydratePerformanceFields(s.performanceMetrics);
+    setPerformanceJsonOverride(h.jsonOverride);
+    setPnlLabels(h.pnlLabels);
+    setPnlValues(h.pnlValues);
+    setTradingDays(h.tradingDays);
+    setWinLossPercent(h.winLossPercent);
+    setStreak(h.streak);
+    setAvgPerDay(h.avgPerDay);
+    setMaxDrawdown(h.maxDrawdown);
+    setBarLabels(h.barLabels);
+    setBarProfit(h.barProfit);
+    setBarLoss(h.barLoss);
+    setHeatmapText(h.heatmapText);
+
+    setModalOpen(true);
+  }
+
+  async function handleSubmitStrategy(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setFormError(null);
@@ -74,20 +401,52 @@ export default function AdminStrategiesPage() {
       return;
     }
 
+    let performanceMetrics: PerformanceMetricsPayload | undefined;
     try {
-      const res = await fetch(`${API_BASE}/strategies`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description,
-          cosmicApiKey,
-          slippage: slippageNum,
-          monthlyFee: monthlyFeeNum,
-          profitShare: profitShareNum,
-          minCapital: minCapitalNum,
-        }),
+      performanceMetrics = buildPerformanceMetrics({
+        performanceJsonOverride,
+        pnlLabels,
+        pnlValues,
+        tradingDays,
+        winLossPercent,
+        streak,
+        avgPerDay,
+        maxDrawdown,
+        barLabels,
+        barProfit,
+        barLoss,
+        heatmapText,
       });
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Invalid performance data");
+      setSubmitting(false);
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      title,
+      description,
+      cosmicApiKey,
+      cosmicApiSecret,
+      slippage: slippageNum,
+      monthlyFee: monthlyFeeNum,
+      profitShare: profitShareNum,
+      minCapital: minCapitalNum,
+    };
+    if (performanceMetrics !== undefined) {
+      payload.performanceMetrics = performanceMetrics;
+    }
+
+    try {
+      const isEdit = editingId !== null;
+      const res = await fetch(
+        isEdit ? `${API_BASE}/strategies/${editingId}` : `${API_BASE}/strategies`,
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        },
+      );
       const body: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {
         const msg =
@@ -96,20 +455,14 @@ export default function AdminStrategiesPage() {
           "error" in body &&
           typeof (body as { error?: unknown }).error === "string"
             ? (body as { error: string }).error
-            : `Create failed (${res.status})`;
+            : `${isEdit ? "Update" : "Create"} failed (${res.status})`;
         throw new Error(msg);
       }
       setModalOpen(false);
-      setTitle("");
-      setDescription("");
-      setCosmicApiKey("");
-      setSlippage("0.5");
-      setMonthlyFee("");
-      setProfitShare("20");
-      setMinCapital("");
+      resetForm();
       await loadStrategies();
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : "Create failed");
+      setFormError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setSubmitting(false);
     }
@@ -123,15 +476,12 @@ export default function AdminStrategiesPage() {
             Strategies
           </h1>
           <p className="mt-1 text-sm text-white/55">
-            Copy-trading strategies from the admin API.
+            Link Cosmic master keys and optional performance metrics for the public strategy page.
           </p>
         </div>
         <button
           type="button"
-          onClick={() => {
-            setFormError(null);
-            setModalOpen(true);
-          }}
+          onClick={openCreateModal}
           className="rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
         >
           Add strategy
@@ -146,7 +496,7 @@ export default function AdminStrategiesPage() {
 
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-sm">
+          <table className="w-full min-w-[1020px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Title</th>
@@ -156,18 +506,19 @@ export default function AdminStrategiesPage() {
                 <th className="px-4 py-3 font-medium text-white/70">Profit %</th>
                 <th className="px-4 py-3 font-medium text-white/70">Min capital</th>
                 <th className="px-4 py-3 font-medium text-white/70">Created</th>
+                <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
                     Loading strategies…
                   </td>
                 </tr>
               ) : strategies.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
                     No strategies found.
                   </td>
                 </tr>
@@ -180,7 +531,7 @@ export default function AdminStrategiesPage() {
                     <td className="max-w-[140px] truncate px-4 py-3 font-medium text-white">
                       {s.title}
                     </td>
-                    <td className="max-w-[220px] truncate px-4 py-3 text-white/70">
+                    <td className="max-w-[200px] truncate px-4 py-3 text-white/70">
                       {s.description}
                     </td>
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.slippage}</td>
@@ -189,6 +540,15 @@ export default function AdminStrategiesPage() {
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.minCapital}</td>
                     <td className="px-4 py-3 text-white/55 tabular-nums">
                       {new Date(s.createdAt).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(s)}
+                        className="rounded-lg border border-glassBorder bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-white/10"
+                      >
+                        Edit
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -203,52 +563,79 @@ export default function AdminStrategiesPage() {
           className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="add-strategy-title"
+          aria-labelledby="strategy-modal-title"
         >
-          <div className="glass-card my-8 w-full max-w-lg border border-glassBorder p-6 shadow-2xl">
-            <h2 id="add-strategy-title" className="text-lg font-semibold text-white">
-              Add strategy
+          <div className="glass-card my-8 w-full max-w-2xl border border-glassBorder p-6 shadow-2xl">
+            <h2
+              id="strategy-modal-title"
+              className="text-lg font-semibold text-white"
+            >
+              {editingId ? "Edit strategy" : "Add strategy"}
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              POST /api/admin/strategies — all fields required by the API.
+              Cosmic credentials identify the master account; performance metrics power charts on the app.
             </p>
 
-            <form onSubmit={handleCreateStrategy} className="mt-6 space-y-4">
+            <form onSubmit={handleSubmitStrategy} className="mt-6 max-h-[calc(100vh-8rem)] space-y-6 overflow-y-auto pr-1">
               {formError && (
                 <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
                   {formError}
                 </p>
               )}
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Title</span>
-                <input
-                  type="text"
-                  required
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Description</span>
-                <textarea
-                  required
-                  rows={3}
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="mt-1 w-full resize-y rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Cosmic API key</span>
-                <input
-                  type="text"
-                  required
-                  value={cosmicApiKey}
-                  onChange={(e) => setCosmicApiKey(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </label>
+
+              <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.03] p-4">
+                <h3 className="text-sm font-semibold text-white">Basics</h3>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Title</span>
+                  <input
+                    type="text"
+                    required
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Description</span>
+                  <textarea
+                    required
+                    rows={3}
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    className="mt-1 w-full resize-y rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
+                <h3 className="text-sm font-semibold text-primary">Master account (Cosmic)</h3>
+                <p className="text-xs text-white/55">
+                  Used by the trade engine to poll open positions for this strategy.
+                </p>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Cosmic API Key</span>
+                  <input
+                    type="text"
+                    required
+                    value={cosmicApiKey}
+                    onChange={(e) => setCosmicApiKey(e.target.value)}
+                    autoComplete="off"
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Cosmic API Secret</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={cosmicApiSecret}
+                    onChange={(e) => setCosmicApiSecret(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    placeholder="Secret for the linked master account"
+                  />
+                </label>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">Slippage</span>
@@ -272,8 +659,6 @@ export default function AdminStrategiesPage() {
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">Profit share (%)</span>
                   <input
@@ -297,10 +682,179 @@ export default function AdminStrategiesPage() {
                   />
                 </label>
               </div>
-              <div className="flex justify-end gap-3 pt-2">
+
+              <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.03] p-4">
+                <h3 className="text-sm font-semibold text-white">Performance data</h3>
+                <p className="text-xs text-white/55">
+                  Stored as JSON for charts: P&amp;L line, backtest summary, profit/loss bars, and calendar heatmap.
+                </p>
+
+                <details className="group rounded-lg border border-white/10 bg-black/20 p-3">
+                  <summary className="cursor-pointer text-xs font-medium text-white/80">
+                    P&amp;L chart (line) — labels &amp; values
+                  </summary>
+                  <p className="mt-2 text-xs text-white/45">
+                    Comma-separated labels (e.g. dates) and matching numeric series for cumulative or daily P&amp;L.
+                  </p>
+                  <label className="mt-2 block">
+                    <span className="text-xs font-medium text-white/60">Labels</span>
+                    <input
+                      type="text"
+                      value={pnlLabels}
+                      onChange={(e) => setPnlLabels(e.target.value)}
+                      placeholder="Jan,Feb,Mar or 2024-01-01,2024-01-02"
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </label>
+                  <label className="mt-2 block">
+                    <span className="text-xs font-medium text-white/60">Values</span>
+                    <input
+                      type="text"
+                      value={pnlValues}
+                      onChange={(e) => setPnlValues(e.target.value)}
+                      placeholder="100,250,-50,400"
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </label>
+                </details>
+
+                <details className="group rounded-lg border border-white/10 bg-black/20 p-3">
+                  <summary className="cursor-pointer text-xs font-medium text-white/80">
+                    Backtest summary
+                  </summary>
+                  <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Trading days</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={tradingDays}
+                        onChange={(e) => setTradingDays(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Win / Loss %</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={winLossPercent}
+                        onChange={(e) => setWinLossPercent(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Streak</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={streak}
+                        onChange={(e) => setStreak(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Avg per day</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={avgPerDay}
+                        onChange={(e) => setAvgPerDay(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Max drawdown</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={maxDrawdown}
+                        onChange={(e) => setMaxDrawdown(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                  </div>
+                </details>
+
+                <details className="group rounded-lg border border-white/10 bg-black/20 p-3">
+                  <summary className="cursor-pointer text-xs font-medium text-white/80">
+                    Max profit &amp; loss (bar chart)
+                  </summary>
+                  <p className="mt-2 text-xs text-white/45">
+                    Same-length comma lists: categories, profit series, loss series.
+                  </p>
+                  <label className="mt-2 block">
+                    <span className="text-xs font-medium text-white/60">Bar labels</span>
+                    <input
+                      type="text"
+                      value={barLabels}
+                      onChange={(e) => setBarLabels(e.target.value)}
+                      placeholder="Week1,Week2,Week3"
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </label>
+                  <label className="mt-2 block">
+                    <span className="text-xs font-medium text-white/60">Profit values</span>
+                    <input
+                      type="text"
+                      value={barProfit}
+                      onChange={(e) => setBarProfit(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </label>
+                  <label className="mt-2 block">
+                    <span className="text-xs font-medium text-white/60">Loss values</span>
+                    <input
+                      type="text"
+                      value={barLoss}
+                      onChange={(e) => setBarLoss(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </label>
+                </details>
+
+                <details className="group rounded-lg border border-white/10 bg-black/20 p-3">
+                  <summary className="cursor-pointer text-xs font-medium text-white/80">
+                    Daywise breakdown (heatmap)
+                  </summary>
+                  <p className="mt-2 text-xs text-white/45">
+                    JSON array <code className="text-primary">[{`{ "date": "YYYY-MM-DD", "value": number }`}]</code>{" "}
+                    or one row per line: <code className="text-primary">2024-06-01, 12.5</code>
+                  </p>
+                  <textarea
+                    value={heatmapText}
+                    onChange={(e) => setHeatmapText(e.target.value)}
+                    rows={6}
+                    placeholder={`[\n  { "date": "2024-01-02", "value": 4 },\n  { "date": "2024-01-03", "value": 0 }\n]`}
+                    className="mt-2 w-full resize-y rounded-lg border border-glassBorder bg-black/40 px-3 py-2 font-mono text-xs text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </details>
+
+                <label className="block">
+                  <span className="text-xs font-medium text-amber-200/90">
+                    Full JSON override (optional)
+                  </span>
+                  <p className="mt-1 text-xs text-white/45">
+                    If filled, this replaces the structured fields above for{" "}
+                    <code className="text-white/70">performanceMetrics</code>.
+                  </p>
+                  <textarea
+                    value={performanceJsonOverride}
+                    onChange={(e) => setPerformanceJsonOverride(e.target.value)}
+                    rows={5}
+                    placeholder='Paste complete JSON object — must match app expectations or charts may break.'
+                    className="mt-2 w-full resize-y rounded-lg border border-amber-500/30 bg-black/40 px-3 py-2 font-mono text-xs text-white outline-none focus:ring-2 focus:ring-amber-500/40"
+                  />
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t border-white/10 pt-4">
                 <button
                   type="button"
-                  onClick={() => setModalOpen(false)}
+                  onClick={() => {
+                    setModalOpen(false);
+                    resetForm();
+                  }}
                   className="rounded-lg px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/10"
                 >
                   Cancel
@@ -310,7 +864,13 @@ export default function AdminStrategiesPage() {
                   disabled={submitting}
                   className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
                 >
-                  {submitting ? "Creating…" : "Create strategy"}
+                  {submitting
+                    ? editingId
+                      ? "Saving…"
+                      : "Creating…"
+                    : editingId
+                      ? "Save changes"
+                      : "Create strategy"}
                 </button>
               </div>
             </form>

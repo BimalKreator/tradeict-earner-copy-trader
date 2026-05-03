@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "ts-node-dev src/server.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "db:reset-strategy": "npm run build && node dist/scripts/resetDefaultStrategy.js"
   },
   "keywords": [],
   "author": "",

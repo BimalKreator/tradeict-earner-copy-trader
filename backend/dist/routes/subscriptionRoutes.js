@@ -6,6 +6,8 @@ export function createSubscriptionRoutes(prisma) {
     const jwtAuth = authenticateJwt();
     const subscription = createSubscriptionController(prisma);
     router.post("/subscribe", jwtAuth, subscription.subscribe);
+    router.get("/strategies", jwtAuth, subscription.listStrategies);
+    router.get("/strategies/:id", jwtAuth, subscription.getStrategy);
     return router;
 }
 //# sourceMappingURL=subscriptionRoutes.js.map
