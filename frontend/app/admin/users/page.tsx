@@ -1,7 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+const ENV_API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+/** Backend prefix: env, or same-origin `/api` when env is missing (typical reverse-proxy setup). */
+function resolveAdminApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (typeof window !== "undefined") {
+    return `${window.location.origin.replace(/\/$/, "")}/api`;
+  }
+  return "";
+}
+
+function authHeaders(): HeadersInit {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 type AdminUser = {
   id: string;
@@ -12,6 +32,8 @@ type AdminUser = {
 };
 
 export default function AdminUsersPage() {
+  const apiBase = useMemo(() => resolveAdminApiBase(), []);
+
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +50,9 @@ export default function AdminUsersPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users`);
+      const res = await fetch(`${apiBase}/admin/users`, {
+        headers: authHeaders(),
+      });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
@@ -39,7 +63,7 @@ export default function AdminUsersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     void loadUsers();
@@ -50,9 +74,9 @@ export default function AdminUsersPage() {
     setSubmitting(true);
     setFormError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users`, {
+      const res = await fetch(`${apiBase}/admin/users`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify({
           email,
           password,
