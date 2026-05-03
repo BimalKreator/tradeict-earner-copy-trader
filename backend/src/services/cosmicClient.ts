@@ -3,7 +3,9 @@ import { parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
 import {
   scrapeCosmicPositionsData,
   type CosmicScrapeMeta,
+  type CosmicScrapeOptions,
 } from "./cosmicBrowserScraper.js";
+import { coerceScraperMappings } from "./cosmicPortfolioDomExtract.js";
 
 export type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
@@ -12,6 +14,17 @@ export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositio
  * Logs into Cosmic via headless browser (see `cosmicBrowserScraper.ts` + env vars),
  * collects position JSON, maps symbols to Delta perpetuals, and returns led trades.
  */
+function buildCosmicScrapeOptions(args: {
+  captureScreenshot?: boolean;
+  scraperMappingsJson?: unknown;
+}): CosmicScrapeOptions | undefined {
+  const mapped = coerceScraperMappings(args.scraperMappingsJson);
+  const opts: CosmicScrapeOptions = {};
+  if (args.captureScreenshot) opts.captureScreenshot = true;
+  if (mapped !== undefined) opts.scraperMappings = mapped;
+  return Object.keys(opts).length > 0 ? opts : undefined;
+}
+
 function tradesFromPayloads(payloads: unknown[]): CosmicLedTrade[] {
   const byId = new Map<string, CosmicLedTrade>();
   for (const chunk of payloads) {
@@ -25,10 +38,12 @@ function tradesFromPayloads(payloads: unknown[]): CosmicLedTrade[] {
 export async function fetchCosmicOpenPositions(
   cosmicEmail: string,
   cosmicPassword: string,
+  scraperMappingsJson?: unknown,
 ): Promise<CosmicLedTrade[]> {
   const { payloads } = await scrapeCosmicPositionsData(
     cosmicEmail.trim(),
     cosmicPassword.trim(),
+    buildCosmicScrapeOptions({ scraperMappingsJson }),
   );
   return tradesFromPayloads(payloads);
 }
@@ -38,6 +53,7 @@ export async function probeCosmicOpenPositions(
   cosmicEmail: string,
   cosmicPassword: string,
   captureScreenshot: boolean,
+  scraperMappingsJson?: unknown,
 ): Promise<{
   trades: CosmicLedTrade[];
   screenshotBase64?: string;
@@ -47,7 +63,7 @@ export async function probeCosmicOpenPositions(
     await scrapeCosmicPositionsData(
       cosmicEmail.trim(),
       cosmicPassword.trim(),
-      captureScreenshot ? { captureScreenshot: true } : undefined,
+      buildCosmicScrapeOptions({ captureScreenshot, scraperMappingsJson }),
     );
   const out: {
     trades: CosmicLedTrade[];

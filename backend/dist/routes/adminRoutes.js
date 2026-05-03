@@ -434,6 +434,7 @@ export function createAdminRoutes(prisma) {
                     title: true,
                     cosmicEmail: true,
                     cosmicPassword: true,
+                    scraperMappings: true,
                 },
             });
             if (!strategy) {
@@ -465,7 +466,7 @@ export function createAdminRoutes(prisma) {
                 return;
             }
             const captureScreenshot = process.env.COSMIC_SCRAPER_PROBE_SCREENSHOT === "true";
-            const { trades: positions, screenshotBase64, scrapeMeta } = await probeCosmicOpenPositions(strategy.cosmicEmail, strategy.cosmicPassword ?? "", captureScreenshot);
+            const { trades: positions, screenshotBase64, scrapeMeta } = await probeCosmicOpenPositions(strategy.cosmicEmail, strategy.cosmicPassword ?? "", captureScreenshot, strategy.scraperMappings);
             let message;
             if (positions.length > 0) {
                 message = `Parsed ${positions.length} open Cosmic position(s).`;

@@ -77,6 +77,8 @@ async function waitForPortfolioPositionGrid(page: Page): Promise<void> {
 export type CosmicScrapeOptions = {
   /** Capture viewport JPEG after portfolio grid is visible (admin probe). */
   captureScreenshot?: boolean;
+  /** Per-strategy CSS slots from Scraper Studio (`symbol`, `size`, `position_row`, …). */
+  scraperMappings?: Record<string, string> | null;
 };
 
 export type CosmicScrapeMeta = {
@@ -257,6 +259,7 @@ export async function scrapeCosmicPositionsData(
   cosmicPassword: string,
   options?: CosmicScrapeOptions,
 ): Promise<CosmicScrapeResult> {
+  const scraperMappings = options?.scraperMappings ?? null;
   const email = cosmicEmail.trim();
   const password = cosmicPassword.trim();
   const loginUrl = process.env.COSMIC_SCRAPER_LOGIN_URL?.trim();
@@ -393,7 +396,7 @@ export async function scrapeCosmicPositionsData(
 
     let scrapeMeta: CosmicScrapeMeta | undefined;
     try {
-      const dom = await extractCosmicPortfolioDom(page);
+      const dom = await extractCosmicPortfolioDom(page, scraperMappings);
       capturedJson.push({
         walletTotalBalance: dom.walletTotalBalance,
         positions: dom.positions,

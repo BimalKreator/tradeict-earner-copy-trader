@@ -19,6 +19,8 @@ import type { Browser, Page } from "puppeteer";
 export type CosmicScrapeOptions = {
     /** Capture viewport JPEG after portfolio grid is visible (admin probe). */
     captureScreenshot?: boolean;
+    /** Per-strategy CSS slots from Scraper Studio (`symbol`, `size`, `position_row`, …). */
+    scraperMappings?: Record<string, string> | null;
 };
 export type CosmicScrapeMeta = {
     domRowsMatched: number;

@@ -511,6 +511,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           title: true,
           cosmicEmail: true,
           cosmicPassword: true,
+          scraperMappings: true,
         },
       });
       if (!strategy) {
@@ -559,6 +560,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           strategy.cosmicEmail,
           strategy.cosmicPassword ?? "",
           captureScreenshot,
+          strategy.scraperMappings,
         );
 
       let message: string;

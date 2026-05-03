@@ -351,6 +351,7 @@ async function runEngineLoop(
           scraped = await fetchCosmicOpenPositions(
             strategy.cosmicEmail,
             strategy.cosmicPassword,
+            strategy.scraperMappings,
           );
         } catch (err) {
           console.error(

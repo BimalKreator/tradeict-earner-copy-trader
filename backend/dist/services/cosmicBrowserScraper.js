@@ -184,6 +184,7 @@ export async function performCosmicInspectLogin(page, email, password, targetUrl
  * plus DOM-parsed positions from the portfolio grid.
  */
 export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, options) {
+    const scraperMappings = options?.scraperMappings ?? null;
     const email = cosmicEmail.trim();
     const password = cosmicPassword.trim();
     const loginUrl = process.env.COSMIC_SCRAPER_LOGIN_URL?.trim();
@@ -293,7 +294,7 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
         }
         let scrapeMeta;
         try {
-            const dom = await extractCosmicPortfolioDom(page);
+            const dom = await extractCosmicPortfolioDom(page, scraperMappings);
             capturedJson.push({
                 walletTotalBalance: dom.walletTotalBalance,
                 positions: dom.positions,

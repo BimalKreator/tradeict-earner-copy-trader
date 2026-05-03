@@ -12,9 +12,12 @@ export type PortfolioDomExtract = {
     domRowsMatched: number;
     extractError?: string;
 };
+/** Normalize Prisma JSON / API payloads into string selectors for `page.evaluate`. */
+export declare function coerceScraperMappings(raw: unknown): Record<string, string> | undefined;
 /**
- * Resilient Cosmic `/portfolio` parse: `bg-table-row` + innerText lines + regex.
+ * Resilient Cosmic `/portfolio` parse: optional per-strategy CSS mappings from Scraper Studio,
+ * then `bg-table-row` + innerText lines + regex fallbacks.
  * Delta mapping (`ETHUSD` → `ETHUSDT`) runs later in `parseCosmicPositionsPayload`.
  */
-export declare function extractCosmicPortfolioDom(page: Page): Promise<PortfolioDomExtract>;
+export declare function extractCosmicPortfolioDom(page: Page, scraperMappings?: Record<string, string> | null): Promise<PortfolioDomExtract>;
 //# sourceMappingURL=cosmicPortfolioDomExtract.d.ts.map

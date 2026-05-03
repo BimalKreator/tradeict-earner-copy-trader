@@ -247,7 +247,7 @@ async function runEngineLoop(prisma, cancelled, dedupeByStrategy) {
             for (const strategy of strategies) {
                 let scraped;
                 try {
-                    scraped = await fetchCosmicOpenPositions(strategy.cosmicEmail, strategy.cosmicPassword);
+                    scraped = await fetchCosmicOpenPositions(strategy.cosmicEmail, strategy.cosmicPassword, strategy.scraperMappings);
                 }
                 catch (err) {
                     console.error(`[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`, err);

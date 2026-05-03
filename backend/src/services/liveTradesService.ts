@@ -227,6 +227,7 @@ export async function getAdminGroupedLiveTrades(
       title: true,
       cosmicEmail: true,
       cosmicPassword: true,
+      scraperMappings: true,
     },
   });
 
@@ -248,6 +249,7 @@ export async function getAdminGroupedLiveTrades(
       cosmicList = await fetchCosmicOpenPositions(
         strat.cosmicEmail,
         strat.cosmicPassword,
+        strat.scraperMappings,
       );
     } catch {
       cosmicList = [];
