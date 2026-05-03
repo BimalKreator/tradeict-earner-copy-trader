@@ -62,15 +62,13 @@ async function main(): Promise<void> {
       data: {
         email: email.trim().toLowerCase(),
         password: passwordHash,
+        name,
         role: Role.ADMIN,
       },
     });
 
     console.log(
-      `Created ADMIN user id=${user.id} email=${user.email} displayName=${name}`,
-    );
-    console.log(
-      "(User model has no name column; displayName is for your records only.)",
+      `Created ADMIN user id=${user.id} email=${user.email} name=${user.name ?? name}`,
     );
   } finally {
     await prisma.$disconnect();

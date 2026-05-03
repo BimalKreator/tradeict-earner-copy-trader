@@ -47,6 +47,8 @@ model User {
   id            String              @id @default(uuid())
   email         String              @unique
   password      String
+  name          String?
+  mobile        String?
   role          Role                @default(USER)
   status        UserStatus          @default(ACTIVE)
   otpCode       String?
@@ -64,6 +66,16 @@ model User {
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
   activities    UserActivity[]
+}
+
+model OtpRecord {
+  id        String   @id @default(uuid())
+  email     String
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
 }
 
 model UserActivity {

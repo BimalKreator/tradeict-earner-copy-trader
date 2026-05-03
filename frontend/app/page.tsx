@@ -60,7 +60,7 @@ export default function Home() {
             </p>
             <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/login"
+                href="/signup"
                 className="inline-flex w-full max-w-xs items-center justify-center rounded-xl bg-primary px-8 py-3.5 text-base font-semibold text-white shadow-xl shadow-primary/30 transition hover:bg-primary/90 sm:w-auto"
               >
                 Get started

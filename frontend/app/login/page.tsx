@@ -1,14 +1,18 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 
 const AUTH_API = "http://localhost:5000/api/auth";
 
 type Step = "email" | "otp";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const registeredSuccess = searchParams.get("registered") === "1";
+
   const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -20,7 +24,7 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/send-otp`, {
+      const res = await fetch(`${AUTH_API}/send-login-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -103,6 +107,12 @@ export default function LoginPage() {
               : "Check your inbox for the 6-digit code."}
           </p>
         </div>
+
+        {registeredSuccess && step === "email" && (
+          <div className="mb-6 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+            Account created successfully. Sign in with your email and the code we send you.
+          </div>
+        )}
 
         {error && (
           <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -188,7 +198,33 @@ export default function LoginPage() {
             </div>
           </form>
         )}
+
+        <p className="mt-8 text-center text-sm text-white/55">
+          Don&apos;t have an account?{" "}
+          <Link
+            href="/signup"
+            className="font-medium text-primary underline-offset-2 transition hover:underline"
+          >
+            Sign up
+          </Link>
+        </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
+          <div className="glass-card w-full max-w-md border border-glassBorder p-8 shadow-2xl">
+            <div className="h-48 animate-pulse rounded-lg bg-white/5" />
+          </div>
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
