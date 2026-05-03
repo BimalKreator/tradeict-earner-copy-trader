@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 const links = [
   { href: "/admin", label: "Dashboard" },
@@ -14,6 +14,12 @@ const links = [
 
 export function AdminSidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+
+  function handleLogout() {
+    localStorage.removeItem("token");
+    router.replace("/login");
+  }
 
   return (
     <aside className="glass-card flex h-screen w-64 shrink-0 flex-col border border-glassBorder p-6 md:sticky md:top-0">
@@ -44,9 +50,16 @@ export function AdminSidebar() {
           );
         })}
       </nav>
-      <p className="mt-auto pt-6 text-xs text-white/40">
-        Midnight Neon · Admin
-      </p>
+      <div className="mt-auto space-y-3 pt-6">
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="w-full rounded-lg border border-white/15 bg-white/[0.04] px-3 py-2.5 text-sm font-medium text-white/80 transition hover:bg-white/10 hover:text-white"
+        >
+          Logout
+        </button>
+        <p className="text-xs text-white/40">Midnight Neon · Admin</p>
+      </div>
     </aside>
   );
 }

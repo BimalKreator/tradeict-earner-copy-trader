@@ -13,6 +13,8 @@ export function createUserController(prisma) {
                     email: true,
                     name: true,
                     mobile: true,
+                    role: true,
+                    status: true,
                 },
             });
             if (!user) {

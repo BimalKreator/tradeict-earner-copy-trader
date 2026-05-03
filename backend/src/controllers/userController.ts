@@ -21,6 +21,8 @@ export function createUserController(prisma: PrismaClient) {
           email: true,
           name: true,
           mobile: true,
+          role: true,
+          status: true,
         },
       });
 

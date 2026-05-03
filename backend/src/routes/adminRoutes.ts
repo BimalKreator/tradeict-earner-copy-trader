@@ -6,10 +6,7 @@ import {
   Role,
   UserStatus,
 } from "@prisma/client";
-import {
-  authenticateJwt,
-  requireAdmin,
-} from "../middleware/authMiddleware.js";
+import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
 import { probeCosmicOpenPositions } from "../services/cosmicClient.js";
 import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
 
@@ -27,7 +24,8 @@ function parsePerformanceMetrics(
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const adminOnly = [authenticateJwt(), requireAdmin(prisma)];
+
+  router.use(authenticateToken(), isAdmin(prisma));
 
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });
@@ -364,7 +362,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/revenue", ...adminOnly, async (_req, res, next) => {
+  router.get("/revenue", async (_req, res, next) => {
     try {
       const now = new Date();
       const monthStart = new Date(
@@ -415,7 +413,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /** Same payload as `GET /api/live-trades/admin/grouped` — lives under `/api/admin/*` for proxies that only forward admin API paths. */
-  router.get("/live-trades/grouped", ...adminOnly, async (_req, res, next) => {
+  router.get("/live-trades/grouped", async (_req, res, next) => {
     try {
       const strategies = await getAdminGroupedLiveTrades(prisma);
       res.json({ strategies });
@@ -427,7 +425,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   /**
    * Runs one Puppeteer scrape with stored Cosmic credentials (can take ~30–120s).
    */
-  router.post("/strategies/:id/cosmic-probe", ...adminOnly, async (req, res, next) => {
+  router.post("/strategies/:id/cosmic-probe", async (req, res, next) => {
     try {
       const rawId = req.params.id;
       const id =

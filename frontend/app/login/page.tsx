@@ -7,6 +7,11 @@ const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "email" | "otp";
 
+function safePostLoginRedirect(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
+  return raw;
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -82,7 +87,7 @@ function LoginForm() {
       }
       const token = (body as { token: string }).token;
       localStorage.setItem("token", token);
-      router.push("/dashboard");
+      router.push(safePostLoginRedirect(searchParams.get("redirect")));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Verification failed");
     } finally {
