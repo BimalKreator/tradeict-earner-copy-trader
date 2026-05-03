@@ -1,5 +1,5 @@
 import { SubscriptionStatus, TradeStatus, UserStatus, } from "@prisma/client";
-import { fetchCosmicOpenPositions, } from "./cosmicClient.js";
+import { fetchCosmicOpenPositionsWithMeta, } from "./cosmicClient.js";
 import { fetchDeltaOpenPositions, fetchDeltaTicker, } from "./exchangeService.js";
 function compactSymbolKey(s) {
     return s.replace(/[/:]/g, "").toUpperCase();
@@ -153,18 +153,50 @@ export async function getAdminGroupedLiveTrades(prisma) {
     for (const strat of strategies) {
         const credentialsPresent = Boolean(strat.cosmicEmail?.trim() && strat.cosmicPassword?.trim());
         let cosmicList = [];
+        let fetchException;
+        let lastScrape;
         try {
-            cosmicList = await fetchCosmicOpenPositions(strat.cosmicEmail, strat.cosmicPassword, strat.scraperMappings);
+            const scraped = await fetchCosmicOpenPositionsWithMeta(strat.cosmicEmail, strat.cosmicPassword, strat.scraperMappings);
+            cosmicList = scraped.trades;
+            const m = scraped.scrapeMeta;
+            const diag = {
+                payloadChunkCount: scraped.payloadChunkCount,
+                payloadPositionRows: scraped.payloadPositionRows,
+                tradesAfterDeltaFilter: scraped.trades.length,
+                walletBalanceDom: m?.walletBalanceDom ?? null,
+            };
+            if (m?.domRowsMatched !== undefined)
+                diag.domRowsMatched = m.domRowsMatched;
+            if (m?.domPositionsParsed !== undefined) {
+                diag.domPositionsParsed = m.domPositionsParsed;
+            }
+            if (m?.scrapeAbortedReason !== undefined) {
+                diag.scrapeAbortedReason = m.scrapeAbortedReason;
+            }
+            if (m?.extractError !== undefined)
+                diag.extractError = m.extractError;
+            lastScrape = diag;
         }
-        catch {
+        catch (err) {
             cosmicList = [];
+            fetchException =
+                err instanceof Error ? err.message : String(err ?? "scrape failed");
+            console.error(`[live-trades] Cosmic scrape threw for "${strat.title}" (${strat.id}):`, fetchException);
         }
+        const metaBase = {
+            scraperEnvConfigured,
+            credentialsPresent,
+            ...(fetchException !== undefined ? { fetchException } : {}),
+            ...(lastScrape !== undefined ? { lastScrape } : {}),
+        };
         if (scraperEnvConfigured &&
             credentialsPresent &&
             cosmicList.length === 0) {
             console.warn(`[live-trades] Zero Cosmic positions for "${strat.title}" (${strat.id}). ` +
-                "If the master has open trades: verify login env, DOM scrape (Test scrape), " +
-                "and that symbols map to Delta (e.g. ETHUSD→ETHUSDT).");
+                `domRows=${lastScrape?.domRowsMatched ?? "?"}, domParsed=${lastScrape?.domPositionsParsed ?? "?"}, ` +
+                `payloadRows=${lastScrape?.payloadPositionRows ?? "?"}, deltaTrades=${lastScrape?.tradesAfterDeltaFilter ?? "?"}, ` +
+                `abort=${lastScrape?.scrapeAbortedReason ?? "none"}, extract=${lastScrape?.extractError ?? "none"}, ` +
+                `fetchErr=${fetchException ?? "none"}`);
         }
         const subs = await prisma.userSubscription.findMany({
             where: {
@@ -197,7 +229,7 @@ export async function getAdminGroupedLiveTrades(prisma) {
                 strategyId: strat.id,
                 strategyTitle: strat.title,
                 groups,
-                cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+                cosmicMeta: metaBase,
             });
             continue;
         }
@@ -234,7 +266,7 @@ export async function getAdminGroupedLiveTrades(prisma) {
             strategyId: strat.id,
             strategyTitle: strat.title,
             groups,
-            cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+            cosmicMeta: metaBase,
         });
     }
     return out;

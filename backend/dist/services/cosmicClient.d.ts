@@ -2,6 +2,13 @@ import type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 import { type CosmicScrapeMeta } from "./cosmicBrowserScraper.js";
 export type { CosmicLedTrade } from "./cosmicPositionsParse.js";
 export { buildCosmicTradeId, parseCosmicPositionsPayload } from "./cosmicPositionsParse.js";
+/** Same as `fetchCosmicOpenPositions` plus scrape meta for admin diagnostics. */
+export declare function fetchCosmicOpenPositionsWithMeta(cosmicEmail: string, cosmicPassword: string, scraperMappingsJson?: unknown, scraperStudioSelectorsJson?: unknown): Promise<{
+    trades: CosmicLedTrade[];
+    scrapeMeta?: CosmicScrapeMeta;
+    payloadChunkCount: number;
+    payloadPositionRows: number;
+}>;
 export declare function fetchCosmicOpenPositions(cosmicEmail: string, cosmicPassword: string, scraperMappingsJson?: unknown, scraperStudioSelectorsJson?: unknown): Promise<CosmicLedTrade[]>;
 /** Admin probe: same scrape plus optional JPEG screenshot of the logged-in viewport. */
 export declare function probeCosmicOpenPositions(cosmicEmail: string, cosmicPassword: string, captureScreenshot: boolean, scraperMappingsJson?: unknown, scraperStudioSelectorsJson?: unknown): Promise<{

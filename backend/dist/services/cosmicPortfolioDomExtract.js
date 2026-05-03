@@ -7,7 +7,20 @@ export const COSMIC_PORTFOLIO_ROW_GRID_SELECTOR_FALLBACK = '[class*="1.5fr_1fr_1
 export const COSMIC_PORTFOLIO_ROW_BG_FALLBACK = 'div.bg-table-row[class*="1.5fr_1fr_1fr_1fr_1fr_1fr_1fr_auto"]';
 /** Normalize Prisma JSON / API payloads into string selectors for `page.evaluate`. */
 export function coerceScraperMappings(raw) {
-    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw == null)
+        return undefined;
+    if (typeof raw === "string") {
+        const t = raw.trim();
+        if (!t || t === "null")
+            return undefined;
+        try {
+            return coerceScraperMappings(JSON.parse(t));
+        }
+        catch {
+            return undefined;
+        }
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) {
         return undefined;
     }
     const out = {};

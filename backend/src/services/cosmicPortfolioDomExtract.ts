@@ -24,7 +24,17 @@ export type PortfolioDomExtract = {
 export function coerceScraperMappings(
   raw: unknown,
 ): Record<string, string> | undefined {
-  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (raw == null) return undefined;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (!t || t === "null") return undefined;
+    try {
+      return coerceScraperMappings(JSON.parse(t) as unknown);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
     return undefined;
   }
   const out: Record<string, string> = {};

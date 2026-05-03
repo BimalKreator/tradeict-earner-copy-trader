@@ -20,6 +20,16 @@ export type AdminCosmicGroupRow = {
     cosmic: LiveTradeRow;
     followers: AdminFollowerRow[];
 };
+export type CosmicScrapeDiagnostics = {
+    payloadChunkCount: number;
+    payloadPositionRows: number;
+    tradesAfterDeltaFilter: number;
+    domRowsMatched?: number;
+    domPositionsParsed?: number;
+    walletBalanceDom?: string | null;
+    scrapeAbortedReason?: string;
+    extractError?: string;
+};
 export type AdminStrategyLiveSection = {
     strategyId: string;
     strategyTitle: string;
@@ -28,6 +38,10 @@ export type AdminStrategyLiveSection = {
     cosmicMeta: {
         scraperEnvConfigured: boolean;
         credentialsPresent: boolean;
+        /** Set when Puppeteer / scrape threw before returning structured meta. */
+        fetchException?: string;
+        /** Latest headless scrape stats (admin Live trades runs one scrape per load). */
+        lastScrape?: CosmicScrapeDiagnostics;
     };
 };
 export declare function getUserLiveTradeRows(prisma: PrismaClient, userId: string): Promise<UserLiveTradeRow[]>;

@@ -5,7 +5,7 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
-  fetchCosmicOpenPositions,
+  fetchCosmicOpenPositionsWithMeta,
   type CosmicLedTrade,
 } from "./cosmicClient.js";
 import {
@@ -40,6 +40,17 @@ export type AdminCosmicGroupRow = {
   followers: AdminFollowerRow[];
 };
 
+export type CosmicScrapeDiagnostics = {
+  payloadChunkCount: number;
+  payloadPositionRows: number;
+  tradesAfterDeltaFilter: number;
+  domRowsMatched?: number;
+  domPositionsParsed?: number;
+  walletBalanceDom?: string | null;
+  scrapeAbortedReason?: string;
+  extractError?: string;
+};
+
 export type AdminStrategyLiveSection = {
   strategyId: string;
   strategyTitle: string;
@@ -48,6 +59,10 @@ export type AdminStrategyLiveSection = {
   cosmicMeta: {
     scraperEnvConfigured: boolean;
     credentialsPresent: boolean;
+    /** Set when Puppeteer / scrape threw before returning structured meta. */
+    fetchException?: string;
+    /** Latest headless scrape stats (admin Live trades runs one scrape per load). */
+    lastScrape?: CosmicScrapeDiagnostics;
   };
 };
 
@@ -245,15 +260,47 @@ export async function getAdminGroupedLiveTrades(
     );
 
     let cosmicList: CosmicLedTrade[] = [];
+    let fetchException: string | undefined;
+    let lastScrape: CosmicScrapeDiagnostics | undefined;
     try {
-      cosmicList = await fetchCosmicOpenPositions(
+      const scraped = await fetchCosmicOpenPositionsWithMeta(
         strat.cosmicEmail,
         strat.cosmicPassword,
         strat.scraperMappings,
       );
-    } catch {
+      cosmicList = scraped.trades;
+      const m = scraped.scrapeMeta;
+      const diag: CosmicScrapeDiagnostics = {
+        payloadChunkCount: scraped.payloadChunkCount,
+        payloadPositionRows: scraped.payloadPositionRows,
+        tradesAfterDeltaFilter: scraped.trades.length,
+        walletBalanceDom: m?.walletBalanceDom ?? null,
+      };
+      if (m?.domRowsMatched !== undefined) diag.domRowsMatched = m.domRowsMatched;
+      if (m?.domPositionsParsed !== undefined) {
+        diag.domPositionsParsed = m.domPositionsParsed;
+      }
+      if (m?.scrapeAbortedReason !== undefined) {
+        diag.scrapeAbortedReason = m.scrapeAbortedReason;
+      }
+      if (m?.extractError !== undefined) diag.extractError = m.extractError;
+      lastScrape = diag;
+    } catch (err) {
       cosmicList = [];
+      fetchException =
+        err instanceof Error ? err.message : String(err ?? "scrape failed");
+      console.error(
+        `[live-trades] Cosmic scrape threw for "${strat.title}" (${strat.id}):`,
+        fetchException,
+      );
     }
+
+    const metaBase = {
+      scraperEnvConfigured,
+      credentialsPresent,
+      ...(fetchException !== undefined ? { fetchException } : {}),
+      ...(lastScrape !== undefined ? { lastScrape } : {}),
+    };
 
     if (
       scraperEnvConfigured &&
@@ -262,8 +309,10 @@ export async function getAdminGroupedLiveTrades(
     ) {
       console.warn(
         `[live-trades] Zero Cosmic positions for "${strat.title}" (${strat.id}). ` +
-          "If the master has open trades: verify login env, DOM scrape (Test scrape), " +
-          "and that symbols map to Delta (e.g. ETHUSD→ETHUSDT).",
+          `domRows=${lastScrape?.domRowsMatched ?? "?"}, domParsed=${lastScrape?.domPositionsParsed ?? "?"}, ` +
+          `payloadRows=${lastScrape?.payloadPositionRows ?? "?"}, deltaTrades=${lastScrape?.tradesAfterDeltaFilter ?? "?"}, ` +
+          `abort=${lastScrape?.scrapeAbortedReason ?? "none"}, extract=${lastScrape?.extractError ?? "none"}, ` +
+          `fetchErr=${fetchException ?? "none"}`,
       );
     }
 
@@ -303,7 +352,7 @@ export async function getAdminGroupedLiveTrades(
         strategyId: strat.id,
         strategyTitle: strat.title,
         groups,
-        cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+        cosmicMeta: metaBase,
       });
       continue;
     }
@@ -347,7 +396,7 @@ export async function getAdminGroupedLiveTrades(
       strategyId: strat.id,
       strategyTitle: strat.title,
       groups,
-      cosmicMeta: { scraperEnvConfigured, credentialsPresent },
+      cosmicMeta: metaBase,
     });
   }
 

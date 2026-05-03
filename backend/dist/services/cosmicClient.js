@@ -24,12 +24,38 @@ function tradesFromPayloads(payloads) {
     }
     return [...byId.values()];
 }
-export async function fetchCosmicOpenPositions(cosmicEmail, cosmicPassword, scraperMappingsJson, scraperStudioSelectorsJson) {
-    const { payloads } = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), buildCosmicScrapeOptions({
+/** Raw position-like rows in payloads before Delta symbol filtering (best-effort). */
+function countPayloadPositionRows(payloads) {
+    let n = 0;
+    for (const chunk of payloads) {
+        if (!chunk || typeof chunk !== "object")
+            continue;
+        const list = chunk.positions;
+        if (Array.isArray(list))
+            n += list.length;
+    }
+    return n;
+}
+/** Same as `fetchCosmicOpenPositions` plus scrape meta for admin diagnostics. */
+export async function fetchCosmicOpenPositionsWithMeta(cosmicEmail, cosmicPassword, scraperMappingsJson, scraperStudioSelectorsJson) {
+    const opts = buildCosmicScrapeOptions({
         scraperMappingsJson,
         scraperStudioSelectorsJson,
-    }));
-    return tradesFromPayloads(payloads);
+    });
+    const result = await scrapeCosmicPositionsData(cosmicEmail.trim(), cosmicPassword.trim(), opts);
+    const trades = tradesFromPayloads(result.payloads);
+    const out = {
+        trades,
+        payloadChunkCount: result.payloads.length,
+        payloadPositionRows: countPayloadPositionRows(result.payloads),
+    };
+    if (result.scrapeMeta !== undefined)
+        out.scrapeMeta = result.scrapeMeta;
+    return out;
+}
+export async function fetchCosmicOpenPositions(cosmicEmail, cosmicPassword, scraperMappingsJson, scraperStudioSelectorsJson) {
+    const { trades } = await fetchCosmicOpenPositionsWithMeta(cosmicEmail, cosmicPassword, scraperMappingsJson, scraperStudioSelectorsJson);
+    return trades;
 }
 /** Admin probe: same scrape plus optional JPEG screenshot of the logged-in viewport. */
 export async function probeCosmicOpenPositions(cosmicEmail, cosmicPassword, captureScreenshot, scraperMappingsJson, scraperStudioSelectorsJson) {

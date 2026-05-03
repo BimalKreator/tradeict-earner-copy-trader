@@ -24,6 +24,17 @@ type Group = {
   followers: FollowerRow[];
 };
 
+type CosmicScrapeDiagnostics = {
+  payloadChunkCount: number;
+  payloadPositionRows: number;
+  tradesAfterDeltaFilter: number;
+  domRowsMatched?: number;
+  domPositionsParsed?: number;
+  walletBalanceDom?: string | null;
+  scrapeAbortedReason?: string;
+  extractError?: string;
+};
+
 type StrategySection = {
   strategyId: string;
   strategyTitle: string;
@@ -31,6 +42,8 @@ type StrategySection = {
   cosmicMeta?: {
     scraperEnvConfigured: boolean;
     credentialsPresent: boolean;
+    fetchException?: string;
+    lastScrape?: CosmicScrapeDiagnostics;
   };
 };
 
@@ -236,6 +249,77 @@ export default function AdminLiveTradesPage() {
               {s.groups.length === 0 ? (
                 <div className="mt-6 space-y-2 text-sm text-white/50">
                   <p>No open Cosmic positions were parsed for this strategy.</p>
+                  {s.cosmicMeta?.fetchException ? (
+                    <p className="rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-red-100/95">
+                      Scrape error:{" "}
+                      <span className="font-mono text-xs text-red-50/90">
+                        {s.cosmicMeta.fetchException}
+                      </span>
+                      <span className="mt-1 block text-xs text-red-100/70">
+                        Often caused by API timeouts (Puppeteer needs a long-lived Node process),
+                        missing Chromium on the server, or blocked outbound HTTPS.
+                      </span>
+                    </p>
+                  ) : null}
+                  {s.cosmicMeta?.lastScrape ? (
+                    <div className="rounded-lg border border-white/[0.12] bg-white/[0.04] px-3 py-2 font-mono text-[11px] leading-relaxed text-white/65">
+                      <p className="mb-1 text-[10px] uppercase tracking-wide text-white/40">
+                        Last scrape diagnostics
+                      </p>
+                      <p>
+                        payloadChunks={s.cosmicMeta.lastScrape.payloadChunkCount}{" "}
+                        · rowsInPayloads=
+                        {s.cosmicMeta.lastScrape.payloadPositionRows} · afterDelta=
+                        {s.cosmicMeta.lastScrape.tradesAfterDeltaFilter}
+                      </p>
+                      {(s.cosmicMeta.lastScrape.domRowsMatched !== undefined ||
+                        s.cosmicMeta.lastScrape.domPositionsParsed !==
+                          undefined) && (
+                        <p>
+                          domRowsMatched=
+                          {String(s.cosmicMeta.lastScrape.domRowsMatched ?? "—")}{" "}
+                          · domPositionsParsed=
+                          {String(s.cosmicMeta.lastScrape.domPositionsParsed ?? "—")}
+                        </p>
+                      )}
+                      {s.cosmicMeta.lastScrape.walletBalanceDom ? (
+                        <p className="truncate text-emerald-200/80">
+                          wallet (DOM): {s.cosmicMeta.lastScrape.walletBalanceDom}
+                        </p>
+                      ) : null}
+                      {s.cosmicMeta.lastScrape.scrapeAbortedReason ? (
+                        <p className="text-amber-200/90">
+                          aborted: {s.cosmicMeta.lastScrape.scrapeAbortedReason}
+                        </p>
+                      ) : null}
+                      {s.cosmicMeta.lastScrape.extractError ? (
+                        <p className="text-amber-200/90">
+                          extract: {s.cosmicMeta.lastScrape.extractError}
+                        </p>
+                      ) : null}
+                      {s.cosmicMeta.lastScrape.payloadPositionRows > 0 &&
+                      s.cosmicMeta.lastScrape.tradesAfterDeltaFilter === 0 ? (
+                        <p className="mt-1 text-white/55">
+                          Rows were parsed from Cosmic but none survived Delta symbol mapping —
+                          check backend logs for{" "}
+                          <code className="rounded bg-black/30 px-1">
+                            [cosmic] No Delta mapping
+                          </code>
+                          .
+                        </p>
+                      ) : null}
+                      {s.cosmicMeta.lastScrape.domRowsMatched === 0 &&
+                      (s.cosmicMeta.lastScrape.payloadPositionRows ?? 0) === 0 &&
+                      !s.cosmicMeta.lastScrape.scrapeAbortedReason ? (
+                        <p className="mt-1 text-white/55">
+                          No DOM rows and no JSON payload positions — login may have failed or the
+                          portfolio layout differs from Scraper Studio. Confirm{" "}
+                          <strong className="text-white/70">COSMIC_SCRAPER_LOGIN_URL</strong> and
+                          run <strong className="text-white/70">Test scrape</strong>.
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {!s.cosmicMeta?.scraperEnvConfigured ? (
                     <p className="text-amber-200/85">
                       API env missing{" "}
