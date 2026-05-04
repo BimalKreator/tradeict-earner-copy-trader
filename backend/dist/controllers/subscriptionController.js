@@ -101,6 +101,16 @@ export function createSubscriptionController(prisma) {
                         : {}),
                 },
             });
+            if (strategy.syncActiveTrades) {
+                void import("../services/tradeEngine.js")
+                    .then(({ lateJoinMirrorOpenPositionsForSubscriber }) => lateJoinMirrorOpenPositionsForSubscriber(prisma, {
+                    strategyId,
+                    userId,
+                }))
+                    .catch((err) => {
+                    console.error("[subscription] Late-join sync failed:", err);
+                });
+            }
             void logUserActivity(prisma, {
                 userId,
                 kind: "SUBSCRIPTION_CREATED",
@@ -121,6 +131,7 @@ export function createSubscriptionController(prisma) {
         profitShare: true,
         slippage: true,
         performanceMetrics: true,
+        syncActiveTrades: true,
         createdAt: true,
     };
     /** Strategies available in the marketplace (all rows; schema has no archived flag). */

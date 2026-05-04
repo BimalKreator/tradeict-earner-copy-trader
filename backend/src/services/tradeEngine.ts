@@ -202,6 +202,130 @@ async function processRemovedCosmicPositions(
   }
 }
 
+/**
+ * Late-join: after subscribe, mirror each currently open Cosmic position onto Delta for one subscriber.
+ * Guarded by `strategy.syncActiveTrades` at the caller.
+ */
+export async function lateJoinMirrorOpenPositionsForSubscriber(
+  prisma: PrismaClient,
+  args: { strategyId: string; userId: string },
+): Promise<void> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+  });
+  if (!strategy || !strategy.syncActiveTrades) return;
+
+  const sub = await prisma.userSubscription.findFirst({
+    where: {
+      strategyId: args.strategyId,
+      userId: args.userId,
+      status: SubscriptionStatus.ACTIVE,
+    },
+    include: {
+      exchangeAccount: true,
+      user: { include: { deltaApiKeys: true } },
+    },
+  });
+  if (!sub || sub.user.status !== UserStatus.ACTIVE) return;
+
+  let scraped: CosmicLedTrade[];
+  try {
+    scraped = await fetchCosmicOpenPositions(
+      strategy.cosmicEmail,
+      strategy.cosmicPassword,
+      strategy.scraperMappings,
+    );
+  } catch (err) {
+    console.error("[late-join] Cosmic fetch failed:", err);
+    return;
+  }
+
+  for (const cosmic of scraped) {
+    let marketPrice: number | undefined;
+    try {
+      const t = await fetchDeltaTicker(cosmic.deltaSymbol);
+      marketPrice = t.last;
+    } catch {
+      marketPrice = undefined;
+    }
+
+    const userSize = cosmic.size * sub.multiplier;
+
+    if (
+      marketPrice !== undefined &&
+      percentSlippage(cosmic.entryPrice, marketPrice) > strategy.slippage
+    ) {
+      await recordTrade(prisma, {
+        userId: sub.userId,
+        strategyId: strategy.id,
+        symbol: cosmic.deltaSymbol,
+        side: cosmic.side,
+        size: userSize,
+        entryPrice: cosmic.entryPrice,
+        status: TradeStatus.FAILED,
+      });
+      continue;
+    }
+
+    if (marketPrice === undefined) {
+      await recordTrade(prisma, {
+        userId: sub.userId,
+        strategyId: strategy.id,
+        symbol: cosmic.deltaSymbol,
+        side: cosmic.side,
+        size: userSize,
+        entryPrice: cosmic.entryPrice,
+        status: TradeStatus.FAILED,
+      });
+      continue;
+    }
+
+    const creds =
+      sub.exchangeAccount != null
+        ? {
+            apiKey: sub.exchangeAccount.apiKey,
+            apiSecret: sub.exchangeAccount.apiSecret,
+          }
+        : sub.user.deltaApiKeys[0] != null
+          ? {
+              apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+              apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+            }
+          : null;
+
+    if (!creds) {
+      await recordTrade(prisma, {
+        userId: sub.userId,
+        strategyId: strategy.id,
+        symbol: cosmic.deltaSymbol,
+        side: cosmic.side,
+        size: userSize,
+        entryPrice: cosmic.entryPrice,
+        status: TradeStatus.FAILED,
+      });
+      continue;
+    }
+
+    const result = await executeTrade(
+      creds.apiKey,
+      creds.apiSecret,
+      cosmic.deltaSymbol,
+      cosmic.side,
+      userSize,
+    );
+
+    await recordTrade(prisma, {
+      userId: sub.userId,
+      strategyId: strategy.id,
+      symbol: cosmic.deltaSymbol,
+      side: cosmic.side,
+      size: userSize,
+      entryPrice: cosmic.entryPrice,
+      status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+    });
+  }
+}
+
 async function processNewCosmicTrade(
   prisma: PrismaClient,
   strategy: {

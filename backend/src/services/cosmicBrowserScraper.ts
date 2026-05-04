@@ -5,9 +5,9 @@
  * - COSMIC_SCRAPER_LOGIN_URL — full login page URL (required for scraping).
  * - COSMIC_SCRAPER_PORTFOLIO_URL — optional; defaults to https://app.cosmic.trade/portfolio after login.
  * - COSMIC_SCRAPER_POST_LOGIN_URL — optional intermediate URL before portfolio (rare).
- * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins).
- * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors.
- * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
+ * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins); if unset, `#username`.
+ * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors; if unset, `#password`.
+ * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for submit; if unset, `button[type="submit"]`.
  *
  * Optional strategy `scraperMappings` (Scraper Studio): single-selector slots
  * `login_email` / `Login email`, `login_password` / `Login password`, `login_submit` / `Login submit`
@@ -38,6 +38,26 @@ const puppeteer = addExtra(
 puppeteer.use(StealthPlugin());
 
 const DEFAULT_PORTFOLIO_URL = "https://app.cosmic.trade/portfolio";
+
+/** Hardcoded Cosmic SPA fallbacks when `COSMIC_SCRAPER_*_SELECTOR` env vars are empty. */
+const DEFAULT_COSMIC_EMAIL_SELECTOR = "#username";
+const DEFAULT_COSMIC_PASSWORD_SELECTOR = "#password";
+const DEFAULT_COSMIC_SUBMIT_SELECTOR = 'button[type="submit"]';
+
+function resolveCosmicEmailSelectorsCsv(): string {
+  const raw = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim();
+  return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_EMAIL_SELECTOR;
+}
+
+function resolveCosmicPasswordSelectorsCsv(): string {
+  const raw = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim();
+  return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_PASSWORD_SELECTOR;
+}
+
+function resolveCosmicSubmitSelectorsCsv(): string {
+  const raw = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim();
+  return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_SUBMIT_SELECTOR;
+}
 
 const POSITION_ROW_SELECTORS = [
   COSMIC_PORTFOLIO_ROW_GRID_SELECTOR,
@@ -228,45 +248,26 @@ async function clickSubmitMappingThenEnvCsv(
 }
 
 /**
- * Match Scraper Studio reliability: wait for Cosmic `#username` / `#password` (or mapped / env fallbacks)
- * so React/hydration finishes before `tryFillInput` races empty `$`.
+ * React SPA: login route finishes painting inputs after network settles — wait for Cosmic’s
+ * canonical fields before `fillUsingMappingThenEnvCsv` / `tryFillInput`.
  */
-async function waitForCosmicLoginShell(
+async function waitForCosmicLoginFieldsReady(
   page: Page,
   scraperMappings: Record<string, string> | null,
-  emailSelectorsCsv: string,
-  passwordSelectorsCsv: string,
 ): Promise<void> {
+  await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+  await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+
   const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
   const mapPwd = selectorFromScraperMappings(scraperMappings, "login_password");
-
-  const tryVisible = async (sel: string, ms: number) => {
-    try {
-      await page.waitForSelector(sel, { visible: true, timeout: ms });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  if (mapEmail) await tryVisible(mapEmail, 12_000);
-  if (mapPwd) await tryVisible(mapPwd, 12_000);
-
-  let sawUser = await tryVisible("#username", 45_000);
-  if (!sawUser) {
-    const fb = emailSelectorsCsv.split(",")[0]?.trim();
-    if (fb) sawUser = await tryVisible(fb, 22_000);
+  if (mapEmail && mapEmail !== "#username") {
+    await waitSelectorFlexible(page, mapEmail);
+  }
+  if (mapPwd && mapPwd !== "#password") {
+    await waitSelectorFlexible(page, mapPwd);
   }
 
-  let sawPwd = await tryVisible("#password", 45_000);
-  if (!sawPwd) {
-    const fb = passwordSelectorsCsv.split(",")[0]?.trim();
-    if (fb) sawPwd = await tryVisible(fb, 22_000);
-  }
-
-  if (!sawUser || !sawPwd) {
-    await new Promise((r) => setTimeout(r, 1200));
-  }
+  await new Promise((r) => setTimeout(r, 400));
 }
 
 function scrapeMetaEarly(explain: string): CosmicScrapeMeta {
@@ -304,15 +305,12 @@ export async function submitCosmicLoginFormIfPresent(
   const p = password.trim();
   if (!e || !p) return false;
 
-  const emailSelectors =
-    process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
-    '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
-  const passwordSelectors =
-    process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
-    '#password,input[type="password"],input[name="password"]';
-  const submitSelectors =
-    process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
-    'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+  const emailSelectors = resolveCosmicEmailSelectorsCsv();
+  const passwordSelectors = resolveCosmicPasswordSelectorsCsv();
+  const submitSelectors = resolveCosmicSubmitSelectorsCsv();
+
+  await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+  await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
 
   const filledEmail = await tryFillInput(page, emailSelectors, e);
   const filledPass = await tryFillInput(page, passwordSelectors, p);
@@ -345,17 +343,15 @@ export async function performCosmicInspectLogin(
   const p = password.trim();
   if (!e || !p) return;
 
-  await page.waitForSelector("#username", { visible: true, timeout: 45_000 });
-  await page.waitForSelector("#password", { visible: true, timeout: 45_000 });
+  await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+  await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
 
   await page.click("#username", { clickCount: 3 });
   await page.type("#username", e, { delay: 12 });
   await page.click("#password", { clickCount: 3 });
   await page.type("#password", p, { delay: 12 });
 
-  const submitSelectors =
-    process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
-    'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+  const submitSelectors = resolveCosmicSubmitSelectorsCsv();
 
   await Promise.all([
     page.waitForNavigation({
@@ -425,15 +421,9 @@ export async function scrapeCosmicPositionsData(
     process.env.COSMIC_SCRAPER_RESPONSE_FILTER?.trim().toLowerCase() ||
     "position";
 
-  const emailSelectors =
-    process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim() ??
-    '#username,input[name="username"],input[type="email"],input[name="email"],input[name="Email"],#email';
-  const passwordSelectors =
-    process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim() ??
-    '#password,input[type="password"],input[name="password"]';
-  const submitSelectors =
-    process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim() ??
-    'button[type="submit"],input[type="submit"],button.login,[data-testid="login-button"]';
+  const emailSelectors = resolveCosmicEmailSelectorsCsv();
+  const passwordSelectors = resolveCosmicPasswordSelectorsCsv();
+  const submitSelectors = resolveCosmicSubmitSelectorsCsv();
 
   const browser = await launchCosmicStealthBrowser();
 
@@ -455,16 +445,11 @@ export async function scrapeCosmicPositionsData(
     });
 
     await page.goto(loginUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 90_000,
+      waitUntil: "networkidle2",
+      timeout: 180_000,
     });
 
-    await waitForCosmicLoginShell(
-      page,
-      scraperMappings,
-      emailSelectors,
-      passwordSelectors,
-    );
+    await waitForCosmicLoginFieldsReady(page, scraperMappings);
 
     const mapLoginEmail = selectorFromScraperMappings(scraperMappings, "login_email");
     const mapLoginPassword = selectorFromScraperMappings(

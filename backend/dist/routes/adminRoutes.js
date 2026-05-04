@@ -182,6 +182,9 @@ export function createAdminRoutes(prisma) {
             }
             const cosmicPassword = typeof body.cosmicPassword === "string" ? body.cosmicPassword : "";
             const performanceMetrics = parsePerformanceMetrics(body.performanceMetrics);
+            const syncActiveTrades = typeof body.syncActiveTrades === "boolean"
+                ? body.syncActiveTrades
+                : false;
             const strategy = await prisma.strategy.create({
                 data: {
                     title,
@@ -195,6 +198,7 @@ export function createAdminRoutes(prisma) {
                     monthlyFee,
                     profitShare,
                     minCapital,
+                    syncActiveTrades,
                 },
             });
             res.status(201).json(strategy);
@@ -282,6 +286,13 @@ export function createAdminRoutes(prisma) {
                     return;
                 }
                 data.minCapital = body.minCapital;
+            }
+            if (body.syncActiveTrades !== undefined) {
+                if (typeof body.syncActiveTrades !== "boolean") {
+                    res.status(400).json({ error: "syncActiveTrades must be a boolean" });
+                    return;
+                }
+                data.syncActiveTrades = body.syncActiveTrades;
             }
             const mappingsBody = body.scraperMappings !== undefined
                 ? body.scraperMappings

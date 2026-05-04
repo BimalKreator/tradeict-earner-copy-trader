@@ -143,6 +143,19 @@ export function createSubscriptionController(prisma: PrismaClient) {
         },
       });
 
+      if (strategy.syncActiveTrades) {
+        void import("../services/tradeEngine.js")
+          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
+            lateJoinMirrorOpenPositionsForSubscriber(prisma, {
+              strategyId,
+              userId,
+            }),
+          )
+          .catch((err) => {
+            console.error("[subscription] Late-join sync failed:", err);
+          });
+      }
+
       void logUserActivity(prisma, {
         userId,
         kind: "SUBSCRIPTION_CREATED",
@@ -164,6 +177,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     profitShare: true,
     slippage: true,
     performanceMetrics: true,
+    syncActiveTrades: true,
     createdAt: true,
   } as const;
 

@@ -102,6 +102,8 @@ model Strategy {
   monthlyFee         Float
   profitShare        Float   @default(20.0)
   minCapital         Float
+  /** When true, new subscribers mirror the strategy's currently open Cosmic positions on Delta (late-join). */
+  syncActiveTrades   Boolean @default(false)
   createdAt          DateTime @default(now())
 
   subscriptions UserSubscription[]

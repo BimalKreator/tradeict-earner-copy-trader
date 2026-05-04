@@ -226,6 +226,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         body.performanceMetrics,
       );
 
+      const syncActiveTrades =
+        typeof body.syncActiveTrades === "boolean"
+          ? body.syncActiveTrades
+          : false;
+
       const strategy = await prisma.strategy.create({
         data: {
           title,
@@ -239,6 +244,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           monthlyFee,
           profitShare,
           minCapital,
+          syncActiveTrades,
         },
       });
 
@@ -263,6 +269,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         monthlyFee?: number;
         profitShare?: number;
         minCapital?: number;
+        syncActiveTrades?: boolean;
       } = {};
 
       /** Body `null` → clear column (`Prisma.DbNull` at update); object replaces mappings. */
@@ -339,6 +346,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           return;
         }
         data.minCapital = body.minCapital;
+      }
+      if (body.syncActiveTrades !== undefined) {
+        if (typeof body.syncActiveTrades !== "boolean") {
+          res.status(400).json({ error: "syncActiveTrades must be a boolean" });
+          return;
+        }
+        data.syncActiveTrades = body.syncActiveTrades;
       }
       const mappingsBody =
         body.scraperMappings !== undefined

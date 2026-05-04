@@ -32,6 +32,7 @@ type Strategy = {
   monthlyFee: number;
   profitShare: number;
   minCapital: number;
+  syncActiveTrades?: boolean;
   createdAt: string;
 };
 
@@ -320,6 +321,7 @@ export default function AdminStrategiesPage() {
   const [barProfit, setBarProfit] = useState("");
   const [barLoss, setBarLoss] = useState("");
   const [heatmapText, setHeatmapText] = useState("");
+  const [syncActiveTrades, setSyncActiveTrades] = useState(false);
 
   const loadStrategies = useCallback(async () => {
     setLoading(true);
@@ -368,6 +370,7 @@ export default function AdminStrategiesPage() {
     setBarProfit("");
     setBarLoss("");
     setHeatmapText("");
+    setSyncActiveTrades(false);
   }
 
   function openCreateModal() {
@@ -404,6 +407,7 @@ export default function AdminStrategiesPage() {
     setBarProfit(h.barProfit);
     setBarLoss(h.barLoss);
     setHeatmapText(h.heatmapText);
+    setSyncActiveTrades(Boolean(s.syncActiveTrades));
 
     setModalOpen(true);
   }
@@ -541,6 +545,7 @@ export default function AdminStrategiesPage() {
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
       minCapital: minCapitalNum,
+      syncActiveTrades,
     };
     const isEdit = editingId !== null;
     if (isEdit) {
@@ -824,6 +829,24 @@ export default function AdminStrategiesPage() {
                       A password is already stored. Enter a new one only if you want to replace it.
                     </p>
                   ) : null}
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
+                  <input
+                    type="checkbox"
+                    checked={syncActiveTrades}
+                    onChange={(e) => setSyncActiveTrades(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-glassBorder text-primary focus:ring-primary/40"
+                  />
+                  <span>
+                    <span className="text-sm font-medium text-white">
+                      Sync Active Trades on Subscribe
+                    </span>
+                    <span className="mt-0.5 block text-xs text-white/50">
+                      When enabled, new subscribers immediately mirror open positions from the master
+                      Cosmic account on Delta (late-join). Requires valid Cosmic credentials and
+                      follower exchange keys.
+                    </span>
+                  </span>
                 </label>
               </div>
 

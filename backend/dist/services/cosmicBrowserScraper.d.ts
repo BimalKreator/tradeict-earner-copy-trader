@@ -5,9 +5,9 @@
  * - COSMIC_SCRAPER_LOGIN_URL — full login page URL (required for scraping).
  * - COSMIC_SCRAPER_PORTFOLIO_URL — optional; defaults to https://app.cosmic.trade/portfolio after login.
  * - COSMIC_SCRAPER_POST_LOGIN_URL — optional intermediate URL before portfolio (rare).
- * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins).
- * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors.
- * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for login button/form submit.
+ * - COSMIC_SCRAPER_EMAIL_SELECTOR — comma-separated CSS selectors (first match wins); if unset, `#username`.
+ * - COSMIC_SCRAPER_PASSWORD_SELECTOR — comma-separated CSS selectors; if unset, `#password`.
+ * - COSMIC_SCRAPER_SUBMIT_SELECTOR — comma-separated CSS selectors for submit; if unset, `button[type="submit"]`.
  *
  * Optional strategy `scraperMappings` (Scraper Studio): single-selector slots
  * `login_email` / `Login email`, `login_password` / `Login password`, `login_submit` / `Login submit`
