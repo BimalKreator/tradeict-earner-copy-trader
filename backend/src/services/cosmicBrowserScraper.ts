@@ -247,30 +247,32 @@ async function clickSubmitMappingThenEnvCsv(
   return tryClick(page, envSelectorsCsv);
 }
 
+const DEBUG_LOGIN_FAIL_SHOT = "debug-login-fail.jpg";
+
 /**
- * React SPA: login inputs mount after JS bundles load — wait for Cosmic’s canonical `#username`
- * / `#password` (defaults when env selectors are unset; see `resolveCosmic*Csv`) before fill.
+ * Run immediately after `page.goto` to the Cosmic login URL: allow React / Cloudflare / SPA
+ * to settle, then wait for canonical fields before fill/submit.
  */
-async function waitForCosmicLoginFieldsReady(
+async function performLogin(
   page: Page,
   scraperMappings: Record<string, string> | null,
 ): Promise<void> {
+  await new Promise((r) => setTimeout(r, 8000));
+
   try {
     await page.waitForSelector("#username", { timeout: 15_000 });
     await page.waitForSelector("#password", { timeout: 15_000 });
-  } catch (firstErr) {
+  } catch (err) {
     try {
-      await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-      await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
-    } catch {
-      const msg =
-        firstErr instanceof Error ? firstErr.message : String(firstErr);
-      console.warn(
-        "[cosmic-scraper] Could not locate email/password inputs (expected #username / #password after SPA render):",
-        msg,
-      );
-      throw firstErr;
+      await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
+    } catch (shotErr) {
+      console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
     }
+    console.warn(
+      "[cosmic-scraper] Could not locate email/password inputs — wrote",
+      DEBUG_LOGIN_FAIL_SHOT,
+    );
+    throw err;
   }
 
   const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
@@ -325,11 +327,20 @@ export async function submitCosmicLoginFormIfPresent(
   const submitSelectors = resolveCosmicSubmitSelectorsCsv();
 
   try {
+    await new Promise((r) => setTimeout(r, 8000));
     await page.waitForSelector("#username", { timeout: 15_000 });
     await page.waitForSelector("#password", { timeout: 15_000 });
-  } catch {
-    await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-    await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+  } catch (err) {
+    try {
+      await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
+    } catch (shotErr) {
+      console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
+    }
+    console.warn(
+      "[cosmic-scraper] Could not locate email/password inputs — wrote",
+      DEBUG_LOGIN_FAIL_SHOT,
+    );
+    throw err;
   }
 
   const filledEmail = await tryFillInput(page, emailSelectors, e);
@@ -364,11 +375,20 @@ export async function performCosmicInspectLogin(
   if (!e || !p) return;
 
   try {
+    await new Promise((r) => setTimeout(r, 8000));
     await page.waitForSelector("#username", { timeout: 15_000 });
     await page.waitForSelector("#password", { timeout: 15_000 });
-  } catch {
-    await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-    await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+  } catch (err) {
+    try {
+      await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
+    } catch (shotErr) {
+      console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
+    }
+    console.warn(
+      "[cosmic-scraper] Could not locate email/password inputs — wrote",
+      DEBUG_LOGIN_FAIL_SHOT,
+    );
+    throw err;
   }
 
   await page.click("#username", { clickCount: 3 });
@@ -474,7 +494,7 @@ export async function scrapeCosmicPositionsData(
       timeout: 180_000,
     });
 
-    await waitForCosmicLoginFieldsReady(page, scraperMappings);
+    await performLogin(page, scraperMappings);
 
     const mapLoginEmail = selectorFromScraperMappings(scraperMappings, "login_email");
     const mapLoginPassword = selectorFromScraperMappings(

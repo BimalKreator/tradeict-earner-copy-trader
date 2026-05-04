@@ -10,6 +10,7 @@ export function createExchangeAccountRoutes(prisma: PrismaClient): Router {
 
   router.get("/", jwtAuth, ctrl.list);
   router.post("/", jwtAuth, ctrl.create);
+  router.post("/test", jwtAuth, ctrl.testConnection);
   router.delete("/:id", jwtAuth, ctrl.remove);
 
   return router;

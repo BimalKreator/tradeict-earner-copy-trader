@@ -2,17 +2,28 @@
 
 import {
   Eye,
+  History,
   LineChart,
   Loader2,
   Sparkles,
   TrendingUp,
   Wallet,
+  Zap,
   X,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const ENV_API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+function resolveApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (typeof window !== "undefined") {
+    return `${window.location.origin.replace(/\/$/, "")}/api`;
+  }
+  return "";
+}
 
 type StrategyListItem = {
   id: string;
@@ -31,6 +42,21 @@ type ExchangeAccountOption = {
   nickname: string;
   exchange: string;
 };
+
+type SubscriptionRow = {
+  id: string;
+  status: string;
+  multiplier: number;
+  joinedDate: string;
+  strategy: StrategyListItem;
+  exchangeAccount: {
+    id: string;
+    nickname: string;
+    exchange: string;
+  } | null;
+};
+
+type StrategiesTab = "marketplace" | "my" | "active";
 
 const ACCENTS = [
   "from-sky-500/25 to-transparent",
@@ -135,10 +161,24 @@ function PnlChartPlaceholder({
   );
 }
 
+function statusBadgeClass(status: string): string {
+  const u = status.toUpperCase();
+  if (u === "ACTIVE")
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
+  if (u === "PAUSED")
+    return "border-amber-500/40 bg-amber-500/15 text-amber-100";
+  if (u === "OVERDUE") return "border-red-500/40 bg-red-500/15 text-red-100";
+  return "border-white/15 bg-white/10 text-white/70";
+}
+
 export default function StrategyMarketplacePage() {
+  const [activeTab, setActiveTab] = useState<StrategiesTab>("marketplace");
   const [strategies, setStrategies] = useState<StrategyListItem[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+  const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
+  const [subsLoading, setSubsLoading] = useState(true);
+  const [subsError, setSubsError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
 
   const [modalStrategy, setModalStrategy] = useState<StrategyListItem | null>(
@@ -167,7 +207,8 @@ export default function StrategyMarketplacePage() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/subscriptions/strategies`, {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/subscriptions/strategies`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 401) {
@@ -195,7 +236,8 @@ export default function StrategyMarketplacePage() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/exchange-accounts`, {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/exchange-accounts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
@@ -216,6 +258,45 @@ export default function StrategyMarketplacePage() {
     }
   }, []);
 
+  const loadSubscriptions = useCallback(async () => {
+    setSubsLoading(true);
+    setSubsError(null);
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (!token) {
+      setSubscriptions([]);
+      setSubsLoading(false);
+      return;
+    }
+    try {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/subscriptions/mine`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        setSubscriptions([]);
+        return;
+      }
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data: unknown = await res.json();
+      const raw =
+        typeof data === "object" &&
+        data !== null &&
+        "subscriptions" in data &&
+        Array.isArray((data as { subscriptions: unknown }).subscriptions)
+          ? (data as { subscriptions: SubscriptionRow[] }).subscriptions
+          : [];
+      setSubscriptions(raw);
+    } catch (e) {
+      setSubsError(
+        e instanceof Error ? e.message : "Failed to load subscriptions",
+      );
+      setSubscriptions([]);
+    } finally {
+      setSubsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadStrategies();
   }, [loadStrategies]);
@@ -223,6 +304,10 @@ export default function StrategyMarketplacePage() {
   useEffect(() => {
     void loadExchangeAccounts();
   }, [loadExchangeAccounts]);
+
+  useEffect(() => {
+    void loadSubscriptions();
+  }, [loadSubscriptions]);
 
   useEffect(() => {
     if (!toast) return;
@@ -286,7 +371,8 @@ export default function StrategyMarketplacePage() {
     setModalError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/subscriptions/subscribe`, {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/subscriptions/subscribe`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -315,6 +401,7 @@ export default function StrategyMarketplacePage() {
 
       setModalStrategy(null);
       setToast(true);
+      void loadSubscriptions();
     } catch (e) {
       setModalError(e instanceof Error ? e.message : "Subscription failed.");
     } finally {
@@ -336,128 +423,318 @@ export default function StrategyMarketplacePage() {
     );
   }
 
+  const activeSubscriptions = subscriptions.filter(
+    (s) => s.status.toUpperCase() === "ACTIVE",
+  );
+  const tabSubs =
+    activeTab === "active" ? activeSubscriptions : subscriptions;
+
+  const tabBtn =
+    "inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition";
+
   return (
     <div className="relative">
-      <header className="mb-10">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-primary">
-            <Sparkles className="h-3.5 w-3.5" aria-hidden />
-            Marketplace
-          </span>
-        </div>
-        <h1 className="mt-4 text-2xl font-semibold tracking-tight text-white md:text-3xl">
-          Strategy marketplace
+      <header className="mb-8">
+        <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
+          Strategies
         </h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/55">
-          Explore copy-trading strategies. View detailed performance or subscribe
-          with a position multiplier.
+          Browse the marketplace, review your subscription history, or focus on
+          active copy-trading subscriptions.
         </p>
+
+        <nav
+          className="mt-8 flex flex-wrap gap-2 border-b border-white/[0.08] pb-3"
+          aria-label="Strategy views"
+        >
+          <button
+            type="button"
+            onClick={() => setActiveTab("marketplace")}
+            className={`${tabBtn} ${
+              activeTab === "marketplace"
+                ? "border border-primary/40 bg-primary/15 text-white"
+                : "border border-transparent text-white/55 hover:bg-white/5 hover:text-white/80"
+            }`}
+          >
+            <Sparkles className="h-4 w-4 text-primary/90" aria-hidden />
+            Marketplace
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("my")}
+            className={`${tabBtn} ${
+              activeTab === "my"
+                ? "border border-primary/40 bg-primary/15 text-white"
+                : "border border-transparent text-white/55 hover:bg-white/5 hover:text-white/80"
+            }`}
+          >
+            <History className="h-4 w-4 text-primary/90" aria-hidden />
+            My Strategies
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("active")}
+            className={`${tabBtn} ${
+              activeTab === "active"
+                ? "border border-primary/40 bg-primary/15 text-white"
+                : "border border-transparent text-white/55 hover:bg-white/5 hover:text-white/80"
+            }`}
+          >
+            <Zap className="h-4 w-4 text-primary/90" aria-hidden />
+            Active Strategies
+          </button>
+        </nav>
       </header>
 
-      {listError && (
-        <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-          {listError}
-        </div>
-      )}
+      {activeTab === "marketplace" && (
+        <>
+          {listError && (
+            <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              {listError}
+            </div>
+          )}
 
-      {listLoading ? (
-        <div className="flex justify-center py-16">
-          <Loader2 className="h-10 w-10 animate-spin text-primary" aria-hidden />
-        </div>
-      ) : strategies.length === 0 ? (
-        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-6 py-12 text-center text-sm text-white/55">
-          No strategies available yet.
-        </div>
-      ) : (
-        <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-2">
-          {strategies.map((s) => {
-            const points = pnlValuesToSparklinePoints(s.performanceMetrics);
-            const hasPnl =
-              typeof s.performanceMetrics === "object" &&
-              s.performanceMetrics !== null &&
-              Array.isArray(
-                (s.performanceMetrics as PnlMetrics).pnlChart?.values,
-              ) &&
-              ((s.performanceMetrics as PnlMetrics).pnlChart?.values?.length ??
-                0) > 0;
-            return (
-              <article
-                key={s.id}
-                className="glass-card relative flex flex-col overflow-hidden border border-glassBorder p-6 shadow-xl transition hover:border-primary/35 hover:shadow-primary/5"
-              >
-                <div
-                  className={`pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b ${accentForId(s.id)} opacity-90`}
-                  aria-hidden
-                />
-                <div className="relative">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h2 className="text-lg font-semibold text-white">{s.title}</h2>
-                      <p className="mt-2 text-sm leading-relaxed text-white/55">
-                        {s.description}
-                      </p>
-                    </div>
-                    <TrendingUp
-                      className="mt-1 h-8 w-8 shrink-0 text-primary/70"
+          {listLoading ? (
+            <div className="flex justify-center py-16">
+              <Loader2
+                className="h-10 w-10 animate-spin text-primary"
+                aria-hidden
+              />
+            </div>
+          ) : strategies.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] px-6 py-12 text-center text-sm text-white/55">
+              No strategies available yet.
+            </div>
+          ) : (
+            <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-2">
+              {strategies.map((s) => {
+                const points = pnlValuesToSparklinePoints(s.performanceMetrics);
+                const hasPnl =
+                  typeof s.performanceMetrics === "object" &&
+                  s.performanceMetrics !== null &&
+                  Array.isArray(
+                    (s.performanceMetrics as PnlMetrics).pnlChart?.values,
+                  ) &&
+                  ((s.performanceMetrics as PnlMetrics).pnlChart?.values
+                    ?.length ?? 0) > 0;
+                return (
+                  <article
+                    key={s.id}
+                    className="glass-card relative flex flex-col overflow-hidden border border-glassBorder p-6 shadow-xl transition hover:border-primary/35 hover:shadow-primary/5"
+                  >
+                    <div
+                      className={`pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b ${accentForId(s.id)} opacity-90`}
                       aria-hidden
                     />
-                  </div>
+                    <div className="relative">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h2 className="text-lg font-semibold text-white">
+                            {s.title}
+                          </h2>
+                          <p className="mt-2 text-sm leading-relaxed text-white/55">
+                            {s.description}
+                          </p>
+                        </div>
+                        <TrendingUp
+                          className="mt-1 h-8 w-8 shrink-0 text-primary/70"
+                          aria-hidden
+                        />
+                      </div>
 
-                  <PnlChartPlaceholder
-                    points={points}
-                    gradientId={`pnl-fill-${s.id.replace(/-/g, "")}`}
-                    hasData={hasPnl}
-                  />
+                      <PnlChartPlaceholder
+                        points={points}
+                        gradientId={`pnl-fill-${s.id.replace(/-/g, "")}`}
+                        hasData={hasPnl}
+                      />
 
-                  <dl className="mt-5 grid grid-cols-3 gap-3 text-center">
-                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                        Monthly
-                      </dt>
-                      <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
-                        ₹{s.monthlyFee.toLocaleString("en-IN")}
-                      </dd>
-                    </div>
-                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                        Min cap.
-                      </dt>
-                      <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
-                        ₹{s.minCapital.toLocaleString("en-IN")}
-                      </dd>
-                    </div>
-                    <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
-                      <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-                        Profit share
-                      </dt>
-                      <dd className="mt-1 text-sm font-semibold tabular-nums text-emerald-300/90">
-                        {s.profitShare}%
-                      </dd>
-                    </div>
-                  </dl>
+                      <dl className="mt-5 grid grid-cols-3 gap-3 text-center">
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Monthly
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                            ₹{s.monthlyFee.toLocaleString("en-IN")}
+                          </dd>
+                        </div>
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Min cap.
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                            ₹{s.minCapital.toLocaleString("en-IN")}
+                          </dd>
+                        </div>
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Profit share
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-emerald-300/90">
+                            {s.profitShare}%
+                          </dd>
+                        </div>
+                      </dl>
 
-                  <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-                    <Link
-                      href={`/dashboard/strategies/${s.id}`}
-                      className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-glassBorder bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/10"
-                    >
-                      <Eye className="h-4 w-4 opacity-90" aria-hidden />
-                      View Strategy
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={() => openSubscribe(s)}
-                      className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
-                    >
-                      <Wallet className="h-4 w-4 opacity-90" aria-hidden />
-                      Subscribe
-                    </button>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
-        </div>
+                      <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+                        <Link
+                          href={`/dashboard/strategies/${s.id}`}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-glassBorder bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        >
+                          <Eye className="h-4 w-4 opacity-90" aria-hidden />
+                          View Strategy
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => openSubscribe(s)}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
+                        >
+                          <Wallet className="h-4 w-4 opacity-90" aria-hidden />
+                          Subscribe
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {(activeTab === "my" || activeTab === "active") && (
+        <>
+          {subsError && (
+            <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              {subsError}
+            </div>
+          )}
+          {subsLoading ? (
+            <div className="flex justify-center py-16">
+              <Loader2
+                className="h-10 w-10 animate-spin text-primary"
+                aria-hidden
+              />
+            </div>
+          ) : tabSubs.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] px-6 py-12 text-center text-sm text-white/55">
+              {activeTab === "active"
+                ? "No active subscriptions. Subscribe from the Marketplace tab or check My Strategies for paused or overdue rows."
+                : "You have not subscribed to any strategy yet."}
+            </div>
+          ) : (
+            <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-2">
+              {tabSubs.map((sub) => {
+                const s = sub.strategy;
+                const points = pnlValuesToSparklinePoints(s.performanceMetrics);
+                const hasPnl =
+                  typeof s.performanceMetrics === "object" &&
+                  s.performanceMetrics !== null &&
+                  Array.isArray(
+                    (s.performanceMetrics as PnlMetrics).pnlChart?.values,
+                  ) &&
+                  ((s.performanceMetrics as PnlMetrics).pnlChart?.values
+                    ?.length ?? 0) > 0;
+                return (
+                  <article
+                    key={sub.id}
+                    className="glass-card relative flex flex-col overflow-hidden border border-glassBorder p-6 shadow-xl transition hover:border-primary/35 hover:shadow-primary/5"
+                  >
+                    <div
+                      className={`pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b ${accentForId(s.id)} opacity-90`}
+                      aria-hidden
+                    />
+                    <div className="relative">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h2 className="text-lg font-semibold text-white">
+                              {s.title}
+                            </h2>
+                            <span
+                              className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${statusBadgeClass(sub.status)}`}
+                            >
+                              {sub.status}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-sm leading-relaxed text-white/55">
+                            {s.description}
+                          </p>
+                        </div>
+                        <TrendingUp
+                          className="mt-1 h-8 w-8 shrink-0 text-primary/70"
+                          aria-hidden
+                        />
+                      </div>
+
+                      <p className="mt-3 text-xs text-white/45">
+                        Joined{" "}
+                        {new Date(sub.joinedDate).toLocaleString(undefined, {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })}
+                        {" · "}
+                        <span className="tabular-nums">
+                          {sub.multiplier}× multiplier
+                        </span>
+                        {sub.exchangeAccount ? (
+                          <>
+                            {" · "}
+                            <span className="text-white/55">
+                              {sub.exchangeAccount.nickname}
+                            </span>
+                          </>
+                        ) : null}
+                      </p>
+
+                      <PnlChartPlaceholder
+                        points={points}
+                        gradientId={`pnl-sub-${sub.id.replace(/-/g, "")}`}
+                        hasData={hasPnl}
+                      />
+
+                      <dl className="mt-5 grid grid-cols-3 gap-3 text-center">
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Monthly
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                            ₹{s.monthlyFee.toLocaleString("en-IN")}
+                          </dd>
+                        </div>
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Min cap.
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
+                            ₹{s.minCapital.toLocaleString("en-IN")}
+                          </dd>
+                        </div>
+                        <div className="rounded-lg border border-white/[0.06] bg-black/25 px-2 py-3">
+                          <dt className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                            Profit share
+                          </dt>
+                          <dd className="mt-1 text-sm font-semibold tabular-nums text-emerald-300/90">
+                            {s.profitShare}%
+                          </dd>
+                        </div>
+                      </dl>
+
+                      <div className="mt-6">
+                        <Link
+                          href={`/dashboard/strategies/${s.id}`}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-glassBorder bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/10"
+                        >
+                          <Eye className="h-4 w-4 opacity-90" aria-hidden />
+                          View Strategy
+                        </Link>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {modalStrategy && (

@@ -1,10 +1,19 @@
 "use client";
 
-import { KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, PlugZap, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const ENV_API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+function resolveApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (typeof window !== "undefined") {
+    return `${window.location.origin.replace(/\/$/, "")}/api`;
+  }
+  return "";
+}
 
 type ExchangeAccountRow = {
   id: string;
@@ -26,6 +35,11 @@ export default function DashboardSettingsPage() {
   const [adding, setAdding] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{
+    message: string;
+    variant: "success" | "error";
+  } | null>(null);
 
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -41,7 +55,8 @@ export default function DashboardSettingsPage() {
     setUnauthorized(false);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/exchange-accounts`, {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/exchange-accounts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 401) {
@@ -87,7 +102,8 @@ export default function DashboardSettingsPage() {
     }
     setAdding(true);
     try {
-      const res = await fetch(`${API_BASE}/exchange-accounts`, {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/exchange-accounts`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -128,10 +144,14 @@ export default function DashboardSettingsPage() {
     setDeletingId(id);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/exchange-accounts/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const base = resolveApiBase();
+      const res = await fetch(
+        `${base}/exchange-accounts/${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       if (res.status === 401) {
         setUnauthorized(true);
         return;
@@ -154,6 +174,86 @@ export default function DashboardSettingsPage() {
       setDeletingId(null);
     }
   }
+
+  async function handleTestConnection(id: string) {
+    if (!token) {
+      setUnauthorized(true);
+      return;
+    }
+    setTestingId(id);
+    setToast(null);
+    try {
+      const base = resolveApiBase();
+      const res = await fetch(`${base}/exchange-accounts/test`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ exchangeAccountId: id }),
+      });
+      const body: unknown = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        setUnauthorized(true);
+        return;
+      }
+      if (res.status === 404) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : "Account not found";
+        setToast({ message: msg, variant: "error" });
+        return;
+      }
+      if (!res.ok && res.status !== 200) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Request failed (${res.status})`;
+        setToast({ message: msg, variant: "error" });
+        return;
+      }
+      const ok =
+        typeof body === "object" &&
+        body !== null &&
+        "success" in body &&
+        (body as { success?: unknown }).success === true;
+      const errMsg =
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : `Request failed (${res.status})`;
+      if (ok) {
+        setToast({
+          message: "Connection OK — Delta API responded successfully.",
+          variant: "success",
+        });
+      } else {
+        setToast({ message: errMsg, variant: "error" });
+      }
+    } catch (e) {
+      setToast({
+        message: e instanceof Error ? e.message : "Connection test failed",
+        variant: "error",
+      });
+    } finally {
+      setTestingId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4800);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   if (unauthorized) {
     return (
@@ -218,6 +318,16 @@ export default function DashboardSettingsPage() {
                         {new Date(a.createdAt).toLocaleDateString()}
                       </p>
                     </div>
+                    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                      <button
+                        type="button"
+                        disabled={testingId === a.id}
+                        onClick={() => void handleTestConnection(a.id)}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/15 disabled:opacity-50"
+                      >
+                        <PlugZap className="h-4 w-4" aria-hidden />
+                        {testingId === a.id ? "Testing…" : "Test connection"}
+                      </button>
                     <button
                       type="button"
                       disabled={deletingId === a.id}
@@ -227,6 +337,7 @@ export default function DashboardSettingsPage() {
                       <Trash2 className="h-4 w-4" aria-hidden />
                       {deletingId === a.id ? "Removing…" : "Remove"}
                     </button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -300,6 +411,24 @@ export default function DashboardSettingsPage() {
           </>
         )}
       </section>
+
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-6 left-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 shadow-2xl"
+        >
+          <div
+            className={`glass-card border px-5 py-4 text-center text-sm font-medium shadow-2xl ${
+              toast.variant === "success"
+                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
+                : "border-red-500/40 bg-red-500/15 text-red-100"
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

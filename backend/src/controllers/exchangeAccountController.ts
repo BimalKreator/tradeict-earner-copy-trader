@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { encryptDeltaSecret } from "../utils/encryption.js";
+import ccxt from "ccxt";
+import { decryptDeltaSecretOrPlain, encryptDeltaSecret } from "../utils/encryption.js";
 
 const listSelect = {
   id: true,
@@ -126,5 +127,60 @@ export function createExchangeAccountController(prisma: PrismaClient) {
     }
   }
 
-  return { list, create, remove };
+  async function testConnection(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { exchangeAccountId?: unknown };
+      const exchangeAccountId =
+        typeof body.exchangeAccountId === "string"
+          ? body.exchangeAccountId.trim()
+          : "";
+
+      if (!exchangeAccountId) {
+        res.status(400).json({ error: "exchangeAccountId is required" });
+        return;
+      }
+
+      const account = await prisma.exchangeAccount.findFirst({
+        where: { id: exchangeAccountId, userId },
+      });
+
+      if (!account) {
+        res.status(404).json({ error: "Exchange account not found" });
+        return;
+      }
+
+      try {
+        const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
+        const secret = decryptDeltaSecretOrPlain(account.apiSecret);
+        const exchange = new ccxt.delta({
+          apiKey,
+          secret,
+          enableRateLimit: true,
+          options: {
+            defaultType: "swap",
+          },
+        });
+        await exchange.loadMarkets();
+        await exchange.fetchBalance();
+        res.json({ success: true });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        res.json({ success: false, error: message });
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  return { list, create, remove, testConnection };
 }

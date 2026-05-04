@@ -4,5 +4,6 @@ export declare function createExchangeAccountController(prisma: PrismaClient): {
     list: (req: Request, res: Response, next: NextFunction) => Promise<void>;
     create: (req: Request, res: Response, next: NextFunction) => Promise<void>;
     remove: (req: Request, res: Response, next: NextFunction) => Promise<void>;
+    testConnection: (req: Request, res: Response, next: NextFunction) => Promise<void>;
 };
 //# sourceMappingURL=exchangeAccountController.d.ts.map

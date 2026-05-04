@@ -7,6 +7,7 @@ export function createExchangeAccountRoutes(prisma) {
     const ctrl = createExchangeAccountController(prisma);
     router.get("/", jwtAuth, ctrl.list);
     router.post("/", jwtAuth, ctrl.create);
+    router.post("/test", jwtAuth, ctrl.testConnection);
     router.delete("/:id", jwtAuth, ctrl.remove);
     return router;
 }

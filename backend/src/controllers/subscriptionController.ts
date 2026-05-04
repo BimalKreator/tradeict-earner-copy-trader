@@ -207,6 +207,34 @@ export function createSubscriptionController(prisma: PrismaClient) {
     }
   }
 
+  /** All subscription rows for the current user (any status), with strategy + exchange account. */
+  async function listMySubscriptions(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = _req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const rows = await prisma.userSubscription.findMany({
+        where: { userId },
+        orderBy: { joinedDate: "desc" },
+        include: {
+          strategy: { select: strategySelectPublic },
+          exchangeAccount: {
+            select: { id: true, nickname: true, exchange: true },
+          },
+        },
+      });
+      res.json({ subscriptions: rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getStrategy(
     req: Request,
     res: Response,
@@ -241,6 +269,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
   return {
     subscribe,
     listStrategies,
+    listMySubscriptions,
     getStrategy,
   };
 }

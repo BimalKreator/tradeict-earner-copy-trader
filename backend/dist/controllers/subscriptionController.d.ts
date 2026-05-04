@@ -9,6 +9,7 @@ export declare function recordTradePnl(prisma: PrismaClient, args: {
 export declare function createSubscriptionController(prisma: PrismaClient): {
     subscribe: (req: Request, res: Response, next: NextFunction) => Promise<void>;
     listStrategies: (_req: Request, res: Response, next: NextFunction) => Promise<void>;
+    listMySubscriptions: (_req: Request, res: Response, next: NextFunction) => Promise<void>;
     getStrategy: (req: Request, res: Response, next: NextFunction) => Promise<void>;
 };
 //# sourceMappingURL=subscriptionController.d.ts.map
