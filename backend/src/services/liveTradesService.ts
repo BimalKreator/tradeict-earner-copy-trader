@@ -70,10 +70,21 @@ function compactSymbolKey(s: string): string {
   return s.replace(/[/:]/g, "").toUpperCase();
 }
 
+/** ETHUSDT (Cosmic) vs ETHUSD (older keys) — same underlying on Delta India. */
+function deltaPairBase(compactNoSlash: string): string | null {
+  const u = compactNoSlash.toUpperCase();
+  if (u.endsWith("USDT")) return u.slice(0, -4);
+  if (u.endsWith("USD") && !u.endsWith("USDT")) return u.slice(0, -3);
+  return null;
+}
+
 function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
   const a = compactSymbolKey(tradeSymbol);
   const b = compactSymbolKey(positionKey);
-  return a === b || a.endsWith(b) || b.endsWith(a);
+  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
+  const ba = deltaPairBase(a);
+  const bb = deltaPairBase(b);
+  return ba != null && bb != null && ba === bb;
 }
 
 function sidesAlign(tradeSide: string, posSide: TradeSide): boolean {

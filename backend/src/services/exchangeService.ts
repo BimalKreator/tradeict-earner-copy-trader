@@ -116,6 +116,51 @@ function unifiedSymbolToKey(unifiedSymbol: string): string {
   return `${base}${quote}`.toUpperCase();
 }
 
+/** Cosmic / UI keys (ETHUSDT, ETHUSD) → match keys for {@link unifiedSymbolToKey} on CCXT markets. */
+function compactSymbolAliasKeys(tradingSymbol: string): Set<string> {
+  const s = tradingSymbol.trim().toUpperCase();
+  const keys = new Set<string>();
+  if (!s) return keys;
+
+  if (s.includes("/")) {
+    keys.add(unifiedSymbolToKey(normalizeDeltaPerpSymbolForCcxt(tradingSymbol)));
+    keys.add(unifiedSymbolToKey(tradingSymbol.trim()));
+    return keys;
+  }
+
+  keys.add(s);
+  if (s.endsWith("USDT")) keys.add(s.slice(0, -4) + "USD");
+  if (s.endsWith("USD") && !s.endsWith("USDT")) keys.add(s.slice(0, -3) + "USDT");
+  return keys;
+}
+
+/**
+ * After `loadMarkets()`, map a trading label to an **existing** swap unified symbol on Delta
+ * India (e.g. ETHUSDT → ETH/USD:USD). Handles legacy `…/USDT:USDT` guesses via alias matching.
+ */
+function resolveDeltaIndiaSwapUnifiedSymbol(
+  exchange: InstanceType<typeof ccxt.delta>,
+  tradingSymbol: string,
+): string | null {
+  const markets = exchange.markets;
+  if (markets == null || typeof markets !== "object") return null;
+
+  const primary = normalizeDeltaPerpSymbolForCcxt(tradingSymbol);
+  const direct = markets[primary];
+  if (direct?.swap === true) return primary;
+
+  const want = compactSymbolAliasKeys(tradingSymbol);
+
+  for (const unified of Object.keys(markets)) {
+    const m = markets[unified];
+    if (m?.swap !== true) continue;
+    const k = unifiedSymbolToKey(unified);
+    if (want.has(k)) return unified;
+  }
+
+  return null;
+}
+
 function ccxtSideToTradeSide(raw: string | undefined): TradeSide {
   const u = (raw ?? "").toLowerCase();
   if (u === "long" || u === "buy") return "BUY";
@@ -140,7 +185,9 @@ export async function executeTrade(
 
     await exchange.loadMarkets();
 
-    const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
+    const ccxtSymbol =
+      resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
+      normalizeDeltaPerpSymbolForCcxt(symbol);
     const ccxtSide = side === "BUY" ? "buy" : "sell";
 
     let order: Awaited<ReturnType<typeof exchange.createMarketOrder>>;
@@ -181,7 +228,9 @@ export async function fetchDeltaTicker(
   try {
     const exchange = initializeDeltaClient();
     await exchange.loadMarkets();
-    const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
+    const ccxtSymbol =
+      resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
+      normalizeDeltaPerpSymbolForCcxt(symbol);
     try {
       const ticker = await exchange.fetchTicker(ccxtSymbol);
       const raw =
