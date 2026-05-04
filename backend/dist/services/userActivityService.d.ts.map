@@ -1,1 +1,0 @@
-{"version":3,"file":"userActivityService.d.ts","sourceRoot":"","sources":["../../src/services/userActivityService.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,YAAY,EAAE,MAAM,gBAAgB,CAAC;AAEnD,wBAAsB,eAAe,CACnC,MAAM,EAAE,YAAY,EACpB,IAAI,EAAE;IACJ,MAAM,EAAE,MAAM,CAAC;IACf,IAAI,EAAE,MAAM,CAAC;IACb,OAAO,EAAE,MAAM,CAAC;CACjB,GACA,OAAO,CAAC,IAAI,CAAC,CAYf"}

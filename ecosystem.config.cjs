@@ -5,14 +5,15 @@
 const path = require("path");
 
 const backendDir = path.join(__dirname, "backend");
-const serverJs = path.join(backendDir, "dist", "server.js");
+const runner = path.join(backendDir, "run-production.mjs");
 
 module.exports = {
   apps: [
     {
       name: "tradeict-bot",
       cwd: backendDir,
-      script: serverJs,
+      /** Fails fast if `dist/` is stale; loads `dist/server.js` after checks. */
+      script: runner,
       interpreter: "node",
       instances: 1,
       autorestart: true,
