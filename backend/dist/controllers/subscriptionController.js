@@ -108,7 +108,8 @@ export function createSubscriptionController(prisma) {
                     userId,
                 }))
                     .catch((err) => {
-                    console.error("[subscription] Late-join sync failed:", err);
+                    const msg = err instanceof Error ? err.message : String(err);
+                    console.error(`[subscription] Late-join sync failed strategyId=${strategyId} userId=${userId}:`, msg);
                 });
             }
             void logUserActivity(prisma, {

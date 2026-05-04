@@ -1,5 +1,38 @@
 import ccxt from "ccxt";
 import { decryptDeltaSecretOrPlain, } from "../utils/encryption.js";
+/**
+ * Converts compact Delta-style keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified
+ * symbols (`ETH/USDT`) into CCXT perpetual swap form `BASE/QUOTE:SETTLE` as used by
+ * Delta + ccxt with `defaultType: "swap"` (typically linear USDT: `BASE/USDT:USDT`).
+ */
+export function normalizeDeltaPerpSymbolForCcxt(raw) {
+    const s = raw.trim();
+    if (!s)
+        return s;
+    if (s.includes("/")) {
+        const colonIdx = s.indexOf(":");
+        if (colonIdx !== -1)
+            return s;
+        const slash = s.indexOf("/");
+        const base = s.slice(0, slash);
+        const quote = s.slice(slash + 1);
+        const q = quote.toUpperCase();
+        if (q === "USDT")
+            return `${base.toUpperCase()}/USDT:USDT`;
+        // Align with cosmicSymbolMap: USD-quoted Cosmic instruments → USDT linear swaps on Delta
+        if (q === "USD")
+            return `${base.toUpperCase()}/USDT:USDT`;
+        return s;
+    }
+    const upper = s.toUpperCase();
+    const usdt = upper.match(/^([A-Z0-9]{2,})(USDT)$/);
+    if (usdt)
+        return `${usdt[1]}/USDT:USDT`;
+    const usd = upper.match(/^([A-Z0-9]{2,})(USD)$/);
+    if (usd)
+        return `${usd[1]}/USDT:USDT`;
+    return s;
+}
 /** Map CCXT unified swap symbol (e.g. ETH/USDT:USDT) to compact ETHUSDT-style key. */
 function unifiedSymbolToKey(unifiedSymbol) {
     const slash = unifiedSymbol.indexOf("/");
@@ -33,8 +66,20 @@ export async function executeTrade(encryptedApiKey, encryptedApiSecret, symbol, 
             },
         });
         await exchange.loadMarkets();
+        const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
         const ccxtSide = side === "BUY" ? "buy" : "sell";
-        const order = await exchange.createMarketOrder(symbol, ccxtSide, size);
+        let order;
+        try {
+            order = await exchange.createMarketOrder(ccxtSymbol, ccxtSide, size);
+        }
+        catch (orderErr) {
+            const message = orderErr instanceof Error ? orderErr.message : String(orderErr);
+            console.log(message);
+            return {
+                success: false,
+                error: message,
+            };
+        }
         return {
             success: true,
             orderId: order.id ?? undefined,
@@ -60,7 +105,8 @@ export async function fetchDeltaTicker(symbol) {
         },
     });
     await exchange.loadMarkets();
-    const ticker = await exchange.fetchTicker(symbol);
+    const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
+    const ticker = await exchange.fetchTicker(ccxtSymbol);
     const raw = ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask ?? undefined;
     if (raw === undefined || typeof raw !== "number") {
         return {};

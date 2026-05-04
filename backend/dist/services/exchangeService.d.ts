@@ -21,6 +21,12 @@ export interface DeltaLivePosition {
     entryTime: string | null;
 }
 /**
+ * Converts compact Delta-style keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified
+ * symbols (`ETH/USDT`) into CCXT perpetual swap form `BASE/QUOTE:SETTLE` as used by
+ * Delta + ccxt with `defaultType: "swap"` (typically linear USDT: `BASE/USDT:USDT`).
+ */
+export declare function normalizeDeltaPerpSymbolForCcxt(raw: string): string;
+/**
  * Decrypts stored Delta Exchange credentials and submits a market order.
  */
 export declare function executeTrade(encryptedApiKey: string, encryptedApiSecret: string, symbol: string, side: TradeSide, size: number): Promise<ExecuteTradeResult>;

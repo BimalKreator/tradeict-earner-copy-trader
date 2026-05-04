@@ -1,6 +1,6 @@
 import { SubscriptionStatus, TradeStatus, UserStatus, } from "@prisma/client";
 import { fetchCosmicOpenPositions, } from "./cosmicClient.js";
-import { executeTrade, fetchDeltaTicker, } from "./exchangeService.js";
+import { executeTrade, fetchDeltaTicker, normalizeDeltaPerpSymbolForCcxt, } from "./exchangeService.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
@@ -227,6 +227,10 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(prisma, args) {
             continue;
         }
         const result = await executeTrade(creds.apiKey, creds.apiSecret, cosmic.deltaSymbol, cosmic.side, userSize);
+        if (!result.success) {
+            const ccxtSym = normalizeDeltaPerpSymbolForCcxt(cosmic.deltaSymbol);
+            console.error(`[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} cosmic=${cosmic.cosmicSymbol} deltaSymbol=${cosmic.deltaSymbol} ccxtSymbol=${ccxtSym} side=${cosmic.side} size=${userSize}: ${result.error ?? "unknown"}`);
+        }
         await recordTrade(prisma, {
             userId: sub.userId,
             strategyId: strategy.id,
