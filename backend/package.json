@@ -8,6 +8,7 @@
     "postinstall": "prisma generate",
     "dev": "ts-node-dev src/server.ts",
     "start": "node dist/server.js",
+    "diagnose:delta": "npm run build && node scripts/diagnose-bot.js",
     "build": "tsc",
     "db:reset-strategy": "npm run build && node dist/scripts/resetDefaultStrategy.js"
   },

@@ -53,6 +53,14 @@ app.use(
 );
 app.use(express.json());
 
+/** No auth: proves which `dist/` build is live. Stale PM2 shows wrong `deltaEthUsdtToCcxt` (must be `ETH/USD:USD`). */
+app.get("/api/health/build", (_req, res) => {
+  res.json({ deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL });
+});
+app.get("/health/build", (_req, res) => {
+  res.json({ deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL });
+});
+
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
 app.use("/api/user", createUserRoutes(prisma));
@@ -96,6 +104,6 @@ app.use(
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `Admin API listening on http://0.0.0.0:${PORT} (Delta India ETHUSDT→${DELTA_INDIA_CCXT_SAMPLE_SYMBOL})`,
+    `[BOOT] Admin API http://0.0.0.0:${PORT} deltaEthUSDT→ccxt=${DELTA_INDIA_CCXT_SAMPLE_SYMBOL} | verify: curl -s http://127.0.0.1:${PORT}/api/health/build`,
   );
 });
