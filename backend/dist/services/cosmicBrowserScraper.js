@@ -187,12 +187,25 @@ async function clickSubmitMappingThenEnvCsv(page, mappingSel, envSelectorsCsv) {
     return tryClick(page, envSelectorsCsv);
 }
 /**
- * React SPA: login route finishes painting inputs after network settles — wait for Cosmic’s
- * canonical fields before `fillUsingMappingThenEnvCsv` / `tryFillInput`.
+ * React SPA: login inputs mount after JS bundles load — wait for Cosmic’s canonical `#username`
+ * / `#password` (defaults when env selectors are unset; see `resolveCosmic*Csv`) before fill.
  */
 async function waitForCosmicLoginFieldsReady(page, scraperMappings) {
-    await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-    await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+    try {
+        await page.waitForSelector("#username", { timeout: 15_000 });
+        await page.waitForSelector("#password", { timeout: 15_000 });
+    }
+    catch (firstErr) {
+        try {
+            await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+            await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+        }
+        catch {
+            const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+            console.warn("[cosmic-scraper] Could not locate email/password inputs (expected #username / #password after SPA render):", msg);
+            throw firstErr;
+        }
+    }
     const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
     const mapPwd = selectorFromScraperMappings(scraperMappings, "login_password");
     if (mapEmail && mapEmail !== "#username") {
@@ -235,8 +248,14 @@ export async function submitCosmicLoginFormIfPresent(page, email, password) {
     const emailSelectors = resolveCosmicEmailSelectorsCsv();
     const passwordSelectors = resolveCosmicPasswordSelectorsCsv();
     const submitSelectors = resolveCosmicSubmitSelectorsCsv();
-    await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-    await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+    try {
+        await page.waitForSelector("#username", { timeout: 15_000 });
+        await page.waitForSelector("#password", { timeout: 15_000 });
+    }
+    catch {
+        await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+        await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+    }
     const filledEmail = await tryFillInput(page, emailSelectors, e);
     const filledPass = await tryFillInput(page, passwordSelectors, p);
     if (!filledEmail || !filledPass)
@@ -262,8 +281,14 @@ export async function performCosmicInspectLogin(page, email, password, targetUrl
     const p = password.trim();
     if (!e || !p)
         return;
-    await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
-    await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+    try {
+        await page.waitForSelector("#username", { timeout: 15_000 });
+        await page.waitForSelector("#password", { timeout: 15_000 });
+    }
+    catch {
+        await page.waitForSelector("#username", { visible: true, timeout: 15_000 });
+        await page.waitForSelector("#password", { visible: true, timeout: 15_000 });
+    }
     await page.click("#username", { clickCount: 3 });
     await page.type("#username", e, { delay: 12 });
     await page.click("#password", { clickCount: 3 });

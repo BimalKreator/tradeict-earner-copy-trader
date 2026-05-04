@@ -231,6 +231,43 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           ? body.syncActiveTrades
           : false;
 
+      const mappingsBodyCreate =
+        body.scraperMappings !== undefined
+          ? body.scraperMappings
+          : body.scraperStudioSelectors;
+      let scraperMappingsCreate: Prisma.InputJsonValue | undefined;
+      if (mappingsBodyCreate !== undefined) {
+        if (mappingsBodyCreate === null) {
+          scraperMappingsCreate = undefined;
+        } else if (
+          typeof mappingsBodyCreate === "object" &&
+          mappingsBodyCreate !== null &&
+          !Array.isArray(mappingsBodyCreate)
+        ) {
+          const raw = mappingsBodyCreate as Record<string, unknown>;
+          const cleaned: Record<string, string> = {};
+          for (const [k, v] of Object.entries(raw)) {
+            if (typeof k !== "string" || typeof v !== "string") {
+              res.status(400).json({
+                error:
+                  "scraperMappings must be an object with string keys and string selector values",
+              });
+              return;
+            }
+            const key = k.trim();
+            if (!key) continue;
+            cleaned[key] = v;
+          }
+          scraperMappingsCreate = cleaned;
+        } else {
+          res.status(400).json({
+            error:
+              "scraperMappings must be a JSON object or null (legacy key scraperStudioSelectors is merged into scraperMappings only)",
+          });
+          return;
+        }
+      }
+
       const strategy = await prisma.strategy.create({
         data: {
           title,
@@ -245,6 +282,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           profitShare,
           minCapital,
           syncActiveTrades,
+          ...(scraperMappingsCreate !== undefined
+            ? { scraperMappings: scraperMappingsCreate }
+            : {}),
         },
       });
 
@@ -400,19 +440,35 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       }
 
       try {
+        const updateData: Prisma.StrategyUpdateInput = {};
+        if (data.title !== undefined) updateData.title = data.title;
+        if (data.description !== undefined)
+          updateData.description = data.description;
+        if (data.cosmicEmail !== undefined)
+          updateData.cosmicEmail = data.cosmicEmail;
+        if (data.cosmicPassword !== undefined)
+          updateData.cosmicPassword = data.cosmicPassword;
+        if (data.performanceMetrics !== undefined)
+          updateData.performanceMetrics = data.performanceMetrics;
+        if (data.slippage !== undefined) updateData.slippage = data.slippage;
+        if (data.monthlyFee !== undefined)
+          updateData.monthlyFee = data.monthlyFee;
+        if (data.profitShare !== undefined)
+          updateData.profitShare = data.profitShare;
+        if (data.minCapital !== undefined)
+          updateData.minCapital = data.minCapital;
+        if (data.syncActiveTrades !== undefined)
+          updateData.syncActiveTrades = data.syncActiveTrades;
+        if (scraperMappingsPatch !== undefined) {
+          updateData.scraperMappings =
+            scraperMappingsPatch === null
+              ? Prisma.DbNull
+              : scraperMappingsPatch;
+        }
+
         const strategy = await prisma.strategy.update({
           where: { id },
-          data: {
-            ...data,
-            ...(scraperMappingsPatch !== undefined
-              ? {
-                  scraperMappings:
-                    scraperMappingsPatch === null
-                      ? Prisma.DbNull
-                      : scraperMappingsPatch,
-                }
-              : {}),
-          },
+          data: updateData,
         });
 
         const { cosmicPassword: _omitPwd, ...safe } = strategy;
