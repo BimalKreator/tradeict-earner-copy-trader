@@ -445,15 +445,13 @@ async function processNewCosmicTrade(
   }
 }
 
-/** Prefer last row in API order — often newest at bottom. */
-function pickLatestTrade(trades: CosmicLedTrade[]): CosmicLedTrade | null {
-  if (trades.length === 0) return null;
-  return trades[trades.length - 1]!;
-}
-
 type StrategyDedupe = {
-  lastId: string | undefined;
   prevOpenById: Map<string, CosmicLedTrade>;
+  /**
+   * After the first non-empty Cosmic snapshot, we only mirror **new** position ids.
+   * (The first snapshot is a baseline so we do not market-open duplicate existing leader positions.)
+   */
+  seeded: boolean;
 };
 
 async function runEngineLoop(
@@ -490,14 +488,15 @@ async function runEngineLoop(
 
           let dedupe = dedupeByStrategy.get(strategy.id);
           if (!dedupe) {
-            dedupe = { lastId: undefined, prevOpenById: new Map() };
+            dedupe = { prevOpenById: new Map(), seeded: false };
             dedupeByStrategy.set(strategy.id, dedupe);
           }
 
+          const prevSnapshot = dedupe.prevOpenById;
           const currentOpen = new Map(scraped.map((t) => [t.id, t]));
 
           const removed: CosmicLedTrade[] = [];
-          for (const [id, trade] of dedupe.prevOpenById) {
+          for (const [id, trade] of prevSnapshot) {
             if (!currentOpen.has(id)) {
               removed.push(trade);
             }
@@ -507,32 +506,27 @@ async function runEngineLoop(
             await processRemovedCosmicPositions(prisma, strategy, removed);
           }
 
-          dedupe.prevOpenById = currentOpen;
-
-          const latest = pickLatestTrade(scraped);
-
-          if (!latest) {
+          if (!dedupe.seeded) {
+            dedupe.prevOpenById = new Map(currentOpen);
+            if (scraped.length > 0) {
+              dedupe.seeded = true;
+            }
             continue;
           }
 
-          if (dedupe.lastId === undefined) {
-            dedupe.lastId = latest.id;
-            continue;
-          }
-          if (latest.id === dedupe.lastId) {
-            continue;
-          }
-
-          try {
-            await processNewCosmicTrade(prisma, strategy, latest);
-          } catch (err) {
-            console.error(
-              `[tradeEngine] strategy ${strategy.id} copy failed:`,
-              err,
-            );
+          for (const [id, cosmic] of currentOpen) {
+            if (prevSnapshot.has(id)) continue;
+            try {
+              await processNewCosmicTrade(prisma, strategy, cosmic);
+            } catch (err) {
+              console.error(
+                `[tradeEngine] strategy ${strategy.id} copy failed for new open ${id}:`,
+                err,
+              );
+            }
           }
 
-          dedupe.lastId = latest.id;
+          dedupe.prevOpenById = new Map(currentOpen);
         } catch (strategyErr) {
           console.error(
             `[tradeEngine] strategy ${strategy.id} iteration failed:`,
@@ -545,6 +539,46 @@ async function runEngineLoop(
     }
 
     await sleep(randomPollMs());
+  }
+}
+
+/**
+ * Runs {@link lateJoinMirrorOpenPositionsForSubscriber} for every active subscriber.
+ * Use when `syncActiveTrades` is turned on for a strategy that already has subscriptions
+ * (subscribe-time late-join only runs for new signups).
+ */
+export async function lateJoinMirrorForAllActiveSubscribers(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<void> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { syncActiveTrades: true },
+  });
+  if (!strategy?.syncActiveTrades) return;
+
+  const subs = await prisma.userSubscription.findMany({
+    where: {
+      strategyId,
+      status: SubscriptionStatus.ACTIVE,
+      user: { status: UserStatus.ACTIVE },
+    },
+    select: { userId: true },
+  });
+
+  for (const row of subs) {
+    try {
+      await lateJoinMirrorOpenPositionsForSubscriber(prisma, {
+        strategyId,
+        userId: row.userId,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[tradeEngine] late-join backfill failed strategyId=${strategyId} userId=${row.userId}:`,
+        msg,
+      );
+    }
   }
 }
 

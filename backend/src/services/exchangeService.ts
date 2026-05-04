@@ -169,10 +169,16 @@ export async function fetchDeltaTicker(
       const ticker = await exchange.fetchTicker(ccxtSymbol);
       const raw =
         ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask ?? undefined;
-      if (raw === undefined || typeof raw !== "number") {
+      const n =
+        typeof raw === "number"
+          ? raw
+          : raw === undefined || raw === null
+            ? NaN
+            : Number(raw);
+      if (!Number.isFinite(n)) {
         return { last: null };
       }
-      return { last: raw };
+      return { last: n };
     } catch (tickerErr) {
       const msg =
         tickerErr instanceof Error ? tickerErr.message : String(tickerErr);

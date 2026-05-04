@@ -319,24 +319,24 @@ export async function getAdminGroupedLiveTrades(
         user: { status: UserStatus.ACTIVE },
       },
       include: {
-        user: { select: { email: true } },
+        user: { select: { email: true, deltaApiKeys: true } },
         exchangeAccount: true,
       },
     });
 
     async function followerPositions(
-      accountId: string,
+      cacheKey: string,
       apiKey: string,
       apiSecret: string,
     ): Promise<DeltaLivePosition[]> {
-      const hit = followerPositionsCache.get(accountId);
+      const hit = followerPositionsCache.get(cacheKey);
       if (hit) return hit;
       try {
         const list = await fetchDeltaOpenPositions(apiKey, apiSecret);
-        followerPositionsCache.set(accountId, list);
+        followerPositionsCache.set(cacheKey, list);
         return list;
       } catch {
-        followerPositionsCache.set(accountId, []);
+        followerPositionsCache.set(cacheKey, []);
         return [];
       }
     }
@@ -367,11 +367,26 @@ export async function getAdminGroupedLiveTrades(
       const followers: AdminFollowerRow[] = [];
 
       for (const sub of subs) {
-        if (!sub.exchangeAccount) continue;
+        const creds =
+          sub.exchangeAccount != null
+            ? {
+                cacheKey: `ex:${sub.exchangeAccount.id}`,
+                apiKey: sub.exchangeAccount.apiKey,
+                apiSecret: sub.exchangeAccount.apiSecret,
+              }
+            : sub.user.deltaApiKeys[0] != null
+              ? {
+                  cacheKey: `legacy:${sub.userId}:${sub.user.deltaApiKeys[0]!.id}`,
+                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+                }
+              : null;
+        if (!creds) continue;
+
         const positions = await followerPositions(
-          sub.exchangeAccount.id,
-          sub.exchangeAccount.apiKey,
-          sub.exchangeAccount.apiSecret,
+          creds.cacheKey,
+          creds.apiKey,
+          creds.apiSecret,
         );
         const m = matchDeltaPosition(positions, c.deltaSymbol, c.side);
         if (!m) continue;
