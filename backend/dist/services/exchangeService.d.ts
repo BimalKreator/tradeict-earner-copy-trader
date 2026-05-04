@@ -1,3 +1,9 @@
+import ccxt from "ccxt";
+/**
+ * Point a `ccxt.delta` instance at Delta India so India API keys and tickers resolve correctly.
+ * Call immediately after `new ccxt.delta({ ... })` and before `loadMarkets` / requests.
+ */
+export declare function applyDeltaIndiaCcxtUrls(exchange: InstanceType<typeof ccxt.delta>): void;
 export type TradeSide = "BUY" | "SELL";
 export interface ExecuteTradeResult {
     success: boolean;

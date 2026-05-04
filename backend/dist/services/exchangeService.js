@@ -1,5 +1,17 @@
 import ccxt from "ccxt";
 import { decryptDeltaSecretOrPlain, } from "../utils/encryption.js";
+/** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
+const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
+/**
+ * Point a `ccxt.delta` instance at Delta India so India API keys and tickers resolve correctly.
+ * Call immediately after `new ccxt.delta({ ... })` and before `loadMarkets` / requests.
+ */
+export function applyDeltaIndiaCcxtUrls(exchange) {
+    exchange.urls.api = {
+        public: DELTA_INDIA_API_BASE,
+        private: DELTA_INDIA_API_BASE,
+    };
+}
 /**
  * Converts compact Delta-style keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified
  * symbols (`ETH/USDT`) into CCXT perpetual swap form `BASE/QUOTE:SETTLE` as used by
@@ -65,6 +77,7 @@ export async function executeTrade(encryptedApiKey, encryptedApiSecret, symbol, 
                 defaultType: "swap",
             },
         });
+        applyDeltaIndiaCcxtUrls(exchange);
         await exchange.loadMarkets();
         const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
         const ccxtSide = side === "BUY" ? "buy" : "sell";
@@ -104,6 +117,7 @@ export async function fetchDeltaTicker(symbol) {
             defaultType: "swap",
         },
     });
+    applyDeltaIndiaCcxtUrls(exchange);
     await exchange.loadMarkets();
     const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
     const ticker = await exchange.fetchTicker(ccxtSymbol);
@@ -127,6 +141,7 @@ export async function fetchDeltaOpenPositions(apiKeyStored, apiSecretStored) {
             defaultType: "swap",
         },
     });
+    applyDeltaIndiaCcxtUrls(exchange);
     await exchange.loadMarkets();
     const positions = await exchange.fetchPositions();
     const out = [];

@@ -3,6 +3,20 @@ import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
 
+/** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
+const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
+
+/**
+ * Point a `ccxt.delta` instance at Delta India so India API keys and tickers resolve correctly.
+ * Call immediately after `new ccxt.delta({ ... })` and before `loadMarkets` / requests.
+ */
+export function applyDeltaIndiaCcxtUrls(exchange: InstanceType<typeof ccxt.delta>): void {
+  exchange.urls.api = {
+    public: DELTA_INDIA_API_BASE,
+    private: DELTA_INDIA_API_BASE,
+  };
+}
+
 export type TradeSide = "BUY" | "SELL";
 
 export interface ExecuteTradeResult {
@@ -101,6 +115,7 @@ export async function executeTrade(
         defaultType: "swap",
       },
     });
+    applyDeltaIndiaCcxtUrls(exchange);
 
     await exchange.loadMarkets();
 
@@ -144,6 +159,7 @@ export async function fetchDeltaTicker(symbol: string): Promise<{ last?: number 
       defaultType: "swap",
     },
   });
+  applyDeltaIndiaCcxtUrls(exchange);
   await exchange.loadMarkets();
   const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
   const ticker = await exchange.fetchTicker(ccxtSymbol);
@@ -173,6 +189,7 @@ export async function fetchDeltaOpenPositions(
       defaultType: "swap",
     },
   });
+  applyDeltaIndiaCcxtUrls(exchange);
 
   await exchange.loadMarkets();
   const positions = await exchange.fetchPositions();

@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import ccxt from "ccxt";
+import { applyDeltaIndiaCcxtUrls } from "../services/exchangeService.js";
 import { decryptDeltaSecret, encryptDeltaSecret } from "../utils/encryption.js";
 
 const listSelect = {
@@ -170,6 +171,7 @@ export function createExchangeAccountController(prisma: PrismaClient) {
             defaultType: "swap",
           },
         });
+        applyDeltaIndiaCcxtUrls(exchange);
         await exchange.loadMarkets();
         await exchange.fetchBalance();
         res.json({ success: true });
