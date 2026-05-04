@@ -19,6 +19,7 @@ import { createWalletRoutes } from "./routes/walletRoutes.js";
 import { createUserRoutes } from "./routes/userRoutes.js";
 import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
+import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import {
   initTelegramBot,
@@ -93,6 +94,8 @@ app.use(
   },
 );
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Admin API listening on http://0.0.0.0:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `Admin API listening on http://0.0.0.0:${PORT} (Delta India ETHUSDT→${DELTA_INDIA_CCXT_SAMPLE_SYMBOL})`,
+  );
 });

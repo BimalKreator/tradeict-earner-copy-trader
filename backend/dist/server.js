@@ -17,6 +17,7 @@ import { createWalletRoutes } from "./routes/walletRoutes.js";
 import { createUserRoutes } from "./routes/userRoutes.js";
 import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
+import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { initTelegramBot, initTelegramCronJobs, } from "./services/telegramService.js";
 const PORT = 5000;
@@ -64,7 +65,7 @@ app.use((err, _req, res, _next) => {
     }
     res.status(500).json({ error: "Internal server error" });
 });
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Admin API listening on http://0.0.0.0:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Admin API listening on http://0.0.0.0:${PORT} (Delta India ETHUSDT→${DELTA_INDIA_CCXT_SAMPLE_SYMBOL})`);
 });
 //# sourceMappingURL=server.js.map

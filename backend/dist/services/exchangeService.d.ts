@@ -32,6 +32,8 @@ export interface DeltaLivePosition {
  * India linear perps use `BASE/USD:USD`, not `BASE/USDT:USDT` (those markets do not exist there).
  */
 export declare function normalizeDeltaPerpSymbolForCcxt(raw: string): string;
+/** Boot-time check: compact key used in Cosmic/copy rows → CCXT symbol on Delta India. */
+export declare const DELTA_INDIA_CCXT_SAMPLE_SYMBOL: string;
 /**
  * Decrypts stored Delta Exchange credentials and submits a market order.
  */
