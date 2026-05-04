@@ -370,6 +370,10 @@ export function createAdminRoutes(prisma) {
                 return;
             }
             try {
+                const existingSync = await prisma.strategy.findUnique({
+                    where: { id },
+                    select: { syncActiveTrades: true },
+                });
                 const updateData = {};
                 if (data.title !== undefined)
                     updateData.title = data.title;
@@ -401,6 +405,16 @@ export function createAdminRoutes(prisma) {
                     where: { id },
                     data: updateData,
                 });
+                if (existingSync &&
+                    !existingSync.syncActiveTrades &&
+                    strategy.syncActiveTrades) {
+                    void import("../services/tradeEngine.js")
+                        .then(({ lateJoinMirrorForAllActiveSubscribers }) => lateJoinMirrorForAllActiveSubscribers(prisma, id))
+                        .catch((err) => {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        console.error(`[admin] syncActiveTrades backfill failed strategyId=${id}:`, msg);
+                    });
+                }
                 const { cosmicPassword: _omitPwd, ...safe } = strategy;
                 res.json(safe);
             }

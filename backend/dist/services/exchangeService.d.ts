@@ -13,7 +13,7 @@ export interface ExecuteTradeResult {
 }
 /** Normalized open perpetual position from Delta (for dashboards). */
 export interface DeltaLivePosition {
-    /** CCXT unified symbol (e.g. ETH/USDT:USDT) */
+    /** CCXT unified symbol (Delta India linear perps: e.g. ETH/USD:USD) */
     symbol: string;
     /** Compact ticker-style id aligned with copy-trade symbols (e.g. ETHUSDT). */
     symbolKey: string;
@@ -27,9 +27,9 @@ export interface DeltaLivePosition {
     entryTime: string | null;
 }
 /**
- * Converts compact Delta-style keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified
- * symbols (`ETH/USDT`) into CCXT perpetual swap form `BASE/QUOTE:SETTLE` as used by
- * Delta + ccxt with `defaultType: "swap"` (typically linear USDT: `BASE/USDT:USDT`).
+ * Converts compact keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified symbols into
+ * CCXT swap symbols for **Delta Exchange India** (`api.india.delta.exchange`).
+ * India linear perps use `BASE/USD:USD`, not `BASE/USDT:USDT` (those markets do not exist there).
  */
 export declare function normalizeDeltaPerpSymbolForCcxt(raw: string): string;
 /**

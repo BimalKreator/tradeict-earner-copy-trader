@@ -22,9 +22,9 @@ export function initializeDeltaClient(apiKey, secret) {
     return exchange;
 }
 /**
- * Converts compact Delta-style keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified
- * symbols (`ETH/USDT`) into CCXT perpetual swap form `BASE/QUOTE:SETTLE` as used by
- * Delta + ccxt with `defaultType: "swap"` (typically linear USDT: `BASE/USDT:USDT`).
+ * Converts compact keys (e.g. `ETHUSDT`, `ETHUSD`) or partial unified symbols into
+ * CCXT swap symbols for **Delta Exchange India** (`api.india.delta.exchange`).
+ * India linear perps use `BASE/USD:USD`, not `BASE/USDT:USDT` (those markets do not exist there).
  */
 export function normalizeDeltaPerpSymbolForCcxt(raw) {
     const s = raw.trim();
@@ -32,29 +32,36 @@ export function normalizeDeltaPerpSymbolForCcxt(raw) {
         return s;
     if (s.includes("/")) {
         const colonIdx = s.indexOf(":");
-        if (colonIdx !== -1)
+        if (colonIdx !== -1) {
+            const u = s.toUpperCase();
+            if (u.endsWith("/USDT:USDT")) {
+                const slash = s.indexOf("/");
+                const base = s.slice(0, slash);
+                return `${base.toUpperCase()}/USD:USD`;
+            }
             return s;
+        }
         const slash = s.indexOf("/");
         const base = s.slice(0, slash);
         const quote = s.slice(slash + 1);
         const q = quote.toUpperCase();
-        if (q === "USDT")
-            return `${base.toUpperCase()}/USDT:USDT`;
-        // Align with cosmicSymbolMap: USD-quoted Cosmic instruments → USDT linear swaps on Delta
-        if (q === "USD")
-            return `${base.toUpperCase()}/USDT:USDT`;
+        if (q === "USDT" || q === "USD")
+            return `${base.toUpperCase()}/USD:USD`;
         return s;
     }
     const upper = s.toUpperCase();
     const usdt = upper.match(/^([A-Z0-9]{2,})(USDT)$/);
     if (usdt)
-        return `${usdt[1]}/USDT:USDT`;
-    const usd = upper.match(/^([A-Z0-9]{2,})(USD)$/);
+        return `${usdt[1]}/USD:USD`;
+    const usd = upper.match(/^([A-Z0-9]{2,})USD$/);
     if (usd)
-        return `${usd[1]}/USDT:USDT`;
+        return `${usd[1]}/USD:USD`;
     return s;
 }
-/** Map CCXT unified swap symbol (e.g. ETH/USDT:USDT) to compact ETHUSDT-style key. */
+/**
+ * Map CCXT unified swap symbol to compact keys aligned with copy-trade symbols (…USDT).
+ * Delta India returns `BASE/USD:USD`; we normalize to `BASEUSDT` to match {@link cosmicSymbolMap}.
+ */
 function unifiedSymbolToKey(unifiedSymbol) {
     const slash = unifiedSymbol.indexOf("/");
     if (slash === -1)
@@ -63,6 +70,11 @@ function unifiedSymbolToKey(unifiedSymbol) {
     const after = unifiedSymbol.slice(slash + 1);
     const colon = after.indexOf(":");
     const quote = colon === -1 ? after : after.slice(0, colon);
+    const settle = colon === -1 ? "" : after.slice(colon + 1);
+    const q = quote.toUpperCase();
+    const st = settle.toUpperCase();
+    if (q === "USD" && st === "USD")
+        return `${base}USDT`.toUpperCase();
     return `${base}${quote}`.toUpperCase();
 }
 function ccxtSideToTradeSide(raw) {
@@ -121,10 +133,15 @@ export async function fetchDeltaTicker(symbol) {
         try {
             const ticker = await exchange.fetchTicker(ccxtSymbol);
             const raw = ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask ?? undefined;
-            if (raw === undefined || typeof raw !== "number") {
+            const n = typeof raw === "number"
+                ? raw
+                : raw === undefined || raw === null
+                    ? NaN
+                    : Number(raw);
+            if (!Number.isFinite(n)) {
                 return { last: null };
             }
-            return { last: raw };
+            return { last: n };
         }
         catch (tickerErr) {
             const msg = tickerErr instanceof Error ? tickerErr.message : String(tickerErr);
