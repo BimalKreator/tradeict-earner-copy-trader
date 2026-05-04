@@ -38,9 +38,11 @@ export declare function normalizeDeltaPerpSymbolForCcxt(raw: string): string;
 export declare function executeTrade(encryptedApiKey: string, encryptedApiSecret: string, symbol: string, side: TradeSide, size: number): Promise<ExecuteTradeResult>;
 /**
  * Public market data for slippage checks (no API keys required).
+ * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure
+ * (missing market, network, etc.) so callers never throw.
  */
 export declare function fetchDeltaTicker(symbol: string): Promise<{
-    last?: number;
+    last: number | null;
 }>;
 /**
  * Authenticated: fetch non-flat perpetual positions from Delta India (swap).

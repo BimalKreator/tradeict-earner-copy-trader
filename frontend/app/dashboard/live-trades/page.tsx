@@ -19,15 +19,28 @@ type LiveRow = {
   side: string;
 };
 
+const usdPriceFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 6,
+});
+
+const usdPnlFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  signDisplay: "always",
+});
+
 function fmtPrice(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 6 })}`;
+  return usdPriceFmt.format(n);
 }
 
 function fmtPnl(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  const sign = n >= 0 ? "+" : "";
-  return `${sign}₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  return usdPnlFmt.format(n);
 }
 
 function fmtTime(iso: string | null): string {

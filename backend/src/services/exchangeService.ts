@@ -155,18 +155,41 @@ export async function executeTrade(
 
 /**
  * Public market data for slippage checks (no API keys required).
+ * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure
+ * (missing market, network, etc.) so callers never throw.
  */
-export async function fetchDeltaTicker(symbol: string): Promise<{ last?: number }> {
-  const exchange = initializeDeltaClient();
-  await exchange.loadMarkets();
-  const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
-  const ticker = await exchange.fetchTicker(ccxtSymbol);
-  const raw =
-    ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask ?? undefined;
-  if (raw === undefined || typeof raw !== "number") {
-    return {};
+export async function fetchDeltaTicker(
+  symbol: string,
+): Promise<{ last: number | null }> {
+  try {
+    const exchange = initializeDeltaClient();
+    await exchange.loadMarkets();
+    const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
+    try {
+      const ticker = await exchange.fetchTicker(ccxtSymbol);
+      const raw =
+        ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask ?? undefined;
+      if (raw === undefined || typeof raw !== "number") {
+        return { last: null };
+      }
+      return { last: raw };
+    } catch (tickerErr) {
+      const msg =
+        tickerErr instanceof Error ? tickerErr.message : String(tickerErr);
+      console.warn(
+        `[exchangeService] fetchTicker failed symbol=${symbol} ccxt=${ccxtSymbol}:`,
+        msg,
+      );
+      return { last: null };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[exchangeService] fetchDeltaTicker failed symbol=${symbol}:`,
+      msg,
+    );
+    return { last: null };
   }
-  return { last: raw };
 }
 
 /**

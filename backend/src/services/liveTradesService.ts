@@ -200,17 +200,13 @@ export async function getUserLiveTradeRows(
     if (match) {
       entryTime = match.entryTime ?? entryTime;
     } else {
-      try {
-        const tick = await fetchDeltaTicker(t.symbol);
-        if (tick.last !== undefined && Number.isFinite(tick.last)) {
-          markPrice = tick.last;
-          const entry = t.entryPrice;
-          const diff = markPrice - entry;
-          const signed = t.side.toUpperCase() === "BUY" ? diff : -diff;
-          livePnl = signed * t.size;
-        }
-      } catch {
-        /* ignore */
+      const tick = await fetchDeltaTicker(t.symbol);
+      if (tick.last != null && Number.isFinite(tick.last)) {
+        markPrice = tick.last;
+        const entry = t.entryPrice;
+        const diff = markPrice - entry;
+        const signed = t.side.toUpperCase() === "BUY" ? diff : -diff;
+        livePnl = signed * t.size;
       }
       entryTime = t.createdAt.toISOString();
     }
@@ -358,13 +354,9 @@ export async function getAdminGroupedLiveTrades(
     }
 
     for (const c of cosmicList) {
-      let mark: number | null = null;
-      try {
-        const tick = await fetchDeltaTicker(c.deltaSymbol);
-        mark = tick.last ?? null;
-      } catch {
-        mark = null;
-      }
+      const tick = await fetchDeltaTicker(c.deltaSymbol);
+      const mark =
+        tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
 
       const cosmicRow: LiveTradeRow = {
         ...cosmicToRow(c),

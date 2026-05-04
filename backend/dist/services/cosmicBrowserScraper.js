@@ -215,27 +215,37 @@ async function captureLoginFailureDebugShot(page) {
 /**
  * Run immediately after `page.goto` to the Cosmic login URL: allow React / Cloudflare / SPA
  * to settle, then wait for canonical fields before fill/submit.
+ * Returns `false` on failure (logs + debug screenshot); does **not** throw — avoids killing Node.
  */
 async function performLogin(page, scraperMappings) {
-    await new Promise((r) => setTimeout(r, 8000));
     try {
-        await page.waitForSelector("#username", { timeout: 15_000 });
-        await page.waitForSelector("#password", { timeout: 15_000 });
+        await new Promise((r) => setTimeout(r, 8000));
+        try {
+            await page.waitForSelector("#username", { timeout: 15_000 });
+            await page.waitForSelector("#password", { timeout: 15_000 });
+        }
+        catch (err) {
+            await captureLoginFailureDebugShot(page);
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[cosmic-scraper] Could not locate email/password inputs — wrote", LOGIN_FAIL_DEBUG_PATH, "—", msg);
+            return false;
+        }
+        const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
+        const mapPwd = selectorFromScraperMappings(scraperMappings, "login_password");
+        if (mapEmail && mapEmail !== "#username") {
+            await waitSelectorFlexible(page, mapEmail);
+        }
+        if (mapPwd && mapPwd !== "#password") {
+            await waitSelectorFlexible(page, mapPwd);
+        }
+        await new Promise((r) => setTimeout(r, 400));
+        return true;
     }
     catch (err) {
-        await captureLoginFailureDebugShot(page);
-        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", LOGIN_FAIL_DEBUG_PATH);
-        throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[cosmic-scraper] performLogin unexpected error:", msg);
+        return false;
     }
-    const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
-    const mapPwd = selectorFromScraperMappings(scraperMappings, "login_password");
-    if (mapEmail && mapEmail !== "#username") {
-        await waitSelectorFlexible(page, mapEmail);
-    }
-    if (mapPwd && mapPwd !== "#password") {
-        await waitSelectorFlexible(page, mapPwd);
-    }
-    await new Promise((r) => setTimeout(r, 400));
 }
 function scrapeMetaEarly(explain) {
     return {
@@ -369,7 +379,18 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
     const emailSelectors = resolveCosmicEmailSelectorsCsv();
     const passwordSelectors = resolveCosmicPasswordSelectorsCsv();
     const submitSelectors = resolveCosmicSubmitSelectorsCsv();
-    const browser = await launchCosmicStealthBrowser();
+    let browser;
+    try {
+        browser = await launchCosmicStealthBrowser();
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[cosmic-scraper] Failed to launch browser:", msg);
+        return {
+            payloads: [],
+            scrapeMeta: scrapeMetaEarly(`Browser launch failed: ${msg}`),
+        };
+    }
     try {
         const page = await browser.newPage();
         await page.setViewport({ width: 1440, height: 900 });
@@ -392,7 +413,13 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
             waitUntil: "networkidle2",
             timeout: 180_000,
         });
-        await performLogin(page, scraperMappings);
+        const loginReady = await performLogin(page, scraperMappings);
+        if (!loginReady) {
+            return {
+                payloads: [],
+                scrapeMeta: scrapeMetaEarly("Could not locate Cosmic login fields (#username / #password) — see logs and login-fail debug screenshot."),
+            };
+        }
         const mapLoginEmail = selectorFromScraperMappings(scraperMappings, "login_email");
         const mapLoginPassword = selectorFromScraperMappings(scraperMappings, "login_password");
         const mapLoginSubmit = selectorFromScraperMappings(scraperMappings, "login_submit");
@@ -536,7 +563,11 @@ export async function scrapeCosmicPositionsData(cosmicEmail, cosmicPassword, opt
         };
     }
     finally {
-        await browser.close();
+        if (browser !== undefined) {
+            await browser.close().catch((closeErr) => {
+                console.warn("[cosmic-scraper] browser.close failed:", closeErr);
+            });
+        }
     }
 }
 //# sourceMappingURL=cosmicBrowserScraper.js.map

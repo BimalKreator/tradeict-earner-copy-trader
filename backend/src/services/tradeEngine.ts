@@ -173,13 +173,11 @@ async function processRemovedCosmicPositions(
   removed: CosmicLedTrade[],
 ): Promise<void> {
   for (const cosmic of removed) {
-    let exitPrice: number | undefined;
-    try {
-      const t = await fetchDeltaTicker(cosmic.deltaSymbol);
-      exitPrice = t.last;
-    } catch {
-      exitPrice = undefined;
-    }
+    const tickRm = await fetchDeltaTicker(cosmic.deltaSymbol);
+    const exitPrice =
+      tickRm.last != null && Number.isFinite(tickRm.last)
+        ? tickRm.last
+        : undefined;
     if (exitPrice === undefined || !Number.isFinite(exitPrice)) continue;
 
     const subs = await prisma.userSubscription.findMany({
@@ -242,13 +240,11 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
   }
 
   for (const cosmic of scraped) {
-    let marketPrice: number | undefined;
-    try {
-      const t = await fetchDeltaTicker(cosmic.deltaSymbol);
-      marketPrice = t.last;
-    } catch {
-      marketPrice = undefined;
-    }
+    const tickLj = await fetchDeltaTicker(cosmic.deltaSymbol);
+    const marketPrice =
+      tickLj.last != null && Number.isFinite(tickLj.last)
+        ? tickLj.last
+        : undefined;
 
     const userSize = cosmic.size * sub.multiplier;
 
@@ -342,13 +338,11 @@ async function processNewCosmicTrade(
   },
   cosmic: CosmicLedTrade,
 ) {
-  let marketPrice: number | undefined;
-  try {
-    const t = await fetchDeltaTicker(cosmic.deltaSymbol);
-    marketPrice = t.last;
-  } catch {
-    marketPrice = undefined;
-  }
+  const tickNew = await fetchDeltaTicker(cosmic.deltaSymbol);
+  const marketPrice =
+    tickNew.last != null && Number.isFinite(tickNew.last)
+      ? tickNew.last
+      : undefined;
 
   const subs = await prisma.userSubscription.findMany({
     where: {
@@ -478,66 +472,73 @@ async function runEngineLoop(
       });
 
       for (const strategy of strategies) {
-        let scraped: CosmicLedTrade[];
         try {
-          scraped = await fetchCosmicOpenPositions(
-            strategy.cosmicEmail,
-            strategy.cosmicPassword,
-            strategy.scraperMappings,
-          );
-        } catch (err) {
-          console.error(
-            `[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`,
-            err,
-          );
-          continue;
-        }
-
-        let dedupe = dedupeByStrategy.get(strategy.id);
-        if (!dedupe) {
-          dedupe = { lastId: undefined, prevOpenById: new Map() };
-          dedupeByStrategy.set(strategy.id, dedupe);
-        }
-
-        const currentOpen = new Map(scraped.map((t) => [t.id, t]));
-
-        const removed: CosmicLedTrade[] = [];
-        for (const [id, trade] of dedupe.prevOpenById) {
-          if (!currentOpen.has(id)) {
-            removed.push(trade);
+          let scraped: CosmicLedTrade[];
+          try {
+            scraped = await fetchCosmicOpenPositions(
+              strategy.cosmicEmail,
+              strategy.cosmicPassword,
+              strategy.scraperMappings,
+            );
+          } catch (err) {
+            console.error(
+              `[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`,
+              err,
+            );
+            continue;
           }
-        }
 
-        if (removed.length > 0) {
-          await processRemovedCosmicPositions(prisma, strategy, removed);
-        }
+          let dedupe = dedupeByStrategy.get(strategy.id);
+          if (!dedupe) {
+            dedupe = { lastId: undefined, prevOpenById: new Map() };
+            dedupeByStrategy.set(strategy.id, dedupe);
+          }
 
-        dedupe.prevOpenById = currentOpen;
+          const currentOpen = new Map(scraped.map((t) => [t.id, t]));
 
-        const latest = pickLatestTrade(scraped);
+          const removed: CosmicLedTrade[] = [];
+          for (const [id, trade] of dedupe.prevOpenById) {
+            if (!currentOpen.has(id)) {
+              removed.push(trade);
+            }
+          }
 
-        if (!latest) {
-          continue;
-        }
+          if (removed.length > 0) {
+            await processRemovedCosmicPositions(prisma, strategy, removed);
+          }
 
-        if (dedupe.lastId === undefined) {
+          dedupe.prevOpenById = currentOpen;
+
+          const latest = pickLatestTrade(scraped);
+
+          if (!latest) {
+            continue;
+          }
+
+          if (dedupe.lastId === undefined) {
+            dedupe.lastId = latest.id;
+            continue;
+          }
+          if (latest.id === dedupe.lastId) {
+            continue;
+          }
+
+          try {
+            await processNewCosmicTrade(prisma, strategy, latest);
+          } catch (err) {
+            console.error(
+              `[tradeEngine] strategy ${strategy.id} copy failed:`,
+              err,
+            );
+          }
+
           dedupe.lastId = latest.id;
-          continue;
-        }
-        if (latest.id === dedupe.lastId) {
-          continue;
-        }
-
-        try {
-          await processNewCosmicTrade(prisma, strategy, latest);
-        } catch (err) {
+        } catch (strategyErr) {
           console.error(
-            `[tradeEngine] strategy ${strategy.id} copy failed:`,
-            err,
+            `[tradeEngine] strategy ${strategy.id} iteration failed:`,
+            strategyErr,
           );
         }
-
-        dedupe.lastId = latest.id;
       }
     } catch (err) {
       console.error("[tradeEngine] loop iteration failed:", err);
