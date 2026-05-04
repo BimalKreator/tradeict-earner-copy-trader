@@ -1,5 +1,4 @@
-import ccxt from "ccxt";
-import { applyDeltaIndiaCcxtUrls } from "../services/exchangeService.js";
+import { initializeDeltaClient } from "../services/exchangeService.js";
 import { decryptDeltaSecret, encryptDeltaSecret } from "../utils/encryption.js";
 const listSelect = {
     id: true,
@@ -117,15 +116,7 @@ export function createExchangeAccountController(prisma) {
             try {
                 const apiKey = decryptDeltaSecret(account.apiKey);
                 const secret = decryptDeltaSecret(account.apiSecret);
-                const exchange = new ccxt.delta({
-                    apiKey,
-                    secret,
-                    enableRateLimit: true,
-                    options: {
-                        defaultType: "swap",
-                    },
-                });
-                applyDeltaIndiaCcxtUrls(exchange);
+                const exchange = initializeDeltaClient(apiKey, secret);
                 await exchange.loadMarkets();
                 await exchange.fetchBalance();
                 res.json({ success: true });

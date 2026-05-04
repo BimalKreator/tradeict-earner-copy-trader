@@ -7,14 +7,26 @@ import {
 const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
 
 /**
- * Point a `ccxt.delta` instance at Delta India so India API keys and tickers resolve correctly.
- * Call immediately after `new ccxt.delta({ ... })` and before `loadMarkets` / requests.
+ * Single factory for `ccxt.delta`: swap markets, rate limit, and **Delta India** REST URLs
+ * (required for India API keys and tickers).
  */
-export function applyDeltaIndiaCcxtUrls(exchange: InstanceType<typeof ccxt.delta>): void {
+export function initializeDeltaClient(
+  apiKey?: string,
+  secret?: string,
+): InstanceType<typeof ccxt.delta> {
+  const exchange = new ccxt.delta({
+    enableRateLimit: true,
+    options: {
+      defaultType: "swap",
+    },
+    ...(apiKey != null && apiKey !== "" ? { apiKey } : {}),
+    ...(secret != null && secret !== "" ? { secret } : {}),
+  });
   exchange.urls.api = {
     public: DELTA_INDIA_API_BASE,
     private: DELTA_INDIA_API_BASE,
   };
+  return exchange;
 }
 
 export type TradeSide = "BUY" | "SELL";
@@ -107,15 +119,7 @@ export async function executeTrade(
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
 
-    const exchange = new ccxt.delta({
-      apiKey,
-      secret,
-      enableRateLimit: true,
-      options: {
-        defaultType: "swap",
-      },
-    });
-    applyDeltaIndiaCcxtUrls(exchange);
+    const exchange = initializeDeltaClient(apiKey, secret);
 
     await exchange.loadMarkets();
 
@@ -153,13 +157,7 @@ export async function executeTrade(
  * Public market data for slippage checks (no API keys required).
  */
 export async function fetchDeltaTicker(symbol: string): Promise<{ last?: number }> {
-  const exchange = new ccxt.delta({
-    enableRateLimit: true,
-    options: {
-      defaultType: "swap",
-    },
-  });
-  applyDeltaIndiaCcxtUrls(exchange);
+  const exchange = initializeDeltaClient();
   await exchange.loadMarkets();
   const ccxtSymbol = normalizeDeltaPerpSymbolForCcxt(symbol);
   const ticker = await exchange.fetchTicker(ccxtSymbol);
@@ -181,15 +179,7 @@ export async function fetchDeltaOpenPositions(
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
 
-  const exchange = new ccxt.delta({
-    apiKey,
-    secret,
-    enableRateLimit: true,
-    options: {
-      defaultType: "swap",
-    },
-  });
-  applyDeltaIndiaCcxtUrls(exchange);
+  const exchange = initializeDeltaClient(apiKey, secret);
 
   await exchange.loadMarkets();
   const positions = await exchange.fetchPositions();
