@@ -1,5 +1,5 @@
 import ccxt from "ccxt";
-import { decryptDeltaSecretOrPlain, encryptDeltaSecret } from "../utils/encryption.js";
+import { decryptDeltaSecret, encryptDeltaSecret } from "../utils/encryption.js";
 const listSelect = {
     id: true,
     nickname: true,
@@ -114,8 +114,8 @@ export function createExchangeAccountController(prisma) {
                 return;
             }
             try {
-                const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
-                const secret = decryptDeltaSecretOrPlain(account.apiSecret);
+                const apiKey = decryptDeltaSecret(account.apiKey);
+                const secret = decryptDeltaSecret(account.apiSecret);
                 const exchange = new ccxt.delta({
                     apiKey,
                     secret,

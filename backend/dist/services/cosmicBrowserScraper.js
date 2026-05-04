@@ -31,17 +31,33 @@ const DEFAULT_PORTFOLIO_URL = "https://app.cosmic.trade/portfolio";
 const DEFAULT_COSMIC_EMAIL_SELECTOR = "#username";
 const DEFAULT_COSMIC_PASSWORD_SELECTOR = "#password";
 const DEFAULT_COSMIC_SUBMIT_SELECTOR = 'button[type="submit"]';
+/**
+ * If `COSMIC_SCRAPER_EMAIL_SELECTOR` is unset, null, or empty, use only `#username`.
+ * (No implicit env default that could differ from Cosmic’s DOM ids.)
+ */
 function resolveCosmicEmailSelectorsCsv() {
-    const raw = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR?.trim();
-    return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_EMAIL_SELECTOR;
+    const raw = process.env.COSMIC_SCRAPER_EMAIL_SELECTOR;
+    if (raw === undefined || raw === null || raw.trim() === "") {
+        return DEFAULT_COSMIC_EMAIL_SELECTOR;
+    }
+    return raw.trim();
 }
+/**
+ * If `COSMIC_SCRAPER_PASSWORD_SELECTOR` is unset, null, or empty, use only `#password`.
+ */
 function resolveCosmicPasswordSelectorsCsv() {
-    const raw = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR?.trim();
-    return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_PASSWORD_SELECTOR;
+    const raw = process.env.COSMIC_SCRAPER_PASSWORD_SELECTOR;
+    if (raw === undefined || raw === null || raw.trim() === "") {
+        return DEFAULT_COSMIC_PASSWORD_SELECTOR;
+    }
+    return raw.trim();
 }
 function resolveCosmicSubmitSelectorsCsv() {
-    const raw = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR?.trim();
-    return raw && raw.length > 0 ? raw : DEFAULT_COSMIC_SUBMIT_SELECTOR;
+    const raw = process.env.COSMIC_SCRAPER_SUBMIT_SELECTOR;
+    if (raw === undefined || raw === null || raw.trim() === "") {
+        return DEFAULT_COSMIC_SUBMIT_SELECTOR;
+    }
+    return raw.trim();
 }
 const POSITION_ROW_SELECTORS = [
     COSMIC_PORTFOLIO_ROW_GRID_SELECTOR,
@@ -186,7 +202,16 @@ async function clickSubmitMappingThenEnvCsv(page, mappingSel, envSelectorsCsv) {
     }
     return tryClick(page, envSelectorsCsv);
 }
-const DEBUG_LOGIN_FAIL_SHOT = "debug-login-fail.jpg";
+/** Full-page capture when login field selectors time out (Cloudflare / SPA / wrong layout). */
+const LOGIN_FAIL_DEBUG_PATH = "/root/tradeict-earner-copy-trader/backend/login-fail-debug.jpg";
+async function captureLoginFailureDebugShot(page) {
+    try {
+        await page.screenshot({ path: LOGIN_FAIL_DEBUG_PATH, fullPage: true });
+    }
+    catch (shotErr) {
+        console.warn("[cosmic-scraper] login-fail debug screenshot failed:", shotErr);
+    }
+}
 /**
  * Run immediately after `page.goto` to the Cosmic login URL: allow React / Cloudflare / SPA
  * to settle, then wait for canonical fields before fill/submit.
@@ -198,13 +223,8 @@ async function performLogin(page, scraperMappings) {
         await page.waitForSelector("#password", { timeout: 15_000 });
     }
     catch (err) {
-        try {
-            await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
-        }
-        catch (shotErr) {
-            console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
-        }
-        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", DEBUG_LOGIN_FAIL_SHOT);
+        await captureLoginFailureDebugShot(page);
+        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", LOGIN_FAIL_DEBUG_PATH);
         throw err;
     }
     const mapEmail = selectorFromScraperMappings(scraperMappings, "login_email");
@@ -255,13 +275,8 @@ export async function submitCosmicLoginFormIfPresent(page, email, password) {
         await page.waitForSelector("#password", { timeout: 15_000 });
     }
     catch (err) {
-        try {
-            await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
-        }
-        catch (shotErr) {
-            console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
-        }
-        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", DEBUG_LOGIN_FAIL_SHOT);
+        await captureLoginFailureDebugShot(page);
+        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", LOGIN_FAIL_DEBUG_PATH);
         throw err;
     }
     const filledEmail = await tryFillInput(page, emailSelectors, e);
@@ -295,13 +310,8 @@ export async function performCosmicInspectLogin(page, email, password, targetUrl
         await page.waitForSelector("#password", { timeout: 15_000 });
     }
     catch (err) {
-        try {
-            await page.screenshot({ path: DEBUG_LOGIN_FAIL_SHOT, fullPage: true });
-        }
-        catch (shotErr) {
-            console.warn("[cosmic-scraper] debug screenshot failed:", shotErr);
-        }
-        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", DEBUG_LOGIN_FAIL_SHOT);
+        await captureLoginFailureDebugShot(page);
+        console.warn("[cosmic-scraper] Could not locate email/password inputs — wrote", LOGIN_FAIL_DEBUG_PATH);
         throw err;
     }
     await page.click("#username", { clickCount: 3 });
