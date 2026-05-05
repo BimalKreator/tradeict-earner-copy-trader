@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import {
   fetchDeltaOpenPositions,
+  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   type DeltaLivePosition,
   type TradeSide,
@@ -60,8 +61,8 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Public market + PnL enrichment for one master `DeltaLivePosition` row. */
-async function enrichMasterPositionRow(
+/** Fresh ticker mark + linear PnL using base size (`realBaseSize`), not raw contract count. */
+async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
   const tick = await fetchDeltaTicker(pos.symbolKey);
@@ -71,18 +72,19 @@ async function enrichMasterPositionRow(
   const base = deltaToRow(pos);
   const entryPx =
     base.entryPrice ?? (mark != null && Number.isFinite(mark) ? mark : null);
-  const size = Math.abs(pos.contracts);
+  const realSize = pos.realBaseSize;
   let livePnl = base.livePnl;
   if (
     entryPx != null &&
     Number.isFinite(entryPx) &&
-    Number.isFinite(size) &&
+    Number.isFinite(realSize) &&
+    realSize > 0 &&
     mark != null
   ) {
     livePnl = estimateLeaderPnl({
       entryPrice: entryPx,
       side: pos.side,
-      size,
+      realSize,
       mark,
     });
   }
@@ -136,7 +138,7 @@ export async function getAdminMasterPositionSnapshots(
 
     const positions: LiveTradeRow[] = [];
     for (const pos of masterList) {
-      positions.push(await enrichMasterPositionRow(pos));
+      positions.push(await enrichPositionLiveRow(pos));
     }
 
     out.push({
@@ -203,17 +205,20 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   };
 }
 
+/**
+ * Linear USD-settled perp: `(mark - entry) × realBaseSize × (long ? 1 : -1)`.
+ * `realBaseSize` must be contracts × `market.contractSize` (see {@link fetchDeltaOpenPositions}).
+ */
 function estimateLeaderPnl(args: {
   entryPrice: number;
   side: TradeSide;
-  size: number;
+  realSize: number;
   mark: number | null;
 }): number | null {
   const { mark } = args;
   if (mark === null || !Number.isFinite(mark)) return null;
-  const diff = mark - args.entryPrice;
-  const signed = args.side === "BUY" ? diff : -diff;
-  return signed * args.size;
+  const sign = args.side === "BUY" ? 1 : -1;
+  return (mark - args.entryPrice) * args.realSize * sign;
 }
 
 export async function getUserLiveTradeRows(
@@ -287,14 +292,43 @@ export async function getUserLiveTradeRows(
 
     if (match) {
       entryTime = match.entryTime ?? entryTime;
+      const tick = await fetchDeltaTicker(match.symbolKey);
+      const markFresh =
+        tick.last != null && Number.isFinite(tick.last)
+          ? tick.last
+          : match.markPrice;
+      markPrice = markFresh ?? match.markPrice ?? null;
+      const entryPx =
+        match.entryPrice != null && Number.isFinite(match.entryPrice)
+          ? match.entryPrice
+          : t.entryPrice;
+      const rs = match.realBaseSize;
+      if (
+        markPrice != null &&
+        Number.isFinite(markPrice) &&
+        Number.isFinite(entryPx) &&
+        Number.isFinite(rs) &&
+        rs > 0
+      ) {
+        livePnl = estimateLeaderPnl({
+          entryPrice: entryPx,
+          side: match.side,
+          realSize: rs,
+          mark: markPrice,
+        });
+      }
     } else {
       const tick = await fetchDeltaTicker(t.symbol);
       if (tick.last != null && Number.isFinite(tick.last)) {
         markPrice = tick.last;
-        const entry = t.entryPrice;
-        const diff = markPrice - entry;
-        const signed = t.side.toUpperCase() === "BUY" ? diff : -diff;
-        livePnl = signed * t.size;
+        const contractSize = await fetchDeltaSwapContractSize(t.symbol);
+        const realSize = Math.abs(t.size) * contractSize;
+        livePnl = estimateLeaderPnl({
+          entryPrice: t.entryPrice,
+          side: t.side.toUpperCase() === "BUY" ? "BUY" : "SELL",
+          realSize,
+          mark: markPrice,
+        });
       }
       entryTime = t.createdAt.toISOString();
     }
@@ -406,7 +440,7 @@ export async function getAdminGroupedLiveTrades(
     }
 
     for (const pos of masterList) {
-      const masterRow = await enrichMasterPositionRow(pos);
+      const masterRow = await enrichPositionLiveRow(pos);
       masterPositions.push(masterRow);
 
       const followers: AdminFollowerRow[] = [];
@@ -437,7 +471,7 @@ export async function getAdminGroupedLiveTrades(
         if (!m) continue;
         followers.push({
           userEmail: sub.user.email,
-          ...deltaToRow(m),
+          ...(await enrichPositionLiveRow(m)),
         });
       }
 

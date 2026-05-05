@@ -45,7 +45,13 @@ export interface DeltaLivePosition {
   /** Compact ticker-style id aligned with copy-trade symbols (e.g. ETHUSDT). */
   symbolKey: string;
   side: TradeSide;
+  /**
+   * Absolute contract / lot count (`contracts` or `amount` from CCXT).
+   * For notional PnL use {@link realBaseSize}.
+   */
   contracts: number;
+  /** `contracts × (exchange.market(symbol).contractSize || 1)` in base asset units. */
+  realBaseSize: number;
   entryPrice: number | null;
   markPrice: number | null;
   unrealizedPnl: number | null;
@@ -169,6 +175,7 @@ function ccxtSideToTradeSide(raw: string | undefined): TradeSide {
 
 /**
  * Decrypts stored Delta Exchange credentials and submits a market order.
+ * For Delta India swaps, `size` is **contracts (lots)** — CCXT `createMarketOrder` amount, not base currency.
  */
 export async function executeTrade(
   encryptedApiKey: string,
@@ -218,9 +225,27 @@ export async function executeTrade(
 }
 
 /**
+ * Linear swap `contractSize` (base asset per contract) on Delta India, or `1` if unknown.
+ * Uses public market metadata only (no API keys required).
+ */
+export async function fetchDeltaSwapContractSize(symbol: string): Promise<number> {
+  try {
+    const exchange = initializeDeltaClient();
+    await exchange.loadMarkets();
+    const ccxtSymbol =
+      resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
+      normalizeDeltaPerpSymbolForCcxt(symbol);
+    const market = exchange.market(ccxtSymbol);
+    const cs = Number(market.contractSize ?? 1);
+    return Number.isFinite(cs) && cs > 0 ? cs : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
  * Public market data for slippage checks (no API keys required).
- * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure
- * (missing market, network, etc.) so callers never throw.
+ * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure.
  */
 export async function fetchDeltaTicker(
   symbol: string,
@@ -283,11 +308,41 @@ export async function fetchDeltaOpenPositions(
 
   const out: DeltaLivePosition[] = [];
   for (const p of positions) {
-    const contracts = Number(p.contracts ?? 0);
-    if (!Number.isFinite(contracts) || Math.abs(contracts) < 1e-12) continue;
-
     const unified = typeof p.symbol === "string" ? p.symbol : "";
     if (!unified) continue;
+
+    let market: ReturnType<typeof exchange.market>;
+    try {
+      market = exchange.market(unified);
+    } catch {
+      console.warn(
+        `[exchangeService] fetchDeltaOpenPositions: no market for symbol=${unified}`,
+      );
+      continue;
+    }
+
+    const fromContracts =
+      p.contracts != null ? Number(p.contracts) : NaN;
+    const amtRaw = (p as { amount?: unknown }).amount;
+    const fromAmount =
+      typeof amtRaw === "number"
+        ? amtRaw
+        : typeof amtRaw === "string"
+          ? Number(amtRaw)
+          : NaN;
+    const rawContracts = Number.isFinite(fromContracts)
+      ? fromContracts
+      : Number.isFinite(fromAmount)
+        ? fromAmount
+        : NaN;
+    if (!Number.isFinite(rawContracts) || Math.abs(rawContracts) < 1e-12)
+      continue;
+
+    const contractLots = Math.abs(rawContracts);
+    const csRaw = Number(market.contractSize ?? 1);
+    const contractSize =
+      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : 1;
+    const realBaseSize = contractLots * contractSize;
 
     const symbolKey = unifiedSymbolToKey(unified);
     const side = ccxtSideToTradeSide(p.side);
@@ -300,10 +355,20 @@ export async function fetchDeltaOpenPositions(
       p.markPrice !== undefined && p.markPrice !== null
         ? Number(p.markPrice)
         : null;
-    const unrealizedPnl =
-      p.unrealizedPnl !== undefined && p.unrealizedPnl !== null
-        ? Number(p.unrealizedPnl)
-        : null;
+
+    let unrealizedPnl: number | null = null;
+    const ep = entryPrice != null && Number.isFinite(entryPrice) ? entryPrice : null;
+    const mp = markPrice != null && Number.isFinite(markPrice) ? markPrice : null;
+    if (ep !== null && mp !== null) {
+      const sign = side === "BUY" ? 1 : -1;
+      unrealizedPnl = (mp - ep) * realBaseSize * sign;
+    } else if (
+      p.unrealizedPnl !== undefined &&
+      p.unrealizedPnl !== null &&
+      Number.isFinite(Number(p.unrealizedPnl))
+    ) {
+      unrealizedPnl = Number(p.unrealizedPnl);
+    }
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
@@ -340,10 +405,14 @@ export async function fetchDeltaOpenPositions(
       symbol: unified,
       symbolKey,
       side,
-      contracts,
+      contracts: contractLots,
+      realBaseSize,
       entryPrice: Number.isFinite(entryPrice ?? NaN) ? entryPrice : null,
       markPrice: Number.isFinite(markPrice ?? NaN) ? markPrice : null,
-      unrealizedPnl: Number.isFinite(unrealizedPnl ?? NaN) ? unrealizedPnl : null,
+      unrealizedPnl:
+        unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
+          ? unrealizedPnl
+          : null,
       stopLoss,
       takeProfit,
       entryTime,

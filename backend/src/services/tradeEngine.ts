@@ -43,6 +43,14 @@ function percentSlippage(entry: number, market: number): number {
   return (Math.abs(market - entry) / entry) * 100;
 }
 
+/** Delta India CCXT market orders use contract/lot count; enforce integer follower size. */
+function followerContractsFromMaster(
+  masterContracts: number,
+  multiplier: number,
+): number {
+  return Math.max(1, Math.floor(masterContracts * multiplier));
+}
+
 function normalizeSide(raw: unknown): TradeSide | null {
   const s = String(raw ?? "").toLowerCase();
   if (s === "buy" || s === "long") return "BUY";
@@ -298,13 +306,13 @@ async function closeFollowerTradeAndRecordPnl(
   });
 }
 
-/** Leader snapshot for late-join REST sync (unchanged contract). */
+/** Leader snapshot for late-join REST sync — sizes are **contracts (lots)**, not base currency. */
 type MasterLedTrade = {
   id: string;
   deltaSymbol: string;
   side: TradeSide;
   entryPrice: number;
-  size: number;
+  masterContracts: number;
 };
 
 function deltaPositionsToMasterLed(
@@ -319,14 +327,14 @@ function deltaPositionsToMasterLed(
           ? p.markPrice
           : null;
     if (entry === null) continue;
-    const size = Math.abs(p.contracts);
-    if (!Number.isFinite(size) || size < 1e-12) continue;
+    const masterContracts = Math.abs(p.contracts);
+    if (!Number.isFinite(masterContracts) || masterContracts < 1e-12) continue;
     out.push({
       id: `${p.symbolKey}:${p.side}`,
       deltaSymbol: p.symbolKey,
       side: p.side,
       entryPrice: entry,
-      size,
+      masterContracts,
     });
   }
   return out;
@@ -382,18 +390,24 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
         ? tickLj.last
         : undefined;
 
-    const userSize = leader.size * sub.multiplier;
+    const followerContracts = followerContractsFromMaster(
+      leader.masterContracts,
+      sub.multiplier,
+    );
 
     if (
       marketPrice !== undefined &&
       percentSlippage(leader.entryPrice, marketPrice) > strategy.slippage
     ) {
+      console.log(
+        `[EXECUTION] Late-join skip (slippage) user ${sub.userId} — ${leader.deltaSymbol} ${leader.side} — would place ${followerContracts} contracts`,
+      );
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
         symbol: leader.deltaSymbol,
         side: leader.side,
-        size: userSize,
+        size: followerContracts,
         entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
@@ -401,12 +415,15 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     }
 
     if (marketPrice === undefined) {
+      console.log(
+        `[EXECUTION] Late-join skip (no mark) user ${sub.userId} — ${leader.deltaSymbol} — ${followerContracts} contracts`,
+      );
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
         symbol: leader.deltaSymbol,
         side: leader.side,
-        size: userSize,
+        size: followerContracts,
         entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
@@ -427,30 +444,37 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
           : null;
 
     if (!creds) {
+      console.log(
+        `[EXECUTION] Late-join skip (no follower creds) user ${sub.userId} — ${leader.deltaSymbol} — ${followerContracts} contracts`,
+      );
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
         symbol: leader.deltaSymbol,
         side: leader.side,
-        size: userSize,
+        size: followerContracts,
         entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
       continue;
     }
 
+    console.log(
+      `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${leader.masterContracts} × ${sub.multiplier}) — ${leader.deltaSymbol} ${leader.side}`,
+    );
+
     const result = await executeTrade(
       creds.apiKey,
       creds.apiSecret,
       leader.deltaSymbol,
       leader.side,
-      userSize,
+      followerContracts,
     );
 
     if (!result.success) {
       const ccxtSym = normalizeDeltaPerpSymbolForCcxt(leader.deltaSymbol);
       console.error(
-        `[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} deltaSymbol=${leader.deltaSymbol} ccxtSymbol=${ccxtSym} side=${leader.side} size=${userSize}: ${result.error ?? "unknown"}`,
+        `[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} deltaSymbol=${leader.deltaSymbol} ccxtSymbol=${ccxtSym} side=${leader.side} contracts=${followerContracts}: ${result.error ?? "unknown"}`,
       );
     }
 
@@ -459,7 +483,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       strategyId: strategy.id,
       symbol: leader.deltaSymbol,
       side: leader.side,
-      size: userSize,
+      size: followerContracts,
       entryPrice: leader.entryPrice,
       status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
     });
@@ -543,13 +567,19 @@ async function copyMasterFillToSubscribers(
     );
     await Promise.all(
       subs.map(async (sub) => {
-        const userSize = args.masterContracts * sub.multiplier;
+        const followerContracts = followerContractsFromMaster(
+          args.masterContracts,
+          sub.multiplier,
+        );
+        console.log(
+          `[EXECUTION] WS copy skip (slippage) user ${sub.userId} — ${args.symbol} ${args.side} — would place ${followerContracts} contracts`,
+        );
         await recordTrade(prisma, {
           userId: sub.userId,
           strategyId,
           symbol: args.symbol,
           side: args.side,
-          size: userSize,
+          size: followerContracts,
           entryPrice: args.avgPrice,
           status: TradeStatus.FAILED,
         });
@@ -561,13 +591,19 @@ async function copyMasterFillToSubscribers(
   if (marketPrice === undefined) {
     await Promise.all(
       subs.map(async (sub) => {
-        const userSize = args.masterContracts * sub.multiplier;
+        const followerContracts = followerContractsFromMaster(
+          args.masterContracts,
+          sub.multiplier,
+        );
+        console.log(
+          `[EXECUTION] WS copy skip (no mark) user ${sub.userId} — ${args.symbol} — ${followerContracts} contracts`,
+        );
         await recordTrade(prisma, {
           userId: sub.userId,
           strategyId,
           symbol: args.symbol,
           side: args.side,
-          size: userSize,
+          size: followerContracts,
           entryPrice: args.avgPrice,
           status: TradeStatus.FAILED,
         });
@@ -578,7 +614,10 @@ async function copyMasterFillToSubscribers(
 
   await Promise.all(
     subs.map(async (sub) => {
-      const userSize = args.masterContracts * sub.multiplier;
+      const followerContracts = followerContractsFromMaster(
+        args.masterContracts,
+        sub.multiplier,
+      );
       const creds =
         sub.exchangeAccount != null
           ? {
@@ -593,24 +632,31 @@ async function copyMasterFillToSubscribers(
             : null;
 
       if (!creds) {
+        console.log(
+          `[EXECUTION] WS copy skip (no follower creds) user ${sub.userId} — ${args.symbol} — ${followerContracts} contracts`,
+        );
         await recordTrade(prisma, {
           userId: sub.userId,
           strategyId,
           symbol: args.symbol,
           side: args.side,
-          size: userSize,
+          size: followerContracts,
           entryPrice: args.avgPrice,
           status: TradeStatus.FAILED,
         });
         return;
       }
 
+      console.log(
+        `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${args.masterContracts} × ${sub.multiplier}) — ${args.symbol} ${args.side}`,
+      );
+
       const result = await executeTrade(
         creds.apiKey,
         creds.apiSecret,
         args.symbol,
         args.side,
-        userSize,
+        followerContracts,
       );
 
       await recordTrade(prisma, {
@@ -618,7 +664,7 @@ async function copyMasterFillToSubscribers(
         strategyId,
         symbol: args.symbol,
         side: args.side,
-        size: userSize,
+        size: followerContracts,
         entryPrice: args.avgPrice,
         status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
       });
@@ -651,14 +697,20 @@ async function notifyMasterFlat(
 
   await Promise.all(
     subs.map(async (sub) => {
-      const userSize = snap.masterContracts * sub.multiplier;
+      const followerContracts = followerContractsFromMaster(
+        snap.masterContracts,
+        sub.multiplier,
+      );
+      console.log(
+        `[EXECUTION] Master flat — closing follower book user ${sub.userId} — ${snap.symbol} ${snap.side} — ${followerContracts} contracts (master ${snap.masterContracts} × ${sub.multiplier})`,
+      );
       await closeFollowerTradeAndRecordPnl(prisma, {
         userId: sub.userId,
         strategyId,
         symbol: snap.symbol,
         side: snap.side,
         masterEntryPrice: snap.masterEntryPrice,
-        sizedPosition: userSize,
+        sizedPosition: followerContracts,
         exitPrice,
       });
     }),

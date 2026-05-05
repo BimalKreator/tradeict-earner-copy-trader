@@ -146,6 +146,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
       });
 
       if (strategy.syncActiveTrades) {
+        console.log(
+          `[EXECUTION] Late-join mirror scheduled for user ${userId} strategy ${strategyId} multiplier=${multiplier}x (opens mirrored in integer contracts)`,
+        );
         void import("../services/tradeEngine.js")
           .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
             lateJoinMirrorOpenPositionsForSubscriber(prisma, {
