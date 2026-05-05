@@ -1101,54 +1101,50 @@ class StrategyMasterSocket {
       }
 
       if (action === "delete" || action === "closed") {
-        const payloadItems: unknown[] = [];
-        const dataLayer = asRecord(msg.data);
-        if (Array.isArray(msg.data)) payloadItems.push(...msg.data);
-        if (Array.isArray(dataLayer?.positions))
-          payloadItems.push(...dataLayer.positions);
-        if (Array.isArray(dataLayer?.open)) payloadItems.push(...dataLayer.open);
-        if (Array.isArray(dataLayer?.closed)) payloadItems.push(...dataLayer.closed);
-        if (payloadItems.length === 0) payloadItems.push(merged);
-
-        for (const rawItem of payloadItems) {
-          const item = mergePayloadLayers(rawItem);
-          const symbol = String(
-            item.product_symbol ?? item.symbol ?? item.contract_symbol ?? "",
-          ).trim();
-          const productKey = String(item.product_id ?? symbol).trim();
-          const candidates = [
-            productKey,
-            symbol,
-            productKey.toUpperCase(),
-            symbol.toUpperCase(),
-          ].filter(Boolean);
-          const key = candidates.find(
-            (k) =>
-              (this.lastPositionContracts.get(k) ?? 0) > 0 &&
-              this.lastOpenMeta.get(k) != null,
-          );
-          if (!key) continue;
-
-          const lastContracts = this.lastPositionContracts.get(key) ?? 0;
-          const lastMeta = this.lastOpenMeta.get(key);
-          if (lastContracts <= 0 || !lastMeta) continue;
-
-          console.log(
-            `[EXECUTION] Position delete detected via WS action=${action} for ${lastMeta.symbol}`,
-          );
-          await notifyMasterFlat(this.prisma, this.strategyId, {
-            symbol: lastMeta.symbol,
-            side: lastMeta.side,
-            masterEntryPrice:
-              Number.isFinite(lastMeta.avgEntry) && lastMeta.avgEntry > 0
-                ? lastMeta.avgEntry
-                : 0,
-            masterContracts: lastContracts,
+        console.log(
+          `[tradeEngine WS] Delete action received. Verifying closures via REST...`,
+        );
+        try {
+          const s = await this.prisma.strategy.findUnique({
+            where: { id: this.strategyId },
+            select: STRATEGY_SELECT_WS_CREDS,
           });
-          for (const c of candidates) {
-            this.lastPositionContracts.delete(c);
-            this.lastOpenMeta.delete(c);
+          if (!s) return;
+          const key = decryptDeltaSecretOrPlain(s.masterApiKey);
+          const secret = decryptDeltaSecretOrPlain(s.masterApiSecret);
+          if (!key || !secret) return;
+
+          const currentPositions = await fetchMasterOpenPositions(key, secret);
+          const currentSymbols = new Set(
+            currentPositions.map((p) => p.deltaSymbol.toUpperCase()),
+          );
+
+          const tracked = Array.from(this.lastOpenMeta.entries());
+          for (const [trackedKey, meta] of tracked) {
+            if (!currentSymbols.has(meta.symbol.toUpperCase())) {
+              const lastContracts =
+                this.lastPositionContracts.get(trackedKey) ?? meta.contracts;
+              console.log(
+                `[EXECUTION] Position closure confirmed for ${meta.symbol}. Triggering follower exits.`,
+              );
+              await notifyMasterFlat(this.prisma, this.strategyId, {
+                symbol: meta.symbol,
+                side: meta.side,
+                masterEntryPrice:
+                  Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                    ? meta.avgEntry
+                    : 0,
+                masterContracts: lastContracts,
+              });
+              this.lastPositionContracts.delete(trackedKey);
+              this.lastOpenMeta.delete(trackedKey);
+            }
           }
+        } catch (err) {
+          console.error(
+            "[tradeEngine WS] Error during delete reconciliation:",
+            err instanceof Error ? err.message : err,
+          );
         }
         return;
       }

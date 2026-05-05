@@ -57,11 +57,15 @@ export default function DashboardLiveTradesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setUnauthorized(false);
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setUnauthorized(false);
+    }
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
         headers: {
@@ -69,8 +73,10 @@ export default function DashboardLiveTradesPage() {
         },
       });
       if (res.status === 401) {
-        setUnauthorized(true);
-        setRows([]);
+        if (!silent) {
+          setUnauthorized(true);
+          setRows([]);
+        }
         return;
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
@@ -83,16 +89,25 @@ export default function DashboardLiveTradesPage() {
           ? ((data as { positions: LiveRow[] }).positions)
           : [];
       setRows(list);
+      setLastRefreshed(new Date());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load positions");
-      setRows([]);
+      if (!silent) {
+        setError(e instanceof Error ? e.message : "Failed to load positions");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void load({ silent: true });
+    }, 8000);
+    return () => window.clearInterval(id);
   }, [load]);
 
   if (unauthorized) {
@@ -123,6 +138,11 @@ export default function DashboardLiveTradesPage() {
             <p className="mt-1 text-sm text-white/55">
               Open copy positions on Delta (mark price &amp; PnL from your linked exchange account).
             </p>
+            {lastRefreshed && !loading ? (
+              <p className="mt-0.5 text-xs text-white/40">
+                Last refresh: {lastRefreshed.toLocaleTimeString()}
+              </p>
+            ) : null}
           </div>
         </div>
       </header>

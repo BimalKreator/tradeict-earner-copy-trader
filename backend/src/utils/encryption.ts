@@ -34,8 +34,8 @@ export function decryptDeltaSecretOrPlain(stored: string): string {
   const t = stored.trim();
   if (!t) return t;
   try {
-    return decryptDeltaSecret(stored);
+    return decryptDeltaSecret(stored).trim();
   } catch {
-    return t;
+    return t.trim();
   }
 }
