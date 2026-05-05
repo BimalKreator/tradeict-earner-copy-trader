@@ -1030,6 +1030,34 @@ class StrategyMasterSocket {
     }
 
     if (type === "positions") {
+      const action = String(msg.action ?? "").toLowerCase();
+      if (action === "delete") {
+        const merged = mergePayloadLayers(parsed);
+        const symbol = String(
+          merged.product_symbol ?? merged.symbol ?? merged.contract_symbol ?? "",
+        ).trim();
+        const productKey = String(merged.product_id ?? symbol).trim();
+        const key = productKey || symbol;
+        const prev = this.lastPositionContracts.get(key) ?? 0;
+        const meta = this.lastOpenMeta.get(key);
+        if (prev > 0 && meta != null && meta.avgEntry > 0) {
+          console.log(
+            `[EXECUTION] Position delete detected. Closing follower trades for ${meta.symbol}`,
+          );
+          await notifyMasterFlat(this.prisma, this.strategyId, {
+            symbol: meta.symbol,
+            side: meta.side,
+            masterEntryPrice: meta.avgEntry,
+            masterContracts: prev,
+          });
+        }
+        if (key) {
+          this.lastPositionContracts.delete(key);
+          this.lastOpenMeta.delete(key);
+        }
+        return;
+      }
+
       const snap = extractPositionSnapshot(parsed);
       if (!snap) return;
 

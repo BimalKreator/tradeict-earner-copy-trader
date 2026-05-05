@@ -258,30 +258,47 @@ export async function getUserLiveTradeRows(
   }
 
   const positionsCache = new Map<string, DeltaLivePosition[]>();
+  const positionsCacheReliable = new Map<string, boolean>();
 
-  async function positionsForStrategy(strategyId: string) {
+  async function positionsForStrategy(
+    strategyId: string,
+  ): Promise<{ positions: DeltaLivePosition[]; reliable: boolean }> {
     const creds = strategyToAccount.get(strategyId);
-    if (!creds) return [];
+    if (!creds) return { positions: [], reliable: false };
     const hit = positionsCache.get(creds.id);
-    if (hit) return hit;
+    if (hit) {
+      return {
+        positions: hit,
+        reliable: positionsCacheReliable.get(creds.id) ?? true,
+      };
+    }
     try {
       const list = await fetchDeltaOpenPositions(
         creds.apiKey,
         creds.apiSecret,
       );
       positionsCache.set(creds.id, list);
-      return list;
+      positionsCacheReliable.set(creds.id, true);
+      return { positions: list, reliable: true };
     } catch {
       positionsCache.set(creds.id, []);
-      return [];
+      positionsCacheReliable.set(creds.id, false);
+      return { positions: [], reliable: false };
     }
   }
 
   const rows: UserLiveTradeRow[] = [];
 
   for (const t of openTrades) {
-    const positions = await positionsForStrategy(t.strategyId);
+    const { positions, reliable } = await positionsForStrategy(t.strategyId);
     const match = matchDeltaPosition(positions, t.symbol, t.side);
+    if (!match && reliable) {
+      await prisma.trade.update({
+        where: { id: t.id },
+        data: { status: TradeStatus.CLOSED },
+      });
+      continue;
+    }
 
     let markPrice: number | null = match?.markPrice ?? null;
     let livePnl: number | null = match?.unrealizedPnl ?? null;
