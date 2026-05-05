@@ -145,17 +145,32 @@ export function createSubscriptionController(prisma: PrismaClient) {
         },
       });
 
+      console.log(
+        `[subscription] Subscription created id=${subscription.id} userId=${userId} strategyId=${strategyId} multiplier=${multiplier}x`,
+      );
+      console.log(
+        `[subscription] Strategy syncActiveTrades=${String(strategy.syncActiveTrades)} (late-join runs only when true)`,
+      );
+
       if (strategy.syncActiveTrades) {
         console.log(
-          `[EXECUTION] Late-join mirror scheduled for user ${userId} strategy ${strategyId} multiplier=${multiplier}x (opens mirrored in integer contracts)`,
+          `[subscription] Late-join path: scheduling lateJoinMirrorOpenPositionsForSubscriber for user ${userId}`,
         );
         void import("../services/tradeEngine.js")
-          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
-            lateJoinMirrorOpenPositionsForSubscriber(prisma, {
+          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) => {
+            console.log(
+              `[subscription] Late-join path: calling lateJoinMirrorOpenPositionsForSubscriber userId=${userId} strategyId=${strategyId}`,
+            );
+            return lateJoinMirrorOpenPositionsForSubscriber(prisma, {
               strategyId,
               userId,
-            }),
-          )
+            });
+          })
+          .then(() => {
+            console.log(
+              `[subscription] Late-join path: lateJoinMirrorOpenPositionsForSubscriber finished userId=${userId} strategyId=${strategyId}`,
+            );
+          })
           .catch((err) => {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(
@@ -163,6 +178,10 @@ export function createSubscriptionController(prisma: PrismaClient) {
               msg,
             );
           });
+      } else {
+        console.log(
+          `[subscription] Late-join skipped: syncActiveTrades is false for strategy ${strategyId}`,
+        );
       }
 
       void logUserActivity(prisma, {

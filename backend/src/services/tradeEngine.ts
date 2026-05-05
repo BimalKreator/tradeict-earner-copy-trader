@@ -307,7 +307,7 @@ async function closeFollowerTradeAndRecordPnl(
 }
 
 /** Leader snapshot for late-join REST sync — sizes are **contracts (lots)**, not base currency. */
-type MasterLedTrade = {
+export type MasterLedTrade = {
   id: string;
   deltaSymbol: string;
   side: TradeSide;
@@ -341,7 +341,7 @@ function deltaPositionsToMasterLed(
 }
 
 /** Leader opens via CCXT `fetchDeltaOpenPositions` (Delta India, strategy master keys). */
-async function fetchMasterOpenPositions(
+export async function fetchMasterOpenPositions(
   apiKey: string,
   apiSecret: string,
 ): Promise<MasterLedTrade[]> {
@@ -351,13 +351,14 @@ async function fetchMasterOpenPositions(
 
 export async function lateJoinMirrorOpenPositionsForSubscriber(
   prisma: PrismaClient,
-  args: { strategyId: string; userId: string },
+  args: { strategyId: string; userId: string; force?: boolean },
 ): Promise<void> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: args.strategyId },
     select: STRATEGY_SELECT_LATE_JOIN,
   });
-  if (!strategy || !strategy.syncActiveTrades) return;
+  if (!strategy) return;
+  if (!args.force && !strategy.syncActiveTrades) return;
 
   const sub = await prisma.userSubscription.findFirst({
     where: {
@@ -523,6 +524,73 @@ export async function lateJoinMirrorForAllActiveSubscribers(
       );
     }
   }
+}
+
+/**
+ * Admin: mirror the master’s open Delta positions for every ACTIVE subscriber at market,
+ * even when `syncActiveTrades` is false. Uses the same `executeTrade` path as late-join.
+ */
+export async function forceMirrorOpenPositionsForAllSubscribers(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<{
+  masterOpenLegs: number;
+  activeSubscribers: number;
+}> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { masterApiKey: true, masterApiSecret: true },
+  });
+
+  const keyOk = Boolean(strategy?.masterApiKey?.trim());
+  const secretOk = Boolean(strategy?.masterApiSecret?.trim());
+  if (!strategy || !keyOk || !secretOk) {
+    throw new Error(
+      "Master Delta API key and secret must be set on this strategy.",
+    );
+  }
+
+  let masterOpenLegs = 0;
+  try {
+    const legs = await fetchMasterOpenPositions(
+      strategy.masterApiKey,
+      strategy.masterApiSecret,
+    );
+    masterOpenLegs = legs.length;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to fetch master open positions: ${msg}`);
+  }
+
+  const subs = await prisma.userSubscription.findMany({
+    where: {
+      strategyId,
+      status: SubscriptionStatus.ACTIVE,
+      user: { status: UserStatus.ACTIVE },
+    },
+    select: { userId: true },
+  });
+
+  for (const row of subs) {
+    try {
+      await lateJoinMirrorOpenPositionsForSubscriber(prisma, {
+        strategyId,
+        userId: row.userId,
+        force: true,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[force-sync] strategyId=${strategyId} userId=${row.userId}:`,
+        msg,
+      );
+    }
+  }
+
+  return {
+    masterOpenLegs,
+    activeSubscribers: subs.length,
+  };
 }
 
 async function copyMasterFillToSubscribers(

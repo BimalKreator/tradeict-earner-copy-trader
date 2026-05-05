@@ -426,6 +426,39 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
+  /**
+   * Force mirror master Delta open positions to all ACTIVE subscribers (same as late-join `executeTrade` path).
+   * Does not require `syncActiveTrades` on the strategy.
+   */
+  router.post("/strategies/:id/force-sync", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { forceMirrorOpenPositionsForAllSubscribers } = await import(
+        "../services/tradeEngine.js"
+      );
+      const result = await forceMirrorOpenPositionsForAllSubscribers(
+        prisma,
+        id,
+      );
+      res.json({
+        ok: true,
+        strategyId: id,
+        masterOpenLegs: result.masterOpenLegs,
+        activeSubscribers: result.activeSubscribers,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        msg.includes("must be set") ||
+        msg.includes("Failed to fetch master")
+      ) {
+        res.status(400).json({ error: msg });
+        return;
+      }
+      next(err);
+    }
+  });
+
   router.delete("/strategies/:id", async (req, res, next) => {
     try {
       const { id } = req.params;

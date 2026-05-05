@@ -312,6 +312,11 @@ export default function AdminStrategiesPage() {
   const [barLoss, setBarLoss] = useState("");
   const [heatmapText, setHeatmapText] = useState("");
   const [syncActiveTrades, setSyncActiveTrades] = useState(false);
+  const [syncToast, setSyncToast] = useState<{
+    kind: "ok" | "err";
+    text: string;
+  } | null>(null);
+  const [forceSyncingId, setForceSyncingId] = useState<string | null>(null);
 
   const loadStrategies = useCallback(async () => {
     setLoading(true);
@@ -336,6 +341,12 @@ export default function AdminStrategiesPage() {
   useEffect(() => {
     void loadStrategies();
   }, [loadStrategies]);
+
+  useEffect(() => {
+    if (!syncToast) return;
+    const t = window.setTimeout(() => setSyncToast(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [syncToast]);
 
   function resetForm() {
     setEditingId(null);
@@ -398,6 +409,51 @@ export default function AdminStrategiesPage() {
     setSyncActiveTrades(Boolean(s.syncActiveTrades));
 
     setModalOpen(true);
+  }
+
+  async function handleForceSync(s: Strategy) {
+    setForceSyncingId(s.id);
+    setSyncToast(null);
+    try {
+      const base = resolveAdminApiBase();
+      const res = await fetch(
+        `${base}/admin/strategies/${encodeURIComponent(s.id)}/force-sync`,
+        {
+          method: "POST",
+          headers: authHeaders(),
+        },
+      );
+      const body: unknown = await res.json().catch(() => ({}));
+      const errMsg =
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      if (!res.ok) {
+        setSyncToast({
+          kind: "err",
+          text: errMsg ?? `Force sync failed (${res.status})`,
+        });
+        return;
+      }
+      const data = body as {
+        masterOpenLegs?: number;
+        activeSubscribers?: number;
+      };
+      setSyncToast({
+        kind: "ok",
+        text: `Force sync OK — ${data.masterOpenLegs ?? 0} master leg(s), ${data.activeSubscribers ?? 0} active subscriber(s) processed.`,
+      });
+    } catch (e) {
+      setSyncToast({
+        kind: "err",
+        text: e instanceof Error ? e.message : "Network error",
+      });
+    } finally {
+      setForceSyncingId(null);
+    }
   }
 
   async function handleSubmitStrategy(e: React.FormEvent) {
@@ -524,6 +580,19 @@ export default function AdminStrategiesPage() {
         </div>
       )}
 
+      {syncToast && (
+        <div
+          className={`fixed bottom-6 right-6 z-[60] max-w-md rounded-lg border px-4 py-3 text-sm shadow-lg ${
+            syncToast.kind === "ok"
+              ? "border-emerald-500/45 bg-emerald-950/95 text-emerald-100"
+              : "border-red-500/45 bg-red-950/95 text-red-100"
+          }`}
+          role="status"
+        >
+          {syncToast.text}
+        </div>
+      )}
+
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
           <table className="w-full min-w-[1020px] text-left text-sm">
@@ -572,13 +641,23 @@ export default function AdminStrategiesPage() {
                       {new Date(s.createdAt).toLocaleString()}
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={() => openEditModal(s)}
-                        className="rounded-lg border border-glassBorder bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-white/10"
-                      >
-                        Edit
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openEditModal(s)}
+                          className="rounded-lg border border-glassBorder bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-white/10"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          disabled={forceSyncingId === s.id}
+                          onClick={() => void handleForceSync(s)}
+                          className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {forceSyncingId === s.id ? "Syncing…" : "Force sync trades"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
