@@ -116,7 +116,7 @@ function unifiedSymbolToKey(unifiedSymbol: string): string {
   return `${base}${quote}`.toUpperCase();
 }
 
-/** Cosmic / UI keys (ETHUSDT, ETHUSD) → match keys for {@link unifiedSymbolToKey} on CCXT markets. */
+/** Compact trading labels (ETHUSDT, ETHUSD, …) → alias keys for {@link unifiedSymbolToKey} on CCXT markets. */
 function compactSymbolAliasKeys(tradingSymbol: string): Set<string> {
   const s = tradingSymbol.trim().toUpperCase();
   const keys = new Set<string>();
@@ -265,7 +265,9 @@ export async function fetchDeltaTicker(
 }
 
 /**
- * Authenticated: fetch non-flat perpetual positions from Delta India (swap).
+ * Authenticated open swap positions via **CCXT** `ccxt.delta` on **Delta Exchange India**
+ * (`api.india.delta.exchange`, see {@link initializeDeltaClient}). Use strategy
+ * `masterApiKey` / `masterApiSecret` (or any subscriber keys) after {@link decryptDeltaSecretOrPlain}.
  */
 export async function fetchDeltaOpenPositions(
   apiKeyStored: string,

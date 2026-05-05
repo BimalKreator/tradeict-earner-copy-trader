@@ -327,6 +327,7 @@ function deltaPositionsToMasterLed(
   return out;
 }
 
+/** Leader opens via CCXT `fetchDeltaOpenPositions` (Delta India, strategy master keys). */
 async function fetchMasterOpenPositions(
   apiKey: string,
   apiSecret: string,

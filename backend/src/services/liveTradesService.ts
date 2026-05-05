@@ -96,7 +96,7 @@ async function enrichMasterPositionRow(
 }
 
 /**
- * CCXT snapshots of each strategy's master Delta account (India REST via {@link fetchDeltaOpenPositions}).
+ * CCXT snapshots of each strategy master account: {@link fetchDeltaOpenPositions} (`ccxt.delta`, India).
  * Use for admin dashboards that only need leader positions without follower matching.
  */
 export async function getAdminMasterPositionSnapshots(

@@ -40,10 +40,6 @@ type StrategySection = {
   /** CCXT open positions on the strategy master Delta (India) account. */
   masterPositions: LiveRow[];
   groups: FollowerGroup[];
-  masterMeta?: {
-    credentialsPresent: boolean;
-    fetchException?: string;
-  };
 };
 
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
@@ -123,7 +119,7 @@ function PositionTable({
               <td className="whitespace-nowrap px-3 py-2 text-xs text-white/75">
                 {variant === "follower"
                   ? (r as FollowerRow).userEmail
-                  : "Master · Delta (CCXT)"}
+                  : "ADMIN · MASTER DELTA"}
               </td>
               <td className="whitespace-nowrap px-3 py-2 tabular-nums text-white/55">
                 {fmtTime(r.entryTime)}
@@ -268,32 +264,21 @@ export default function AdminLiveTradesPage() {
                 <span className="font-mono text-white/55">{s.strategyId}</span>
               </p>
 
-              {/* Top: master open positions from CCXT (same source as GET /admin/live-trades/master-positions). */}
               <div className="mt-6 overflow-hidden rounded-xl border border-primary/25 bg-black/20">
                 <div className="border-b border-primary/25 bg-primary/5 px-4 py-2">
-                  <p className="text-xs font-medium uppercase tracking-wider text-primary/90">
-                    Master account · Delta India (CCXT open positions)
+                  <p className="text-xs font-semibold uppercase tracking-wider text-primary/90">
+                    ADMIN · MASTER DELTA
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-normal normal-case tracking-normal text-white/45">
+                    Open positions from CCXT (<code className="text-white/55">fetchPositions</code>, Delta India)
                   </p>
                 </div>
                 {s.masterPositions.length > 0 ? (
                   <PositionTable rows={s.masterPositions} variant="master" />
                 ) : (
-                  <div className="space-y-2 px-4 py-6 text-sm text-white/50">
-                    <p>No open positions on the master account.</p>
-                    {s.masterMeta?.fetchException ? (
-                      <p className="rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-red-100/95">
-                        Fetch error:{" "}
-                        <span className="font-mono text-xs text-red-50/90">
-                          {s.masterMeta.fetchException}
-                        </span>
-                      </p>
-                    ) : null}
-                    {!s.masterMeta?.credentialsPresent ? (
-                      <p className="text-amber-200/85">
-                        Add master Delta API key and secret under Admin → Strategies → Edit.
-                      </p>
-                    ) : null}
-                  </div>
+                  <p className="px-4 py-6 text-sm text-white/50">
+                    No open positions reported for this strategy&apos;s master Delta account.
+                  </p>
                 )}
               </div>
 
@@ -314,8 +299,8 @@ export default function AdminLiveTradesPage() {
                         className="overflow-hidden rounded-xl border border-white/[0.08] bg-black/20"
                       >
                         <div className="border-b border-white/[0.06] bg-white/[0.02] px-4 py-2">
-                          <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-                            {g.token} · {g.side} · subscribers
+                          <p className="text-xs font-semibold uppercase tracking-wider text-white/55">
+                            ADMIN · SUBSCRIBERS DELTA · {g.token} · {g.side}
                           </p>
                         </div>
                         {g.followers.length === 0 ? (

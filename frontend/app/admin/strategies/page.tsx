@@ -20,10 +20,6 @@ type Strategy = {
   description: string;
   masterApiKey: string;
   hasMasterApiSecret?: boolean;
-  masterConnection?: {
-    credentialsPresent: boolean;
-    ready: boolean;
-  };
   performanceMetrics?: PerformanceMetricsPayload | unknown;
   slippage: number;
   monthlyFee: number;
@@ -607,7 +603,9 @@ export default function AdminStrategiesPage() {
               {editingId ? "Edit strategy" : "Add strategy"}
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              Master Delta API credentials drive the copy engine. Performance metrics power charts on the app.
+              Leader credentials use <span className="text-white/70">masterApiKey</span> /{" "}
+              <span className="text-white/70">masterApiSecret</span> against the Delta India API. Performance
+              metrics below power product charts.
             </p>
 
             <form onSubmit={handleSubmitStrategy} className="mt-6 max-h-[calc(100vh-8rem)] space-y-6 overflow-y-auto pr-1">
@@ -642,15 +640,14 @@ export default function AdminStrategiesPage() {
               </div>
 
               <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
-                <h3 className="text-sm font-semibold text-primary">
-                  Leader account · Delta Exchange (India)
-                </h3>
+                <h3 className="text-sm font-semibold text-primary">Master Delta API</h3>
                 <p className="text-xs text-white/55">
-                  API keys must be for Delta India. The copy engine uses them for WebSocket auth and CCXT (positions and orders).
+                  Delta Exchange India keys only. These map to <code className="text-primary/90">masterApiKey</code>{" "}
+                  and <code className="text-primary/90">masterApiSecret</code> in the API payload.
                 </p>
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">
-                    Master Delta API key
+                    Master Delta API Key
                   </span>
                   <input
                     type="text"
@@ -663,7 +660,7 @@ export default function AdminStrategiesPage() {
                 </label>
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">
-                    Master Delta API secret
+                    Master Delta API Secret
                   </span>
                   <input
                     type="password"

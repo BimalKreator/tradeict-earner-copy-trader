@@ -3,7 +3,10 @@ import type { PrismaClient } from "@prisma/client";
 import { createSubscriptionController } from "../controllers/subscriptionController.js";
 import { authenticateJwt } from "../middleware/authMiddleware.js";
 
-/** User-facing strategy payloads omit `masterApiKey` / `masterApiSecret` via explicit `select`. */
+/**
+ * Subscription APIs use only `masterApiKey` / `masterApiSecret` on the Strategy model for leader auth.
+ * User-facing strategy payloads omit secrets via explicit `select` in the subscription controller.
+ */
 export function createSubscriptionRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const jwtAuth = authenticateJwt();

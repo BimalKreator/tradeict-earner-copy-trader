@@ -13,6 +13,7 @@ import {
   getAdminMasterPositionSnapshots,
 } from "../services/liveTradesService.js";
 
+/** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
 
