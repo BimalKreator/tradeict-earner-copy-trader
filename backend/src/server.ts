@@ -21,6 +21,7 @@ import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
+import { startTradeEngine } from "./services/tradeEngine.js";
 import {
   initTelegramBot,
   initTelegramCronJobs,
@@ -40,6 +41,18 @@ const prisma = new PrismaClient({ adapter });
 initBillingCronJobs(prisma);
 initTelegramBot(prisma);
 initTelegramCronJobs(prisma);
+
+/** Private WS per strategy (master Delta keys) → copies fills to subscribers. Must run or only late-join / force-sync work. */
+const stopTradeEngine = startTradeEngine(prisma);
+function shutdownTradeEngine(): void {
+  try {
+    stopTradeEngine();
+  } catch {
+    /* ignore */
+  }
+}
+process.once("SIGTERM", shutdownTradeEngine);
+process.once("SIGINT", shutdownTradeEngine);
 
 const app = express();
 
@@ -106,4 +119,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(
     `[BOOT] Admin API http://0.0.0.0:${PORT} deltaEthUSDT→ccxt=${DELTA_INDIA_CCXT_SAMPLE_SYMBOL} | verify: curl -s http://127.0.0.1:${PORT}/api/health/build`,
   );
+  console.log("[BOOT] Trade engine (master Delta WebSocket copy) is running.");
 });

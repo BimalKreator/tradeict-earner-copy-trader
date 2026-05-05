@@ -31,7 +31,8 @@ const WS_AUTH_PATH = "/live";
 const HEARTBEAT_WATCHDOG_MS = 35_000;
 const MIN_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
-const ROSTER_SYNC_MS = 45_000;
+/** How often to (re)attach private WS for strategies with active subs + master keys. */
+const ROSTER_SYNC_MS = 15_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;

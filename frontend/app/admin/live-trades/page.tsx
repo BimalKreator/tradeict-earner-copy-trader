@@ -162,18 +162,24 @@ export default function AdminLiveTradesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setForbidden(false);
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setForbidden(false);
+    }
     const base = resolveAdminApiBase();
     if (!base) {
-      setError(
-        "NEXT_PUBLIC_API_URL is not set and same-origin /api could not be resolved.",
-      );
-      setStrategies([]);
-      setLoading(false);
+      if (!silent) {
+        setError(
+          "NEXT_PUBLIC_API_URL is not set and same-origin /api could not be resolved.",
+        );
+        setStrategies([]);
+        setLoading(false);
+      }
       return;
     }
     try {
@@ -183,8 +189,10 @@ export default function AdminLiveTradesPage() {
         },
       });
       if (res.status === 403) {
-        setForbidden(true);
-        setStrategies([]);
+        if (!silent) {
+          setForbidden(true);
+          setStrategies([]);
+        }
         return;
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
@@ -197,16 +205,26 @@ export default function AdminLiveTradesPage() {
           ? ((data as { strategies: StrategySection[] }).strategies)
           : [];
       setStrategies(list);
+      setLastRefreshed(new Date());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-      setStrategies([]);
+      if (!silent) {
+        setError(e instanceof Error ? e.message : "Failed to load");
+        setStrategies([]);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void load({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(id);
   }, [load]);
 
   if (forbidden) {
@@ -232,9 +250,15 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Leader positions are loaded from the master Delta API (CCXT). Subscriber rows show open
-              Delta positions that match each leg.
+              Data comes from CCXT + market tickers. PnL and mark prices update about every 5 seconds
+              while this page is open. New master fills are copied to subscribers by the backend trade
+              engine (WebSocket to Delta); restart the API if copy ever stops.
             </p>
+            {lastRefreshed && !loading && (
+              <p className="mt-0.5 text-xs text-white/40">
+                Last refresh: {lastRefreshed.toLocaleTimeString()}
+              </p>
+            )}
           </div>
         </div>
       </header>
