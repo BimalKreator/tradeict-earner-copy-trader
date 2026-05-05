@@ -3,6 +3,7 @@ import {
   type PrismaClient,
   SubscriptionStatus,
 } from "@prisma/client";
+import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { logUserActivity } from "../services/userActivityService.js";
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
@@ -110,6 +111,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       const strategy = await prisma.strategy.findUnique({
         where: { id: strategyId },
+        select: STRATEGY_SELECT_SUBSCRIBE_GATE,
       });
       if (!strategy) {
         res.status(404).json({ error: "Strategy not found" });

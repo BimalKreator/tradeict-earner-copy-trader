@@ -16,6 +16,11 @@ import {
 } from "./exchangeService.js";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
+import {
+  STRATEGY_SELECT_LATE_JOIN,
+  STRATEGY_SELECT_SLIPPAGE,
+  STRATEGY_SELECT_WS_CREDS,
+} from "../prisma/strategySelect.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 
@@ -342,6 +347,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
 ): Promise<void> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: args.strategyId },
+    select: STRATEGY_SELECT_LATE_JOIN,
   });
   if (!strategy || !strategy.syncActiveTrades) return;
 
@@ -507,6 +513,7 @@ async function copyMasterFillToSubscribers(
 ): Promise<void> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: strategyId },
+    select: STRATEGY_SELECT_SLIPPAGE,
   });
   if (!strategy) return;
 
@@ -733,7 +740,10 @@ class StrategyMasterSocket {
     this.tearDownSocket();
 
     void this.prisma.strategy
-      .findUnique({ where: { id: this.strategyId } })
+      .findUnique({
+        where: { id: this.strategyId },
+        select: STRATEGY_SELECT_WS_CREDS,
+      })
       .then((s) => {
         if (this.destroyed) return;
         if (!s) {

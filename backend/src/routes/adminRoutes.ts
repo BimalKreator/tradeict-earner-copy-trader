@@ -12,6 +12,10 @@ import {
   getAdminGroupedLiveTrades,
   getAdminMasterPositionSnapshots,
 } from "../services/liveTradesService.js";
+import {
+  STRATEGY_SELECT_ADMIN_LIST,
+  STRATEGY_SELECT_ADMIN_SAFE,
+} from "../prisma/strategySelect.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -165,6 +169,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     try {
       const strategies = await prisma.strategy.findMany({
         orderBy: { createdAt: "desc" },
+        select: STRATEGY_SELECT_ADMIN_LIST,
       });
       res.json(
         strategies.map((s) => {
@@ -244,10 +249,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           minCapital,
           syncActiveTrades,
         },
+        select: STRATEGY_SELECT_ADMIN_SAFE,
       });
 
-      const { masterApiSecret: _omitCreateSecret, ...safe } = strategy;
-      res.status(201).json(safe);
+      res.status(201).json(strategy);
     } catch (err) {
       next(err);
     }
@@ -384,6 +389,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         const strategy = await prisma.strategy.update({
           where: { id },
           data: updateData,
+          select: STRATEGY_SELECT_ADMIN_SAFE,
         });
 
         if (
@@ -404,8 +410,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
             });
         }
 
-        const { masterApiSecret: _omitSecret, ...safe } = strategy;
-        res.json(safe);
+        res.json(strategy);
       } catch (err: unknown) {
         if (
           err instanceof PrismaClientKnownRequestError &&
