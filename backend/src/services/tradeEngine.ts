@@ -280,9 +280,9 @@ async function closeFollowerTradeAndRecordPnl(
     orderBy: { createdAt: "asc" },
   });
 
-  const open = candidates.find((t) =>
-    entryPriceMatches(t.entryPrice, args.masterEntryPrice),
-  );
+  const open =
+    candidates.find((t) => entryPriceMatches(t.entryPrice, args.masterEntryPrice)) ??
+    candidates[0];
 
   if (!open) return;
 
@@ -900,6 +900,46 @@ class StrategyMasterSocket {
     this.ws = null;
   }
 
+  private async seedPositionMapsFromRest(): Promise<void> {
+    try {
+      const strat = await this.prisma.strategy.findUnique({
+        where: { id: this.strategyId },
+        select: STRATEGY_SELECT_WS_CREDS,
+      });
+      if (!strat) return;
+      const key = strat.masterApiKey?.trim();
+      const secret = strat.masterApiSecret?.trim();
+      if (!key || !secret) return;
+
+      const masters = await fetchMasterOpenPositions(
+        strat.masterApiKey,
+        strat.masterApiSecret,
+      );
+      for (const m of masters) {
+        const aliases = [m.deltaSymbol, m.deltaSymbol.toUpperCase()].filter(Boolean);
+        for (const k of aliases) {
+          this.lastPositionContracts.set(k, m.masterContracts);
+          this.lastOpenMeta.set(k, {
+            symbol: m.deltaSymbol,
+            side: m.side,
+            contracts: m.masterContracts,
+            avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+          });
+        }
+      }
+      if (masters.length > 0) {
+        console.log(
+          `[tradeEngine] seeded ${masters.length} master open positions strategyId=${this.strategyId}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[tradeEngine] seedPositionMapsFromRest failed strategyId=${this.strategyId}:`,
+        err,
+      );
+    }
+  }
+
   private connect(): void {
     if (this.destroyed) return;
     this.tearDownSocket();
@@ -1003,6 +1043,7 @@ class StrategyMasterSocket {
         },
       };
       this.ws?.send(JSON.stringify(subPayload));
+      void this.seedPositionMapsFromRest();
       return;
     }
 
@@ -1032,6 +1073,32 @@ class StrategyMasterSocket {
     if (type === "positions") {
       const merged = mergePayloadLayers(parsed);
       const action = String(msg.action ?? "").toLowerCase();
+
+      if (action === "snapshot" && Array.isArray(msg.data)) {
+        for (const rawSnap of msg.data) {
+          const snap = extractPositionSnapshot(rawSnap);
+          if (!snap) continue;
+          const aliases = [
+            snap.productKey,
+            snap.symbol,
+            snap.productKey.toUpperCase(),
+            snap.symbol.toUpperCase(),
+          ].filter(Boolean);
+          for (const k of aliases) {
+            this.lastPositionContracts.set(k, snap.contracts);
+            this.lastOpenMeta.set(k, {
+              symbol: snap.symbol,
+              side: snap.side,
+              contracts: snap.contracts,
+              avgEntry:
+                snap.avgEntry ??
+                this.lastOpenMeta.get(k)?.avgEntry ??
+                0,
+            });
+          }
+        }
+        return;
+      }
 
       if (action === "delete" || action === "closed") {
         const payloadItems: unknown[] = [];
@@ -1064,7 +1131,7 @@ class StrategyMasterSocket {
 
           const lastContracts = this.lastPositionContracts.get(key) ?? 0;
           const lastMeta = this.lastOpenMeta.get(key);
-          if (lastContracts <= 0 || !lastMeta || lastMeta.avgEntry <= 0) continue;
+          if (lastContracts <= 0 || !lastMeta) continue;
 
           console.log(
             `[EXECUTION] Position delete detected via WS action=${action} for ${lastMeta.symbol}`,
@@ -1072,7 +1139,10 @@ class StrategyMasterSocket {
           await notifyMasterFlat(this.prisma, this.strategyId, {
             symbol: lastMeta.symbol,
             side: lastMeta.side,
-            masterEntryPrice: lastMeta.avgEntry,
+            masterEntryPrice:
+              Number.isFinite(lastMeta.avgEntry) && lastMeta.avgEntry > 0
+                ? lastMeta.avgEntry
+                : 0,
             masterContracts: lastContracts,
           });
           for (const c of candidates) {
@@ -1091,11 +1161,14 @@ class StrategyMasterSocket {
 
       if (next <= 0 && prev > 0) {
         const meta = this.lastOpenMeta.get(snap.productKey);
-        if (meta != null && meta.avgEntry > 0) {
+        if (meta != null) {
           await notifyMasterFlat(this.prisma, this.strategyId, {
             symbol: meta.symbol,
             side: meta.side,
-            masterEntryPrice: meta.avgEntry,
+            masterEntryPrice:
+              Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                ? meta.avgEntry
+                : 0,
             masterContracts: prev,
           });
         }
@@ -1118,15 +1191,13 @@ class StrategyMasterSocket {
         for (const k of keyAliases) {
           this.lastPositionContracts.set(k, next);
         }
-        if (avg > 0) {
-          for (const k of keyAliases) {
-            this.lastOpenMeta.set(k, {
-              symbol: snap.symbol,
-              side: snap.side,
-              contracts: next,
-              avgEntry: avg,
-            });
-          }
+        for (const k of keyAliases) {
+          this.lastOpenMeta.set(k, {
+            symbol: snap.symbol,
+            side: snap.side,
+            contracts: next,
+            avgEntry: Number.isFinite(avg) ? avg : 0,
+          });
         }
       }
       return;
