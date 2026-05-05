@@ -750,6 +750,18 @@ async function notifyMasterFlat(
       status: SubscriptionStatus.ACTIVE,
       user: { status: UserStatus.ACTIVE },
     },
+    include: {
+      exchangeAccount: true,
+      user: {
+        include: {
+          deltaApiKeys: true,
+          exchangeAccounts: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+      },
+    },
   });
 
   await Promise.all(
@@ -758,9 +770,53 @@ async function notifyMasterFlat(
         snap.masterContracts,
         sub.multiplier,
       );
+      const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
+      const creds =
+        sub.exchangeAccount != null
+          ? {
+              apiKey: sub.exchangeAccount.apiKey,
+              apiSecret: sub.exchangeAccount.apiSecret,
+            }
+          : sub.user.exchangeAccounts?.[0] != null
+            ? {
+                apiKey: sub.user.exchangeAccounts[0]!.apiKey,
+                apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
+              }
+            : sub.user.deltaApiKeys[0] != null
+              ? {
+                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+                }
+              : null;
+
+      if (!creds) {
+        console.log(
+          `[EXECUTION] Close skip (no follower creds) user ${sub.userId} - Size: ${followerContracts} contracts - ${snap.symbol} ${oppositeSide}`,
+        );
+        return;
+      }
+
       console.log(
         `[EXECUTION] Master flat — closing follower book user ${sub.userId} — ${snap.symbol} ${snap.side} — ${followerContracts} contracts (master ${snap.masterContracts} × ${sub.multiplier})`,
       );
+      console.log(
+        `[EXECUTION] Closing order for user ${sub.userId} - Size: ${followerContracts} contracts - ${snap.symbol} ${oppositeSide}`,
+      );
+      const closeResult = await executeTrade(
+        creds.apiKey,
+        creds.apiSecret,
+        snap.symbol,
+        oppositeSide,
+        followerContracts,
+        { reduceOnly: true },
+      );
+      if (!closeResult.success) {
+        console.error(
+          `[tradeEngine] close executeTrade failed userId=${sub.userId} strategyId=${strategyId} symbol=${snap.symbol} side=${oppositeSide} contracts=${followerContracts}: ${closeResult.error ?? "unknown"}`,
+        );
+        return;
+      }
+
       await closeFollowerTradeAndRecordPnl(prisma, {
         userId: sub.userId,
         strategyId,

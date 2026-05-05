@@ -219,6 +219,7 @@ export async function executeTrade(
   symbol: string,
   side: TradeSide,
   size: number,
+  opts?: { reduceOnly?: boolean },
 ): Promise<ExecuteTradeResult> {
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
@@ -230,10 +231,21 @@ export async function executeTrade(
       resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
       normalizeDeltaPerpSymbolForCcxt(symbol);
     const ccxtSide = side === "BUY" ? "buy" : "sell";
+    const params =
+      opts?.reduceOnly === true
+        ? { reduceOnly: true, reduce_only: true }
+        : undefined;
 
-    let order: Awaited<ReturnType<typeof exchange.createMarketOrder>>;
+    let order: Awaited<ReturnType<typeof exchange.createOrder>>;
     try {
-      order = await exchange.createMarketOrder(ccxtSymbol, ccxtSide, size);
+      order = await exchange.createOrder(
+        ccxtSymbol,
+        "market",
+        ccxtSide,
+        size,
+        undefined,
+        params,
+      );
     } catch (orderErr) {
       const message =
         orderErr instanceof Error ? orderErr.message : String(orderErr);
