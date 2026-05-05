@@ -1114,6 +1114,58 @@ class StrategyMasterSocket {
         console.log(
           `[tradeEngine WS] Delete action received. Verifying closures via REST...`,
         );
+        const closeTrackedByPayload = async (): Promise<boolean> => {
+          const payloadItems: unknown[] = [];
+          const dataLayer = asRecord(msg.data);
+          if (Array.isArray(msg.data)) payloadItems.push(...msg.data);
+          if (Array.isArray(dataLayer?.positions))
+            payloadItems.push(...dataLayer.positions);
+          if (Array.isArray(dataLayer?.open)) payloadItems.push(...dataLayer.open);
+          if (Array.isArray(dataLayer?.closed))
+            payloadItems.push(...dataLayer.closed);
+          if (payloadItems.length === 0) payloadItems.push(merged);
+
+          let closedAny = false;
+          for (const rawItem of payloadItems) {
+            const item = mergePayloadLayers(rawItem);
+            const symbol = String(
+              item.product_symbol ?? item.symbol ?? item.contract_symbol ?? "",
+            ).trim();
+            const productKey = String(item.product_id ?? "").trim();
+            const candidateKeys = [
+              productKey,
+              symbol,
+              productKey.toUpperCase(),
+              symbol.toUpperCase(),
+            ].filter(Boolean);
+            const hitKey = candidateKeys.find((k) => this.lastOpenMeta.has(k));
+            if (!hitKey) continue;
+            const meta = this.lastOpenMeta.get(hitKey);
+            if (!meta) continue;
+            const lastContracts =
+              this.lastPositionContracts.get(hitKey) ?? meta.contracts;
+            if (lastContracts <= 0) continue;
+
+            console.log(
+              `[EXECUTION] Position delete payload matched ${meta.symbol}. Triggering follower exits.`,
+            );
+            await notifyMasterFlat(this.prisma, this.strategyId, {
+              symbol: meta.symbol,
+              side: meta.side,
+              masterEntryPrice:
+                Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                  ? meta.avgEntry
+                  : 0,
+              masterContracts: lastContracts,
+            });
+            for (const k of candidateKeys) {
+              this.lastPositionContracts.delete(k);
+              this.lastOpenMeta.delete(k);
+            }
+            closedAny = true;
+          }
+          return closedAny;
+        };
         const closeLocallyTracked = async (): Promise<void> => {
           const tracked = Array.from(this.lastOpenMeta.entries());
           for (const [trackedKey, meta] of tracked) {
@@ -1136,6 +1188,8 @@ class StrategyMasterSocket {
             this.lastOpenMeta.delete(trackedKey);
           }
         };
+        const payloadClosed = await closeTrackedByPayload();
+        if (payloadClosed) return;
         try {
           const s = await this.prisma.strategy.findUnique({
             where: { id: this.strategyId },

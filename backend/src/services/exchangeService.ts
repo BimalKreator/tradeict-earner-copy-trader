@@ -50,13 +50,14 @@ async function getAuthClient(
   apiKey: string,
   secret: string,
 ): Promise<InstanceType<typeof ccxt.delta>> {
-  let entry = _authClientCache.get(apiKey);
+  const cacheKey = `${apiKey}::${secret}`;
+  let entry = _authClientCache.get(cacheKey);
   if (!entry) {
     entry = {
       client: initializeDeltaClient(apiKey, secret),
       marketsLoaded: false,
     };
-    _authClientCache.set(apiKey, entry);
+    _authClientCache.set(cacheKey, entry);
   }
   if (!entry.marketsLoaded) {
     await entry.client.loadMarkets();
