@@ -29,6 +29,42 @@ export function initializeDeltaClient(
   return exchange;
 }
 
+let _publicClient: InstanceType<typeof ccxt.delta> | null = null;
+let _publicMarketsLoaded = false;
+
+async function getPublicClient(): Promise<InstanceType<typeof ccxt.delta>> {
+  if (!_publicClient) _publicClient = initializeDeltaClient();
+  if (!_publicMarketsLoaded) {
+    await _publicClient.loadMarkets();
+    _publicMarketsLoaded = true;
+  }
+  return _publicClient;
+}
+
+const _authClientCache = new Map<
+  string,
+  { client: InstanceType<typeof ccxt.delta>; marketsLoaded: boolean }
+>();
+
+async function getAuthClient(
+  apiKey: string,
+  secret: string,
+): Promise<InstanceType<typeof ccxt.delta>> {
+  let entry = _authClientCache.get(apiKey);
+  if (!entry) {
+    entry = {
+      client: initializeDeltaClient(apiKey, secret),
+      marketsLoaded: false,
+    };
+    _authClientCache.set(apiKey, entry);
+  }
+  if (!entry.marketsLoaded) {
+    await entry.client.loadMarkets();
+    entry.marketsLoaded = true;
+  }
+  return entry.client;
+}
+
 export type TradeSide = "BUY" | "SELL";
 
 export interface ExecuteTradeResult {
@@ -188,9 +224,7 @@ export async function executeTrade(
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
 
-    const exchange = initializeDeltaClient(apiKey, secret);
-
-    await exchange.loadMarkets();
+    const exchange = await getAuthClient(apiKey, secret);
 
     const ccxtSymbol =
       resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
@@ -230,8 +264,7 @@ export async function executeTrade(
  */
 export async function fetchDeltaSwapContractSize(symbol: string): Promise<number> {
   try {
-    const exchange = initializeDeltaClient();
-    await exchange.loadMarkets();
+    const exchange = await getPublicClient();
     const ccxtSymbol =
       resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
       normalizeDeltaPerpSymbolForCcxt(symbol);
@@ -251,8 +284,7 @@ export async function fetchDeltaTicker(
   symbol: string,
 ): Promise<{ last: number | null }> {
   try {
-    const exchange = initializeDeltaClient();
-    await exchange.loadMarkets();
+    const exchange = await getPublicClient();
     const ccxtSymbol =
       resolveDeltaIndiaSwapUnifiedSymbol(exchange, symbol) ??
       normalizeDeltaPerpSymbolForCcxt(symbol);
@@ -301,9 +333,7 @@ export async function fetchDeltaOpenPositions(
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
 
-  const exchange = initializeDeltaClient(apiKey, secret);
-
-  await exchange.loadMarkets();
+  const exchange = await getAuthClient(apiKey, secret);
   const positions = await exchange.fetchPositions();
 
   const out: DeltaLivePosition[] = [];

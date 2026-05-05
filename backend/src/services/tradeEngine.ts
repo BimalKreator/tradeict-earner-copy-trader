@@ -78,10 +78,12 @@ function mergePayloadLayers(raw: unknown): Record<string, unknown> {
   const base = asRecord(raw);
   if (!base) return {};
   const out: Record<string, unknown> = { ...base };
-  const inner = asRecord(base.payload);
-  if (inner) {
-    for (const [k, v] of Object.entries(inner)) {
-      if (!(k in out)) out[k] = v;
+  for (const layerKey of ["payload", "data"]) {
+    const inner = asRecord(base[layerKey]);
+    if (inner) {
+      for (const [k, v] of Object.entries(inner)) {
+        if (!(k in out)) out[k] = v;
+      }
     }
   }
   return out;
@@ -369,7 +371,15 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     },
     include: {
       exchangeAccount: true,
-      user: { include: { deltaApiKeys: true } },
+      user: {
+        include: {
+          deltaApiKeys: true,
+          exchangeAccounts: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+      },
     },
   });
   if (!sub || sub.user.status !== UserStatus.ACTIVE) return;
@@ -416,34 +426,23 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       continue;
     }
 
-    if (marketPrice === undefined) {
-      console.log(
-        `[EXECUTION] Late-join skip (no mark) user ${sub.userId} — ${leader.deltaSymbol} — ${followerContracts} contracts`,
-      );
-      await recordTrade(prisma, {
-        userId: sub.userId,
-        strategyId: strategy.id,
-        symbol: leader.deltaSymbol,
-        side: leader.side,
-        size: followerContracts,
-        entryPrice: leader.entryPrice,
-        status: TradeStatus.FAILED,
-      });
-      continue;
-    }
-
     const creds =
       sub.exchangeAccount != null
         ? {
             apiKey: sub.exchangeAccount.apiKey,
             apiSecret: sub.exchangeAccount.apiSecret,
           }
-        : sub.user.deltaApiKeys[0] != null
+        : sub.user.exchangeAccounts?.[0] != null
           ? {
-              apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-              apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+              apiKey: sub.user.exchangeAccounts[0]!.apiKey,
+              apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
             }
-          : null;
+          : sub.user.deltaApiKeys[0] != null
+            ? {
+                apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+                apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+              }
+            : null;
 
     if (!creds) {
       console.log(
@@ -622,7 +621,15 @@ async function copyMasterFillToSubscribers(
     },
     include: {
       exchangeAccount: true,
-      user: { include: { deltaApiKeys: true } },
+      user: {
+        include: {
+          deltaApiKeys: true,
+          exchangeAccounts: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+      },
     },
   });
 
@@ -657,30 +664,6 @@ async function copyMasterFillToSubscribers(
     return;
   }
 
-  if (marketPrice === undefined) {
-    await Promise.all(
-      subs.map(async (sub) => {
-        const followerContracts = followerContractsFromMaster(
-          args.masterContracts,
-          sub.multiplier,
-        );
-        console.log(
-          `[EXECUTION] WS copy skip (no mark) user ${sub.userId} — ${args.symbol} — ${followerContracts} contracts`,
-        );
-        await recordTrade(prisma, {
-          userId: sub.userId,
-          strategyId,
-          symbol: args.symbol,
-          side: args.side,
-          size: followerContracts,
-          entryPrice: args.avgPrice,
-          status: TradeStatus.FAILED,
-        });
-      }),
-    );
-    return;
-  }
-
   await Promise.all(
     subs.map(async (sub) => {
       const followerContracts = followerContractsFromMaster(
@@ -693,12 +676,17 @@ async function copyMasterFillToSubscribers(
               apiKey: sub.exchangeAccount.apiKey,
               apiSecret: sub.exchangeAccount.apiSecret,
             }
-          : sub.user.deltaApiKeys[0] != null
+          : sub.user.exchangeAccounts?.[0] != null
             ? {
-                apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-                apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+                apiKey: sub.user.exchangeAccounts[0]!.apiKey,
+                apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
               }
-            : null;
+            : sub.user.deltaApiKeys[0] != null
+              ? {
+                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+                }
+              : null;
 
       if (!creds) {
         console.log(
@@ -941,6 +929,10 @@ class StrategyMasterSocket {
       return;
     }
 
+    console.log(
+      `[tradeEngine WS] strategyId=${this.strategyId} type=${type} action=${String(msg.action ?? "?")}`,
+    );
+
     if (
       type === "success" &&
       String(msg.message ?? "").toLowerCase() === "authenticated"
@@ -959,14 +951,25 @@ class StrategyMasterSocket {
     }
 
     if (type === "orders") {
-      const sig = extractOrderFillSignal(parsed);
-      if (!sig || sig.reduceOnly) return;
-      await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
-        symbol: sig.symbol,
-        side: sig.side,
-        masterContracts: sig.contracts,
-        avgPrice: sig.avgPrice,
-      });
+      const records: unknown[] = [];
+      const data = asRecord(msg.data);
+      if (data) {
+        const open = Array.isArray(data.open) ? data.open : [];
+        const closed = Array.isArray(data.closed) ? data.closed : [];
+        records.push(...open, ...closed);
+      }
+      if (records.length === 0) records.push(parsed);
+
+      for (const r of records) {
+        const sig = extractOrderFillSignal(r);
+        if (!sig || sig.reduceOnly) continue;
+        await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
+          symbol: sig.symbol,
+          side: sig.side,
+          masterContracts: sig.contracts,
+          avgPrice: sig.avgPrice,
+        });
+      }
       return;
     }
 

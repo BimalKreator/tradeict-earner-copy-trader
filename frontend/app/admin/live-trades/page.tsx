@@ -209,7 +209,6 @@ export default function AdminLiveTradesPage() {
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : "Failed to load");
-        setStrategies([]);
       }
     } finally {
       if (!silent) setLoading(false);
@@ -223,7 +222,7 @@ export default function AdminLiveTradesPage() {
   useEffect(() => {
     const id = window.setInterval(() => {
       void load({ silent: true });
-    }, 5000);
+    }, 8000);
     return () => window.clearInterval(id);
   }, [load]);
 
