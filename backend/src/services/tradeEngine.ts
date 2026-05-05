@@ -1191,51 +1191,66 @@ class StrategyMasterSocket {
         return;
       }
 
-      const snap = extractPositionSnapshot(parsed);
-      if (!snap) return;
-
-      const prev = this.lastPositionContracts.get(snap.productKey) ?? 0;
-      const next = snap.contracts;
-
-      if (next <= 0 && prev > 0) {
-        const meta = this.lastOpenMeta.get(snap.productKey);
-        if (meta != null) {
-          await notifyMasterFlat(this.prisma, this.strategyId, {
-            symbol: meta.symbol,
-            side: meta.side,
-            masterEntryPrice:
-              Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
-                ? meta.avgEntry
-                : 0,
-            masterContracts: prev,
-          });
-        }
-        this.lastPositionContracts.delete(snap.productKey);
-        this.lastOpenMeta.delete(snap.productKey);
-        return;
+      const positionRows: unknown[] = [];
+      if (Array.isArray(msg.data)) {
+        positionRows.push(...msg.data);
+      } else if (asRecord(msg.data)) {
+        positionRows.push(msg.data);
+      } else {
+        positionRows.push(parsed);
       }
 
-      if (next > 0) {
-        const avg =
-          snap.avgEntry ??
-          this.lastOpenMeta.get(snap.productKey)?.avgEntry ??
-          0;
+      for (const row of positionRows) {
+        const snap = extractPositionSnapshot(row);
+        if (!snap) continue;
+
         const keyAliases = [
           snap.productKey,
           snap.symbol,
           snap.productKey.toUpperCase(),
           snap.symbol.toUpperCase(),
         ].filter(Boolean);
+
+        let prev = 0;
+        let meta: LastOpenMeta | undefined;
         for (const k of keyAliases) {
-          this.lastPositionContracts.set(k, next);
+          const c = this.lastPositionContracts.get(k) ?? 0;
+          if (c > prev) prev = c;
+          const m = this.lastOpenMeta.get(k);
+          if (!meta && m) meta = m;
         }
-        for (const k of keyAliases) {
-          this.lastOpenMeta.set(k, {
-            symbol: snap.symbol,
-            side: snap.side,
-            contracts: next,
-            avgEntry: Number.isFinite(avg) ? avg : 0,
-          });
+        const next = snap.contracts;
+
+        if (next <= 0 && prev > 0) {
+          if (meta != null) {
+            await notifyMasterFlat(this.prisma, this.strategyId, {
+              symbol: meta.symbol,
+              side: meta.side,
+              masterEntryPrice:
+                Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                  ? meta.avgEntry
+                  : 0,
+              masterContracts: prev,
+            });
+          }
+          for (const k of keyAliases) {
+            this.lastPositionContracts.delete(k);
+            this.lastOpenMeta.delete(k);
+          }
+          continue;
+        }
+
+        if (next > 0) {
+          const avg = snap.avgEntry ?? meta?.avgEntry ?? 0;
+          for (const k of keyAliases) {
+            this.lastPositionContracts.set(k, next);
+            this.lastOpenMeta.set(k, {
+              symbol: snap.symbol,
+              side: snap.side,
+              contracts: next,
+              avgEntry: Number.isFinite(avg) ? avg : 0,
+            });
+          }
         }
       }
       return;
