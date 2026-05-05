@@ -94,13 +94,13 @@ export function normalizeDeltaPerpSymbolForCcxt(raw: string): string {
   return s;
 }
 
-/** Boot-time check: compact key used in Cosmic/copy rows → CCXT symbol on Delta India. */
+/** Boot-time check: compact key used in copy-trade rows → CCXT symbol on Delta India. */
 export const DELTA_INDIA_CCXT_SAMPLE_SYMBOL =
   normalizeDeltaPerpSymbolForCcxt("ETHUSDT");
 
 /**
  * Map CCXT unified swap symbol to compact keys aligned with copy-trade symbols (…USDT).
- * Delta India returns `BASE/USD:USD`; we normalize to `BASEUSDT` to match {@link cosmicSymbolMap}.
+ * Delta India returns `BASE/USD:USD`; we normalize to `BASEUSDT` for display and matching.
  */
 function unifiedSymbolToKey(unifiedSymbol: string): string {
   const slash = unifiedSymbol.indexOf("/");

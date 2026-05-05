@@ -30,9 +30,9 @@ async function main(): Promise<void> {
       data: {
         title: "Intraday Cryptotrading Algo - For Delta Ex India",
         description:
-          "Automated intraday crypto strategy mirrored from a linked Cosmic Trade account to Delta Exchange (India). Set cosmic email/password on this strategy and COSMIC_SCRAPER_LOGIN_URL (plus optional selectors) for headless login.",
-        cosmicEmail: "",
-        cosmicPassword: "",
+          "Automated intraday crypto strategy mirrored from a linked Delta Exchange (India) master account to follower accounts. Set master API key and secret on this strategy.",
+        masterApiKey: "",
+        masterApiSecret: "",
         performanceMetrics: {},
         slippage: 0.5,
         monthlyFee: 0,

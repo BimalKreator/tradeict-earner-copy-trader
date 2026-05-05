@@ -4,7 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { Layers, Loader2 } from "lucide-react";
 import Link from "next/link";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const ENV_API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+function resolveAdminApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (typeof window !== "undefined") {
+    return `${window.location.origin.replace(/\/$/, "")}/api`;
+  }
+  return "";
+}
 
 type LiveRow = {
   entryTime: string | null;
@@ -19,32 +28,21 @@ type LiveRow = {
 
 type FollowerRow = LiveRow & { userEmail: string };
 
-type Group = {
-  cosmic: LiveRow;
+type FollowerGroup = {
+  token: string;
+  side: string;
   followers: FollowerRow[];
-};
-
-type CosmicScrapeDiagnostics = {
-  payloadChunkCount: number;
-  payloadPositionRows: number;
-  tradesAfterDeltaFilter: number;
-  domRowsMatched?: number;
-  domPositionsParsed?: number;
-  walletBalanceDom?: string | null;
-  /** Present when the scrape stopped before any portfolio payload (login/env/etc.). */
-  scrapeAbortedReason?: string;
-  extractError?: string;
 };
 
 type StrategySection = {
   strategyId: string;
   strategyTitle: string;
-  groups: Group[];
-  cosmicMeta?: {
-    scraperEnvConfigured: boolean;
+  /** CCXT open positions on the strategy master Delta (India) account. */
+  masterPositions: LiveRow[];
+  groups: FollowerGroup[];
+  masterMeta?: {
     credentialsPresent: boolean;
     fetchException?: string;
-    lastScrape?: CosmicScrapeDiagnostics;
   };
 };
 
@@ -86,14 +84,14 @@ function PositionTable({
   variant,
 }: {
   rows: (LiveRow | FollowerRow)[];
-  variant: "cosmic" | "follower";
+  variant: "master" | "follower";
 }) {
   return (
     <div className="scroll-table overflow-x-auto">
       <table className="w-full min-w-[880px] text-left text-sm">
         <thead
           className={
-            variant === "cosmic"
+            variant === "master"
               ? "border-b border-primary/35 bg-primary/10"
               : "border-b border-white/[0.08] bg-black/25"
           }
@@ -125,7 +123,7 @@ function PositionTable({
               <td className="whitespace-nowrap px-3 py-2 text-xs text-white/75">
                 {variant === "follower"
                   ? (r as FollowerRow).userEmail
-                  : "Cosmic.trade (strategy)"}
+                  : "Master · Delta (CCXT)"}
               </td>
               <td className="whitespace-nowrap px-3 py-2 tabular-nums text-white/55">
                 {fmtTime(r.entryTime)}
@@ -173,8 +171,17 @@ export default function AdminLiveTradesPage() {
     setLoading(true);
     setError(null);
     setForbidden(false);
+    const base = resolveAdminApiBase();
+    if (!base) {
+      setError(
+        "NEXT_PUBLIC_API_URL is not set and same-origin /api could not be resolved.",
+      );
+      setStrategies([]);
+      setLoading(false);
+      return;
+    }
     try {
-      const res = await fetch(`${API_BASE}/admin/live-trades/grouped`, {
+      const res = await fetch(`${base}/admin/live-trades/grouped`, {
         headers: {
           Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
         },
@@ -229,7 +236,8 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Cosmic positions per strategy and mirrored Delta positions for subscribers.
+              Leader positions are loaded from the master Delta API (CCXT). Subscriber rows show open
+              Delta positions that match each leg.
             </p>
           </div>
         </div>
@@ -260,146 +268,68 @@ export default function AdminLiveTradesPage() {
                 <span className="font-mono text-white/55">{s.strategyId}</span>
               </p>
 
-              {s.groups.length === 0 ? (
-                <div className="mt-6 space-y-2 text-sm text-white/50">
-                  <p>No open Cosmic positions were parsed for this strategy.</p>
-                  {s.cosmicMeta?.fetchException ? (
-                    <p className="rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-red-100/95">
-                      Scrape error:{" "}
-                      <span className="font-mono text-xs text-red-50/90">
-                        {s.cosmicMeta.fetchException}
-                      </span>
-                      <span className="mt-1 block text-xs text-red-100/70">
-                        Often caused by API timeouts (Puppeteer needs a long-lived Node process),
-                        missing Chromium on the server, or blocked outbound HTTPS.
-                      </span>
-                    </p>
-                  ) : null}
-                  {s.cosmicMeta?.lastScrape ? (
-                    <div className="rounded-lg border border-white/[0.12] bg-white/[0.04] px-3 py-2 font-mono text-[11px] leading-relaxed text-white/65">
-                      <p className="mb-1 text-[10px] uppercase tracking-wide text-white/40">
-                        Last scrape diagnostics
-                      </p>
-                      {s.cosmicMeta.lastScrape.scrapeAbortedReason &&
-                      s.cosmicMeta.lastScrape.payloadChunkCount === 0 ? (
-                        <p className="mb-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-100/95 normal-case">
-                          <span className="font-semibold text-amber-50/90">
-                            Scrape stopped early:{" "}
-                          </span>
-                          {s.cosmicMeta.lastScrape.scrapeAbortedReason}
-                        </p>
-                      ) : null}
-                      <p>
-                        payloadChunks={s.cosmicMeta.lastScrape.payloadChunkCount}{" "}
-                        · rowsInPayloads=
-                        {s.cosmicMeta.lastScrape.payloadPositionRows} · afterDelta=
-                        {s.cosmicMeta.lastScrape.tradesAfterDeltaFilter}
-                      </p>
-                      {(s.cosmicMeta.lastScrape.domRowsMatched !== undefined ||
-                        s.cosmicMeta.lastScrape.domPositionsParsed !==
-                          undefined) && (
-                        <p>
-                          domRowsMatched=
-                          {String(s.cosmicMeta.lastScrape.domRowsMatched ?? "—")}{" "}
-                          · domPositionsParsed=
-                          {String(s.cosmicMeta.lastScrape.domPositionsParsed ?? "—")}
-                        </p>
-                      )}
-                      {s.cosmicMeta.lastScrape.walletBalanceDom ? (
-                        <p className="truncate text-emerald-200/80">
-                          wallet (DOM): {s.cosmicMeta.lastScrape.walletBalanceDom}
-                        </p>
-                      ) : null}
-                      {s.cosmicMeta.lastScrape.scrapeAbortedReason &&
-                      s.cosmicMeta.lastScrape.payloadChunkCount > 0 ? (
-                        <p className="text-amber-200/90">
-                          aborted: {s.cosmicMeta.lastScrape.scrapeAbortedReason}
-                        </p>
-                      ) : null}
-                      {s.cosmicMeta.lastScrape.extractError ? (
-                        <p className="text-amber-200/90">
-                          extract: {s.cosmicMeta.lastScrape.extractError}
-                        </p>
-                      ) : null}
-                      {s.cosmicMeta.lastScrape.payloadPositionRows > 0 &&
-                      s.cosmicMeta.lastScrape.tradesAfterDeltaFilter === 0 ? (
-                        <p className="mt-1 text-white/55">
-                          Rows were parsed from Cosmic but none survived Delta symbol mapping —
-                          check backend logs for{" "}
-                          <code className="rounded bg-black/30 px-1">
-                            [cosmic] No Delta mapping
-                          </code>
-                          .
-                        </p>
-                      ) : null}
-                      {s.cosmicMeta.lastScrape.domRowsMatched === 0 &&
-                      (s.cosmicMeta.lastScrape.payloadPositionRows ?? 0) === 0 &&
-                      !s.cosmicMeta.lastScrape.scrapeAbortedReason ? (
-                        <p className="mt-1 text-white/55">
-                          No DOM rows and no JSON payload positions — login may have failed or the
-                          portfolio layout differs from Scraper Studio. Confirm{" "}
-                          <strong className="text-white/70">COSMIC_SCRAPER_LOGIN_URL</strong> and
-                          run <strong className="text-white/70">Test scrape</strong>.
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {!s.cosmicMeta?.scraperEnvConfigured ? (
-                    <p className="text-amber-200/85">
-                      API env missing{" "}
-                      <code className="rounded bg-white/10 px-1 text-[11px] text-white/70">
-                        COSMIC_SCRAPER_LOGIN_URL
-                      </code>
-                      — the headless browser never opens Cosmic. Set it on the server and restart.
-                    </p>
-                  ) : null}
-                  {s.cosmicMeta?.scraperEnvConfigured &&
-                  !s.cosmicMeta?.credentialsPresent ? (
-                    <p className="text-amber-200/85">
-                      Strategy has no saved Cosmic email/password — add them under Admin → Strategies → Edit.
-                    </p>
-                  ) : null}
-                  {s.cosmicMeta?.scraperEnvConfigured &&
-                  s.cosmicMeta?.credentialsPresent ? (
-                    <p>
-                      If the master account does have open trades, check Puppeteer selectors and{" "}
-                      <code className="rounded bg-white/10 px-1 text-[11px] text-white/70">
-                        COSMIC_SCRAPER_RESPONSE_FILTER
-                      </code>{" "}
-                      on the API host. Use <strong className="text-white/70">Strategies → Test scrape</strong> to debug.
-                    </p>
-                  ) : null}
+              {/* Top: master open positions from CCXT (same source as GET /admin/live-trades/master-positions). */}
+              <div className="mt-6 overflow-hidden rounded-xl border border-primary/25 bg-black/20">
+                <div className="border-b border-primary/25 bg-primary/5 px-4 py-2">
+                  <p className="text-xs font-medium uppercase tracking-wider text-primary/90">
+                    Master account · Delta India (CCXT open positions)
+                  </p>
                 </div>
-              ) : (
-                <div className="mt-6 space-y-8">
-                  {s.groups.map((g, gi) => (
-                    <div
-                      key={`${s.strategyId}-${g.cosmic.token}-${g.cosmic.side}-${gi}`}
-                      className="rounded-xl border border-white/[0.08] bg-black/20 overflow-hidden"
-                    >
-                      <div className="border-b border-primary/25 bg-primary/5 px-4 py-2">
-                        <p className="text-xs font-medium uppercase tracking-wider text-primary/90">
-                          Admin · Cosmic.trade
-                        </p>
-                      </div>
-                      <PositionTable rows={[g.cosmic]} variant="cosmic" />
+                {s.masterPositions.length > 0 ? (
+                  <PositionTable rows={s.masterPositions} variant="master" />
+                ) : (
+                  <div className="space-y-2 px-4 py-6 text-sm text-white/50">
+                    <p>No open positions on the master account.</p>
+                    {s.masterMeta?.fetchException ? (
+                      <p className="rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-red-100/95">
+                        Fetch error:{" "}
+                        <span className="font-mono text-xs text-red-50/90">
+                          {s.masterMeta.fetchException}
+                        </span>
+                      </p>
+                    ) : null}
+                    {!s.masterMeta?.credentialsPresent ? (
+                      <p className="text-amber-200/85">
+                        Add master Delta API key and secret under Admin → Strategies → Edit.
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
 
-                      <div className="border-t border-white/[0.06] bg-white/[0.02] px-4 py-2">
-                        <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-                          Subscribers · Delta Exchange
-                        </p>
+              <div className="mt-8">
+                <h3 className="text-sm font-medium text-white/80">
+                  Subscribers (matched legs)
+                </h3>
+                {s.groups.length === 0 ? (
+                  <p className="mt-3 text-sm text-white/45">
+                    No legs to match — either the master has no open positions or there are no active
+                    subscribers with linked exchange accounts.
+                  </p>
+                ) : (
+                  <div className="mt-4 space-y-8">
+                    {s.groups.map((g, gi) => (
+                      <div
+                        key={`${s.strategyId}-${g.token}-${g.side}-${gi}`}
+                        className="overflow-hidden rounded-xl border border-white/[0.08] bg-black/20"
+                      >
+                        <div className="border-b border-white/[0.06] bg-white/[0.02] px-4 py-2">
+                          <p className="text-xs font-medium uppercase tracking-wider text-white/50">
+                            {g.token} · {g.side} · subscribers
+                          </p>
+                        </div>
+                        {g.followers.length === 0 ? (
+                          <p className="px-4 py-6 text-sm text-white/45">
+                            No matching open Delta positions for active subscribers on this leg.
+                          </p>
+                        ) : (
+                          <PositionTable rows={g.followers} variant="follower" />
+                        )}
                       </div>
-                      {g.followers.length === 0 ? (
-                        <p className="px-4 py-6 text-sm text-white/45">
-                          No matching open Delta positions for active subscribers with linked exchange accounts.
-                        </p>
-                      ) : (
-                        <PositionTable rows={g.followers} variant="follower" />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
+                    ))}
+                  </div>
+                )}
+              </div>
             </section>
           ))}
         </div>

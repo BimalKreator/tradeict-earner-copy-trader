@@ -8,9 +8,10 @@ import {
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
-import { probeCosmicOpenPositions } from "../services/cosmicClient.js";
-import { getAdminGroupedLiveTrades } from "../services/liveTradesService.js";
-import { runScraperStudioInspect } from "../services/scraperStudioInspect.js";
+import {
+  getAdminGroupedLiveTrades,
+  getAdminMasterPositionSnapshots,
+} from "../services/liveTradesService.js";
 
 const roleValues = new Set<string>(Object.values(Role));
 const statusValues = new Set<string>(Object.values(UserStatus));
@@ -164,21 +165,17 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const strategies = await prisma.strategy.findMany({
         orderBy: { createdAt: "desc" },
       });
-      const scraperEnvReady = Boolean(
-        process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
-      );
       res.json(
         strategies.map((s) => {
-          const { cosmicPassword, ...rest } = s;
-          const hasPwd = Boolean(cosmicPassword?.trim());
-          const credPresent = Boolean(s.cosmicEmail?.trim() && hasPwd);
+          const { masterApiSecret, ...rest } = s;
+          const hasSecret = Boolean(masterApiSecret?.trim());
+          const credPresent = Boolean(s.masterApiKey?.trim() && hasSecret);
           return {
             ...rest,
-            hasCosmicPassword: hasPwd,
-            cosmicConnection: {
-              scraperEnvReady,
+            hasMasterApiSecret: hasSecret,
+            masterConnection: {
               credentialsPresent: credPresent,
-              ready: scraperEnvReady && credPresent,
+              ready: credPresent,
             },
           };
         }),
@@ -193,7 +190,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const body = req.body as Record<string, unknown>;
       const title = body.title;
       const description = body.description;
-      const cosmicEmail = body.cosmicEmail;
+      const masterApiKey = body.masterApiKey;
       const slippage = body.slippage;
       const monthlyFee = body.monthlyFee;
       const profitShare = body.profitShare;
@@ -202,13 +199,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       if (
         typeof title !== "string" ||
         typeof description !== "string" ||
-        typeof cosmicEmail !== "string" ||
+        typeof masterApiKey !== "string" ||
         typeof monthlyFee !== "number" ||
         typeof minCapital !== "number"
       ) {
         res.status(400).json({
           error:
-            "title, description, cosmicEmail, monthlyFee, and minCapital are required (numbers where applicable)",
+            "title, description, masterApiKey, monthlyFee, and minCapital are required (numbers where applicable)",
         });
         return;
       }
@@ -220,8 +217,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const cosmicPassword =
-        typeof body.cosmicPassword === "string" ? body.cosmicPassword : "";
+      const masterApiSecret =
+        typeof body.masterApiSecret === "string" ? body.masterApiSecret : "";
       const performanceMetrics = parsePerformanceMetrics(
         body.performanceMetrics,
       );
@@ -231,49 +228,12 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           ? body.syncActiveTrades
           : false;
 
-      const mappingsBodyCreate =
-        body.scraperMappings !== undefined
-          ? body.scraperMappings
-          : body.scraperStudioSelectors;
-      let scraperMappingsCreate: Prisma.InputJsonValue | undefined;
-      if (mappingsBodyCreate !== undefined) {
-        if (mappingsBodyCreate === null) {
-          scraperMappingsCreate = undefined;
-        } else if (
-          typeof mappingsBodyCreate === "object" &&
-          mappingsBodyCreate !== null &&
-          !Array.isArray(mappingsBodyCreate)
-        ) {
-          const raw = mappingsBodyCreate as Record<string, unknown>;
-          const cleaned: Record<string, string> = {};
-          for (const [k, v] of Object.entries(raw)) {
-            if (typeof k !== "string" || typeof v !== "string") {
-              res.status(400).json({
-                error:
-                  "scraperMappings must be an object with string keys and string selector values",
-              });
-              return;
-            }
-            const key = k.trim();
-            if (!key) continue;
-            cleaned[key] = v;
-          }
-          scraperMappingsCreate = cleaned;
-        } else {
-          res.status(400).json({
-            error:
-              "scraperMappings must be a JSON object or null (legacy key scraperStudioSelectors is merged into scraperMappings only)",
-          });
-          return;
-        }
-      }
-
       const strategy = await prisma.strategy.create({
         data: {
           title,
           description,
-          cosmicEmail,
-          cosmicPassword,
+          masterApiKey,
+          masterApiSecret,
           ...(performanceMetrics !== undefined
             ? { performanceMetrics }
             : {}),
@@ -282,13 +242,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           profitShare,
           minCapital,
           syncActiveTrades,
-          ...(scraperMappingsCreate !== undefined
-            ? { scraperMappings: scraperMappingsCreate }
-            : {}),
         },
       });
 
-      res.status(201).json(strategy);
+      const { masterApiSecret: _omitCreateSecret, ...safe } = strategy;
+      res.status(201).json(safe);
     } catch (err) {
       next(err);
     }
@@ -302,8 +260,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const data: {
         title?: string;
         description?: string;
-        cosmicEmail?: string;
-        cosmicPassword?: string;
+        masterApiKey?: string;
+        masterApiSecret?: string;
         performanceMetrics?: Prisma.InputJsonValue | typeof Prisma.DbNull;
         slippage?: number;
         monthlyFee?: number;
@@ -311,9 +269,6 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         minCapital?: number;
         syncActiveTrades?: boolean;
       } = {};
-
-      /** Body `null` → clear column (`Prisma.DbNull` at update); object replaces mappings. */
-      let scraperMappingsPatch: Prisma.InputJsonValue | null | undefined;
 
       if (body.title !== undefined) {
         if (typeof body.title !== "string") {
@@ -329,20 +284,20 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.description = body.description;
       }
-      if (body.cosmicEmail !== undefined) {
-        if (typeof body.cosmicEmail !== "string") {
-          res.status(400).json({ error: "cosmicEmail must be a string" });
+      if (body.masterApiKey !== undefined) {
+        if (typeof body.masterApiKey !== "string") {
+          res.status(400).json({ error: "masterApiKey must be a string" });
           return;
         }
-        data.cosmicEmail = body.cosmicEmail;
+        data.masterApiKey = body.masterApiKey;
       }
-      if (body.cosmicPassword !== undefined) {
-        if (typeof body.cosmicPassword !== "string") {
-          res.status(400).json({ error: "cosmicPassword must be a string" });
+      if (body.masterApiSecret !== undefined) {
+        if (typeof body.masterApiSecret !== "string") {
+          res.status(400).json({ error: "masterApiSecret must be a string" });
           return;
         }
-        if (body.cosmicPassword !== "") {
-          data.cosmicPassword = body.cosmicPassword;
+        if (body.masterApiSecret !== "") {
+          data.masterApiSecret = body.masterApiSecret;
         }
       }
       if (body.performanceMetrics !== undefined) {
@@ -394,47 +349,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.syncActiveTrades = body.syncActiveTrades;
       }
-      const mappingsBody =
-        body.scraperMappings !== undefined
-          ? body.scraperMappings
-          : body.scraperStudioSelectors;
-
-      if (mappingsBody !== undefined) {
-        if (mappingsBody === null) {
-          scraperMappingsPatch = null;
-        } else if (
-          typeof mappingsBody === "object" &&
-          mappingsBody !== null &&
-          !Array.isArray(mappingsBody)
-        ) {
-          const raw = mappingsBody as Record<string, unknown>;
-          const cleaned: Record<string, string> = {};
-          for (const [k, v] of Object.entries(raw)) {
-            if (typeof k !== "string" || typeof v !== "string") {
-              res.status(400).json({
-                error:
-                  "scraperMappings must be an object with string keys and string selector values",
-              });
-              return;
-            }
-            const key = k.trim();
-            if (!key) continue;
-            cleaned[key] = v;
-          }
-          scraperMappingsPatch = cleaned;
-        } else {
-          res.status(400).json({
-            error:
-              "scraperMappings must be a JSON object or null to clear (legacy key scraperStudioSelectors still accepted)",
-          });
-          return;
-        }
-      }
-
-      if (
-        Object.keys(data).length === 0 &&
-        scraperMappingsPatch === undefined
-      ) {
+      if (Object.keys(data).length === 0) {
         res.status(400).json({ error: "No valid fields to update" });
         return;
       }
@@ -449,10 +364,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         if (data.title !== undefined) updateData.title = data.title;
         if (data.description !== undefined)
           updateData.description = data.description;
-        if (data.cosmicEmail !== undefined)
-          updateData.cosmicEmail = data.cosmicEmail;
-        if (data.cosmicPassword !== undefined)
-          updateData.cosmicPassword = data.cosmicPassword;
+        if (data.masterApiKey !== undefined)
+          updateData.masterApiKey = data.masterApiKey;
+        if (data.masterApiSecret !== undefined)
+          updateData.masterApiSecret = data.masterApiSecret;
         if (data.performanceMetrics !== undefined)
           updateData.performanceMetrics = data.performanceMetrics;
         if (data.slippage !== undefined) updateData.slippage = data.slippage;
@@ -464,12 +379,6 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           updateData.minCapital = data.minCapital;
         if (data.syncActiveTrades !== undefined)
           updateData.syncActiveTrades = data.syncActiveTrades;
-        if (scraperMappingsPatch !== undefined) {
-          updateData.scraperMappings =
-            scraperMappingsPatch === null
-              ? Prisma.DbNull
-              : scraperMappingsPatch;
-        }
 
         const strategy = await prisma.strategy.update({
           where: { id },
@@ -494,7 +403,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
             });
         }
 
-        const { cosmicPassword: _omitPwd, ...safe } = strategy;
+        const { masterApiSecret: _omitSecret, ...safe } = strategy;
         res.json(safe);
       } catch (err: unknown) {
         if (
@@ -582,170 +491,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /**
-   * Runs one Puppeteer scrape with stored Cosmic credentials (can take ~30–120s).
+   * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
+   * For full master + subscriber matching, use `GET /admin/live-trades/grouped`.
    */
-  router.post("/strategies/:id/cosmic-probe", async (req, res, next) => {
+  router.get("/live-trades/master-positions", async (_req, res, next) => {
     try {
-      const rawId = req.params.id;
-      const id =
-        typeof rawId === "string"
-          ? rawId
-          : Array.isArray(rawId)
-            ? rawId[0]
-            : undefined;
-      if (!id) {
-        res.status(400).json({ error: "Missing strategy id" });
-        return;
-      }
-      const strategy = await prisma.strategy.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          title: true,
-          cosmicEmail: true,
-          cosmicPassword: true,
-          scraperMappings: true,
-        },
-      });
-      if (!strategy) {
-        res.status(404).json({ error: "Strategy not found" });
-        return;
-      }
-
-      const scraperEnvReady = Boolean(
-        process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
-      );
-      const credentialsPresent = Boolean(
-        strategy.cosmicEmail?.trim() && strategy.cosmicPassword?.trim(),
-      );
-
-      if (!scraperEnvReady) {
-        res.json({
-          ok: false,
-          positionCount: 0,
-          strategyTitle: strategy.title,
-          scraperEnvReady,
-          credentialsPresent,
-          message:
-            "Server is missing COSMIC_SCRAPER_LOGIN_URL. Set it to the Cosmic login page URL and restart the API.",
-        });
-        return;
-      }
-
-      if (!credentialsPresent) {
-        res.json({
-          ok: false,
-          positionCount: 0,
-          strategyTitle: strategy.title,
-          scraperEnvReady,
-          credentialsPresent,
-          message:
-            "Save Cosmic Login Email and Password on this strategy before testing.",
-        });
-        return;
-      }
-
-      const captureScreenshot =
-        process.env.COSMIC_SCRAPER_PROBE_SCREENSHOT === "true";
-
-      const { trades: positions, screenshotBase64, scrapeMeta } =
-        await probeCosmicOpenPositions(
-          strategy.cosmicEmail,
-          strategy.cosmicPassword ?? "",
-          captureScreenshot,
-          strategy.scraperMappings,
-        );
-
-      let message: string;
-      if (positions.length > 0) {
-        message = `Parsed ${positions.length} open Cosmic position(s).`;
-      } else if (scrapeMeta?.scrapeAbortedReason) {
-        message = `Browser scrape aborted: ${scrapeMeta.scrapeAbortedReason}`;
-      } else if (scrapeMeta?.extractError) {
-        message = `Portfolio DOM extract error: ${scrapeMeta.extractError}`;
-      } else if (
-        scrapeMeta !== undefined &&
-        scrapeMeta.domRowsMatched > 0 &&
-        scrapeMeta.domPositionsParsed === 0
-      ) {
-        message =
-          `Found ${scrapeMeta.domRowsMatched} position row(s) in the page DOM but field parsing yielded 0 positions — markup may have changed (symbol/side/size/avg columns).`;
-      } else if (
-        scrapeMeta !== undefined &&
-        scrapeMeta.domRowsMatched === 0 &&
-        scrapeMeta.walletBalanceDom
-      ) {
-        message =
-          "Portfolio wallet loaded but no position rows matched selectors — scroll/tab issue or Cosmic layout changed; check COSMIC_SCRAPER_PROBE_SCREENSHOT and API logs.";
-      } else if (
-        scrapeMeta !== undefined &&
-        scrapeMeta.domRowsMatched === 0 &&
-        !scrapeMeta.walletBalanceDom
-      ) {
-        message =
-          "No wallet row or position rows detected — login likely failed (wrong credentials, 2FA, or selectors). Confirm COSMIC_SCRAPER_LOGIN_URL and strategy Cosmic username/password.";
-      } else {
-        message =
-          "Scrape finished but no position payloads were produced — DOM extract may have failed; check API logs for [cosmic-scraper].";
-      }
-
-      res.json({
-        ok: true,
-        positionCount: positions.length,
-        strategyTitle: strategy.title,
-        scraperEnvReady,
-        credentialsPresent,
-        screenshotPreview: Boolean(screenshotBase64),
-        screenshotBase64: screenshotBase64 ?? undefined,
-        scrapeMeta: scrapeMeta ?? undefined,
-        message,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  /**
-   * Visual Scraper Studio: headless inspect — screenshot + visible element boxes/selectors.
-   * Body: `{ url, strategyId?, email?, password? }` — if `strategyId` is set, Cosmic credentials load server-side.
-   */
-  router.post("/scraper-studio/inspect", async (req, res, next) => {
-    try {
-      const { url, email, password, strategyId } = req.body as {
-        url?: unknown;
-        email?: unknown;
-        password?: unknown;
-        strategyId?: unknown;
-      };
-
-      if (typeof url !== "string" || !url.trim()) {
-        res.status(400).json({ error: "url is required" });
-        return;
-      }
-
-      let emailStr = typeof email === "string" ? email : "";
-      let passwordStr = typeof password === "string" ? password : "";
-
-      if (typeof strategyId === "string" && strategyId.trim()) {
-        const strat = await prisma.strategy.findUnique({
-          where: { id: strategyId.trim() },
-          select: { cosmicEmail: true, cosmicPassword: true },
-        });
-        if (!strat) {
-          res.status(404).json({ error: "Strategy not found" });
-          return;
-        }
-        emailStr = strat.cosmicEmail ?? "";
-        passwordStr = strat.cosmicPassword ?? "";
-      }
-
-      const result = await runScraperStudioInspect({
-        url: url.trim(),
-        email: emailStr,
-        password: passwordStr,
-      });
-
-      res.json(result);
+      const strategies = await getAdminMasterPositionSnapshots(prisma);
+      res.json({ strategies });
     } catch (err) {
       next(err);
     }

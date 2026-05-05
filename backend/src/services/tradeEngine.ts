@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+import WebSocket from "ws";
 import {
   type PrismaClient,
   SubscriptionStatus,
@@ -5,36 +7,161 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
-  fetchCosmicOpenPositions,
-  type CosmicLedTrade,
-} from "./cosmicClient.js";
-import {
   executeTrade,
+  fetchDeltaOpenPositions,
   fetchDeltaTicker,
   normalizeDeltaPerpSymbolForCcxt,
+  type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
+import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 
-const POLL_MIN_MS = 2000;
-const POLL_MAX_MS = 3000;
+/** Delta Exchange India private WebSocket (see Delta WebSocket docs). */
+const DELTA_INDIA_PRIVATE_WS = "wss://socket.india.delta.exchange";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const WS_AUTH_PATH = "/live";
+const HEARTBEAT_WATCHDOG_MS = 35_000;
+const MIN_RECONNECT_MS = 1_000;
+const MAX_RECONNECT_MS = 60_000;
+const ROSTER_SYNC_MS = 45_000;
 
-function randomPollMs(): number {
-  return (
-    POLL_MIN_MS +
-    Math.floor(Math.random() * (POLL_MAX_MS - POLL_MIN_MS + 1))
-  );
+function wsAuthSignature(secretPlain: string, timestampSec: string): string {
+  const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
+  return createHmac("sha256", secretPlain).update(prehash).digest("hex");
 }
 
 function percentSlippage(entry: number, market: number): number {
   if (entry <= 0) return Number.POSITIVE_INFINITY;
   return (Math.abs(market - entry) / entry) * 100;
+}
+
+function normalizeSide(raw: unknown): TradeSide | null {
+  const s = String(raw ?? "").toLowerCase();
+  if (s === "buy" || s === "long") return "BUY";
+  if (s === "sell" || s === "short") return "SELL";
+  return null;
+}
+
+function num(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/** Flatten nested payload objects from Delta WS messages. */
+function asRecord(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function mergePayloadLayers(raw: unknown): Record<string, unknown> {
+  const base = asRecord(raw);
+  if (!base) return {};
+  const out: Record<string, unknown> = { ...base };
+  const inner = asRecord(base.payload);
+  if (inner) {
+    for (const [k, v] of Object.entries(inner)) {
+      if (!(k in out)) out[k] = v;
+    }
+  }
+  return out;
+}
+
+function orderStateIndicatesFill(state: string): boolean {
+  const u = state.toLowerCase();
+  return (
+    u.includes("fill") ||
+    u === "closed" ||
+    u === "completed" ||
+    u === "done"
+  );
+}
+
+/**
+ * Derives a copy signal from an `orders` channel message (schema varies by contract type).
+ */
+function extractOrderFillSignal(
+  raw: unknown,
+): {
+  symbol: string;
+  side: TradeSide;
+  contracts: number;
+  avgPrice: number;
+  reduceOnly: boolean;
+} | null {
+  const o = mergePayloadLayers(raw);
+  const state = String(o.state ?? o.order_state ?? o.status ?? "");
+  if (!orderStateIndicatesFill(state)) return null;
+
+  const symbol = String(
+    o.product_symbol ?? o.symbol ?? o.contract_symbol ?? "",
+  ).trim();
+  if (!symbol) return null;
+
+  const side = normalizeSide(o.side ?? o.order_side);
+  if (!side) return null;
+
+  const contracts =
+    num(o.fill_qty) ??
+    num(o.filled_qty) ??
+    num(o.size) ??
+    num(o.order_qty);
+  if (contracts == null || contracts <= 0) return null;
+
+  const avgPrice =
+    num(o.average_fill_price) ??
+    num(o.avg_fill_price) ??
+    num(o.fill_avg_price) ??
+    num(o.price) ??
+    num(o.limit_price);
+  if (avgPrice == null || avgPrice <= 0) return null;
+
+  const reduceOnly = Boolean(o.reduce_only ?? o.reduceOnly);
+
+  return { symbol, side, contracts, avgPrice, reduceOnly };
+}
+
+/**
+ * Reads position snapshot fields from a `positions` channel message.
+ */
+function extractPositionSnapshot(raw: unknown): {
+  symbol: string;
+  side: TradeSide;
+  contracts: number;
+  avgEntry: number | null;
+  productKey: string;
+} | null {
+  const o = mergePayloadLayers(raw);
+  const symbol = String(
+    o.product_symbol ?? o.symbol ?? o.contract_symbol ?? "",
+  ).trim();
+  const productKey = String(o.product_id ?? symbol);
+  if (!symbol && !productKey) return null;
+
+  const side = normalizeSide(o.side ?? o.position_side ?? o.direction);
+  if (!side) return null;
+
+  const contracts = Math.abs(
+    num(o.size) ?? num(o.position_size) ?? num(o.contracts) ?? 0,
+  );
+  if (!Number.isFinite(contracts)) return null;
+
+  const avgEntry =
+    num(o.entry_price) ?? num(o.avg_entry_price) ?? num(o.avg_admission_price);
+
+  return {
+    symbol: symbol || productKey,
+    side,
+    contracts,
+    avgEntry,
+    productKey: productKey || symbol,
+  };
 }
 
 async function recordTrade(
@@ -109,20 +236,19 @@ function realizedPnlUsd(args: {
   return args.side === "BUY" ? diff * args.size : -diff * args.size;
 }
 
-function entryPriceMatches(stored: number, cosmic: number): boolean {
-  const eps = Math.max(1e-8, Math.abs(cosmic) * 1e-6);
-  return Math.abs(stored - cosmic) <= eps;
+function entryPriceMatches(stored: number, leader: number): boolean {
+  const eps = Math.max(1e-8, Math.abs(leader) * 1e-6);
+  return Math.abs(stored - leader) <= eps;
 }
 
-/**
- * Marks the follower's matching OPEN trade CLOSED and writes PnL + commission row.
- */
 async function closeFollowerTradeAndRecordPnl(
   prisma: PrismaClient,
   args: {
     userId: string;
     strategyId: string;
-    cosmic: CosmicLedTrade;
+    symbol: string;
+    side: TradeSide;
+    masterEntryPrice: number;
     sizedPosition: number;
     exitPrice: number;
   },
@@ -131,22 +257,22 @@ async function closeFollowerTradeAndRecordPnl(
     where: {
       userId: args.userId,
       strategyId: args.strategyId,
-      symbol: args.cosmic.deltaSymbol,
-      side: args.cosmic.side,
+      symbol: args.symbol,
+      side: args.side,
       status: TradeStatus.OPEN,
     },
     orderBy: { createdAt: "asc" },
   });
 
   const open = candidates.find((t) =>
-    entryPriceMatches(t.entryPrice, args.cosmic.entryPrice),
+    entryPriceMatches(t.entryPrice, args.masterEntryPrice),
   );
 
   if (!open) return;
 
   const tradeProfit = realizedPnlUsd({
-    side: args.cosmic.side,
-    entryPrice: args.cosmic.entryPrice,
+    side: args.side,
+    entryPrice: args.masterEntryPrice,
     exitPrice: args.exitPrice,
     size: args.sizedPosition,
   });
@@ -167,44 +293,48 @@ async function closeFollowerTradeAndRecordPnl(
   });
 }
 
-async function processRemovedCosmicPositions(
-  prisma: PrismaClient,
-  strategy: { id: string },
-  removed: CosmicLedTrade[],
-): Promise<void> {
-  for (const cosmic of removed) {
-    const tickRm = await fetchDeltaTicker(cosmic.deltaSymbol);
-    const exitPrice =
-      tickRm.last != null && Number.isFinite(tickRm.last)
-        ? tickRm.last
-        : undefined;
-    if (exitPrice === undefined || !Number.isFinite(exitPrice)) continue;
+/** Leader snapshot for late-join REST sync (unchanged contract). */
+type MasterLedTrade = {
+  id: string;
+  deltaSymbol: string;
+  side: TradeSide;
+  entryPrice: number;
+  size: number;
+};
 
-    const subs = await prisma.userSubscription.findMany({
-      where: {
-        strategyId: strategy.id,
-        status: SubscriptionStatus.ACTIVE,
-        user: { status: UserStatus.ACTIVE },
-      },
+function deltaPositionsToMasterLed(
+  positions: DeltaLivePosition[],
+): MasterLedTrade[] {
+  const out: MasterLedTrade[] = [];
+  for (const p of positions) {
+    const entry =
+      p.entryPrice != null && Number.isFinite(p.entryPrice)
+        ? p.entryPrice
+        : p.markPrice != null && Number.isFinite(p.markPrice)
+          ? p.markPrice
+          : null;
+    if (entry === null) continue;
+    const size = Math.abs(p.contracts);
+    if (!Number.isFinite(size) || size < 1e-12) continue;
+    out.push({
+      id: `${p.symbolKey}:${p.side}`,
+      deltaSymbol: p.symbolKey,
+      side: p.side,
+      entryPrice: entry,
+      size,
     });
-
-    for (const sub of subs) {
-      const userSize = cosmic.size * sub.multiplier;
-      await closeFollowerTradeAndRecordPnl(prisma, {
-        userId: sub.userId,
-        strategyId: strategy.id,
-        cosmic,
-        sizedPosition: userSize,
-        exitPrice,
-      });
-    }
   }
+  return out;
 }
 
-/**
- * Late-join: after subscribe, mirror each currently open Cosmic position onto Delta for one subscriber.
- * Guarded by `strategy.syncActiveTrades` at the caller.
- */
+async function fetchMasterOpenPositions(
+  apiKey: string,
+  apiSecret: string,
+): Promise<MasterLedTrade[]> {
+  const raw = await fetchDeltaOpenPositions(apiKey, apiSecret);
+  return deltaPositionsToMasterLed(raw);
+}
+
 export async function lateJoinMirrorOpenPositionsForSubscriber(
   prisma: PrismaClient,
   args: { strategyId: string; userId: string },
@@ -227,38 +357,37 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
   });
   if (!sub || sub.user.status !== UserStatus.ACTIVE) return;
 
-  let scraped: CosmicLedTrade[];
+  let leaders: MasterLedTrade[];
   try {
-    scraped = await fetchCosmicOpenPositions(
-      strategy.cosmicEmail,
-      strategy.cosmicPassword,
-      strategy.scraperMappings,
+    leaders = await fetchMasterOpenPositions(
+      strategy.masterApiKey,
+      strategy.masterApiSecret,
     );
   } catch (err) {
-    console.error("[late-join] Cosmic fetch failed:", err);
+    console.error("[late-join] master Delta fetch failed:", err);
     return;
   }
 
-  for (const cosmic of scraped) {
-    const tickLj = await fetchDeltaTicker(cosmic.deltaSymbol);
+  for (const leader of leaders) {
+    const tickLj = await fetchDeltaTicker(leader.deltaSymbol);
     const marketPrice =
       tickLj.last != null && Number.isFinite(tickLj.last)
         ? tickLj.last
         : undefined;
 
-    const userSize = cosmic.size * sub.multiplier;
+    const userSize = leader.size * sub.multiplier;
 
     if (
       marketPrice !== undefined &&
-      percentSlippage(cosmic.entryPrice, marketPrice) > strategy.slippage
+      percentSlippage(leader.entryPrice, marketPrice) > strategy.slippage
     ) {
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
+        symbol: leader.deltaSymbol,
+        side: leader.side,
         size: userSize,
-        entryPrice: cosmic.entryPrice,
+        entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
       continue;
@@ -268,10 +397,10 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
+        symbol: leader.deltaSymbol,
+        side: leader.side,
         size: userSize,
-        entryPrice: cosmic.entryPrice,
+        entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
       continue;
@@ -294,10 +423,10 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       await recordTrade(prisma, {
         userId: sub.userId,
         strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
+        symbol: leader.deltaSymbol,
+        side: leader.side,
         size: userSize,
-        entryPrice: cosmic.entryPrice,
+        entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
       });
       continue;
@@ -306,247 +435,30 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     const result = await executeTrade(
       creds.apiKey,
       creds.apiSecret,
-      cosmic.deltaSymbol,
-      cosmic.side,
+      leader.deltaSymbol,
+      leader.side,
       userSize,
     );
 
     if (!result.success) {
-      const ccxtSym = normalizeDeltaPerpSymbolForCcxt(cosmic.deltaSymbol);
+      const ccxtSym = normalizeDeltaPerpSymbolForCcxt(leader.deltaSymbol);
       console.error(
-        `[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} cosmic=${cosmic.cosmicSymbol} deltaSymbol=${cosmic.deltaSymbol} ccxtSymbol=${ccxtSym} side=${cosmic.side} size=${userSize}: ${result.error ?? "unknown"}`,
+        `[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} deltaSymbol=${leader.deltaSymbol} ccxtSymbol=${ccxtSym} side=${leader.side} size=${userSize}: ${result.error ?? "unknown"}`,
       );
     }
 
     await recordTrade(prisma, {
       userId: sub.userId,
       strategyId: strategy.id,
-      symbol: cosmic.deltaSymbol,
-      side: cosmic.side,
+      symbol: leader.deltaSymbol,
+      side: leader.side,
       size: userSize,
-      entryPrice: cosmic.entryPrice,
+      entryPrice: leader.entryPrice,
       status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
     });
   }
 }
 
-async function processNewCosmicTrade(
-  prisma: PrismaClient,
-  strategy: {
-    id: string;
-    slippage: number;
-  },
-  cosmic: CosmicLedTrade,
-) {
-  const tickNew = await fetchDeltaTicker(cosmic.deltaSymbol);
-  const marketPrice =
-    tickNew.last != null && Number.isFinite(tickNew.last)
-      ? tickNew.last
-      : undefined;
-
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      strategyId: strategy.id,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
-    },
-    include: {
-      exchangeAccount: true,
-      user: {
-        include: { deltaApiKeys: true },
-      },
-    },
-  });
-
-  if (
-    marketPrice !== undefined &&
-    percentSlippage(cosmic.entryPrice, marketPrice) > strategy.slippage
-  ) {
-    console.log(
-      `[tradeEngine] Slippage exceeded for ${cosmic.deltaSymbol} (${cosmic.cosmicSymbol})`,
-    );
-    for (const sub of subs) {
-      const userSize = cosmic.size * sub.multiplier;
-      await recordTrade(prisma, {
-        userId: sub.userId,
-        strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
-        size: userSize,
-        entryPrice: cosmic.entryPrice,
-        status: TradeStatus.FAILED,
-      });
-    }
-    return;
-  }
-
-  if (marketPrice === undefined) {
-    for (const sub of subs) {
-      const userSize = cosmic.size * sub.multiplier;
-      await recordTrade(prisma, {
-        userId: sub.userId,
-        strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
-        size: userSize,
-        entryPrice: cosmic.entryPrice,
-        status: TradeStatus.FAILED,
-      });
-    }
-    return;
-  }
-
-  for (const sub of subs) {
-    const userSize = cosmic.size * sub.multiplier;
-
-    const creds =
-      sub.exchangeAccount != null
-        ? {
-            apiKey: sub.exchangeAccount.apiKey,
-            apiSecret: sub.exchangeAccount.apiSecret,
-          }
-        : sub.user.deltaApiKeys[0] != null
-          ? {
-              apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-              apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
-            }
-          : null;
-
-    if (!creds) {
-      await recordTrade(prisma, {
-        userId: sub.userId,
-        strategyId: strategy.id,
-        symbol: cosmic.deltaSymbol,
-        side: cosmic.side,
-        size: userSize,
-        entryPrice: cosmic.entryPrice,
-        status: TradeStatus.FAILED,
-      });
-      continue;
-    }
-
-    const result = await executeTrade(
-      creds.apiKey,
-      creds.apiSecret,
-      cosmic.deltaSymbol,
-      cosmic.side,
-      userSize,
-    );
-
-    await recordTrade(prisma, {
-      userId: sub.userId,
-      strategyId: strategy.id,
-      symbol: cosmic.deltaSymbol,
-      side: cosmic.side,
-      size: userSize,
-      entryPrice: cosmic.entryPrice,
-      status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
-    });
-  }
-}
-
-type StrategyDedupe = {
-  prevOpenById: Map<string, CosmicLedTrade>;
-  /**
-   * After the first non-empty Cosmic snapshot, we only mirror **new** position ids.
-   * (The first snapshot is a baseline so we do not market-open duplicate existing leader positions.)
-   */
-  seeded: boolean;
-};
-
-async function runEngineLoop(
-  prisma: PrismaClient,
-  cancelled: { value: boolean },
-  dedupeByStrategy: Map<string, StrategyDedupe>,
-): Promise<void> {
-  while (!cancelled.value) {
-    try {
-      const strategies = await prisma.strategy.findMany({
-        where: {
-          subscriptions: {
-            some: { status: SubscriptionStatus.ACTIVE },
-          },
-        },
-      });
-
-      for (const strategy of strategies) {
-        try {
-          let scraped: CosmicLedTrade[];
-          try {
-            scraped = await fetchCosmicOpenPositions(
-              strategy.cosmicEmail,
-              strategy.cosmicPassword,
-              strategy.scraperMappings,
-            );
-          } catch (err) {
-            console.error(
-              `[tradeEngine] Cosmic fetch failed for strategy ${strategy.id}:`,
-              err,
-            );
-            continue;
-          }
-
-          let dedupe = dedupeByStrategy.get(strategy.id);
-          if (!dedupe) {
-            dedupe = { prevOpenById: new Map(), seeded: false };
-            dedupeByStrategy.set(strategy.id, dedupe);
-          }
-
-          const prevSnapshot = dedupe.prevOpenById;
-          const currentOpen = new Map(scraped.map((t) => [t.id, t]));
-
-          const removed: CosmicLedTrade[] = [];
-          for (const [id, trade] of prevSnapshot) {
-            if (!currentOpen.has(id)) {
-              removed.push(trade);
-            }
-          }
-
-          if (removed.length > 0) {
-            await processRemovedCosmicPositions(prisma, strategy, removed);
-          }
-
-          if (!dedupe.seeded) {
-            dedupe.prevOpenById = new Map(currentOpen);
-            if (scraped.length > 0) {
-              dedupe.seeded = true;
-            }
-            continue;
-          }
-
-          for (const [id, cosmic] of currentOpen) {
-            if (prevSnapshot.has(id)) continue;
-            try {
-              await processNewCosmicTrade(prisma, strategy, cosmic);
-            } catch (err) {
-              console.error(
-                `[tradeEngine] strategy ${strategy.id} copy failed for new open ${id}:`,
-                err,
-              );
-            }
-          }
-
-          dedupe.prevOpenById = new Map(currentOpen);
-        } catch (strategyErr) {
-          console.error(
-            `[tradeEngine] strategy ${strategy.id} iteration failed:`,
-            strategyErr,
-          );
-        }
-      }
-    } catch (err) {
-      console.error("[tradeEngine] loop iteration failed:", err);
-    }
-
-    await sleep(randomPollMs());
-  }
-}
-
-/**
- * Runs {@link lateJoinMirrorOpenPositionsForSubscriber} for every active subscriber.
- * Use when `syncActiveTrades` is turned on for a strategy that already has subscriptions
- * (subscribe-time late-join only runs for new signups).
- */
 export async function lateJoinMirrorForAllActiveSubscribers(
   prisma: PrismaClient,
   strategyId: string,
@@ -582,17 +494,470 @@ export async function lateJoinMirrorForAllActiveSubscribers(
   }
 }
 
+async function copyMasterFillToSubscribers(
+  prisma: PrismaClient,
+  strategyId: string,
+  args: {
+    symbol: string;
+    side: TradeSide;
+    masterContracts: number;
+    avgPrice: number;
+  },
+): Promise<void> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+  });
+  if (!strategy) return;
+
+  const tick = await fetchDeltaTicker(args.symbol);
+  const marketPrice =
+    tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
+
+  const subs = await prisma.userSubscription.findMany({
+    where: {
+      strategyId,
+      status: SubscriptionStatus.ACTIVE,
+      user: { status: UserStatus.ACTIVE },
+    },
+    include: {
+      exchangeAccount: true,
+      user: { include: { deltaApiKeys: true } },
+    },
+  });
+
+  const skipAll =
+    marketPrice !== undefined &&
+    percentSlippage(args.avgPrice, marketPrice) > strategy.slippage;
+
+  if (skipAll) {
+    console.warn(
+      `[tradeEngine] Slippage exceeded for ${args.symbol}; skipping copy for strategy ${strategyId}`,
+    );
+    await Promise.all(
+      subs.map(async (sub) => {
+        const userSize = args.masterContracts * sub.multiplier;
+        await recordTrade(prisma, {
+          userId: sub.userId,
+          strategyId,
+          symbol: args.symbol,
+          side: args.side,
+          size: userSize,
+          entryPrice: args.avgPrice,
+          status: TradeStatus.FAILED,
+        });
+      }),
+    );
+    return;
+  }
+
+  if (marketPrice === undefined) {
+    await Promise.all(
+      subs.map(async (sub) => {
+        const userSize = args.masterContracts * sub.multiplier;
+        await recordTrade(prisma, {
+          userId: sub.userId,
+          strategyId,
+          symbol: args.symbol,
+          side: args.side,
+          size: userSize,
+          entryPrice: args.avgPrice,
+          status: TradeStatus.FAILED,
+        });
+      }),
+    );
+    return;
+  }
+
+  await Promise.all(
+    subs.map(async (sub) => {
+      const userSize = args.masterContracts * sub.multiplier;
+      const creds =
+        sub.exchangeAccount != null
+          ? {
+              apiKey: sub.exchangeAccount.apiKey,
+              apiSecret: sub.exchangeAccount.apiSecret,
+            }
+          : sub.user.deltaApiKeys[0] != null
+            ? {
+                apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+                apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+              }
+            : null;
+
+      if (!creds) {
+        await recordTrade(prisma, {
+          userId: sub.userId,
+          strategyId,
+          symbol: args.symbol,
+          side: args.side,
+          size: userSize,
+          entryPrice: args.avgPrice,
+          status: TradeStatus.FAILED,
+        });
+        return;
+      }
+
+      const result = await executeTrade(
+        creds.apiKey,
+        creds.apiSecret,
+        args.symbol,
+        args.side,
+        userSize,
+      );
+
+      await recordTrade(prisma, {
+        userId: sub.userId,
+        strategyId,
+        symbol: args.symbol,
+        side: args.side,
+        size: userSize,
+        entryPrice: args.avgPrice,
+        status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+      });
+    }),
+  );
+}
+
+async function notifyMasterFlat(
+  prisma: PrismaClient,
+  strategyId: string,
+  snap: {
+    symbol: string;
+    side: TradeSide;
+    masterEntryPrice: number;
+    masterContracts: number;
+  },
+): Promise<void> {
+  const tick = await fetchDeltaTicker(snap.symbol);
+  const exitPrice =
+    tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
+  if (exitPrice === undefined || !Number.isFinite(exitPrice)) return;
+
+  const subs = await prisma.userSubscription.findMany({
+    where: {
+      strategyId,
+      status: SubscriptionStatus.ACTIVE,
+      user: { status: UserStatus.ACTIVE },
+    },
+  });
+
+  await Promise.all(
+    subs.map(async (sub) => {
+      const userSize = snap.masterContracts * sub.multiplier;
+      await closeFollowerTradeAndRecordPnl(prisma, {
+        userId: sub.userId,
+        strategyId,
+        symbol: snap.symbol,
+        side: snap.side,
+        masterEntryPrice: snap.masterEntryPrice,
+        sizedPosition: userSize,
+        exitPrice,
+      });
+    }),
+  );
+}
+
+type LastOpenMeta = {
+  symbol: string;
+  side: TradeSide;
+  contracts: number;
+  avgEntry: number;
+};
+
+class StrategyMasterSocket {
+  private ws: WebSocket | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private destroyed = false;
+  /** Last non-zero position per product (for closed detection). */
+  private readonly lastPositionContracts = new Map<string, number>();
+  private readonly lastOpenMeta = new Map<string, LastOpenMeta>();
+
+  constructor(
+    private readonly prisma: PrismaClient,
+    readonly strategyId: string,
+  ) {}
+
+  start(): void {
+    if (this.destroyed) return;
+    this.connect();
+  }
+
+  private clearHeartbeatWatchdog(): void {
+    if (this.heartbeatTimer != null) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private armHeartbeatWatchdog(): void {
+    this.clearHeartbeatWatchdog();
+    this.heartbeatTimer = setTimeout(() => {
+      console.warn(
+        `[tradeEngine] heartbeat missed strategyId=${this.strategyId}; reconnecting`,
+      );
+      this.ws?.terminate();
+    }, HEARTBEAT_WATCHDOG_MS);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.destroyed) return;
+    if (this.reconnectTimer != null) return;
+    const delay = Math.min(
+      MAX_RECONNECT_MS,
+      MIN_RECONNECT_MS * 2 ** this.reconnectAttempt,
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.destroyed) return;
+      this.reconnectAttempt += 1;
+      this.connect();
+    }, delay);
+  }
+
+  private tearDownSocket(): void {
+    this.clearHeartbeatWatchdog();
+    try {
+      this.ws?.removeAllListeners();
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.ws = null;
+  }
+
+  private connect(): void {
+    if (this.destroyed) return;
+    this.tearDownSocket();
+
+    void this.prisma.strategy
+      .findUnique({ where: { id: this.strategyId } })
+      .then((s) => {
+        if (this.destroyed) return;
+        if (!s) {
+          this.scheduleReconnect();
+          return;
+        }
+        const key = decryptDeltaSecretOrPlain(s.masterApiKey).trim();
+        const secret = decryptDeltaSecretOrPlain(s.masterApiSecret).trim();
+        if (!key || !secret) {
+          this.scheduleReconnect();
+          return;
+        }
+
+        const socket = new WebSocket(DELTA_INDIA_PRIVATE_WS);
+        this.ws = socket;
+
+        socket.on("open", () => {
+          if (this.destroyed) return;
+          this.reconnectAttempt = 0;
+          socket.send(JSON.stringify({ type: "enable_heartbeat" }));
+          const ts = String(Math.floor(Date.now() / 1000));
+          const signature = wsAuthSignature(secret, ts);
+          socket.send(
+            JSON.stringify({
+              type: "auth",
+              payload: {
+                "api-key": key,
+                signature,
+                timestamp: ts,
+              },
+            }),
+          );
+          this.armHeartbeatWatchdog();
+        });
+
+        socket.on("message", (data) => {
+          void this.onMessage(data);
+        });
+
+        socket.on("error", (err) => {
+          console.error(
+            `[tradeEngine] WS error strategyId=${this.strategyId}:`,
+            err,
+          );
+        });
+
+        socket.on("close", () => {
+          this.tearDownSocket();
+          if (!this.destroyed) this.scheduleReconnect();
+        });
+      })
+      .catch((err) => {
+        console.error(
+          `[tradeEngine] strategy load failed strategyId=${this.strategyId}:`,
+          err,
+        );
+        this.scheduleReconnect();
+      });
+  }
+
+  private async onMessage(data: WebSocket.RawData): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object") return;
+    const msg = parsed as Record<string, unknown>;
+    const type = String(msg.type ?? "");
+
+    if (type === "heartbeat") {
+      this.armHeartbeatWatchdog();
+      return;
+    }
+
+    if (
+      type === "success" &&
+      String(msg.message ?? "").toLowerCase() === "authenticated"
+    ) {
+      const subPayload = {
+        type: "subscribe",
+        payload: {
+          channels: [
+            { name: "orders", symbols: ["all"] },
+            { name: "positions", symbols: ["all"] },
+          ],
+        },
+      };
+      this.ws?.send(JSON.stringify(subPayload));
+      return;
+    }
+
+    if (type === "orders") {
+      const sig = extractOrderFillSignal(parsed);
+      if (!sig || sig.reduceOnly) return;
+      await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
+        symbol: sig.symbol,
+        side: sig.side,
+        masterContracts: sig.contracts,
+        avgPrice: sig.avgPrice,
+      });
+      return;
+    }
+
+    if (type === "positions") {
+      const snap = extractPositionSnapshot(parsed);
+      if (!snap) return;
+
+      const prev = this.lastPositionContracts.get(snap.productKey) ?? 0;
+      const next = snap.contracts;
+
+      if (next <= 0 && prev > 0) {
+        const meta = this.lastOpenMeta.get(snap.productKey);
+        if (meta != null && meta.avgEntry > 0) {
+          await notifyMasterFlat(this.prisma, this.strategyId, {
+            symbol: meta.symbol,
+            side: meta.side,
+            masterEntryPrice: meta.avgEntry,
+            masterContracts: prev,
+          });
+        }
+        this.lastPositionContracts.delete(snap.productKey);
+        this.lastOpenMeta.delete(snap.productKey);
+        return;
+      }
+
+      if (next > 0) {
+        const avg =
+          snap.avgEntry ??
+          this.lastOpenMeta.get(snap.productKey)?.avgEntry ??
+          0;
+        this.lastPositionContracts.set(snap.productKey, next);
+        if (avg > 0) {
+          this.lastOpenMeta.set(snap.productKey, {
+            symbol: snap.symbol,
+            side: snap.side,
+            contracts: next,
+            avgEntry: avg,
+          });
+        }
+      }
+      return;
+    }
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+    if (this.reconnectTimer != null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.tearDownSocket();
+  }
+}
+
 /**
- * Polls each subscribed strategy’s Cosmic account via headless browser login (see `cosmicBrowserScraper.ts`
- * and `COSMIC_SCRAPER_*` env vars), maps symbols to Delta per `COSMIC_TO_DELTA_SYMBOL`, and mirrors trades for subscribers on Delta Exchange.
+ * WebSocket-driven copy engine: one private socket per strategy with master API credentials.
+ * Periodically re-syncs which strategies need sockets (new subscriptions / key updates).
  */
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
-  const dedupeByStrategy = new Map<string, StrategyDedupe>();
+  const sockets = new Map<string, StrategyMasterSocket>();
+  let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  void runEngineLoop(prisma, cancelled, dedupeByStrategy);
+  async function syncRoster(): Promise<void> {
+    if (cancelled.value) return;
+    try {
+      const strategies = await prisma.strategy.findMany({
+        where: {
+          subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
+        },
+        select: { id: true, masterApiKey: true, masterApiSecret: true },
+      });
+
+      const want = new Set<string>();
+      for (const s of strategies) {
+        if (
+          s.masterApiKey?.trim() &&
+          s.masterApiSecret?.trim()
+        ) {
+          want.add(s.id);
+        }
+      }
+
+      for (const id of sockets.keys()) {
+        if (!want.has(id)) {
+          sockets.get(id)?.destroy();
+          sockets.delete(id);
+        }
+      }
+
+      for (const id of want) {
+        if (!sockets.has(id)) {
+          const conn = new StrategyMasterSocket(prisma, id);
+          sockets.set(id, conn);
+          conn.start();
+        }
+      }
+    } catch (err) {
+      console.error("[tradeEngine] roster sync failed:", err);
+    }
+  }
+
+  function scheduleRoster(): void {
+    rosterTimeout = setTimeout(() => {
+      void syncRoster().finally(() => {
+        if (!cancelled.value) scheduleRoster();
+      });
+    }, ROSTER_SYNC_MS);
+  }
+
+  void syncRoster().finally(() => {
+    if (!cancelled.value) scheduleRoster();
+  });
 
   return () => {
     cancelled.value = true;
+    if (rosterTimeout != null) {
+      clearTimeout(rosterTimeout);
+      rosterTimeout = null;
+    }
+    for (const s of sockets.values()) {
+      s.destroy();
+    }
+    sockets.clear();
   };
 }

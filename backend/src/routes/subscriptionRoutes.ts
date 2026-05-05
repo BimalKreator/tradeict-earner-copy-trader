@@ -3,6 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createSubscriptionController } from "../controllers/subscriptionController.js";
 import { authenticateJwt } from "../middleware/authMiddleware.js";
 
+/** User-facing strategy payloads omit `masterApiKey` / `masterApiSecret` via explicit `select`. */
 export function createSubscriptionRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const jwtAuth = authenticateJwt();

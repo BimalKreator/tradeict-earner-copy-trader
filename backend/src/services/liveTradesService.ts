@@ -5,10 +5,6 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
-  fetchCosmicOpenPositionsWithMeta,
-  type CosmicLedTrade,
-} from "./cosmicClient.js";
-import {
   fetchDeltaOpenPositions,
   fetchDeltaTicker,
   type DeltaLivePosition,
@@ -35,42 +31,133 @@ export type AdminFollowerRow = LiveTradeRow & {
   userEmail: string;
 };
 
-export type AdminCosmicGroupRow = {
-  cosmic: LiveTradeRow;
+export type AdminMasterGroupRow = {
+  /** Symbol key (e.g. ETHUSDT) for this master leg. */
+  token: string;
+  side: string;
   followers: AdminFollowerRow[];
-};
-
-export type CosmicScrapeDiagnostics = {
-  payloadChunkCount: number;
-  payloadPositionRows: number;
-  tradesAfterDeltaFilter: number;
-  domRowsMatched?: number;
-  domPositionsParsed?: number;
-  walletBalanceDom?: string | null;
-  scrapeAbortedReason?: string;
-  extractError?: string;
 };
 
 export type AdminStrategyLiveSection = {
   strategyId: string;
   strategyTitle: string;
-  groups: AdminCosmicGroupRow[];
-  /** Why Cosmic rows might be empty (does not prove login succeeded). */
-  cosmicMeta: {
-    scraperEnvConfigured: boolean;
+  /** Open positions on the master Delta (India) account from {@link fetchDeltaOpenPositions} (CCXT). */
+  masterPositions: LiveTradeRow[];
+  groups: AdminMasterGroupRow[];
+  masterMeta: {
     credentialsPresent: boolean;
-    /** Set when Puppeteer / scrape threw before returning structured meta. */
     fetchException?: string;
-    /** Latest headless scrape stats (admin Live trades runs one scrape per load). */
-    lastScrape?: CosmicScrapeDiagnostics;
   };
 };
+
+export type AdminMasterPositionSnapshot = {
+  strategyId: string;
+  strategyTitle: string;
+  positions: LiveTradeRow[];
+  masterMeta: {
+    credentialsPresent: boolean;
+    fetchException?: string;
+  };
+};
+
+/** Public market + PnL enrichment for one master `DeltaLivePosition` row. */
+async function enrichMasterPositionRow(
+  pos: DeltaLivePosition,
+): Promise<LiveTradeRow> {
+  const tick = await fetchDeltaTicker(pos.symbolKey);
+  const mark =
+    tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
+
+  const base = deltaToRow(pos);
+  const entryPx =
+    base.entryPrice ?? (mark != null && Number.isFinite(mark) ? mark : null);
+  const size = Math.abs(pos.contracts);
+  let livePnl = base.livePnl;
+  if (
+    entryPx != null &&
+    Number.isFinite(entryPx) &&
+    Number.isFinite(size) &&
+    mark != null
+  ) {
+    livePnl = estimateLeaderPnl({
+      entryPrice: entryPx,
+      side: pos.side,
+      size,
+      mark,
+    });
+  }
+
+  return {
+    ...base,
+    entryPrice: entryPx,
+    markPrice: mark ?? base.markPrice,
+    livePnl,
+  };
+}
+
+/**
+ * CCXT snapshots of each strategy's master Delta account (India REST via {@link fetchDeltaOpenPositions}).
+ * Use for admin dashboards that only need leader positions without follower matching.
+ */
+export async function getAdminMasterPositionSnapshots(
+  prisma: PrismaClient,
+): Promise<AdminMasterPositionSnapshot[]> {
+  const strategies = await prisma.strategy.findMany({
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+    },
+  });
+
+  const out: AdminMasterPositionSnapshot[] = [];
+
+  for (const strat of strategies) {
+    const credentialsPresent = Boolean(
+      strat.masterApiKey?.trim() && strat.masterApiSecret?.trim(),
+    );
+
+    let masterList: DeltaLivePosition[] = [];
+    let fetchException: string | undefined;
+    if (credentialsPresent) {
+      try {
+        masterList = await fetchDeltaOpenPositions(
+          strat.masterApiKey,
+          strat.masterApiSecret,
+        );
+      } catch (err) {
+        fetchException =
+          err instanceof Error ? err.message : String(err ?? "fetch failed");
+        masterList = [];
+      }
+    }
+
+    const positions: LiveTradeRow[] = [];
+    for (const pos of masterList) {
+      positions.push(await enrichMasterPositionRow(pos));
+    }
+
+    out.push({
+      strategyId: strat.id,
+      strategyTitle: strat.title,
+      positions,
+      masterMeta: {
+        credentialsPresent,
+        ...(fetchException !== undefined ? { fetchException } : {}),
+      },
+    });
+  }
+
+  return out;
+}
 
 function compactSymbolKey(s: string): string {
   return s.replace(/[/:]/g, "").toUpperCase();
 }
 
-/** ETHUSDT (Cosmic) vs ETHUSD (older keys) — same underlying on Delta India. */
+/** ETHUSDT vs ETHUSD — same underlying on Delta India. */
 function deltaPairBase(compactNoSlash: string): string | null {
   const u = compactNoSlash.toUpperCase();
   if (u.endsWith("USDT")) return u.slice(0, -4);
@@ -103,19 +190,6 @@ function matchDeltaPosition(
   );
 }
 
-function cosmicToRow(c: CosmicLedTrade): LiveTradeRow {
-  return {
-    entryTime: c.openedAt ?? null,
-    token: c.deltaSymbol,
-    entryPrice: c.entryPrice,
-    stopLoss: c.stopLoss ?? null,
-    target: c.takeProfit ?? null,
-    livePnl: null,
-    markPrice: null,
-    side: c.side,
-  };
-}
-
 function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   return {
     entryTime: p.entryTime,
@@ -129,14 +203,17 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   };
 }
 
-function estimateCosmicPnl(
-  c: CosmicLedTrade,
-  mark: number | null,
-): number | null {
+function estimateLeaderPnl(args: {
+  entryPrice: number;
+  side: TradeSide;
+  size: number;
+  mark: number | null;
+}): number | null {
+  const { mark } = args;
   if (mark === null || !Number.isFinite(mark)) return null;
-  const diff = mark - c.entryPrice;
-  const signed = c.side === "BUY" ? diff : -diff;
-  return signed * c.size;
+  const diff = mark - args.entryPrice;
+  const signed = args.side === "BUY" ? diff : -diff;
+  return signed * args.size;
 }
 
 export async function getUserLiveTradeRows(
@@ -247,15 +324,10 @@ export async function getAdminGroupedLiveTrades(
     select: {
       id: true,
       title: true,
-      cosmicEmail: true,
-      cosmicPassword: true,
-      scraperMappings: true,
+      masterApiKey: true,
+      masterApiSecret: true,
     },
   });
-
-  const scraperEnvConfigured = Boolean(
-    process.env.COSMIC_SCRAPER_LOGIN_URL?.trim(),
-  );
 
   const out: AdminStrategyLiveSection[] = [];
 
@@ -263,65 +335,32 @@ export async function getAdminGroupedLiveTrades(
 
   for (const strat of strategies) {
     const credentialsPresent = Boolean(
-      strat.cosmicEmail?.trim() && strat.cosmicPassword?.trim(),
+      strat.masterApiKey?.trim() && strat.masterApiSecret?.trim(),
     );
 
-    let cosmicList: CosmicLedTrade[] = [];
+    let masterList: DeltaLivePosition[] = [];
     let fetchException: string | undefined;
-    let lastScrape: CosmicScrapeDiagnostics | undefined;
-    try {
-      const scraped = await fetchCosmicOpenPositionsWithMeta(
-        strat.cosmicEmail,
-        strat.cosmicPassword,
-        strat.scraperMappings,
-      );
-      cosmicList = scraped.trades;
-      const m = scraped.scrapeMeta;
-      const diag: CosmicScrapeDiagnostics = {
-        payloadChunkCount: scraped.payloadChunkCount,
-        payloadPositionRows: scraped.payloadPositionRows,
-        tradesAfterDeltaFilter: scraped.trades.length,
-        walletBalanceDom: m?.walletBalanceDom ?? null,
-      };
-      if (m?.domRowsMatched !== undefined) diag.domRowsMatched = m.domRowsMatched;
-      if (m?.domPositionsParsed !== undefined) {
-        diag.domPositionsParsed = m.domPositionsParsed;
+    if (credentialsPresent) {
+      try {
+        masterList = await fetchDeltaOpenPositions(
+          strat.masterApiKey,
+          strat.masterApiSecret,
+        );
+      } catch (err) {
+        fetchException =
+          err instanceof Error ? err.message : String(err ?? "fetch failed");
+        masterList = [];
+        console.error(
+          `[live-trades] Master Delta positions threw for "${strat.title}" (${strat.id}):`,
+          fetchException,
+        );
       }
-      if (m?.scrapeAbortedReason !== undefined) {
-        diag.scrapeAbortedReason = m.scrapeAbortedReason;
-      }
-      if (m?.extractError !== undefined) diag.extractError = m.extractError;
-      lastScrape = diag;
-    } catch (err) {
-      cosmicList = [];
-      fetchException =
-        err instanceof Error ? err.message : String(err ?? "scrape failed");
-      console.error(
-        `[live-trades] Cosmic scrape threw for "${strat.title}" (${strat.id}):`,
-        fetchException,
-      );
     }
 
     const metaBase = {
-      scraperEnvConfigured,
       credentialsPresent,
       ...(fetchException !== undefined ? { fetchException } : {}),
-      ...(lastScrape !== undefined ? { lastScrape } : {}),
     };
-
-    if (
-      scraperEnvConfigured &&
-      credentialsPresent &&
-      cosmicList.length === 0
-    ) {
-      console.warn(
-        `[live-trades] Zero Cosmic positions for "${strat.title}" (${strat.id}). ` +
-          `domRows=${lastScrape?.domRowsMatched ?? "?"}, domParsed=${lastScrape?.domPositionsParsed ?? "?"}, ` +
-          `payloadRows=${lastScrape?.payloadPositionRows ?? "?"}, deltaTrades=${lastScrape?.tradesAfterDeltaFilter ?? "?"}, ` +
-          `abort=${lastScrape?.scrapeAbortedReason ?? "none"}, extract=${lastScrape?.extractError ?? "none"}, ` +
-          `fetchErr=${fetchException ?? "none"}`,
-      );
-    }
 
     const subs = await prisma.userSubscription.findMany({
       where: {
@@ -352,28 +391,23 @@ export async function getAdminGroupedLiveTrades(
       }
     }
 
-    const groups: AdminCosmicGroupRow[] = [];
+    const groups: AdminMasterGroupRow[] = [];
+    const masterPositions: LiveTradeRow[] = [];
 
-    if (cosmicList.length === 0) {
+    if (masterList.length === 0) {
       out.push({
         strategyId: strat.id,
         strategyTitle: strat.title,
+        masterPositions,
         groups,
-        cosmicMeta: metaBase,
+        masterMeta: metaBase,
       });
       continue;
     }
 
-    for (const c of cosmicList) {
-      const tick = await fetchDeltaTicker(c.deltaSymbol);
-      const mark =
-        tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
-
-      const cosmicRow: LiveTradeRow = {
-        ...cosmicToRow(c),
-        markPrice: mark,
-        livePnl: estimateCosmicPnl(c, mark),
-      };
+    for (const pos of masterList) {
+      const masterRow = await enrichMasterPositionRow(pos);
+      masterPositions.push(masterRow);
 
       const followers: AdminFollowerRow[] = [];
 
@@ -399,7 +433,7 @@ export async function getAdminGroupedLiveTrades(
           creds.apiKey,
           creds.apiSecret,
         );
-        const m = matchDeltaPosition(positions, c.deltaSymbol, c.side);
+        const m = matchDeltaPosition(positions, pos.symbolKey, pos.side);
         if (!m) continue;
         followers.push({
           userEmail: sub.user.email,
@@ -407,14 +441,19 @@ export async function getAdminGroupedLiveTrades(
         });
       }
 
-      groups.push({ cosmic: cosmicRow, followers });
+      groups.push({
+        token: pos.symbolKey,
+        side: pos.side,
+        followers,
+      });
     }
 
     out.push({
       strategyId: strat.id,
       strategyTitle: strat.title,
+      masterPositions,
       groups,
-      cosmicMeta: metaBase,
+      masterMeta: metaBase,
     });
   }
 

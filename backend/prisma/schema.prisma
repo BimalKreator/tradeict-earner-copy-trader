@@ -93,16 +93,15 @@ model Strategy {
   id                 String  @id @default(uuid())
   title              String
   description        String
-  cosmicEmail        String  @default("")
-  cosmicPassword     String  @default("")
+  /** Delta Exchange (India) API key for the leader account whose positions are copied. */
+  masterApiKey       String  @default("")
+  masterApiSecret    String  @default("")
   performanceMetrics Json?
-  /** Visual Scraper Studio: slot key → CSS selector (e.g. symbol, size, side). */
-  scraperMappings Json?
   slippage           Float   @default(0.5)
   monthlyFee         Float
   profitShare        Float   @default(20.0)
   minCapital         Float
-  /** When true, new subscribers mirror the strategy's currently open Cosmic positions on Delta (late-join). */
+  /** When true, new subscribers mirror the strategy's currently open master (leader) positions on Delta (late-join). */
   syncActiveTrades   Boolean @default(false)
   createdAt          DateTime @default(now())
 

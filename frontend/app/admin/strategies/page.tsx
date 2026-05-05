@@ -18,12 +18,9 @@ type Strategy = {
   id: string;
   title: string;
   description: string;
-  cosmicEmail: string;
-  /** Omitted from list API — use hasCosmicPassword + cosmicConnection. */
-  cosmicPassword?: string;
-  hasCosmicPassword?: boolean;
-  cosmicConnection?: {
-    scraperEnvReady: boolean;
+  masterApiKey: string;
+  hasMasterApiSecret?: boolean;
+  masterConnection?: {
     credentialsPresent: boolean;
     ready: boolean;
   };
@@ -295,15 +292,12 @@ export default function AdminStrategiesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [probingId, setProbingId] = useState<string | null>(null);
-  const [probeNotice, setProbeNotice] = useState<string | null>(null);
-  const [probeScreenshot, setProbeScreenshot] = useState<string | null>(null);
-  const [savedCosmicPassword, setSavedCosmicPassword] = useState(false);
+  const [savedMasterApiSecret, setSavedMasterApiSecret] = useState(false);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [cosmicEmail, setCosmicEmail] = useState("");
-  const [cosmicPassword, setCosmicPassword] = useState("");
+  const [masterApiKey, setMasterApiKey] = useState("");
+  const [masterApiSecret, setMasterApiSecret] = useState("");
   const [slippage, setSlippage] = useState("0.5");
   const [monthlyFee, setMonthlyFee] = useState("");
   const [profitShare, setProfitShare] = useState("20");
@@ -349,11 +343,11 @@ export default function AdminStrategiesPage() {
 
   function resetForm() {
     setEditingId(null);
-    setSavedCosmicPassword(false);
+    setSavedMasterApiSecret(false);
     setTitle("");
     setDescription("");
-    setCosmicEmail("");
-    setCosmicPassword("");
+    setMasterApiKey("");
+    setMasterApiSecret("");
     setSlippage("0.5");
     setMonthlyFee("");
     setProfitShare("20");
@@ -376,19 +370,17 @@ export default function AdminStrategiesPage() {
   function openCreateModal() {
     resetForm();
     setFormError(null);
-    setProbeNotice(null);
     setModalOpen(true);
   }
 
   function openEditModal(s: Strategy) {
     setEditingId(s.id);
     setFormError(null);
-    setProbeNotice(null);
-    setSavedCosmicPassword(Boolean(s.hasCosmicPassword));
+    setSavedMasterApiSecret(Boolean(s.hasMasterApiSecret));
     setTitle(s.title);
     setDescription(s.description);
-    setCosmicEmail(s.cosmicEmail);
-    setCosmicPassword("");
+    setMasterApiKey(s.masterApiKey);
+    setMasterApiSecret("");
     setSlippage(String(s.slippage));
     setMonthlyFee(String(s.monthlyFee));
     setProfitShare(String(s.profitShare));
@@ -410,88 +402,6 @@ export default function AdminStrategiesPage() {
     setSyncActiveTrades(Boolean(s.syncActiveTrades));
 
     setModalOpen(true);
-  }
-
-  async function probeCosmic(id: string) {
-    setProbeNotice(null);
-    setProbeScreenshot(null);
-    const token =
-      typeof window !== "undefined"
-        ? localStorage.getItem("token")?.trim() ?? ""
-        : "";
-    if (!token) {
-      setProbeNotice(
-        "Missing login token — sign in from /login on this exact domain (including www vs non-www), then try Test scrape again.",
-      );
-      return;
-    }
-
-    const base = resolveAdminApiBase();
-    if (!base) {
-      setProbeNotice(
-        "NEXT_PUBLIC_API_URL is not set and same-origin /api could not be resolved.",
-      );
-      return;
-    }
-
-    setProbingId(id);
-    try {
-      const res = await fetch(`${base}/admin/strategies/${id}/cosmic-probe`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({}),
-        cache: "no-store",
-        credentials: "include",
-      });
-      const body: unknown = await res.json().catch(() => ({}));
-      const errMsg =
-        typeof body === "object" &&
-        body !== null &&
-        "error" in body &&
-        typeof (body as { error?: unknown }).error === "string"
-          ? (body as { error: string }).error
-          : null;
-      if (!res.ok) {
-        setProbeNotice(errMsg ?? `Cosmic probe failed (${res.status}).`);
-        return;
-      }
-      const msg =
-        typeof body === "object" &&
-        body !== null &&
-        "message" in body &&
-        typeof (body as { message?: unknown }).message === "string"
-          ? (body as { message: string }).message
-          : `Probe finished (${res.status})`;
-      const count =
-        typeof body === "object" &&
-        body !== null &&
-        "positionCount" in body &&
-        typeof (body as { positionCount?: unknown }).positionCount === "number"
-          ? (body as { positionCount: number }).positionCount
-          : undefined;
-      setProbeNotice(
-        count !== undefined ? `${msg} (positions: ${count})` : msg,
-      );
-
-      const shot =
-        typeof body === "object" &&
-        body !== null &&
-        "screenshotBase64" in body &&
-        typeof (body as { screenshotBase64?: unknown }).screenshotBase64 ===
-          "string"
-          ? (body as { screenshotBase64: string }).screenshotBase64
-          : null;
-      setProbeScreenshot(
-        shot && shot.length > 0 ? `data:image/jpeg;base64,${shot}` : null,
-      );
-    } catch {
-      setProbeNotice("Cosmic probe request failed.");
-    } finally {
-      setProbingId(null);
-    }
   }
 
   async function handleSubmitStrategy(e: React.FormEvent) {
@@ -540,7 +450,7 @@ export default function AdminStrategiesPage() {
     const payload: Record<string, unknown> = {
       title,
       description,
-      cosmicEmail,
+      masterApiKey,
       slippage: slippageNum,
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
@@ -549,9 +459,10 @@ export default function AdminStrategiesPage() {
     };
     const isEdit = editingId !== null;
     if (isEdit) {
-      if (cosmicPassword.trim()) payload.cosmicPassword = cosmicPassword.trim();
+      if (masterApiSecret.trim())
+        payload.masterApiSecret = masterApiSecret.trim();
     } else {
-      payload.cosmicPassword = cosmicPassword;
+      payload.masterApiSecret = masterApiSecret;
     }
     if (performanceMetrics !== undefined) {
       payload.performanceMetrics = performanceMetrics;
@@ -598,11 +509,8 @@ export default function AdminStrategiesPage() {
             Strategies
           </h1>
           <p className="mt-1 text-sm text-white/55">
-            Cosmic master login (Puppeteer scrape). Status badges reflect server env (
-            <code className="text-white/60">COSMIC_SCRAPER_LOGIN_URL</code>) and saved credentials.
-            Use <span className="text-white/75">Test scrape</span> to verify the bot can read positions.
-            Set API env <code className="text-white/60">COSMIC_SCRAPER_PROBE_SCREENSHOT=true</code>{" "}
-            to attach a JPEG preview of the logged-in Cosmic tab after each probe.
+            Delta-to-Delta copy trading: set the leader&apos;s Delta Exchange (India) API credentials per strategy.
+            Subscribers mirror fills using their own linked Delta accounts.
           </p>
         </div>
         <button
@@ -620,37 +528,6 @@ export default function AdminStrategiesPage() {
         </div>
       )}
 
-      {probeNotice && (
-        <div className="mb-6 space-y-4 rounded-lg border border-primary/35 bg-primary/10 px-4 py-3 text-sm text-white/85">
-          <div>
-            <span>{probeNotice}</span>
-            <button
-              type="button"
-              onClick={() => {
-                setProbeNotice(null);
-                setProbeScreenshot(null);
-              }}
-              className="ml-3 text-xs text-primary underline"
-            >
-              Dismiss
-            </button>
-          </div>
-          {probeScreenshot ? (
-            <div className="rounded-lg border border-white/15 bg-black/40 p-2">
-              <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-white/45">
-                Cosmic viewport (probe screenshot)
-              </p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={probeScreenshot}
-                alt="Cosmic session after login attempt"
-                className="max-h-[28rem] w-full max-w-4xl rounded-md object-contain object-top"
-              />
-            </div>
-          ) : null}
-        </div>
-      )}
-
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
           <table className="w-full min-w-[1020px] text-left text-sm">
@@ -662,7 +539,6 @@ export default function AdminStrategiesPage() {
                 <th className="px-4 py-3 font-medium text-white/70">Monthly fee</th>
                 <th className="px-4 py-3 font-medium text-white/70">Profit %</th>
                 <th className="px-4 py-3 font-medium text-white/70">Min capital</th>
-                <th className="px-4 py-3 font-medium text-white/70">Cosmic</th>
                 <th className="px-4 py-3 font-medium text-white/70">Created</th>
                 <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
@@ -670,13 +546,13 @@ export default function AdminStrategiesPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
                     Loading strategies…
                   </td>
                 </tr>
               ) : strategies.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
                     No strategies found.
                   </td>
                 </tr>
@@ -696,31 +572,6 @@ export default function AdminStrategiesPage() {
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.monthlyFee}</td>
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.profitShare}</td>
                     <td className="px-4 py-3 tabular-nums text-white/80">{s.minCapital}</td>
-                    <td className="max-w-[200px] px-4 py-3 align-top">
-                      <div className="flex flex-col gap-2">
-                        {s.cosmicConnection?.ready ? (
-                          <span className="inline-flex w-fit items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300 ring-1 ring-emerald-500/35">
-                            Connected (ready)
-                          </span>
-                        ) : s.cosmicConnection?.credentialsPresent === false ? (
-                          <span className="inline-flex w-fit items-center rounded-full bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-200/95 ring-1 ring-amber-500/30">
-                            Needs Cosmic login
-                          </span>
-                        ) : (
-                          <span className="inline-flex w-fit items-center rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] font-medium text-white/55 ring-1 ring-white/15">
-                            Scraper off (env)
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          disabled={probingId === s.id}
-                          onClick={() => void probeCosmic(s.id)}
-                          className="w-fit rounded-md border border-glassBorder bg-black/30 px-2 py-1 text-[11px] font-medium text-primary transition hover:bg-white/5 disabled:opacity-45"
-                        >
-                          {probingId === s.id ? "Testing scrape…" : "Test scrape"}
-                        </button>
-                      </div>
-                    </td>
                     <td className="px-4 py-3 text-white/55 tabular-nums">
                       {new Date(s.createdAt).toLocaleString()}
                     </td>
@@ -756,7 +607,7 @@ export default function AdminStrategiesPage() {
               {editingId ? "Edit strategy" : "Add strategy"}
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              Cosmic email/password are used by the server trade engine (Puppeteer login). Performance metrics power charts on the app.
+              Master Delta API credentials drive the copy engine. Performance metrics power charts on the app.
             </p>
 
             <form onSubmit={handleSubmitStrategy} className="mt-6 max-h-[calc(100vh-8rem)] space-y-6 overflow-y-auto pr-1">
@@ -791,42 +642,44 @@ export default function AdminStrategiesPage() {
               </div>
 
               <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
-                <h3 className="text-sm font-semibold text-primary">Master account (Cosmic)</h3>
+                <h3 className="text-sm font-semibold text-primary">
+                  Leader account · Delta Exchange (India)
+                </h3>
                 <p className="text-xs text-white/55">
-                  Backend logs in with these credentials (see COSMIC_SCRAPER_LOGIN_URL and selectors in API env).
+                  API keys must be for Delta India. The copy engine uses them for WebSocket auth and CCXT (positions and orders).
                 </p>
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">
-                    Cosmic Login Email
+                    Master Delta API key
                   </span>
                   <input
-                    type="email"
+                    type="text"
                     required
-                    value={cosmicEmail}
-                    onChange={(e) => setCosmicEmail(e.target.value)}
-                    autoComplete="username"
+                    value={masterApiKey}
+                    onChange={(e) => setMasterApiKey(e.target.value)}
+                    autoComplete="off"
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
                 <label className="block">
                   <span className="text-xs font-medium text-white/60">
-                    Cosmic Password
+                    Master Delta API secret
                   </span>
                   <input
                     type="password"
                     autoComplete="new-password"
-                    value={cosmicPassword}
-                    onChange={(e) => setCosmicPassword(e.target.value)}
+                    value={masterApiSecret}
+                    onChange={(e) => setMasterApiSecret(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                     placeholder={
-                      editingId && savedCosmicPassword
-                        ? "Leave blank to keep saved password"
-                        : "Master Cosmic account password"
+                      editingId && savedMasterApiSecret
+                        ? "Leave blank to keep saved secret"
+                        : "Paste secret"
                     }
                   />
-                  {editingId && savedCosmicPassword ? (
+                  {editingId && savedMasterApiSecret ? (
                     <p className="mt-1 text-[11px] text-white/45">
-                      A password is already stored. Enter a new one only if you want to replace it.
+                      A secret is already stored. Enter a new one only if you want to replace it.
                     </p>
                   ) : null}
                 </label>
@@ -843,8 +696,8 @@ export default function AdminStrategiesPage() {
                     </span>
                     <span className="mt-0.5 block text-xs text-white/50">
                       When enabled, new subscribers immediately mirror open positions from the master
-                      Cosmic account on Delta (late-join). Requires valid Cosmic credentials and
-                      follower exchange keys.
+                      Delta account (late-join). Requires valid master API credentials and follower
+                      exchange keys.
                     </span>
                   </span>
                 </label>
