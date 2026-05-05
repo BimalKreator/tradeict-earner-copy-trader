@@ -68,6 +68,7 @@ export default function DashboardLiveTradesPage() {
     }
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
+        cache: "no-store",
         headers: {
           Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
         },

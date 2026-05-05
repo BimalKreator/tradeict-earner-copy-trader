@@ -68,6 +68,16 @@ function num(v: unknown): number | null {
   return null;
 }
 
+function symbolAliasSet(raw: string): Set<string> {
+  const u = raw.trim().toUpperCase();
+  const out = new Set<string>();
+  if (!u) return out;
+  out.add(u);
+  if (u.endsWith("USDT")) out.add(`${u.slice(0, -4)}USD`);
+  if (u.endsWith("USD") && !u.endsWith("USDT")) out.add(`${u.slice(0, -3)}USDT`);
+  return out;
+}
+
 /** Flatten nested payload objects from Delta WS messages. */
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
@@ -1104,24 +1114,55 @@ class StrategyMasterSocket {
         console.log(
           `[tradeEngine WS] Delete action received. Verifying closures via REST...`,
         );
+        const closeLocallyTracked = async (): Promise<void> => {
+          const tracked = Array.from(this.lastOpenMeta.entries());
+          for (const [trackedKey, meta] of tracked) {
+            const lastContracts =
+              this.lastPositionContracts.get(trackedKey) ?? meta.contracts;
+            if (lastContracts <= 0) continue;
+            console.log(
+              `[EXECUTION] REST verify unavailable; forcing close from local map for ${meta.symbol}.`,
+            );
+            await notifyMasterFlat(this.prisma, this.strategyId, {
+              symbol: meta.symbol,
+              side: meta.side,
+              masterEntryPrice:
+                Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                  ? meta.avgEntry
+                  : 0,
+              masterContracts: lastContracts,
+            });
+            this.lastPositionContracts.delete(trackedKey);
+            this.lastOpenMeta.delete(trackedKey);
+          }
+        };
         try {
           const s = await this.prisma.strategy.findUnique({
             where: { id: this.strategyId },
             select: STRATEGY_SELECT_WS_CREDS,
           });
-          if (!s) return;
+          if (!s) {
+            await closeLocallyTracked();
+            return;
+          }
           const key = decryptDeltaSecretOrPlain(s.masterApiKey);
           const secret = decryptDeltaSecretOrPlain(s.masterApiSecret);
-          if (!key || !secret) return;
+          if (!key || !secret) {
+            await closeLocallyTracked();
+            return;
+          }
 
           const currentPositions = await fetchMasterOpenPositions(key, secret);
-          const currentSymbols = new Set(
-            currentPositions.map((p) => p.deltaSymbol.toUpperCase()),
-          );
+          const currentSymbols = new Set<string>();
+          for (const p of currentPositions) {
+            for (const a of symbolAliasSet(p.deltaSymbol)) currentSymbols.add(a);
+          }
 
           const tracked = Array.from(this.lastOpenMeta.entries());
           for (const [trackedKey, meta] of tracked) {
-            if (!currentSymbols.has(meta.symbol.toUpperCase())) {
+            const aliases = symbolAliasSet(meta.symbol);
+            const stillOpen = Array.from(aliases).some((a) => currentSymbols.has(a));
+            if (!stillOpen) {
               const lastContracts =
                 this.lastPositionContracts.get(trackedKey) ?? meta.contracts;
               console.log(
@@ -1145,6 +1186,7 @@ class StrategyMasterSocket {
             "[tradeEngine WS] Error during delete reconciliation:",
             err instanceof Error ? err.message : err,
           );
+          await closeLocallyTracked();
         }
         return;
       }

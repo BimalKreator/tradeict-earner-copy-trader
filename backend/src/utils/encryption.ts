@@ -31,11 +31,13 @@ export function decryptDeltaSecret(ciphertext: string): string {
 
 /** Decrypt stored Delta credentials, or return trimmed plaintext (legacy rows). */
 export function decryptDeltaSecretOrPlain(stored: string): string {
-  const t = stored.trim();
+  const t = stored.replace(/[\u0000-\u001F\u007F]/g, "").trim();
   if (!t) return t;
   try {
-    return decryptDeltaSecret(stored).trim();
+    return decryptDeltaSecret(stored)
+      .replace(/[\u0000-\u001F\u007F]/g, "")
+      .trim();
   } catch {
-    return t.trim();
+    return t;
   }
 }
