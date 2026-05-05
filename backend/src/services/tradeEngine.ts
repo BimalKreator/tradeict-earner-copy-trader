@@ -1030,30 +1030,55 @@ class StrategyMasterSocket {
     }
 
     if (type === "positions") {
+      const merged = mergePayloadLayers(parsed);
       const action = String(msg.action ?? "").toLowerCase();
-      if (action === "delete") {
-        const merged = mergePayloadLayers(parsed);
-        const symbol = String(
-          merged.product_symbol ?? merged.symbol ?? merged.contract_symbol ?? "",
-        ).trim();
-        const productKey = String(merged.product_id ?? symbol).trim();
-        const key = productKey || symbol;
-        const prev = this.lastPositionContracts.get(key) ?? 0;
-        const meta = this.lastOpenMeta.get(key);
-        if (prev > 0 && meta != null && meta.avgEntry > 0) {
+
+      if (action === "delete" || action === "closed") {
+        const payloadItems: unknown[] = [];
+        const dataLayer = asRecord(msg.data);
+        if (Array.isArray(msg.data)) payloadItems.push(...msg.data);
+        if (Array.isArray(dataLayer?.positions))
+          payloadItems.push(...dataLayer.positions);
+        if (Array.isArray(dataLayer?.open)) payloadItems.push(...dataLayer.open);
+        if (Array.isArray(dataLayer?.closed)) payloadItems.push(...dataLayer.closed);
+        if (payloadItems.length === 0) payloadItems.push(merged);
+
+        for (const rawItem of payloadItems) {
+          const item = mergePayloadLayers(rawItem);
+          const symbol = String(
+            item.product_symbol ?? item.symbol ?? item.contract_symbol ?? "",
+          ).trim();
+          const productKey = String(item.product_id ?? symbol).trim();
+          const candidates = [
+            productKey,
+            symbol,
+            productKey.toUpperCase(),
+            symbol.toUpperCase(),
+          ].filter(Boolean);
+          const key = candidates.find(
+            (k) =>
+              (this.lastPositionContracts.get(k) ?? 0) > 0 &&
+              this.lastOpenMeta.get(k) != null,
+          );
+          if (!key) continue;
+
+          const lastContracts = this.lastPositionContracts.get(key) ?? 0;
+          const lastMeta = this.lastOpenMeta.get(key);
+          if (lastContracts <= 0 || !lastMeta || lastMeta.avgEntry <= 0) continue;
+
           console.log(
-            `[EXECUTION] Position delete detected. Closing follower trades for ${meta.symbol}`,
+            `[EXECUTION] Position delete detected via WS action=${action} for ${lastMeta.symbol}`,
           );
           await notifyMasterFlat(this.prisma, this.strategyId, {
-            symbol: meta.symbol,
-            side: meta.side,
-            masterEntryPrice: meta.avgEntry,
-            masterContracts: prev,
+            symbol: lastMeta.symbol,
+            side: lastMeta.side,
+            masterEntryPrice: lastMeta.avgEntry,
+            masterContracts: lastContracts,
           });
-        }
-        if (key) {
-          this.lastPositionContracts.delete(key);
-          this.lastOpenMeta.delete(key);
+          for (const c of candidates) {
+            this.lastPositionContracts.delete(c);
+            this.lastOpenMeta.delete(c);
+          }
         }
         return;
       }
@@ -1084,14 +1109,24 @@ class StrategyMasterSocket {
           snap.avgEntry ??
           this.lastOpenMeta.get(snap.productKey)?.avgEntry ??
           0;
-        this.lastPositionContracts.set(snap.productKey, next);
+        const keyAliases = [
+          snap.productKey,
+          snap.symbol,
+          snap.productKey.toUpperCase(),
+          snap.symbol.toUpperCase(),
+        ].filter(Boolean);
+        for (const k of keyAliases) {
+          this.lastPositionContracts.set(k, next);
+        }
         if (avg > 0) {
-          this.lastOpenMeta.set(snap.productKey, {
-            symbol: snap.symbol,
-            side: snap.side,
-            contracts: next,
-            avgEntry: avg,
-          });
+          for (const k of keyAliases) {
+            this.lastOpenMeta.set(k, {
+              symbol: snap.symbol,
+              side: snap.side,
+              contracts: next,
+              avgEntry: avg,
+            });
+          }
         }
       }
       return;
