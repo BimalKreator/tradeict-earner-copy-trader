@@ -935,7 +935,7 @@ class StrategyMasterSocket {
 
     if (
       type === "success" &&
-      String(msg.message ?? "").toLowerCase() === "authenticated"
+      String(msg.message ?? "").toLowerCase().includes("authenticated")
     ) {
       const subPayload = {
         type: "subscribe",

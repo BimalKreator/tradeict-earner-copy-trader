@@ -60,6 +60,12 @@ type StrategyDetail = {
   createdAt: string;
 };
 
+type SubscriptionMineRow = {
+  id: string;
+  status: string;
+  strategyId: string;
+};
+
 function parseMetrics(raw: unknown): PerformanceMetrics | null {
   if (!raw || typeof raw !== "object") return null;
   return raw as PerformanceMetrics;
@@ -119,11 +125,15 @@ export default function StrategyPerformancePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [unsubscribeBusy, setUnsubscribeBusy] = useState(false);
+  const [unsubscribeError, setUnsubscribeError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError(null);
+    setUnsubscribeError(null);
     setUnauthorized(false);
     const token =
       typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -153,13 +163,74 @@ export default function StrategyPerformancePage() {
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       setStrategy(data as StrategyDetail);
+
+      const mineRes = await fetch(`${API_BASE}/subscriptions/mine`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (mineRes.ok) {
+        const mineData: unknown = await mineRes.json();
+        const subs =
+          typeof mineData === "object" &&
+          mineData !== null &&
+          "subscriptions" in mineData &&
+          Array.isArray((mineData as { subscriptions: unknown }).subscriptions)
+            ? ((mineData as { subscriptions: SubscriptionMineRow[] }).subscriptions)
+            : [];
+        const active = subs.some(
+          (s) => s.strategyId === id && String(s.status).toUpperCase() === "ACTIVE",
+        );
+        setIsSubscribed(active);
+      } else {
+        setIsSubscribed(false);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load strategy");
       setStrategy(null);
+      setIsSubscribed(false);
     } finally {
       setLoading(false);
     }
   }, [id]);
+
+  const handleUnsubscribe = useCallback(async () => {
+    if (!id || unsubscribeBusy) return;
+    setUnsubscribeBusy(true);
+    setUnsubscribeError(null);
+    try {
+      const token =
+        typeof window !== "undefined" ? localStorage.getItem("token") : null;
+      if (!token) {
+        setUnauthorized(true);
+        return;
+      }
+      const res = await fetch(
+        `${API_BASE}/subscriptions/${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      if (!res.ok && res.status !== 204) {
+        const body: unknown = await res.json().catch(() => ({}));
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Unsubscribe failed (${res.status})`;
+        setUnsubscribeError(msg);
+        return;
+      }
+      await load();
+    } catch (e) {
+      setUnsubscribeError(
+        e instanceof Error ? e.message : "Unsubscribe request failed",
+      );
+    } finally {
+      setUnsubscribeBusy(false);
+    }
+  }, [id, load, unsubscribeBusy]);
 
   useEffect(() => {
     void load();
@@ -329,7 +400,20 @@ export default function StrategyPerformancePage() {
               </dl>
             </div>
           </div>
+          {isSubscribed ? (
+            <button
+              type="button"
+              onClick={() => void handleUnsubscribe()}
+              disabled={unsubscribeBusy}
+              className="inline-flex items-center justify-center rounded-lg border border-red-500/35 bg-red-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-red-100 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {unsubscribeBusy ? "Unsubscribing..." : "Unsubscribe"}
+            </button>
+          ) : null}
         </header>
+        {unsubscribeError ? (
+          <p className="mt-3 text-sm text-red-200">{unsubscribeError}</p>
+        ) : null}
       </div>
 
       {!hasMetrics && (

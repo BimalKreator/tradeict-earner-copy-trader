@@ -290,8 +290,59 @@ export function createSubscriptionController(prisma: PrismaClient) {
     }
   }
 
+  async function unsubscribe(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const raw = req.params.strategyId;
+      const strategyId = Array.isArray(raw) ? raw[0] : raw;
+      if (typeof strategyId !== "string" || !strategyId.trim()) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+
+      const sub = await prisma.userSubscription.findFirst({
+        where: {
+          userId,
+          strategyId: strategyId.trim(),
+          status: SubscriptionStatus.ACTIVE,
+        },
+        select: { id: true },
+      });
+
+      if (!sub) {
+        res.status(404).json({ error: "Active subscription not found" });
+        return;
+      }
+
+      await prisma.userSubscription.update({
+        where: { id: sub.id },
+        data: { status: SubscriptionStatus.PAUSED },
+      });
+
+      void logUserActivity(prisma, {
+        userId,
+        kind: "SUBSCRIPTION_CANCELLED",
+        message: `Unsubscribed from strategy ${strategyId.trim()}`,
+      });
+
+      res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     subscribe,
+    unsubscribe,
     listStrategies,
     listMySubscriptions,
     getStrategy,

@@ -397,9 +397,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           !existingSync.syncActiveTrades &&
           strategy.syncActiveTrades
         ) {
+          const strategyId = id;
           void import("../services/tradeEngine.js")
             .then(({ lateJoinMirrorForAllActiveSubscribers }) =>
-              lateJoinMirrorForAllActiveSubscribers(prisma, id),
+              lateJoinMirrorForAllActiveSubscribers(prisma, strategyId),
             )
             .catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);
