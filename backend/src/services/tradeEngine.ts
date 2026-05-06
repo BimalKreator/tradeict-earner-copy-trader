@@ -927,6 +927,7 @@ class StrategyMasterSocket {
   /** Last non-zero position per product (for closed detection). */
   private readonly lastPositionContracts = new Map<string, number>();
   private readonly lastOpenMeta = new Map<string, LastOpenMeta>();
+  private readonly processedOrderIds = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -1165,6 +1166,20 @@ class StrategyMasterSocket {
       if (records.length === 0) records.push(parsed);
 
       for (const r of records) {
+        const o = mergePayloadLayers(r);
+        const orderIdRaw = o.id ?? o.order_id;
+        const orderId =
+          orderIdRaw === undefined || orderIdRaw === null
+            ? ""
+            : String(orderIdRaw).trim();
+        if (orderId) {
+          if (this.processedOrderIds.has(orderId)) continue;
+          this.processedOrderIds.add(orderId);
+          if (this.processedOrderIds.size > 500) {
+            this.processedOrderIds.clear();
+          }
+        }
+
         const sig = extractOrderFillSignal(r);
         if (!sig || sig.reduceOnly) continue;
         await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
