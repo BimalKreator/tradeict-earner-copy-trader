@@ -83,6 +83,7 @@ export default function DashboardSettingsPage() {
   }, [token]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadAccounts();
   }, [loadAccounts]);
 

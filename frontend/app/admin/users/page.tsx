@@ -66,6 +66,7 @@ export default function AdminUsersPage() {
   }, [apiBase]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadUsers();
   }, [loadUsers]);
 

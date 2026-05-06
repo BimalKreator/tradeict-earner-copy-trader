@@ -13,6 +13,11 @@ import {
   getAdminMasterPositionSnapshots,
 } from "../services/liveTradesService.js";
 import {
+  generateMonthlyInvoices,
+  getPlatformRevenueStats,
+  runOverdueCheck,
+} from "../services/billingService.js";
+import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
@@ -485,15 +490,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       ] = await Promise.all([
         prisma.invoice.aggregate({
           where: { status: InvoiceStatus.PAID },
-          _sum: { amount: true },
+          _sum: { amountDue: true },
         }),
         prisma.invoice.aggregate({
           where: {
             status: {
-              in: [InvoiceStatus.UNPAID, InvoiceStatus.OVERDUE],
+              in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE],
             },
           },
-          _sum: { amount: true },
+          _sum: { amountDue: true },
         }),
         prisma.pnLRecord.aggregate({
           where: { timestamp: { gte: monthStart } },
@@ -503,18 +508,209 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           orderBy: { dueDate: "desc" },
           include: {
             user: { select: { email: true } },
+            strategy: { select: { id: true, title: true } },
           },
         }),
       ]);
 
       res.json({
         stats: {
-          totalRevenueReceived: paidAgg._sum.amount ?? 0,
-          pendingDuesUnpaid: pendingAgg._sum.amount ?? 0,
+          totalRevenueReceived: paidAgg._sum.amountDue ?? 0,
+          pendingDuesUnpaid: pendingAgg._sum.amountDue ?? 0,
           projectedEarnings: projectedAgg._sum.commissionAmount ?? 0,
         },
         invoices,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Manual fire-the-cron endpoint for QA / staging.
+   *
+   * Runs `generateMonthlyInvoices` (the 1st-of-month job) and then
+   * `runOverdueCheck` (the daily job) so a single call covers the entire
+   * billing pipeline. Body accepts optional `{ month, year }` (1-indexed)
+   * to target a specific calendar month — defaults to the previous calendar
+   * month, mirroring the real cron.
+   *
+   * NOTE: keep behind admin auth; remove or feature-flag before production.
+   */
+  router.post("/trigger-billing-cron", async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as {
+        month?: unknown;
+        year?: unknown;
+        userIds?: unknown;
+        subscriptionIds?: unknown;
+      };
+
+      const opts: {
+        month?: number;
+        year?: number;
+        scope?: { userIds?: string[]; subscriptionIds?: string[] };
+      } = {};
+      if (body.month !== undefined) {
+        const m = Number(body.month);
+        if (!Number.isInteger(m) || m < 1 || m > 12) {
+          res
+            .status(400)
+            .json({ error: "month must be an integer between 1 and 12" });
+          return;
+        }
+        opts.month = m;
+      }
+      if (body.year !== undefined) {
+        const y = Number(body.year);
+        if (!Number.isInteger(y) || y < 1970 || y > 9999) {
+          res.status(400).json({ error: "year must be a 4-digit integer" });
+          return;
+        }
+        opts.year = y;
+      }
+
+      if (
+        (opts.month !== undefined && opts.year === undefined) ||
+        (opts.year !== undefined && opts.month === undefined)
+      ) {
+        res
+          .status(400)
+          .json({ error: "month and year must be supplied together" });
+        return;
+      }
+
+      const scope: { userIds?: string[]; subscriptionIds?: string[] } = {};
+      if (Array.isArray(body.userIds)) {
+        const list = body.userIds.filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        );
+        if (list.length > 0) scope.userIds = list;
+      }
+      if (Array.isArray(body.subscriptionIds)) {
+        const list = body.subscriptionIds.filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        );
+        if (list.length > 0) scope.subscriptionIds = list;
+      }
+      if (scope.userIds || scope.subscriptionIds) {
+        opts.scope = scope;
+      }
+
+      const monthly = await generateMonthlyInvoices(prisma, opts);
+      const overdue = await runOverdueCheck(prisma);
+
+      res.json({ ok: true, monthly, overdue });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * GET /api/admin/revenue-stats
+   *
+   * Global platform metrics for the admin revenue dashboard:
+   *   - `totalPlatformPnl`  — Σ realized PnL across every CLOSED trade
+   *                          this UTC month (all users).
+   *   - `expectedRevenue`   — Σ profitShare-weighted positive cumulative PnL
+   *                          across every ACTIVE subscription this month.
+   *   - `collectedRevenue`  — Σ amountDue from PAID invoices (all-time).
+   *   - `pendingDues`       — Σ amountDue from PENDING + OVERDUE invoices.
+   */
+  router.get("/revenue-stats", async (_req, res, next) => {
+    try {
+      const [platformStats, paidAgg, pendingAgg] = await Promise.all([
+        getPlatformRevenueStats(prisma),
+        prisma.invoice.aggregate({
+          where: { status: InvoiceStatus.PAID },
+          _sum: { amountDue: true },
+        }),
+        prisma.invoice.aggregate({
+          where: {
+            status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+          },
+          _sum: { amountDue: true },
+        }),
+      ]);
+
+      res.json({
+        totalPlatformPnl: platformStats.totalPlatformPnl,
+        expectedRevenue: platformStats.expectedRevenue,
+        collectedRevenue: paidAgg._sum.amountDue ?? 0,
+        pendingDues: pendingAgg._sum.amountDue ?? 0,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * GET /api/admin/invoices?status=ALL|PENDING_OVERDUE
+   *
+   * Master invoice list for the admin revenue dashboard. Each row joins the
+   * owning user's email + the strategy title so the table is self-contained.
+   * Default order: most recent billing period first.
+   *
+   * The `status` query param is a convenience server-side filter; the
+   * dashboard also filters client-side with the same predicate.
+   */
+  router.get("/invoices", async (req, res, next) => {
+    try {
+      const statusRaw = req.query.status;
+      const where:
+        | { status?: { in: ("PENDING" | "OVERDUE")[] } }
+        | Record<string, never> = {};
+      if (typeof statusRaw === "string") {
+        const upper = statusRaw.trim().toUpperCase();
+        if (upper === "PENDING_OVERDUE" || upper === "OUTSTANDING") {
+          (where as { status: { in: ("PENDING" | "OVERDUE")[] } }).status = {
+            in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE],
+          };
+        }
+      }
+
+      const rows = await prisma.invoice.findMany({
+        where,
+        orderBy: [
+          { year: "desc" },
+          { month: "desc" },
+          { createdAt: "desc" },
+        ],
+        select: {
+          id: true,
+          userId: true,
+          strategyId: true,
+          month: true,
+          year: true,
+          totalPnl: true,
+          amountDue: true,
+          dueDate: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+          user: { select: { email: true, name: true } },
+          strategy: { select: { title: true } },
+        },
+      });
+
+      const invoices = rows.map((r) => ({
+        id: r.id,
+        userId: r.userId,
+        userEmail: r.user.email,
+        userName: r.user.name,
+        strategyId: r.strategyId,
+        strategyTitle: r.strategy.title,
+        month: r.month,
+        year: r.year,
+        totalPnl: r.totalPnl,
+        amountDue: r.amountDue,
+        dueDate: r.dueDate.toISOString(),
+        status: r.status,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      }));
+
+      res.json({ invoices });
     } catch (err) {
       next(err);
     }

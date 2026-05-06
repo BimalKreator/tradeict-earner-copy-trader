@@ -298,14 +298,17 @@ export default function StrategyMarketplacePage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadStrategies();
   }, [loadStrategies]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadExchangeAccounts();
   }, [loadExchangeAccounts]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadSubscriptions();
   }, [loadSubscriptions]);
 
@@ -336,9 +339,11 @@ export default function StrategyMarketplacePage() {
   useEffect(() => {
     if (!modalStrategy) return;
     if (exchangeAccounts.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- modal selection sync from external props
       setSelectedExchangeAccountId("");
       return;
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- modal selection sync from external props
     setSelectedExchangeAccountId((current) =>
       exchangeAccounts.some((a) => a.id === current)
         ? current

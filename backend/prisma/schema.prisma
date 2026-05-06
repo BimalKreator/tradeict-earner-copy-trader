@@ -21,8 +21,8 @@ enum UserStatus {
 
 enum SubscriptionStatus {
   ACTIVE
-  PAUSED
-  OVERDUE
+  PAUSED_DUE_TO_FUNDS
+  CANCELLED
 }
 
 enum TradeStatus {
@@ -38,7 +38,7 @@ enum TransactionStatus {
 }
 
 enum InvoiceStatus {
-  UNPAID
+  PENDING
   PAID
   OVERDUE
 }
@@ -108,6 +108,7 @@ model Strategy {
   subscriptions UserSubscription[]
   trades        Trade[]
   pnlRecords    PnLRecord[]
+  invoices      Invoice[]
 }
 
 model UserSubscription {
@@ -122,7 +123,6 @@ model UserSubscription {
   user             User             @relation(fields: [userId], references: [id])
   strategy         Strategy         @relation(fields: [strategyId], references: [id])
   exchangeAccount  ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id], onDelete: SetNull)
-  invoices         Invoice[]
 }
 
 model ExchangeAccount {
@@ -141,17 +141,19 @@ model ExchangeAccount {
 }
 
 model Trade {
-  id         String      @id @default(uuid())
-  userId     String
-  strategyId String
-  symbol     String
-  side       String
-  size       Float
-  entryPrice Float
-  exitPrice  Float?
-  pnl        Float?
-  status     TradeStatus @default(OPEN)
-  createdAt  DateTime    @default(now())
+  id              String      @id @default(uuid())
+  userId          String
+  strategyId      String
+  symbol          String
+  side            String
+  size            Float
+  entryPrice      Float
+  exitPrice       Float?
+  pnl             Float?
+  tradePnl        Float       @default(0)
+  revenueShareAmt Float       @default(0)
+  status          TradeStatus @default(OPEN)
+  createdAt       DateTime    @default(now())
 
   user       User        @relation(fields: [userId], references: [id])
   strategy   Strategy    @relation(fields: [strategyId], references: [id])
@@ -201,19 +203,23 @@ model DeltaApiKey {
 }
 
 model Invoice {
-  id               String        @id @default(uuid())
-  userId           String
-  amount           Float
-  status           InvoiceStatus @default(UNPAID)
-  dueDate          DateTime
-  createdAt        DateTime      @default(now())
-  subscriptionId   String?
-  billingPeriodEnd DateTime?
+  id          String        @id @default(uuid())
+  userId      String
+  strategyId  String
+  month       Int
+  year        Int
+  totalPnl    Float
+  amountDue   Float
+  dueDate     DateTime
+  status      InvoiceStatus @default(PENDING)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
-  user         User              @relation(fields: [userId], references: [id])
-  subscription UserSubscription? @relation(fields: [subscriptionId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+  strategy Strategy @relation(fields: [strategyId], references: [id])
 
-  @@unique([subscriptionId, billingPeriodEnd])
+  @@unique([userId, strategyId, month, year])
+  @@index([status])
 }
 
 model PnLRecord {

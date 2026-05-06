@@ -68,8 +68,8 @@ export function createAnalyticsRoutes(prisma: PrismaClient): Router {
           status: {
             in: [
               SubscriptionStatus.ACTIVE,
-              SubscriptionStatus.PAUSED,
-              SubscriptionStatus.OVERDUE,
+              SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+              SubscriptionStatus.CANCELLED,
             ],
           },
         },

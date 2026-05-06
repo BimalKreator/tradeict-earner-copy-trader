@@ -325,7 +325,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       await prisma.userSubscription.update({
         where: { id: sub.id },
-        data: { status: SubscriptionStatus.PAUSED },
+        data: { status: SubscriptionStatus.CANCELLED },
       });
 
       void logUserActivity(prisma, {

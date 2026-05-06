@@ -233,6 +233,7 @@ export default function StrategyPerformancePage() {
   }, [id, load, unsubscribeBusy]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void load();
   }, [load]);
 

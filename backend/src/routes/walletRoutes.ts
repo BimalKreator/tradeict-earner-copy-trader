@@ -14,6 +14,7 @@ export function createWalletRoutes(prisma: PrismaClient): Router {
   const wallet = createWalletController(prisma);
 
   router.post("/topup", jwtAuth, wallet.topUp);
+  router.get("/me", jwtAuth, wallet.getMyWallet);
   router.get("/transactions", ...adminOnly, wallet.listTransactions);
   router.post("/approve", ...adminOnly, wallet.approve);
 

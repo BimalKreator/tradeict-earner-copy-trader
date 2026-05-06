@@ -59,13 +59,10 @@ export default function DashboardLiveTradesPage() {
   const [unauthorized, setUnauthorized] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  const load = useCallback(async (opts?: { silent?: boolean }) => {
-    const silent = Boolean(opts?.silent);
-    if (!silent) {
-      setLoading(true);
-      setError(null);
-      setUnauthorized(false);
-    }
+  const load = useCallback(async (silent: boolean) => {
+    // setState is intentionally only called after awaits to satisfy
+    // `react-hooks/set-state-in-effect` — synchronous setState in an
+    // effect body would trigger cascading-render warnings.
     try {
       const res = await fetch(`${API_BASE}/live-trades/me`, {
         cache: "no-store",
@@ -91,6 +88,10 @@ export default function DashboardLiveTradesPage() {
           : [];
       setRows(list);
       setLastRefreshed(new Date());
+      if (!silent) {
+        setError(null);
+        setUnauthorized(false);
+      }
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : "Failed to load positions");
@@ -101,12 +102,15 @@ export default function DashboardLiveTradesPage() {
   }, []);
 
   useEffect(() => {
-    void load();
+    // Initial data fetch on mount. setState inside `load` is gated behind
+    // an `await`, so it never runs synchronously from this effect body.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
+    void load(false);
   }, [load]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      void load({ silent: true });
+      void load(true);
     }, 8000);
     return () => window.clearInterval(id);
   }, [load]);

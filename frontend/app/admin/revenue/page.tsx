@@ -3,9 +3,9 @@
 import {
   AlertTriangle,
   Banknote,
+  CircleDollarSign,
   Clock,
   Loader2,
-  Mail,
   RefreshCw,
   Search,
   TrendingUp,
@@ -15,134 +15,199 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
-type InvoiceStatus = "UNPAID" | "PAID" | "OVERDUE";
+type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
 
-type RevenueInvoice = {
+type AdminInvoice = {
   id: string;
   userId: string;
-  amount: number;
-  status: InvoiceStatus;
+  userEmail: string;
+  userName: string | null;
+  strategyId: string;
+  strategyTitle: string;
+  month: number;
+  year: number;
+  totalPnl: number;
+  amountDue: number;
   dueDate: string;
+  status: InvoiceStatus;
   createdAt: string;
-  user: { email: string };
+  updatedAt: string;
 };
 
-type RevenueResponse = {
-  stats: {
-    totalRevenueReceived: number;
-    pendingDuesUnpaid: number;
-    projectedEarnings: number;
-  };
-  invoices: RevenueInvoice[];
+type RevenueStats = {
+  totalPlatformPnl: number;
+  expectedRevenue: number;
+  collectedRevenue: number;
+  pendingDues: number;
 };
 
-function statusLabel(status: InvoiceStatus): string {
-  switch (status) {
-    case "PAID":
-      return "Paid";
-    case "OVERDUE":
-      return "Overdue";
-    default:
-      return "Unpaid";
+type FilterMode = "all" | "outstanding";
+
+const usdSignedFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  signDisplay: "always",
+});
+
+const usdFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const monthLabelFmt = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "long",
+});
+
+const dateFmt = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+});
+
+function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return usdFmt.format(n);
+}
+
+function fmtUsdSigned(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return usdSignedFmt.format(n);
+}
+
+function fmtMonth(month: number, year: number): string {
+  try {
+    return monthLabelFmt.format(new Date(Date.UTC(year, month - 1, 1)));
+  } catch {
+    return `${year}-${String(month).padStart(2, "0")}`;
   }
 }
 
-function statusClasses(status: InvoiceStatus): string {
+function fmtDate(iso: string): string {
+  try {
+    return dateFmt.format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function pnlToneClass(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "text-white/70";
+  if (n > 0) return "text-emerald-400";
+  if (n < 0) return "text-red-300";
+  return "text-white/70";
+}
+
+function statusBadgeClasses(status: InvoiceStatus): string {
   switch (status) {
     case "PAID":
-      return "bg-emerald-500/15 text-emerald-300";
+      return "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30";
     case "OVERDUE":
-      return "bg-red-500/15 text-red-300";
+      return "bg-red-500/15 text-red-300 ring-1 ring-red-500/30";
+    case "PENDING":
     default:
-      return "bg-amber-500/15 text-amber-200";
+      return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30";
   }
+}
+
+async function authFetch(path: string): Promise<Response> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${token ?? ""}` },
+  });
 }
 
 export default function AdminRevenuePage() {
-  const [data, setData] = useState<RevenueResponse | null>(null);
+  const [stats, setStats] = useState<RevenueStats | null>(null);
+  const [invoices, setInvoices] = useState<AdminInvoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [forbidden, setForbidden] = useState(false);
-  const [unauthorized, setUnauthorized] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unauthorized, setUnauthorized] = useState(false);
+  const [forbidden, setForbidden] = useState(false);
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [emailQuery, setEmailQuery] = useState("");
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
-  const load = useCallback(async () => {
-    setError(null);
-    if (!token) {
-      setUnauthorized(true);
-      setForbidden(false);
-      setLoading(false);
-      setData(null);
-      return;
-    }
-
-    setLoading(true);
-    setUnauthorized(false);
-    setForbidden(false);
-
+  const load = useCallback(async (silent: boolean) => {
     try {
-      const res = await fetch(`${API_BASE}/admin/revenue`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const [statsRes, invRes] = await Promise.all([
+        authFetch("/admin/revenue-stats"),
+        authFetch("/admin/invoices"),
+      ]);
 
-      if (res.status === 401) {
-        setUnauthorized(true);
-        setData(null);
+      if (statsRes.status === 401 || invRes.status === 401) {
+        if (!silent) {
+          setUnauthorized(true);
+          setStats(null);
+          setInvoices([]);
+        }
         return;
       }
-      if (res.status === 403) {
-        setForbidden(true);
-        setData(null);
+      if (statsRes.status === 403 || invRes.status === 403) {
+        if (!silent) {
+          setForbidden(true);
+          setStats(null);
+          setInvoices([]);
+        }
         return;
       }
-
-      if (!res.ok) {
-        const body: unknown = await res.json().catch(() => ({}));
-        const msg =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
-            ? (body as { error: string }).error
-            : `Failed to load (${res.status})`;
-        throw new Error(msg);
+      if (!statsRes.ok || !invRes.ok) {
+        const codes = [statsRes.status, invRes.status]
+          .filter((c) => c >= 400)
+          .join("/");
+        throw new Error(`Request failed (${codes})`);
       }
 
-      const raw: unknown = await res.json();
-      if (
-        typeof raw !== "object" ||
-        raw === null ||
-        !("stats" in raw) ||
-        !("invoices" in raw)
-      ) {
-        throw new Error("Invalid response");
+      const s = (await statsRes.json()) as RevenueStats;
+      const inv = (await invRes.json()) as { invoices?: AdminInvoice[] };
+      setStats(s);
+      setInvoices(Array.isArray(inv.invoices) ? inv.invoices : []);
+      if (!silent) {
+        setError(null);
+        setUnauthorized(false);
+        setForbidden(false);
       }
-      setData(raw as RevenueResponse);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load revenue");
-      setData(null);
+      if (!silent) {
+        setError(e instanceof Error ? e.message : "Failed to load revenue");
+      }
     } finally {
-      setLoading(false);
+      if (silent) setRefreshing(false);
+      else setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
-    void load();
+    // Initial data fetch on mount. setState inside `load` is gated behind
+    // an `await`, so it never runs synchronously from this effect body.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
+    void load(false);
   }, [load]);
 
-  const filteredInvoices = useMemo(() => {
-    const list = data?.invoices ?? [];
-    const q = emailQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((inv) =>
-      inv.user.email.toLowerCase().includes(q),
-    );
-  }, [data?.invoices, emailQuery]);
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    void load(true);
+  }, [load]);
 
-  const stats = data?.stats;
+  const filtered = useMemo(() => {
+    const q = emailQuery.trim().toLowerCase();
+    return invoices.filter((inv) => {
+      if (filterMode === "outstanding") {
+        if (inv.status !== "PENDING" && inv.status !== "OVERDUE") return false;
+      }
+      if (q) {
+        const haystack = `${inv.userEmail} ${inv.userName ?? ""} ${inv.strategyTitle}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [invoices, filterMode, emailQuery]);
 
   if (unauthorized) {
     return (
@@ -150,7 +215,7 @@ export default function AdminRevenuePage() {
         <AlertTriangle className="mx-auto h-10 w-10 text-amber-300" aria-hidden />
         <h1 className="mt-4 text-lg font-semibold text-white">Sign in required</h1>
         <p className="mt-2 text-sm text-white/60">
-          Sign in with an admin account to view revenue and invoices.
+          Sign in with an admin account to view platform revenue and invoices.
         </p>
         <Link
           href="/login"
@@ -183,105 +248,98 @@ export default function AdminRevenuePage() {
   return (
     <div className="mx-auto max-w-6xl">
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
-            Revenue
-          </h1>
-          <p className="mt-2 max-w-xl text-sm text-white/55">
-            Invoice totals, outstanding dues, and commission accrued this month
-            (projected from PnL records).
-          </p>
+        <div className="flex items-start gap-3">
+          <div className="rounded-xl border border-glassBorder bg-primary/10 p-3">
+            <CircleDollarSign className="h-6 w-6 text-primary" aria-hidden />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
+              Platform revenue
+            </h1>
+            <p className="mt-2 max-w-xl text-sm text-white/55">
+              Global high-water-mark accruals, collected revenue, and an
+              invoice-by-invoice view across every user.
+            </p>
+          </div>
         </div>
         <button
           type="button"
-          onClick={() => void load()}
-          disabled={loading}
+          onClick={handleRefresh}
+          disabled={refreshing || loading}
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-white hover:bg-white/10 disabled:opacity-50"
         >
           <RefreshCw
-            className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
+            className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
             aria-hidden
           />
           Refresh
         </button>
       </header>
 
-      {error && (
+      {error ? (
         <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
         </div>
-      )}
+      ) : null}
 
-      <div className="mb-8 grid gap-4 sm:grid-cols-3">
-        <div className="glass-card border border-glassBorder p-5">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-emerald-500/15 p-2.5">
-              <Banknote className="h-5 w-5 text-emerald-400" aria-hidden />
-            </div>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-white/45">
-                Total revenue (received)
-              </p>
-              <p className="mt-1 text-xl font-semibold tabular-nums text-white">
-                {loading && !stats
-                  ? "—"
-                  : `₹${(stats?.totalRevenueReceived ?? 0).toLocaleString("en-IN", {
-                      maximumFractionDigits: 2,
-                    })}`}
-              </p>
-            </div>
-          </div>
-          <p className="mt-3 text-xs text-white/40">Sum of paid invoices</p>
-        </div>
-
-        <div className="glass-card border border-glassBorder p-5">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-amber-500/15 p-2.5">
-              <Clock className="h-5 w-5 text-amber-400" aria-hidden />
-            </div>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-white/45">
-                Pending dues (unpaid)
-              </p>
-              <p className="mt-1 text-xl font-semibold tabular-nums text-white">
-                {loading && !stats
-                  ? "—"
-                  : `₹${(stats?.pendingDuesUnpaid ?? 0).toLocaleString("en-IN", {
-                      maximumFractionDigits: 2,
-                    })}`}
-              </p>
-            </div>
-          </div>
-          <p className="mt-3 text-xs text-white/40">
-            Unpaid + overdue invoice balances
-          </p>
-        </div>
-
-        <div className="glass-card border border-glassBorder p-5">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-sky-500/15 p-2.5">
-              <TrendingUp className="h-5 w-5 text-sky-400" aria-hidden />
-            </div>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wider text-white/45">
-                Projected earnings
-              </p>
-              <p className="mt-1 text-xl font-semibold tabular-nums text-white">
-                {loading && !stats
-                  ? "—"
-                  : `₹${(stats?.projectedEarnings ?? 0).toLocaleString("en-IN", {
-                      maximumFractionDigits: 2,
-                    })}`}
-              </p>
-            </div>
-          </div>
-          <p className="mt-3 text-xs text-white/40">
-            Commission from PnL this month (UTC)
-          </p>
-        </div>
+      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          tone="sky"
+          icon={<TrendingUp className="h-5 w-5 text-sky-400" aria-hidden />}
+          label="Total platform PnL"
+          subLabel="This UTC month, all users"
+          value={loading && !stats ? "—" : fmtUsdSigned(stats?.totalPlatformPnl ?? 0)}
+          valueToneClass={pnlToneClass(stats?.totalPlatformPnl ?? null)}
+        />
+        <StatCard
+          tone="primary"
+          icon={
+            <CircleDollarSign className="h-5 w-5 text-primary" aria-hidden />
+          }
+          label="Expected revenue"
+          subLabel="If month closed today (active subs)"
+          value={loading && !stats ? "—" : fmtUsd(stats?.expectedRevenue ?? 0)}
+        />
+        <StatCard
+          tone="emerald"
+          icon={<Banknote className="h-5 w-5 text-emerald-400" aria-hidden />}
+          label="Collected revenue"
+          subLabel="Σ amountDue from PAID invoices"
+          value={loading && !stats ? "—" : fmtUsd(stats?.collectedRevenue ?? 0)}
+        />
+        <StatCard
+          tone="amber"
+          icon={<Clock className="h-5 w-5 text-amber-400" aria-hidden />}
+          label="Pending dues"
+          subLabel="PENDING + OVERDUE"
+          value={loading && !stats ? "—" : fmtUsd(stats?.pendingDues ?? 0)}
+        />
       </div>
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div
+          role="tablist"
+          aria-label="Invoice filter"
+          className="inline-flex rounded-lg border border-glassBorder bg-white/[0.03] p-1 text-sm"
+        >
+          <FilterTab
+            active={filterMode === "all"}
+            onClick={() => setFilterMode("all")}
+            label="All invoices"
+            count={invoices.length}
+          />
+          <FilterTab
+            active={filterMode === "outstanding"}
+            onClick={() => setFilterMode("outstanding")}
+            label="Outstanding only"
+            count={
+              invoices.filter(
+                (i) => i.status === "PENDING" || i.status === "OVERDUE",
+              ).length
+            }
+            highlight
+          />
+        </div>
         <label className="relative flex w-full max-w-md items-center">
           <Search
             className="pointer-events-none absolute left-3 h-4 w-4 text-white/35"
@@ -289,7 +347,7 @@ export default function AdminRevenuePage() {
           />
           <input
             type="search"
-            placeholder="Filter by user email…"
+            placeholder="Search by email, name, or strategy…"
             value={emailQuery}
             onChange={(e) => setEmailQuery(e.target.value)}
             className="w-full rounded-lg border border-glassBorder bg-black/40 py-2.5 pl-10 pr-4 text-sm text-white outline-none ring-primary/25 placeholder:text-white/35 focus:ring-2"
@@ -299,20 +357,36 @@ export default function AdminRevenuePage() {
 
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[820px] text-left text-sm">
+          <table className="w-full min-w-[920px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
-                <th className="px-4 py-3 font-medium text-white/70">User email</th>
-                <th className="px-4 py-3 font-medium text-white/70">Invoice amount</th>
-                <th className="px-4 py-3 font-medium text-white/70">Due date</th>
-                <th className="px-4 py-3 font-medium text-white/70">Status</th>
-                <th className="px-4 py-3 font-medium text-white/70">Actions</th>
+                <th className="px-4 py-3 font-medium text-white/70">
+                  User
+                </th>
+                <th className="px-4 py-3 font-medium text-white/70">
+                  Strategy
+                </th>
+                <th className="px-4 py-3 font-medium text-white/70">
+                  Period
+                </th>
+                <th className="px-4 py-3 text-right font-medium text-white/70">
+                  Amount
+                </th>
+                <th className="px-4 py-3 font-medium text-white/70">
+                  Status
+                </th>
+                <th className="px-4 py-3 font-medium text-white/70">
+                  Due date
+                </th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center text-white/45">
+                  <td
+                    colSpan={6}
+                    className="px-4 py-16 text-center text-white/45"
+                  >
                     <Loader2
                       className="mx-auto h-8 w-8 animate-spin text-primary"
                       aria-hidden
@@ -320,47 +394,55 @@ export default function AdminRevenuePage() {
                     <p className="mt-3">Loading invoices…</p>
                   </td>
                 </tr>
-              ) : filteredInvoices.length === 0 ? (
+              ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-14 text-center text-white/45">
-                    {(data?.invoices.length ?? 0) === 0
-                      ? "No invoices yet."
-                      : "No invoices match this filter."}
+                  <td
+                    colSpan={6}
+                    className="px-4 py-14 text-center text-white/45"
+                  >
+                    {invoices.length === 0
+                      ? "No invoices have been generated yet."
+                      : filterMode === "outstanding"
+                        ? "No outstanding invoices — all caught up."
+                        : "No invoices match this filter."}
                   </td>
                 </tr>
               ) : (
-                filteredInvoices.map((inv) => (
+                filtered.map((inv) => (
                   <tr
                     key={inv.id}
                     className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
                   >
-                    <td className="px-4 py-3 font-medium text-white">
-                      {inv.user.email}
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col">
+                        <span className="font-medium text-white">
+                          {inv.userEmail}
+                        </span>
+                        {inv.userName ? (
+                          <span className="text-xs text-white/45">
+                            {inv.userName}
+                          </span>
+                        ) : null}
+                      </div>
                     </td>
-                    <td className="px-4 py-3 tabular-nums text-white/85">
-                      ₹{inv.amount.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                    <td className="max-w-[220px] truncate px-4 py-3 text-white/80">
+                      <span title={inv.strategyTitle}>{inv.strategyTitle}</span>
                     </td>
-                    <td className="px-4 py-3 tabular-nums text-white/55">
-                      {new Date(inv.dueDate).toLocaleString()}
+                    <td className="whitespace-nowrap px-4 py-3 text-white/80">
+                      {fmtMonth(inv.month, inv.year)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums font-semibold text-white">
+                      {fmtUsd(inv.amountDue)}
                     </td>
                     <td className="px-4 py-3">
                       <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${statusClasses(inv.status)}`}
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium uppercase tracking-wide ${statusBadgeClasses(inv.status)}`}
                       >
-                        {statusLabel(inv.status)}
+                        {inv.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          console.log(inv.user.email);
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-glassBorder bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-white/90 hover:bg-white/10"
-                      >
-                        <Mail className="h-3.5 w-3.5 text-primary/90" aria-hidden />
-                        Send reminder
-                      </button>
+                    <td className="px-4 py-3 tabular-nums text-white/55">
+                      {fmtDate(inv.dueDate)}
                     </td>
                   </tr>
                 ))
@@ -369,6 +451,94 @@ export default function AdminRevenuePage() {
           </table>
         </div>
       </div>
+
+      {!loading && filtered.length > 0 ? (
+        <p className="mt-3 text-xs text-white/40">
+          Showing {filtered.length} of {invoices.length} invoices.
+        </p>
+      ) : null}
     </div>
+  );
+}
+
+function StatCard({
+  tone,
+  icon,
+  label,
+  subLabel,
+  value,
+  valueToneClass,
+}: {
+  tone: "primary" | "emerald" | "amber" | "sky";
+  icon: React.ReactNode;
+  label: string;
+  subLabel: string;
+  value: string;
+  valueToneClass?: string;
+}): React.ReactElement {
+  const toneBg: Record<typeof tone, string> = {
+    primary: "bg-primary/15",
+    emerald: "bg-emerald-500/15",
+    amber: "bg-amber-500/15",
+    sky: "bg-sky-500/15",
+  };
+  return (
+    <div className="glass-card border border-glassBorder p-5">
+      <div className="flex items-center gap-3">
+        <div className={`rounded-lg p-2.5 ${toneBg[tone]}`}>{icon}</div>
+        <div className="min-w-0">
+          <p className="text-xs font-medium uppercase tracking-wider text-white/45">
+            {label}
+          </p>
+          <p
+            className={`mt-1 text-xl font-semibold tabular-nums ${valueToneClass ?? "text-white"}`}
+          >
+            {value}
+          </p>
+        </div>
+      </div>
+      <p className="mt-3 text-xs text-white/40">{subLabel}</p>
+    </div>
+  );
+}
+
+function FilterTab({
+  active,
+  onClick,
+  label,
+  count,
+  highlight = false,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count: number;
+  highlight?: boolean;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`relative inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+        active
+          ? "bg-primary/15 text-primary ring-1 ring-primary/40"
+          : "text-white/60 hover:bg-white/5 hover:text-white"
+      }`}
+    >
+      {label}
+      <span
+        className={`rounded-full px-1.5 py-0.5 text-[10px] tabular-nums ${
+          active
+            ? "bg-primary/25 text-primary"
+            : highlight && count > 0
+              ? "bg-red-500/25 text-red-200"
+              : "bg-white/10 text-white/55"
+        }`}
+      >
+        {count}
+      </span>
+    </button>
   );
 }

@@ -178,9 +178,44 @@ export function createWalletController(prisma: PrismaClient) {
     }
   }
 
+  /**
+   * Wallet summary for the calling user.
+   *
+   * Returns `{ balance, pendingFees, exists }`. If the user has never had a
+   * wallet row created (no approved deposit yet), `exists` is `false` and
+   * balances default to `0` — the frontend doesn't have to special-case the
+   * missing-wallet shape.
+   */
+  async function getMyWallet(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const wallet = await prisma.wallet.findUnique({
+        where: { userId },
+        select: { balance: true, pendingFees: true, overdueDays: true },
+      });
+      res.json({
+        exists: wallet !== null,
+        balance: wallet?.balance ?? 0,
+        pendingFees: wallet?.pendingFees ?? 0,
+        overdueDays: wallet?.overdueDays ?? 0,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     topUp,
     listTransactions,
     approve,
+    getMyWallet,
   };
 }
