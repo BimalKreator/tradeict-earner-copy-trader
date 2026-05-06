@@ -69,6 +69,15 @@ async function getAuthClient(
   apiKey: string,
   secret: string,
 ): Promise<InstanceType<typeof ccxt.delta>> {
+  // Debug: confirm the credentials CCXT actually receives match the keys
+  // stored in the admin panel. `apiKey` here is post-decryption plaintext;
+  // mismatched output → encryption key drift or stale cache, not a CCXT bug.
+  const maskedKey =
+    apiKey.length > 5 ? apiKey.substring(0, 5) + "***" : "INVALID_LENGTH";
+  console.log(
+    `[DEBUG_AUTH] Initializing CCXT for API Key starting with: ${maskedKey}`,
+  );
+
   const cacheKey = `${apiKey}::${secret}`;
   let entry = _authClientCache.get(cacheKey);
   if (!entry) {

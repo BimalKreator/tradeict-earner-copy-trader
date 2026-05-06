@@ -370,6 +370,20 @@ export async function fetchMasterOpenPositions(
   apiKey: string,
   apiSecret: string,
 ): Promise<MasterLedTrade[]> {
+  // Debug: confirm the master key decrypted from the database matches the
+  // value pasted into the admin panel. If the masked prefix does NOT match
+  // the real key, the row in `Strategy.masterApiKey` is stale, encrypted
+  // with a different `PROCESS_ENCRYPTION_KEY`, or the admin panel write
+  // never landed.
+  const decryptedKey = decryptDeltaSecretOrPlain(apiKey);
+  const maskedKey =
+    decryptedKey.length > 5
+      ? decryptedKey.substring(0, 5) + "***"
+      : "INVALID_LENGTH";
+  console.log(
+    `[DEBUG_AUTH] fetchMasterOpenPositions decrypted master key starts with: ${maskedKey}`,
+  );
+
   const raw = await fetchDeltaOpenPositions(apiKey, apiSecret);
   return deltaPositionsToMasterLed(raw);
 }
