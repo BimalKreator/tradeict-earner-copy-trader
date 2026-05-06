@@ -279,6 +279,24 @@ function entryPriceMatches(stored: number, leader: number): boolean {
   return Math.abs(stored - leader) <= eps;
 }
 
+/**
+ * Per-trade revenue-share fee: positive realized PnL × strategy profitShare%.
+ * Negative or zero PnL contributes 0 (no fee on losing trades).
+ *
+ * Note: this is the *per-trade* display value persisted to `Trade.revenueShareAmt`
+ * (used by the user trades page "Est. Fee" column). The actual billable amount
+ * is computed cumulatively at month end by `generateMonthlyInvoices`, which
+ * correctly netts wins against losses across the whole month.
+ */
+function computeRevenueShareAmt(
+  realizedPnl: number,
+  profitSharePct: number,
+): number {
+  if (!Number.isFinite(realizedPnl) || realizedPnl <= 0) return 0;
+  if (!Number.isFinite(profitSharePct) || profitSharePct <= 0) return 0;
+  return realizedPnl * (profitSharePct / 100);
+}
+
 async function closeFollowerTradeAndRecordPnl(
   prisma: PrismaClient,
   args: {
@@ -315,11 +333,23 @@ async function closeFollowerTradeAndRecordPnl(
     size: args.sizedPosition,
   });
 
+  // Fetch profitShare for the per-trade revenue-share snapshot. Closes are
+  // infrequent so a single extra select is cheap; doing it here keeps every
+  // call site of this function (WS handler today, future paths) consistent.
+  const strategyMeta = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+    select: { profitShare: true },
+  });
+  const profitSharePct = strategyMeta?.profitShare ?? 0;
+  const revenueShareAmt = computeRevenueShareAmt(tradeProfit, profitSharePct);
+
   await prisma.trade.update({
     where: { id: open.id },
     data: {
       exitPrice: args.exitPrice,
       pnl: tradeProfit,
+      tradePnl: tradeProfit,
+      revenueShareAmt,
       status: TradeStatus.CLOSED,
     },
   });
@@ -1473,6 +1503,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           id: true,
           masterApiKey: true,
           masterApiSecret: true,
+          profitShare: true,
         },
       });
       for (const strat of strategies) {
@@ -1594,14 +1625,21 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           }
 
           const sign = String(trade.side).toUpperCase() === "BUY" ? 1 : -1;
-          const pnl = (exitPrice - trade.entryPrice) * trade.size * sign;
+          const pnlRaw = (exitPrice - trade.entryPrice) * trade.size * sign;
+          const pnl = Number.isFinite(pnlRaw) ? pnlRaw : 0;
+          const revenueShareAmt = computeRevenueShareAmt(
+            pnl,
+            strat.profitShare,
+          );
 
           await prisma.trade.update({
             where: { id: trade.id },
             data: {
               status: TradeStatus.CLOSED,
               exitPrice,
-              pnl: Number.isFinite(pnl) ? pnl : 0,
+              pnl,
+              tradePnl: pnl,
+              revenueShareAmt,
             },
           });
         }
