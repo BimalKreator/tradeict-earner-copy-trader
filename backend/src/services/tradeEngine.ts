@@ -1052,6 +1052,15 @@ class StrategyMasterSocket {
           socket.send(JSON.stringify({ type: "enable_heartbeat" }));
           const ts = String(Math.floor(Date.now() / 1000));
           const signature = wsAuthSignature(secret, ts);
+          // Log a concise handshake trace so we can correlate WS auth
+          // attempts with Delta's response (which can return type=error
+          // for many reasons: bad signature, IP whitelist, missing
+          // 'View' / WebSocket permission on the key, time skew, etc).
+          const keyPrefix =
+            key.length > 5 ? key.substring(0, 5) + "***" : "INVALID_LENGTH";
+          console.log(
+            `[tradeEngine WS] auth attempt strategyId=${this.strategyId} keyPrefix=${keyPrefix} ts=${ts} sig=${signature.substring(0, 12)}...`,
+          );
           socket.send(
             JSON.stringify({
               type: "auth",
@@ -1109,6 +1118,23 @@ class StrategyMasterSocket {
     console.log(
       `[tradeEngine WS] strategyId=${this.strategyId} type=${type} action=${String(msg.action ?? "?")}`,
     );
+
+    // Dump the full payload for `type=error` (and warnings). Delta India
+    // returns the actual rejection reason in `payload`/`message`/`error`
+    // fields — without this we can't tell whether the handshake failure is
+    // a bad signature, an IP whitelist miss, a missing key permission, a
+    // time skew, or a malformed subscribe.
+    if (type === "error" || type === "warning") {
+      let dump: string;
+      try {
+        dump = JSON.stringify(msg);
+      } catch {
+        dump = String(msg);
+      }
+      console.error(
+        `[tradeEngine WS] ${type.toUpperCase()} payload strategyId=${this.strategyId}: ${dump}`,
+      );
+    }
 
     if (
       type === "success" &&
