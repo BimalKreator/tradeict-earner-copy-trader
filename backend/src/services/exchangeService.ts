@@ -9,18 +9,37 @@ const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
 /**
  * Single factory for `ccxt.delta`: swap markets, rate limit, and **Delta India** REST URLs
  * (required for India API keys and tickers).
+ *
+ * The India URL override is passed at construction time (CCXT's `describe()` merge
+ * runs once during `new ccxt.delta(...)` — overriding `urls.api` post-hoc misses
+ * any handler that already snapshotted the default global endpoint, which
+ * surfaces as `invalid_api_key` on signed REST calls). The post-construction
+ * assignment is kept as a belt-and-braces in case a future CCXT release adds
+ * another API path key.
+ *
+ * API key / secret are trimmed because trailing whitespace from env vars or
+ * DB-stored values is the most common source of `invalid_api_key` errors.
  */
 export function initializeDeltaClient(
   apiKey?: string,
   secret?: string,
 ): InstanceType<typeof ccxt.delta> {
+  const trimmedKey = apiKey?.trim() ?? "";
+  const trimmedSecret = secret?.trim() ?? "";
+
   const exchange = new ccxt.delta({
     enableRateLimit: true,
     options: {
       defaultType: "swap",
     },
-    ...(apiKey != null && apiKey !== "" ? { apiKey } : {}),
-    ...(secret != null && secret !== "" ? { secret } : {}),
+    urls: {
+      api: {
+        public: DELTA_INDIA_API_BASE,
+        private: DELTA_INDIA_API_BASE,
+      },
+    },
+    ...(trimmedKey !== "" ? { apiKey: trimmedKey } : {}),
+    ...(trimmedSecret !== "" ? { secret: trimmedSecret } : {}),
   });
   exchange.urls.api = {
     public: DELTA_INDIA_API_BASE,
