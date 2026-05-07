@@ -1168,15 +1168,15 @@ class StrategyMasterSocket {
       if (records.length === 0) records.push(parsed);
 
       for (const r of records) {
-        const row = r as {
-          id?: unknown;
-          order_id?: unknown;
-          payload?: { id?: unknown; order_id?: unknown } | null;
-        };
         const orderId = String(
-          row.id ??
-            row.order_id ??
-            (row.payload && (row.payload.id || row.payload.order_id)) ??
+          (r as { id?: unknown }).id ??
+            (r as { order_id?: unknown }).order_id ??
+            ((r as { payload?: { id?: unknown; order_id?: unknown } | null })
+              .payload &&
+              ((r as { payload?: { id?: unknown; order_id?: unknown } | null })
+                .payload?.id ||
+                (r as { payload?: { id?: unknown; order_id?: unknown } | null })
+                  .payload?.order_id)) ??
             "",
         );
         if (orderId) {
