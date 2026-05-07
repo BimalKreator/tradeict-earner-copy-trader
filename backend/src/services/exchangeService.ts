@@ -550,3 +550,21 @@ export async function fetchDeltaOpenPositions(
 
   return out;
 }
+
+export async function fetchDeltaTotalBalanceUsd(
+  apiKeyStored: string,
+  apiSecretStored: string,
+): Promise<number> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  const exchange = await getAuthClient(apiKey, secret);
+  const bal = await exchange.fetchBalance();
+  const totalUsd = Number(
+    (bal.total as Record<string, unknown> | undefined)?.USD ??
+      (bal.total as Record<string, unknown> | undefined)?.USDT ??
+      (bal as { info?: { total_balance?: unknown } }).info?.total_balance ??
+      0,
+  );
+  if (Number.isFinite(totalUsd)) return totalUsd;
+  return 0;
+}

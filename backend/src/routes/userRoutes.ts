@@ -10,6 +10,7 @@ export function createUserRoutes(prisma: PrismaClient): Router {
 
   router.get("/me", jwtAuth, user.getMe);
   router.patch("/me", jwtAuth, user.patchMe);
+  router.get("/dashboard-overview", jwtAuth, user.getDashboardOverview);
   router.get("/trades", jwtAuth, user.listTrades);
   router.get("/invoices", jwtAuth, user.listInvoices);
 

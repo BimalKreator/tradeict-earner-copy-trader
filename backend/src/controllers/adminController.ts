@@ -1,6 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
 import { InvoiceStatus, TradeStatus, type PrismaClient } from "@prisma/client";
-import { executeTrade, type TradeSide } from "../services/exchangeService.js";
+import crypto from "node:crypto";
+import {
+  executeTrade,
+  fetchDeltaTotalBalanceUsd,
+  type TradeSide,
+} from "../services/exchangeService.js";
+import { sendPasswordResetLinkEmail } from "../utils/emailService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -306,11 +312,219 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function sendResetPasswordLink(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      const token = crypto.randomBytes(24).toString("hex");
+      const base = (process.env.FRONTEND_URL ?? "http://localhost:3000").replace(
+        /\/$/,
+        "",
+      );
+      const resetLink = `${base}/reset-password?token=${token}&email=${encodeURIComponent(
+        user.email,
+      )}`;
+      await sendPasswordResetLinkEmail(user.email, resetLink);
+      res.json({ ok: true, message: "Password reset link sent successfully." });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getDashboardStats(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const [
+        totalUsers,
+        activeStrategies,
+        pnlAgg,
+        revenueAgg,
+        pendingApprovals,
+        recentTrades,
+        leaderboardRows,
+      ] =
+        await Promise.all([
+          prisma.user.count(),
+          prisma.strategy.count({
+            where: { subscriptions: { some: { status: "ACTIVE" } } },
+          }),
+          prisma.trade.aggregate({
+            where: { status: TradeStatus.CLOSED },
+            _sum: { tradePnl: true },
+          }),
+          prisma.trade.aggregate({
+            where: { status: TradeStatus.CLOSED },
+            _sum: { revenueShareAmt: true },
+          }),
+          prisma.profileUpdateRequest.count({ where: { status: "PENDING" } }),
+          prisma.trade.findMany({
+            orderBy: { createdAt: "desc" },
+            take: 8,
+            select: {
+              id: true,
+              symbol: true,
+              side: true,
+              status: true,
+              tradePnl: true,
+              createdAt: true,
+              user: { select: { email: true } },
+              strategy: { select: { title: true } },
+            },
+          }),
+          prisma.trade.groupBy({
+            by: ["userId"],
+            where: { status: TradeStatus.CLOSED },
+            _sum: { tradePnl: true },
+            orderBy: { _sum: { tradePnl: "desc" } },
+            take: 10,
+          }),
+        ]);
+
+      const userIds = leaderboardRows.map((r) => r.userId);
+      const users = await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, name: true, email: true },
+      });
+      const userMap = new Map(users.map((u) => [u.id, u]));
+      const leaderboard = leaderboardRows.map((r, idx) => ({
+        rank: idx + 1,
+        userId: r.userId,
+        name: userMap.get(r.userId)?.name ?? null,
+        email: userMap.get(r.userId)?.email ?? "Unknown",
+        totalNetPnl: r._sum.tradePnl ?? 0,
+      }));
+
+      res.json({
+        totalUsers,
+        activeStrategies,
+        totalPnlNet: pnlAgg._sum.tradePnl ?? 0,
+        totalRevenue: revenueAgg._sum.revenueShareAmt ?? 0,
+        pendingApprovals,
+        leaderboard,
+        recentLiveTrades: recentTrades.map((t) => ({
+          id: t.id,
+          symbol: t.symbol,
+          side: t.side,
+          status: t.status,
+          pnl: t.tradePnl,
+          createdAt: t.createdAt,
+          userEmail: t.user.email,
+          strategyTitle: t.strategy.title,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getUserBalance(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          exchangeAccounts: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { apiKey: true, apiSecret: true },
+          },
+          deltaApiKeys: {
+            orderBy: { id: "desc" },
+            take: 1,
+            select: { apiKey: true, apiSecret: true },
+          },
+        },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      const creds =
+        user.exchangeAccounts[0] ?? user.deltaApiKeys[0] ?? null;
+      if (!creds) {
+        res.status(400).json({ error: "No Delta credentials configured for this user" });
+        return;
+      }
+      const totalBalanceUsd = await fetchDeltaTotalBalanceUsd(
+        creds.apiKey,
+        creds.apiSecret,
+      );
+      res.json({
+        userId: user.id,
+        email: user.email,
+        totalBalanceUsd,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listTransactions(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rows = await prisma.transaction.findMany({
+        orderBy: { createdAt: "desc" },
+        include: {
+          user: { select: { id: true, email: true, name: true } },
+        },
+      });
+      res.json({
+        transactions: rows.map((t) => ({
+          id: t.id,
+          userId: t.userId,
+          userEmail: t.user.email,
+          userName: t.user.name,
+          amount: t.amount,
+          type: t.type,
+          status: t.status,
+          createdAt: t.createdAt,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
     closeManualTrade,
     flushUserTrades,
+    sendResetPasswordLink,
+    getDashboardStats,
+    getUserBalance,
+    listTransactions,
   };
 }
 

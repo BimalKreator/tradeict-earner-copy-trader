@@ -51,6 +51,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });
   });
+  router.get("/dashboard-stats", adminController.getDashboardStats);
+  router.get("/transactions", adminController.listTransactions);
 
   router.get("/users", async (_req, res, next) => {
     try {
@@ -92,6 +94,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           id: true,
           name: true,
           email: true,
+          mobile: true,
+          address: true,
+          panNumber: true,
+          aadhaarNumber: true,
           status: true,
           deltaApiKeys: {
             orderBy: { id: "desc" },
@@ -120,6 +126,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           id: user.id,
           name: user.name,
           email: user.email,
+          mobile: user.mobile,
+          address: user.address,
+          panNumber: user.panNumber,
+          aadhaarNumber: user.aadhaarNumber,
           status: user.status,
         },
         deltaApiKey: user.deltaApiKeys[0] ?? null,
@@ -246,6 +256,98 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   router.get("/users/:id/trades", adminController.getUserTradesBilling);
+  router.get("/users/:id/transactions", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const rows = await prisma.transaction.findMany({
+        where: { userId: id },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          amount: true,
+          type: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+      res.json({ transactions: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+  router.get("/users/:id/change-requests", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const rows = await prisma.profileUpdateRequest.findMany({
+        where: { userId: id, status: "PENDING" },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          address: true,
+          panNumber: true,
+          aadhaarNumber: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+      const current = await prisma.user.findUnique({
+        where: { id },
+        select: { address: true, panNumber: true, aadhaarNumber: true },
+      });
+      res.json({ current, requests: rows });
+    } catch (err) {
+      next(err);
+    }
+  });
+  router.post("/users/:id/change-requests/:requestId/approve", async (req, res, next) => {
+    try {
+      const { id, requestId } = req.params;
+      const reqRow = await prisma.profileUpdateRequest.findFirst({
+        where: { id: requestId, userId: id, status: "PENDING" },
+      });
+      if (!reqRow) {
+        res.status(404).json({ error: "Pending profile update request not found" });
+        return;
+      }
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id },
+          data: {
+            ...(reqRow.address !== null ? { address: reqRow.address } : {}),
+            ...(reqRow.panNumber !== null ? { panNumber: reqRow.panNumber } : {}),
+            ...(reqRow.aadhaarNumber !== null
+              ? { aadhaarNumber: reqRow.aadhaarNumber }
+              : {}),
+          },
+        }),
+        prisma.profileUpdateRequest.update({
+          where: { id: reqRow.id },
+          data: { status: "APPROVED", reviewedAt: new Date() },
+        }),
+      ]);
+      res.json({ ok: true, message: "Profile update request approved." });
+    } catch (err) {
+      next(err);
+    }
+  });
+  router.post("/users/:id/change-requests/:requestId/reject", async (req, res, next) => {
+    try {
+      const { id, requestId } = req.params;
+      const updated = await prisma.profileUpdateRequest.updateMany({
+        where: { id: requestId, userId: id, status: "PENDING" },
+        data: { status: "REJECTED", reviewedAt: new Date() },
+      });
+      if (updated.count === 0) {
+        res.status(404).json({ error: "Pending profile update request not found" });
+        return;
+      }
+      res.json({ ok: true, message: "Profile update request rejected." });
+    } catch (err) {
+      next(err);
+    }
+  });
+  router.get("/users/:id/balance", adminController.getUserBalance);
+  router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
   router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
   router.post("/trades/close-manual", adminController.closeManualTrade);
 

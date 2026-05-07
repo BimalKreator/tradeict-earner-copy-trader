@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
+import { fetchDeltaTotalBalanceUsd } from "../services/exchangeService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -24,6 +25,9 @@ export function createUserController(prisma: PrismaClient) {
           email: true,
           name: true,
           mobile: true,
+          address: true,
+          panNumber: true,
+          aadhaarNumber: true,
           role: true,
           status: true,
         },
@@ -34,7 +38,109 @@ export function createUserController(prisma: PrismaClient) {
         return;
       }
 
-      res.json(user);
+      const pending = await prisma.profileUpdateRequest.findFirst({
+        where: { userId, status: "PENDING" },
+        orderBy: { createdAt: "desc" },
+        select: { address: true, panNumber: true, aadhaarNumber: true },
+      });
+      const pendingFields: string[] = [];
+      if (pending?.address != null) pendingFields.push("address");
+      if (pending?.panNumber != null) pendingFields.push("panNumber");
+      if (pending?.aadhaarNumber != null) pendingFields.push("aadhaarNumber");
+      res.json({ ...user, pendingApprovalFields: pendingFields });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getDashboardOverview(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const [activeSubs, allClosedTrades, todayTrades, userWithCreds, strategyPnl] =
+        await Promise.all([
+          prisma.userSubscription.count({
+            where: { userId, status: "ACTIVE" },
+          }),
+          prisma.trade.findMany({
+            where: { userId, status: "CLOSED" },
+            select: { tradePnl: true },
+          }),
+          prisma.trade.findMany({
+            where: { userId, status: "CLOSED", createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+            select: { tradePnl: true },
+          }),
+          prisma.user.findUnique({
+            where: { id: userId },
+            select: {
+              exchangeAccounts: {
+                orderBy: { createdAt: "desc" },
+                take: 1,
+                select: { apiKey: true, apiSecret: true },
+              },
+              deltaApiKeys: {
+                orderBy: { id: "desc" },
+                take: 1,
+                select: { apiKey: true, apiSecret: true },
+              },
+            },
+          }),
+          prisma.pnLRecord.groupBy({
+            by: ["strategyId"],
+            where: { userId },
+            _sum: { profitAmount: true },
+            orderBy: { _sum: { profitAmount: "desc" } },
+            take: 6,
+          }),
+        ]);
+
+      const wins = allClosedTrades.filter((t) => t.tradePnl > 0).length;
+      const totalClosed = allClosedTrades.length;
+      const totalWinRate = totalClosed > 0 ? (wins / totalClosed) * 100 : 0;
+      const todaysPnl = todayTrades.reduce((s, t) => s + t.tradePnl, 0);
+
+      const strategyIds = strategyPnl.map((s) => s.strategyId);
+      const strategies = await prisma.strategy.findMany({
+        where: { id: { in: strategyIds } },
+        select: { id: true, title: true },
+      });
+      const titleMap = new Map(strategies.map((s) => [s.id, s.title]));
+
+      let totalPortfolioValueUsd = 0;
+      const creds =
+        userWithCreds?.exchangeAccounts[0] ?? userWithCreds?.deltaApiKeys[0] ?? null;
+      if (creds) {
+        try {
+          totalPortfolioValueUsd = await fetchDeltaTotalBalanceUsd(
+            creds.apiKey,
+            creds.apiSecret,
+          );
+        } catch {
+          totalPortfolioValueUsd = 0;
+        }
+      }
+
+      res.json({
+        totalPortfolioValueUsd,
+        activeSubscriptions: activeSubs,
+        quickStats: {
+          todaysPnl,
+          totalWinRate,
+        },
+        activeStrategyPerformance: strategyPnl.map((s) => ({
+          strategyId: s.strategyId,
+          strategyTitle: titleMap.get(s.strategyId) ?? "Unknown Strategy",
+          pnl: s._sum.profitAmount ?? 0,
+        })),
+      });
     } catch (err) {
       next(err);
     }
@@ -52,8 +158,19 @@ export function createUserController(prisma: PrismaClient) {
         return;
       }
 
-      const body = req.body as { name?: unknown; mobile?: unknown };
+      const body = req.body as {
+        name?: unknown;
+        mobile?: unknown;
+        address?: unknown;
+        panNumber?: unknown;
+        aadhaarNumber?: unknown;
+      };
       const data: { name?: string | null; mobile?: string | null } = {};
+      const profileReq: {
+        address?: string | null;
+        panNumber?: string | null;
+        aadhaarNumber?: string | null;
+      } = {};
 
       if ("name" in body) {
         if (body.name === null || body.name === undefined) {
@@ -79,22 +196,93 @@ export function createUserController(prisma: PrismaClient) {
         }
       }
 
-      if (Object.keys(data).length === 0) {
-        res.status(400).json({ error: "Provide name and/or mobile to update" });
+      if ("address" in body) {
+        if (body.address === null || body.address === undefined) {
+          profileReq.address = null;
+        } else if (typeof body.address === "string") {
+          const s = body.address.trim();
+          profileReq.address = s.length ? s : null;
+        } else {
+          res.status(400).json({ error: "address must be a string or null" });
+          return;
+        }
+      }
+      if ("panNumber" in body) {
+        if (body.panNumber === null || body.panNumber === undefined) {
+          profileReq.panNumber = null;
+        } else if (typeof body.panNumber === "string") {
+          const s = body.panNumber.trim();
+          profileReq.panNumber = s.length ? s : null;
+        } else {
+          res.status(400).json({ error: "panNumber must be a string or null" });
+          return;
+        }
+      }
+      if ("aadhaarNumber" in body) {
+        if (body.aadhaarNumber === null || body.aadhaarNumber === undefined) {
+          profileReq.aadhaarNumber = null;
+        } else if (typeof body.aadhaarNumber === "string") {
+          const s = body.aadhaarNumber.trim();
+          profileReq.aadhaarNumber = s.length ? s : null;
+        } else {
+          res.status(400).json({ error: "aadhaarNumber must be a string or null" });
+          return;
+        }
+      }
+
+      const hasDirect = Object.keys(data).length > 0;
+      const hasProfileRequest = Object.keys(profileReq).length > 0;
+      if (!hasDirect && !hasProfileRequest) {
+        res.status(400).json({
+          error:
+            "Provide at least one field to update: name, mobile, address, panNumber, or aadhaarNumber",
+        });
         return;
       }
 
-      const user = await prisma.user.update({
+      let user = await prisma.user.findUnique({
         where: { id: userId },
-        data,
-        select: {
-          id: true,
-          email: true,
-          name: true,
-          mobile: true,
-        },
+        select: { id: true, email: true, name: true, mobile: true },
       });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      if (hasDirect) {
+        user = await prisma.user.update({
+          where: { id: userId },
+          data,
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            mobile: true,
+          },
+        });
+      }
+      if (hasProfileRequest) {
+        await prisma.profileUpdateRequest.create({
+          data: {
+            userId,
+            ...(profileReq.address !== undefined ? { address: profileReq.address } : {}),
+            ...(profileReq.panNumber !== undefined
+              ? { panNumber: profileReq.panNumber }
+              : {}),
+            ...(profileReq.aadhaarNumber !== undefined
+              ? { aadhaarNumber: profileReq.aadhaarNumber }
+              : {}),
+          },
+        });
+      }
 
+      if (hasProfileRequest) {
+        res.json({
+          user,
+          message:
+            "Profile update request submitted. Changes will reflect after admin approval.",
+        });
+        return;
+      }
       res.json(user);
     } catch (err) {
       next(err);
@@ -251,5 +439,5 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
-  return { getMe, patchMe, listTrades, listInvoices };
+  return { getMe, patchMe, listTrades, listInvoices, getDashboardOverview };
 }

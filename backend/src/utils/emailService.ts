@@ -146,3 +146,34 @@ export async function sendOtpEmail(
     html: buildOtpHtml(otp, purpose),
   });
 }
+
+export async function sendPasswordResetLinkEmail(
+  to: string,
+  resetLink: string,
+): Promise<void> {
+  const transport = createMailTransport();
+  await transport.sendMail({
+    from: getFromAddress(),
+    to,
+    subject: "Reset your password — TradeICT Earner",
+    text: [
+      "TradeICT Earner",
+      "",
+      "A password reset was requested for your account.",
+      `Reset link: ${resetLink}`,
+      "",
+      "If you did not request this, you can safely ignore this email.",
+    ].join("\n"),
+    html: `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0">
+  <h2 style="margin-top:0;color:#f8fafc">TradeICT Earner</h2>
+  <p>A password reset was requested for your account.</p>
+  <p>
+    <a href="${escapeHtml(resetLink)}" style="color:#38bdf8">Reset your password</a>
+  </p>
+  <p style="font-size:12px;color:#94a3b8">If you did not request this, you can safely ignore this email.</p>
+</body>
+</html>`,
+  });
+}

@@ -37,6 +37,17 @@ enum TransactionStatus {
   REJECTED
 }
 
+enum TransactionType {
+  PAYMENT
+  FEE
+}
+
+enum ProfileUpdateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum InvoiceStatus {
   PENDING
   PAID
@@ -49,6 +60,9 @@ model User {
   password      String
   name          String?
   mobile        String?
+  address       String?
+  panNumber     String?
+  aadhaarNumber String?
   role          Role                @default(USER)
   status        UserStatus          @default(ACTIVE)
   otpCode       String?
@@ -67,6 +81,7 @@ model User {
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
   activities    UserActivity[]
+  profileUpdateRequests ProfileUpdateRequest[]
 }
 
 model OtpRecord {
@@ -186,11 +201,27 @@ model Transaction {
   id        String            @id @default(uuid())
   userId    String
   amount    Float
+  type      TransactionType   @default(PAYMENT)
   utrNumber String?           @unique
   status    TransactionStatus @default(PENDING)
   createdAt DateTime          @default(now())
 
   user User @relation(fields: [userId], references: [id])
+}
+
+model ProfileUpdateRequest {
+  id            String              @id @default(uuid())
+  userId        String
+  address       String?
+  panNumber     String?
+  aadhaarNumber String?
+  status        ProfileUpdateStatus @default(PENDING)
+  createdAt     DateTime            @default(now())
+  reviewedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, createdAt])
 }
 
 model DeltaApiKey {

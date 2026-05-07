@@ -11,12 +11,17 @@ type Me = {
   email: string;
   name: string | null;
   mobile: string | null;
+  address: string | null;
+  panNumber: string | null;
+  aadhaarNumber: string | null;
+  pendingApprovalFields?: string[];
 };
 
 export default function DashboardProfilePage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [name, setName] = useState("");
-  const [mobile, setMobile] = useState("");
+  const [address, setAddress] = useState("");
+  const [panNumber, setPanNumber] = useState("");
+  const [aadhaarNumber, setAadhaarNumber] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,8 +62,9 @@ export default function DashboardProfilePage() {
       }
       const row = data as Me;
       setMe(row);
-      setName(row.name ?? "");
-      setMobile(row.mobile ?? "");
+      setAddress(row.address ?? "");
+      setPanNumber(row.panNumber ?? "");
+      setAadhaarNumber(row.aadhaarNumber ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load profile");
       setMe(null);
@@ -89,8 +95,9 @@ export default function DashboardProfilePage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: name.trim() || null,
-          mobile: mobile.trim() || null,
+          address: address.trim() || null,
+          panNumber: panNumber.trim() || null,
+          aadhaarNumber: aadhaarNumber.trim() || null,
         }),
       });
       const body: unknown = await res.json().catch(() => ({}));
@@ -104,10 +111,11 @@ export default function DashboardProfilePage() {
             : `Save failed (${res.status})`;
         throw new Error(msg);
       }
-      const row = body as Me;
-      setMe(row);
-      setName(row.name ?? "");
-      setMobile(row.mobile ?? "");
+      const row = body as { user: Me; message?: string };
+      setMe(row.user);
+      setAddress(row.user.address ?? "");
+      setPanNumber(row.user.panNumber ?? "");
+      setAadhaarNumber(row.user.aadhaarNumber ?? "");
       setSuccess(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
@@ -142,7 +150,7 @@ export default function DashboardProfilePage() {
               Profile
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Update your display name and mobile number.
+              Manage your profile and KYC details.
             </p>
           </div>
         </div>
@@ -163,6 +171,14 @@ export default function DashboardProfilePage() {
                 <p className="mt-1 text-sm text-white/85">{me.email}</p>
               </div>
             )}
+            {me && (
+              <div className="rounded-lg border border-white/[0.08] bg-black/25 px-4 py-3">
+                <p className="text-xs font-medium uppercase tracking-wider text-white/40">
+                  Mobile
+                </p>
+                <p className="mt-1 text-sm text-white/85">{me.mobile ?? "—"}</p>
+              </div>
+            )}
 
             {error && (
               <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -172,31 +188,58 @@ export default function DashboardProfilePage() {
 
             {success && (
               <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                Profile saved.
+                Your update request has been submitted to the Admin. Changes will be reflected in your profile once approved.
               </div>
             )}
 
             <label className="block">
-              <span className="text-xs font-medium text-white/60">Name</span>
+              <span className="text-xs font-medium text-white/60">Address</span>
+              {me?.pendingApprovalFields?.includes("address") && (
+                <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-200">
+                  Pending Approval
+                </span>
+              )}
               <input
                 type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                autoComplete="name"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                disabled={Boolean(me?.pendingApprovalFields?.includes("address"))}
                 className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2"
-                placeholder="Your name"
+                placeholder="Your address"
               />
             </label>
 
             <label className="block">
-              <span className="text-xs font-medium text-white/60">Mobile</span>
+              <span className="text-xs font-medium text-white/60">PAN Card</span>
+              {me?.pendingApprovalFields?.includes("panNumber") && (
+                <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-200">
+                  Pending Approval
+                </span>
+              )}
               <input
-                type="tel"
-                value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
-                autoComplete="tel"
+                type="text"
+                value={panNumber}
+                onChange={(e) => setPanNumber(e.target.value)}
+                disabled={Boolean(me?.pendingApprovalFields?.includes("panNumber"))}
                 className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2"
-                placeholder="+91 …"
+                placeholder="ABCDE1234F"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-xs font-medium text-white/60">Aadhaar Number</span>
+              {me?.pendingApprovalFields?.includes("aadhaarNumber") && (
+                <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-200">
+                  Pending Approval
+                </span>
+              )}
+              <input
+                type="text"
+                value={aadhaarNumber}
+                onChange={(e) => setAadhaarNumber(e.target.value)}
+                disabled={Boolean(me?.pendingApprovalFields?.includes("aadhaarNumber"))}
+                className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2"
+                placeholder="1234 5678 9012"
               />
             </label>
 
