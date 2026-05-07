@@ -1,0 +1,660 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { Loader2 } from "lucide-react";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+
+type UserState = {
+  id: string;
+  email: string;
+  name: string | null;
+  mobile: string | null;
+  address: string | null;
+  panNumber: string | null;
+  aadhaarNumber: string | null;
+  status: "ACTIVE" | "SUSPENDED" | string;
+};
+
+type ManagementPayload = {
+  user: UserState;
+  deltaApiKey: { id: string; nickname: string; apiKey: string; apiSecret: string } | null;
+  exchangeAccount:
+    | {
+        id: string;
+        nickname: string;
+        exchange: string;
+        apiKey: string;
+        apiSecret: string;
+      }
+    | null;
+};
+
+type UserStrategy = {
+  id: string;
+  strategyTitle: string;
+  status: string;
+  multiplier: number;
+};
+
+type UserTrade = {
+  id: string;
+  createdAt: string;
+  symbol: string;
+  side: string;
+  pnl: number;
+  tradingFee: number;
+  adminRevenue: number;
+};
+
+type UserTransaction = {
+  id: string;
+  amount: number;
+  type: string;
+  status: string;
+  createdAt: string;
+};
+
+type ProfileChangeRequest = {
+  id: string;
+  address: string | null;
+  panNumber: string | null;
+  aadhaarNumber: string | null;
+  createdAt: string;
+};
+
+export default function AdminUserDetails({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const userId = String(params?.id ?? "");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [tab, setTab] = useState<
+    "management" | "subscriptions" | "trades" | "transactions"
+  >("management");
+
+  const [user, setUser] = useState<UserState | null>(null);
+  const [balanceUsd, setBalanceUsd] = useState<number>(0);
+  const [strategies, setStrategies] = useState<UserStrategy[]>([]);
+  const [trades, setTrades] = useState<UserTrade[]>([]);
+  const [transactions, setTransactions] = useState<UserTransaction[]>([]);
+  const [requests, setRequests] = useState<ProfileChangeRequest[]>([]);
+  const [currentProfile, setCurrentProfile] = useState<{
+    address: string | null;
+    panNumber: string | null;
+    aadhaarNumber: string | null;
+  } | null>(null);
+
+  const [statusDraft, setStatusDraft] = useState("ACTIVE");
+  const [nicknameDraft, setNicknameDraft] = useState("Primary");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiSecretDraft, setApiSecretDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [flushing, setFlushing] = useState(false);
+  const [sendingReset, setSendingReset] = useState(false);
+  const [tradeStartDate, setTradeStartDate] = useState("");
+  const [tradeEndDate, setTradeEndDate] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  const authHeaders = useMemo(() => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    return { Authorization: `Bearer ${token ?? ""}` };
+  }, []);
+
+  async function loadAll(): Promise<void> {
+    if (!userId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [mgRes, balRes, stRes, trRes, txRes, reqRes] = await Promise.all([
+        fetch(`${API_BASE}/admin/users/${userId}/management`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/balance`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/strategies`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/trades`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/transactions`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
+      ]);
+      if (!mgRes.ok || !balRes.ok || !stRes.ok || !trRes.ok || !txRes.ok || !reqRes.ok) {
+        throw new Error("Failed to load user details.");
+      }
+
+      const mg = (await mgRes.json()) as ManagementPayload;
+      const bal = (await balRes.json()) as { totalBalanceUsd?: number };
+      const st = (await stRes.json()) as { strategies?: UserStrategy[] };
+      const tr = (await trRes.json()) as { trades?: UserTrade[] };
+      const tx = (await txRes.json()) as { transactions?: UserTransaction[] };
+      const reqData = (await reqRes.json()) as {
+        current?: { address: string | null; panNumber: string | null; aadhaarNumber: string | null };
+        requests?: ProfileChangeRequest[];
+      };
+
+      setUser(mg.user);
+      setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
+      const source = mg.deltaApiKey ?? mg.exchangeAccount;
+      setNicknameDraft(source?.nickname ?? "Primary");
+      setApiKeyDraft(source?.apiKey ?? "");
+      setApiSecretDraft(source?.apiSecret ?? "");
+      setBalanceUsd(Number.isFinite(bal.totalBalanceUsd ?? NaN) ? (bal.totalBalanceUsd as number) : 0);
+      setStrategies(st.strategies ?? []);
+      setTrades(tr.trades ?? []);
+      setTransactions(tx.transactions ?? []);
+      setCurrentProfile(reqData.current ?? null);
+      setRequests(reqData.requests ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load page.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount/user switch fetch is intentional
+    void loadAll();
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filteredTrades = useMemo(() => {
+    const start = tradeStartDate ? new Date(`${tradeStartDate}T00:00:00`) : null;
+    const end = tradeEndDate ? new Date(`${tradeEndDate}T23:59:59.999`) : null;
+    return trades.filter((t) => {
+      const when = new Date(t.createdAt);
+      if (start && when < start) return false;
+      if (end && when > end) return false;
+      return true;
+    });
+  }, [tradeEndDate, tradeStartDate, trades]);
+
+  async function saveManagement(): Promise<void> {
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const [statusRes, keysRes] = await Promise.all([
+        fetch(`${API_BASE}/admin/users/${userId}/status`, {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ status: statusDraft }),
+        }),
+        fetch(`${API_BASE}/admin/users/${userId}/api-keys`, {
+          method: "PUT",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nickname: nicknameDraft,
+            apiKey: apiKeyDraft,
+            apiSecret: apiSecretDraft,
+          }),
+        }),
+      ]);
+      if (!statusRes.ok || !keysRes.ok) {
+        throw new Error("Failed to save management settings.");
+      }
+      setNotice("Management settings updated successfully.");
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save settings.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function flushTradeHistory(): Promise<void> {
+    const ok = window.confirm(
+      "Delete only closed/failed trades for this user? Open trades will be kept and a backup CSV will be created.",
+    );
+    if (!ok) return;
+    setFlushing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}/trades/flush`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      if (!res.ok) throw new Error("Failed to flush trade history.");
+      const body = (await res.json()) as { backupFile?: string; deleted?: number };
+      setNotice(
+        body.backupFile
+          ? `Flush backup created and ${body.deleted ?? 0} records deleted successfully.`
+          : `${body.deleted ?? 0} records deleted successfully.`,
+      );
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to flush trade history.");
+    } finally {
+      setFlushing(false);
+    }
+  }
+
+  async function sendResetLink(): Promise<void> {
+    setSendingReset(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}/reset-password-link`, {
+        method: "POST",
+        headers: authHeaders,
+      });
+      const body = (await res.json().catch(() => ({}))) as { message?: string };
+      if (!res.ok) throw new Error("Failed to send password reset link.");
+      setNotice(body.message ?? "Password reset link sent successfully.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to send reset link.");
+    } finally {
+      setSendingReset(false);
+    }
+  }
+
+  async function generateTradeExport(): Promise<void> {
+    setExporting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const qs = new URLSearchParams();
+      if (tradeStartDate) qs.set("startDate", tradeStartDate);
+      if (tradeEndDate) qs.set("endDate", tradeEndDate);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const res = await fetch(`${API_BASE}/admin/trades/export${suffix}`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      if (!res.ok) throw new Error("Failed to trigger export.");
+      setNotice("File is being generated. Check the Downloads page shortly.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to trigger export.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function decideRequest(
+    requestId: string,
+    action: "approve" | "reject",
+  ): Promise<void> {
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/users/${userId}/change-requests/${requestId}/${action}`,
+        { method: "POST", headers: authHeaders },
+      );
+      if (!res.ok) throw new Error(`Failed to ${action} request.`);
+      setNotice(
+        action === "approve"
+          ? "Profile update request approved."
+          : "Profile update request rejected.",
+      );
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Failed to ${action} request.`);
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">User Management</h1>
+          <p className="mt-1 text-sm text-white/55">
+            {user ? `${user.name ?? "Unnamed User"} · ${user.email}` : "Loading user details..."}
+          </p>
+        </div>
+        <Link
+          href="/admin/users"
+          className="rounded-lg border border-glassBorder px-3 py-2 text-sm text-white/80 hover:bg-white/10"
+        >
+          Back to Users
+        </Link>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+          {notice}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-16 text-center text-white/60">
+          <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+        </div>
+      ) : (
+        <>
+          <div className="rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+            <div className="grid gap-3 md:grid-cols-3">
+              <InfoField label="Name" value={user?.name ?? "—"} />
+              <InfoField label="Email" value={user?.email ?? "—"} />
+              <InfoField label="Mobile" value={user?.mobile ?? "—"} />
+              <InfoField label="Current Address" value={user?.address ?? "—"} />
+              <InfoField label="PAN" value={user?.panNumber ?? "—"} />
+              <InfoField label="Aadhaar" value={user?.aadhaarNumber ?? "—"} />
+              <InfoField label="Delta Exchange Total Balance" value={`$${balanceUsd.toFixed(2)}`} />
+            </div>
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => void sendResetLink()}
+                disabled={sendingReset}
+                className="rounded-lg border border-blue-500/45 bg-blue-500/15 px-3 py-2 text-xs font-medium text-blue-200 hover:bg-blue-500/25 disabled:opacity-60"
+              >
+                {sendingReset ? "Sending..." : "Send Password Reset Link"}
+              </button>
+            </div>
+          </div>
+
+          <div className="inline-flex rounded-lg border border-glassBorder bg-white/[0.03] p-1 text-sm">
+            <TabButton active={tab === "management"} onClick={() => setTab("management")}>
+              Management
+            </TabButton>
+            <TabButton active={tab === "subscriptions"} onClick={() => setTab("subscriptions")}>
+              Subscriptions
+            </TabButton>
+            <TabButton active={tab === "trades"} onClick={() => setTab("trades")}>
+              Trade History
+            </TabButton>
+            <TabButton active={tab === "transactions"} onClick={() => setTab("transactions")}>
+              Transactions & Approvals
+            </TabButton>
+          </div>
+
+          {tab === "management" && (
+            <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-white/70">
+                  User Status
+                  <select
+                    value={statusDraft}
+                    onChange={(e) => setStatusDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  >
+                    <option value="ACTIVE">Active</option>
+                    <option value="SUSPENDED">Paused</option>
+                  </select>
+                </label>
+                <label className="text-sm text-white/70">
+                  API Nickname
+                  <input
+                    value={nicknameDraft}
+                    onChange={(e) => setNicknameDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="text-sm text-white/70">
+                  API Key
+                  <input
+                    value={apiKeyDraft}
+                    onChange={(e) => setApiKeyDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="text-sm text-white/70">
+                  API Secret
+                  <input
+                    value={apiSecretDraft}
+                    onChange={(e) => setApiSecretDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void saveManagement()}
+                  disabled={saving}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                >
+                  {saving ? "Saving..." : "Save Management Changes"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void flushTradeHistory()}
+                  disabled={flushing}
+                  className="rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/25 disabled:opacity-60"
+                >
+                  {flushing ? "Flushing..." : "Flush Trade History"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {tab === "subscriptions" && (
+            <div className="space-y-2">
+              {strategies.length === 0 ? (
+                <p className="text-sm text-white/55">No subscriptions found.</p>
+              ) : (
+                strategies.map((s) => (
+                  <div
+                    key={s.id}
+                    className="rounded-lg border border-glassBorder bg-white/[0.02] px-4 py-3 text-sm"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-white">{s.strategyTitle}</span>
+                      <span className="rounded bg-white/10 px-2 py-0.5 text-xs text-white/80">
+                        {s.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-white/60">Multiplier: {s.multiplier}x</p>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {tab === "trades" && (
+            <div className="rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+              <div className="mb-3 flex flex-wrap items-end gap-3">
+                <label className="text-xs text-white/60">
+                  Start Date
+                  <input
+                    type="date"
+                    value={tradeStartDate}
+                    onChange={(e) => setTradeStartDate(e.target.value)}
+                    className="mt-1 block rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="text-xs text-white/60">
+                  End Date
+                  <input
+                    type="date"
+                    value={tradeEndDate}
+                    onChange={(e) => setTradeEndDate(e.target.value)}
+                    className="mt-1 block rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void generateTradeExport()}
+                  disabled={exporting}
+                  className="rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-3 py-2 text-xs font-medium text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-60"
+                >
+                  {exporting ? "Generating..." : "Generate Export"}
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[820px] text-left text-sm">
+                  <thead className="border-b border-glassBorder bg-white/[0.03] text-white/70">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Date</th>
+                      <th className="px-3 py-2 font-medium">Symbol</th>
+                      <th className="px-3 py-2 font-medium">Side</th>
+                      <th className="px-3 py-2 font-medium">Net PnL</th>
+                      <th className="px-3 py-2 font-medium">Trading Fee</th>
+                      <th className="px-3 py-2 font-medium">Admin Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredTrades.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-3 py-8 text-center text-white/45">
+                          No trades found for selected range.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredTrades.map((t) => (
+                        <tr key={t.id} className="border-b border-white/[0.06] last:border-0">
+                          <td className="px-3 py-2 text-white/60">{new Date(t.createdAt).toLocaleString()}</td>
+                          <td className="px-3 py-2 text-white">{t.symbol}</td>
+                          <td className="px-3 py-2 text-white/80">{t.side}</td>
+                          <td className={`px-3 py-2 ${t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                            ${t.pnl.toFixed(2)}
+                          </td>
+                          <td className="px-3 py-2 text-white">${t.tradingFee.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-white">${t.adminRevenue.toFixed(2)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {tab === "transactions" && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+                <h3 className="mb-3 text-sm font-medium text-white">Transactions</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[740px] text-left text-sm">
+                    <thead className="border-b border-glassBorder bg-white/[0.03] text-white/70">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">Date</th>
+                        <th className="px-3 py-2 font-medium">Type</th>
+                        <th className="px-3 py-2 font-medium">Status</th>
+                        <th className="px-3 py-2 font-medium">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {transactions.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="px-3 py-8 text-center text-white/45">
+                            No transactions found.
+                          </td>
+                        </tr>
+                      ) : (
+                        transactions.map((t) => (
+                          <tr key={t.id} className="border-b border-white/[0.06] last:border-0">
+                            <td className="px-3 py-2 text-white/60">{new Date(t.createdAt).toLocaleString()}</td>
+                            <td className="px-3 py-2 text-white">{t.type}</td>
+                            <td className="px-3 py-2 text-white/80">{t.status}</td>
+                            <td className="px-3 py-2 text-white">${t.amount.toFixed(2)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+                <h3 className="mb-3 text-sm font-medium text-white">Pending Profile Update Requests</h3>
+                {requests.length === 0 ? (
+                  <p className="text-sm text-white/55">No pending requests.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {requests.map((r) => (
+                      <div key={r.id} className="rounded-lg border border-white/10 p-3">
+                        <p className="text-xs text-white/45">
+                          Requested on {new Date(r.createdAt).toLocaleString()}
+                        </p>
+                        <div className="mt-2 grid gap-2 md:grid-cols-3">
+                          <RequestField
+                            label="Address"
+                            current={currentProfile?.address ?? null}
+                            requested={r.address}
+                          />
+                          <RequestField
+                            label="PAN"
+                            current={currentProfile?.panNumber ?? null}
+                            requested={r.panNumber}
+                          />
+                          <RequestField
+                            label="Aadhaar"
+                            current={currentProfile?.aadhaarNumber ?? null}
+                            requested={r.aadhaarNumber}
+                          />
+                        </div>
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void decideRequest(r.id, "approve")}
+                            className="rounded-md bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/30"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void decideRequest(r.id, "reject")}
+                            className="rounded-md bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/30"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md px-3 py-1.5 ${
+        active ? "bg-primary/20 text-primary" : "text-white/70 hover:bg-white/5"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function InfoField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-white/10 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wider text-white/45">{label}</p>
+      <p className="mt-1 text-sm text-white">{value || "—"}</p>
+    </div>
+  );
+}
+
+function RequestField({
+  label,
+  current,
+  requested,
+}: {
+  label: string;
+  current: string | null;
+  requested: string | null;
+}) {
+  return (
+    <div className="rounded-md border border-white/10 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wider text-white/45">{label}</p>
+      <p className="mt-1 text-xs text-white/50">Current: {current ?? "—"}</p>
+      <p className="mt-1 text-sm text-cyan-200">Requested: {requested ?? "—"}</p>
+    </div>
+  );
+}
