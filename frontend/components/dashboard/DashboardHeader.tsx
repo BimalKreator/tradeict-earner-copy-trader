@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Menu, User } from "lucide-react";
+import { NotificationBell } from "@/components/common/NotificationBell";
 
 type DashboardHeaderProps = {
   onMenuClick: () => void;
@@ -40,6 +41,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <NotificationBell />
           <Link
             href="/dashboard/profile"
             className="inline-flex items-center gap-2 rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 hover:text-white"

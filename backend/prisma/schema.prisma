@@ -82,6 +82,8 @@ model User {
   pnlRecords    PnLRecord[]
   activities    UserActivity[]
   profileUpdateRequests ProfileUpdateRequest[]
+  depositRequests DepositRequest[]
+  notifications Notification[]
 }
 
 model OtpRecord {
@@ -222,6 +224,36 @@ model ProfileUpdateRequest {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status, createdAt])
+}
+
+model DepositRequest {
+  id            String   @id @default(uuid())
+  userId        String
+  amount        Float
+  transactionId String
+  screenshotUrl String?
+  status        String   @default("PENDING")
+  adminReason   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String?
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
 }
 
 model DeltaApiKey {

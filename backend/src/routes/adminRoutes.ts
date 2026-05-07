@@ -23,6 +23,7 @@ import {
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
 import { createAdminController } from "../controllers/adminController.js";
+import { createDepositController } from "../controllers/depositController.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -45,6 +46,7 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const adminController = createAdminController(prisma);
+  const deposits = createDepositController(prisma);
 
   router.use(authenticateToken(), isAdmin(prisma));
 
@@ -53,6 +55,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
   router.get("/dashboard-stats", adminController.getDashboardStats);
   router.get("/transactions", adminController.listTransactions);
+  router.get("/deposits", deposits.listAllDeposits);
+  router.put("/deposits/:id", deposits.updateDepositStatus);
 
   router.get("/users", async (_req, res, next) => {
     try {

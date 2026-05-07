@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Eye,
   Loader2,
   RefreshCw,
   Wallet,
@@ -13,20 +14,22 @@ import { useCallback, useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
-type TxUser = { id: string; email: string };
-
-type WalletTx = {
+type DepositTx = {
   id: string;
   userId: string;
+  userEmail: string;
+  userName: string | null;
   amount: number;
-  utrNumber: string | null;
+  transactionId: string;
+  screenshotUrl: string | null;
   status: "PENDING" | "APPROVED" | "REJECTED";
+  adminReason: string | null;
   createdAt: string;
-  user: TxUser;
+  updatedAt: string;
 };
 
 export default function AdminFundsPage() {
-  const [items, setItems] = useState<WalletTx[]>([]);
+  const [items, setItems] = useState<DepositTx[]>([]);
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
   const [unauthorized, setUnauthorized] = useState(false);
@@ -34,6 +37,12 @@ export default function AdminFundsPage() {
   const [rowAction, setRowAction] = useState<Record<string, "approve" | "reject">>(
     {},
   );
+  const [screenshotModal, setScreenshotModal] = useState<string | null>(null);
+  const [decisionModal, setDecisionModal] = useState<{
+    id: string;
+    action: "APPROVED" | "REJECTED";
+  } | null>(null);
+  const [adminReason, setAdminReason] = useState("");
 
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -53,7 +62,7 @@ export default function AdminFundsPage() {
     setForbidden(false);
 
     try {
-      const res = await fetch(`${API_BASE}/wallet/transactions`, {
+      const res = await fetch(`${API_BASE}/admin/deposits`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -81,10 +90,16 @@ export default function AdminFundsPage() {
       }
 
       const data: unknown = await res.json();
-      if (!Array.isArray(data)) throw new Error("Invalid response");
-      setItems(data as WalletTx[]);
+      if (
+        typeof data !== "object" ||
+        data === null ||
+        !Array.isArray((data as { deposits?: unknown }).deposits)
+      ) {
+        throw new Error("Invalid response");
+      }
+      setItems((data as { deposits: DepositTx[] }).deposits);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load transactions");
+      setError(e instanceof Error ? e.message : "Failed to load deposit requests");
       setItems([]);
     } finally {
       setLoading(false);
@@ -96,7 +111,7 @@ export default function AdminFundsPage() {
     void load();
   }, [load]);
 
-  async function handleApproveAction(id: string, action: "APPROVED" | "REJECTED") {
+  async function handleApproveAction(id: string, action: "APPROVED" | "REJECTED", reason: string) {
     const t = token ?? localStorage.getItem("token");
     if (!t) {
       setUnauthorized(true);
@@ -107,13 +122,13 @@ export default function AdminFundsPage() {
     setRowAction((prev) => ({ ...prev, [id]: key }));
 
     try {
-      const res = await fetch(`${API_BASE}/wallet/approve`, {
-        method: "POST",
+      const res = await fetch(`${API_BASE}/admin/deposits/${id}`, {
+        method: "PUT",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${t}`,
         },
-        body: JSON.stringify({ transactionId: id, action }),
+        body: JSON.stringify({ status: action, adminReason: reason.trim() || null }),
       });
 
       const body: unknown = await res.json().catch(() => ({}));
@@ -197,12 +212,8 @@ export default function AdminFundsPage() {
             <Wallet className="h-6 w-6 text-primary" aria-hidden />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
-              Funds &amp; deposits
-            </h1>
-            <p className="mt-1 text-sm text-white/55">
-              Review UPI top-up requests. Only administrators can approve or reject.
-            </p>
+            <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">Funds &amp; Deposits</h1>
+            <p className="mt-1 text-sm text-white/55">Review user deposit requests and moderate approvals.</p>
           </div>
         </div>
         <button
@@ -230,18 +241,19 @@ export default function AdminFundsPage() {
           <table className="w-full min-w-[920px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
-                <th className="px-4 py-3 font-medium text-white/70">User email</th>
+                <th className="px-4 py-3 font-medium text-white/70">User</th>
                 <th className="px-4 py-3 font-medium text-white/70">Amount</th>
-                <th className="px-4 py-3 font-medium text-white/70">UTR number</th>
+                <th className="px-4 py-3 font-medium text-white/70">TxID</th>
                 <th className="px-4 py-3 font-medium text-white/70">Date</th>
                 <th className="px-4 py-3 font-medium text-white/70">Status</th>
+                <th className="px-4 py-3 font-medium text-white/70">Admin Reason</th>
                 <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-16 text-center text-white/45">
+                  <td colSpan={7} className="px-4 py-16 text-center text-white/45">
                     <Loader2
                       className="mx-auto h-8 w-8 animate-spin text-primary"
                       aria-hidden
@@ -251,7 +263,7 @@ export default function AdminFundsPage() {
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-14 text-center text-white/45">
+                  <td colSpan={7} className="px-4 py-14 text-center text-white/45">
                     No deposit requests yet.
                   </td>
                 </tr>
@@ -267,13 +279,14 @@ export default function AdminFundsPage() {
                       className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
                     >
                       <td className="px-4 py-3 font-medium text-white">
-                        {tx.user?.email ?? "—"}
+                        <p>{tx.userEmail ?? "—"}</p>
+                        <p className="text-xs text-white/45">{tx.userName ?? "—"}</p>
                       </td>
                       <td className="px-4 py-3 tabular-nums text-white/85">
-                        ₹{tx.amount.toLocaleString("en-IN")}
+                        ${tx.amount.toFixed(2)}
                       </td>
                       <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-white/75">
-                        {tx.utrNumber ?? "—"}
+                        {tx.transactionId ?? "—"}
                       </td>
                       <td className="px-4 py-3 text-white/55 tabular-nums">
                         {new Date(tx.createdAt).toLocaleString()}
@@ -291,15 +304,32 @@ export default function AdminFundsPage() {
                           {tx.status}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-white/65">{tx.adminReason?.trim() || "—"}</td>
                       <td className="px-4 py-3">
-                        {pending ? (
-                          <div className="flex flex-wrap gap-2">
+                        <div className="flex flex-wrap gap-2">
+                          {tx.screenshotUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => setScreenshotModal(tx.screenshotUrl)}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-500/25"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                              View Screenshot
+                            </button>
+                          ) : (
+                            <span className="inline-flex rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/40">
+                              No screenshot
+                            </span>
+                          )}
+                          {pending ? (
+                            <>
                             <button
                               type="button"
                               disabled={busyApprove || busyReject}
-                              onClick={() =>
-                                void handleApproveAction(tx.id, "APPROVED")
-                              }
+                              onClick={() => {
+                                setAdminReason("");
+                                setDecisionModal({ id: tx.id, action: "APPROVED" });
+                              }}
                               className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow hover:bg-emerald-500 disabled:opacity-50"
                             >
                               {busyApprove ? (
@@ -312,9 +342,10 @@ export default function AdminFundsPage() {
                             <button
                               type="button"
                               disabled={busyApprove || busyReject}
-                              onClick={() =>
-                                void handleApproveAction(tx.id, "REJECTED")
-                              }
+                              onClick={() => {
+                                setAdminReason("");
+                                setDecisionModal({ id: tx.id, action: "REJECTED" });
+                              }}
                               className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow hover:bg-red-500 disabled:opacity-50"
                             >
                               {busyReject ? (
@@ -324,10 +355,9 @@ export default function AdminFundsPage() {
                               )}
                               Reject
                             </button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-white/35">—</span>
-                        )}
+                            </>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -337,6 +367,76 @@ export default function AdminFundsPage() {
           </table>
         </div>
       </div>
+      {screenshotModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="max-h-[90vh] w-full max-w-4xl overflow-auto rounded-xl border border-glassBorder bg-[#0f1117] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm font-medium text-white">Payment Screenshot</p>
+              <button
+                type="button"
+                onClick={() => setScreenshotModal(null)}
+                className="rounded-md border border-glassBorder px-3 py-1 text-xs text-white/80 hover:bg-white/10"
+              >
+                Close
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`${API_BASE}${screenshotModal}`}
+              alt="Deposit screenshot"
+              className="mx-auto max-h-[75vh] rounded-lg object-contain"
+            />
+          </div>
+        </div>
+      )}
+      {decisionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-md rounded-xl border border-glassBorder bg-[#0f1117] p-5">
+            <h3 className="text-lg font-semibold text-white">
+              {decisionModal.action === "APPROVED" ? "Approve Deposit" : "Reject Deposit"}
+            </h3>
+            <p className="mt-1 text-sm text-white/60">
+              You can provide an optional reason for this decision.
+            </p>
+            <label className="mt-4 block text-sm text-white/70">
+              Admin Reason (optional)
+              <textarea
+                value={adminReason}
+                onChange={(e) => setAdminReason(e.target.value)}
+                rows={4}
+                className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                placeholder="Add context for the user..."
+              />
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDecisionModal(null)}
+                className="rounded-lg border border-glassBorder px-3 py-2 text-sm text-white/80 hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void handleApproveAction(
+                    decisionModal.id,
+                    decisionModal.action,
+                    adminReason,
+                  ).finally(() => setDecisionModal(null))
+                }
+                className={`rounded-lg px-3 py-2 text-sm font-medium text-white ${
+                  decisionModal.action === "APPROVED"
+                    ? "bg-emerald-600 hover:bg-emerald-500"
+                    : "bg-red-600 hover:bg-red-500"
+                }`}
+              >
+                Submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

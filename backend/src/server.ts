@@ -7,6 +7,7 @@ if (!process.env.PROCESS_ENCRYPTION_KEY) {
 
 import cors from "cors";
 import express from "express";
+import path from "node:path";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
@@ -20,6 +21,7 @@ import { createUserRoutes } from "./routes/userRoutes.js";
 import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
 import { createBillingRoutes } from "./routes/billingRoutes.js";
+import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
@@ -66,6 +68,7 @@ app.use(
   }),
 );
 app.use(express.json());
+app.use("/uploads", express.static(path.resolve(process.cwd(), "public", "uploads")));
 
 /** No auth: proves which `dist/` build is live. Stale PM2 shows wrong `deltaEthUsdtToCcxt` (must be `ETH/USD:USD`). */
 app.get("/api/health/build", (_req, res) => {
@@ -78,6 +81,7 @@ app.get("/health/build", (_req, res) => {
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
 app.use("/api/user", createUserRoutes(prisma));
+app.use("/api/notifications", createNotificationRoutes(prisma));
 app.use("/api/exchange-accounts", createExchangeAccountRoutes(prisma));
 
 const liveTradesRoutes = createLiveTradesRoutes(prisma);

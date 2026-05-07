@@ -152,6 +152,11 @@ export default function DashboardProfilePage() {
             <p className="mt-1 text-sm text-white/55">
               Manage your profile and KYC details.
             </p>
+            {me?.name && (
+              <p className="mt-1 text-sm font-medium text-primary">
+                {me.name}
+              </p>
+            )}
           </div>
         </div>
       </header>
