@@ -516,6 +516,89 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listAllDeposits(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rows = await prisma.depositRequest.findMany({
+        orderBy: { createdAt: "desc" },
+        include: {
+          user: { select: { id: true, email: true, name: true } },
+        },
+      });
+      res.json({
+        deposits: rows.map((r) => ({
+          id: r.id,
+          userId: r.userId,
+          userEmail: r.user.email,
+          userName: r.user.name,
+          amount: r.amount,
+          transactionId: r.transactionId,
+          screenshotUrl: r.screenshotUrl,
+          status: r.status,
+          adminReason: r.adminReason,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function updateDepositStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      const status = String((req.body as { status?: unknown }).status ?? "")
+        .trim()
+        .toUpperCase();
+      const adminReasonRaw = (req.body as { adminReason?: unknown }).adminReason;
+      const adminReason =
+        typeof adminReasonRaw === "string" && adminReasonRaw.trim() !== ""
+          ? adminReasonRaw.trim()
+          : null;
+
+      if (!id) {
+        res.status(400).json({ error: "Deposit request id is required." });
+        return;
+      }
+      if (status !== "APPROVED" && status !== "REJECTED") {
+        res
+          .status(400)
+          .json({ error: "status must be either APPROVED or REJECTED." });
+        return;
+      }
+
+      const updated = await prisma.depositRequest.update({
+        where: { id },
+        data: { status, adminReason },
+      });
+
+      await prisma.notification.create({
+        data: {
+          userId: updated.userId,
+          title: "Deposit Request Update",
+          message:
+            status === "APPROVED"
+              ? "Your deposit request has been approved."
+              : `Your deposit request has been rejected.${
+                  adminReason ? ` Reason: ${adminReason}` : ""
+                }`,
+        },
+      });
+
+      res.json({ ok: true, deposit: updated });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -525,6 +608,8 @@ export function createAdminController(prisma: PrismaClient) {
     getDashboardStats,
     getUserBalance,
     listTransactions,
+    listAllDeposits,
+    updateDepositStatus,
   };
 }
 

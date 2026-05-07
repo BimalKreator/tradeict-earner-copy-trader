@@ -7,6 +7,7 @@ if (!process.env.PROCESS_ENCRYPTION_KEY) {
 
 import cors from "cors";
 import express from "express";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -31,6 +32,7 @@ import {
 } from "./services/telegramService.js";
 
 const PORT = 5000;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -68,7 +70,7 @@ app.use(
   }),
 );
 app.use(express.json());
-app.use("/uploads", express.static(path.resolve(process.cwd(), "public", "uploads")));
+app.use("/uploads", express.static(path.join(__dirname, "../public/uploads")));
 
 /** No auth: proves which `dist/` build is live. Stale PM2 shows wrong `deltaEthUsdtToCcxt` (must be `ETH/USD:USD`). */
 app.get("/api/health/build", (_req, res) => {

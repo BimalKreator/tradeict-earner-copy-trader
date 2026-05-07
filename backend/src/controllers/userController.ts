@@ -6,6 +6,75 @@ const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
 
 export function createUserController(prisma: PrismaClient) {
+  async function createDeposit(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const amount = Number((req.body as { amount?: unknown }).amount);
+      const transactionId = String(
+        (req.body as { transactionId?: unknown }).transactionId ?? "",
+      ).trim();
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: "Amount must be a positive number." });
+        return;
+      }
+      if (!transactionId) {
+        res.status(400).json({ error: "transactionId is required." });
+        return;
+      }
+
+      const screenshotUrl = req.file ? `/uploads/${req.file.filename}` : null;
+      const row = await prisma.depositRequest.create({
+        data: {
+          userId,
+          amount,
+          transactionId,
+          screenshotUrl,
+        },
+      });
+      await prisma.notification.create({
+        data: {
+          userId: null,
+          title: "New Deposit Request",
+          message: `A new deposit request was submitted. User: ${userId}, Amount: ${amount.toFixed(
+            2,
+          )}, Transaction ID: ${transactionId}.`,
+        },
+      });
+      res.status(201).json({ deposit: row });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listDeposits(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const rows = await prisma.depositRequest.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+      });
+      res.json({ deposits: rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getMe(
     req: Request,
     res: Response,
@@ -439,5 +508,13 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
-  return { getMe, patchMe, listTrades, listInvoices, getDashboardOverview };
+  return {
+    getMe,
+    patchMe,
+    listTrades,
+    listInvoices,
+    getDashboardOverview,
+    createDeposit,
+    listDeposits,
+  };
 }
