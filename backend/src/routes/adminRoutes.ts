@@ -62,6 +62,49 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
+  router.get("/users/:id/strategies", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const subscriptions = await prisma.userSubscription.findMany({
+        where: { userId: id },
+        orderBy: { joinedDate: "desc" },
+        select: {
+          id: true,
+          status: true,
+          multiplier: true,
+          joinedDate: true,
+          strategyId: true,
+          strategy: { select: { title: true } },
+          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
+        },
+      });
+
+      res.json({
+        user,
+        strategies: subscriptions.map((s) => ({
+          id: s.id,
+          strategyId: s.strategyId,
+          strategyTitle: s.strategy.title,
+          status: s.status,
+          multiplier: s.multiplier,
+          joinedDate: s.joinedDate,
+          exchangeAccount: s.exchangeAccount,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post("/users", async (req, res, next) => {
     try {
       const { email, password, role, status } = req.body as {

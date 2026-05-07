@@ -13,7 +13,12 @@ export function createSubscriptionRoutes(prisma: PrismaClient): Router {
   const subscription = createSubscriptionController(prisma);
 
   router.post("/subscribe", jwtAuth, subscription.subscribe);
-  router.delete("/:strategyId", jwtAuth, subscription.unsubscribe);
+  router.post("/:strategyId/deploy", jwtAuth, subscription.deploy);
+  router.patch("/:strategyId/modify", jwtAuth, subscription.modify);
+  router.patch("/:strategyId/pause", jwtAuth, subscription.pause);
+  router.patch("/:strategyId/resume", jwtAuth, subscription.resume);
+  router.delete("/:strategyId/remove", jwtAuth, subscription.remove);
+  router.delete("/:strategyId", jwtAuth, subscription.remove);
   router.get("/mine", jwtAuth, subscription.listMySubscriptions);
   /** Marketplace list: same payload as GET /strategies (URLs differ by mount prefix). */
   router.get("/", jwtAuth, subscription.listStrategies);

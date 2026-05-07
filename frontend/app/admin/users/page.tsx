@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -31,6 +31,16 @@ type AdminUser = {
   createdAt: string;
 };
 
+type UserStrategyState = {
+  id: string;
+  strategyId: string;
+  strategyTitle: string;
+  status: string;
+  multiplier: number;
+  joinedDate: string;
+  exchangeAccount: { id: string; nickname: string; exchange: string } | null;
+};
+
 export default function AdminUsersPage() {
   const apiBase = useMemo(() => resolveAdminApiBase(), []);
 
@@ -40,6 +50,9 @@ export default function AdminUsersPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+  const [userStrategies, setUserStrategies] = useState<Record<string, UserStrategyState[]>>({});
+  const [userStrategiesLoading, setUserStrategiesLoading] = useState<Record<string, boolean>>({});
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -109,6 +122,28 @@ export default function AdminUsersPage() {
     }
   }
 
+  async function toggleUserStrategies(userId: string) {
+    if (expandedUserId === userId) {
+      setExpandedUserId(null);
+      return;
+    }
+    setExpandedUserId(userId);
+    if (userStrategies[userId] !== undefined) return;
+    setUserStrategiesLoading((p) => ({ ...p, [userId]: true }));
+    try {
+      const res = await fetch(`${apiBase}/admin/users/${userId}/strategies`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = (await res.json()) as { strategies?: UserStrategyState[] };
+      setUserStrategies((p) => ({ ...p, [userId]: data.strategies ?? [] }));
+    } catch {
+      setUserStrategies((p) => ({ ...p, [userId]: [] }));
+    } finally {
+      setUserStrategiesLoading((p) => ({ ...p, [userId]: false }));
+    }
+  }
+
   return (
     <div className="mx-auto max-w-6xl">
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -164,27 +199,69 @@ export default function AdminUsersPage() {
                 </tr>
               ) : (
                 users.map((u) => (
-                  <tr
-                    key={u.id}
-                    className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
-                  >
-                    <td className="px-4 py-3 font-medium text-white">{u.email}</td>
-                    <td className="px-4 py-3 text-white/80">{u.role}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                          u.status === "ACTIVE"
-                            ? "bg-emerald-500/15 text-emerald-300"
-                            : "bg-amber-500/15 text-amber-200"
-                        }`}
-                      >
-                        {u.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-white/55 tabular-nums">
-                      {new Date(u.createdAt).toLocaleString()}
-                    </td>
-                  </tr>
+                  <Fragment key={u.id}>
+                    <tr
+                      className="border-b border-white/[0.06] hover:bg-white/[0.02]"
+                    >
+                      <td className="px-4 py-3 font-medium text-white">
+                        <button
+                          type="button"
+                          onClick={() => void toggleUserStrategies(u.id)}
+                          className="text-left hover:text-primary"
+                        >
+                          {u.email}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-white/80">{u.role}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                            u.status === "ACTIVE"
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : "bg-amber-500/15 text-amber-200"
+                          }`}
+                        >
+                          {u.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-white/55 tabular-nums">
+                        {new Date(u.createdAt).toLocaleString()}
+                      </td>
+                    </tr>
+                    {expandedUserId === u.id && (
+                      <tr className="border-b border-white/[0.06] bg-white/[0.02]">
+                        <td colSpan={4} className="px-4 py-4">
+                          <p className="mb-2 text-xs uppercase tracking-wider text-white/50">
+                            Strategy Lifecycle States
+                          </p>
+                          {userStrategiesLoading[u.id] ? (
+                            <p className="text-sm text-white/55">Loading strategies...</p>
+                          ) : (userStrategies[u.id]?.length ?? 0) === 0 ? (
+                            <p className="text-sm text-white/55">No strategy interactions.</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {userStrategies[u.id]!.map((s) => (
+                                <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm">
+                                  <span className="font-medium text-white">{s.strategyTitle}</span>
+                                  <span className={`rounded px-2 py-0.5 text-xs ${
+                                    s.status === "ACTIVE"
+                                      ? "bg-emerald-500/15 text-emerald-300"
+                                      : "bg-amber-500/15 text-amber-200"
+                                  }`}>
+                                    {s.status === "ACTIVE" ? "DEPLOYED" : "PAUSED"}
+                                  </span>
+                                  <span className="text-white/60">Multiplier: {s.multiplier}x</span>
+                                  <span className="text-white/50">
+                                    {s.exchangeAccount ? `Account: ${s.exchangeAccount.nickname}` : "Not configured"}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))
               )}
             </tbody>

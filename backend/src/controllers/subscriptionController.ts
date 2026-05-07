@@ -45,6 +45,43 @@ export async function recordTradePnl(
 }
 
 export function createSubscriptionController(prisma: PrismaClient) {
+  const USER_PAUSED_STATUS = SubscriptionStatus.PAUSED_DUE_TO_FUNDS;
+
+  async function validateExchangeAccountOwnership(
+    userId: string,
+    exchangeAccountId: unknown,
+  ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+    if (typeof exchangeAccountId !== "string") {
+      return { ok: false, error: "exchangeAccountId must be a string" };
+    }
+    const trimmed = exchangeAccountId.trim();
+    if (!trimmed) {
+      return { ok: false, error: "exchangeAccountId cannot be empty" };
+    }
+    const account = await prisma.exchangeAccount.findFirst({
+      where: { id: trimmed, userId },
+      select: { id: true },
+    });
+    if (!account) {
+      return {
+        ok: false,
+        error: "Exchange account not found or does not belong to you",
+      };
+    }
+    return { ok: true, id: trimmed };
+  }
+
+  function parsePositiveMultiplier(v: unknown): number | null {
+    const n =
+      typeof v === "number"
+        ? v
+        : typeof v === "string"
+          ? Number(v)
+          : NaN;
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  }
+
   async function subscribe(
     req: Request,
     res: Response,
@@ -59,53 +96,13 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       const body = req.body as {
         strategyId?: unknown;
-        multiplier?: unknown;
-        exchangeAccountId?: unknown;
       };
 
       const strategyId =
         typeof body.strategyId === "string" ? body.strategyId.trim() : "";
 
-      const multiplier =
-        typeof body.multiplier === "number"
-          ? body.multiplier
-          : typeof body.multiplier === "string"
-            ? Number(body.multiplier)
-            : NaN;
-
-      let exchangeAccountId: string | null = null;
-      if (
-        body.exchangeAccountId !== undefined &&
-        body.exchangeAccountId !== null
-      ) {
-        if (typeof body.exchangeAccountId !== "string") {
-          res.status(400).json({ error: "exchangeAccountId must be a string" });
-          return;
-        }
-        const trimmed = body.exchangeAccountId.trim();
-        if (!trimmed) {
-          res.status(400).json({ error: "exchangeAccountId cannot be empty" });
-          return;
-        }
-        const account = await prisma.exchangeAccount.findFirst({
-          where: { id: trimmed, userId },
-        });
-        if (!account) {
-          res.status(400).json({
-            error: "Exchange account not found or does not belong to you",
-          });
-          return;
-        }
-        exchangeAccountId = trimmed;
-      }
-
       if (!strategyId) {
         res.status(400).json({ error: "strategyId is required" });
-        return;
-      }
-
-      if (!Number.isFinite(multiplier) || multiplier <= 0) {
-        res.status(400).json({ error: "multiplier must be a positive number" });
         return;
       }
 
@@ -118,17 +115,19 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const existingActive = await prisma.userSubscription.findFirst({
+      const existing = await prisma.userSubscription.findFirst({
         where: {
           userId,
           strategyId,
-          status: SubscriptionStatus.ACTIVE,
+          status: {
+            in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
+          },
         },
       });
 
-      if (existingActive) {
+      if (existing) {
         res.status(409).json({
-          error: "You already have an active subscription for this strategy",
+          error: "You already have this strategy in My Strategies",
         });
         return;
       }
@@ -137,57 +136,19 @@ export function createSubscriptionController(prisma: PrismaClient) {
         data: {
           userId,
           strategyId,
-          multiplier,
-          status: SubscriptionStatus.ACTIVE,
-          ...(exchangeAccountId !== null
-            ? { exchangeAccountId }
-            : {}),
+          multiplier: 1,
+          status: USER_PAUSED_STATUS,
         },
       });
 
       console.log(
-        `[subscription] Subscription created id=${subscription.id} userId=${userId} strategyId=${strategyId} multiplier=${multiplier}x`,
+        `[subscription] Strategy added (paused) id=${subscription.id} userId=${userId} strategyId=${strategyId}`,
       );
-      console.log(
-        `[subscription] Strategy syncActiveTrades=${String(strategy.syncActiveTrades)} (late-join runs only when true)`,
-      );
-
-      if (strategy.syncActiveTrades) {
-        console.log(
-          `[subscription] Late-join path: scheduling lateJoinMirrorOpenPositionsForSubscriber for user ${userId}`,
-        );
-        void import("../services/tradeEngine.js")
-          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) => {
-            console.log(
-              `[subscription] Late-join path: calling lateJoinMirrorOpenPositionsForSubscriber userId=${userId} strategyId=${strategyId}`,
-            );
-            return lateJoinMirrorOpenPositionsForSubscriber(prisma, {
-              strategyId,
-              userId,
-            });
-          })
-          .then(() => {
-            console.log(
-              `[subscription] Late-join path: lateJoinMirrorOpenPositionsForSubscriber finished userId=${userId} strategyId=${strategyId}`,
-            );
-          })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error(
-              `[subscription] Late-join sync failed strategyId=${strategyId} userId=${userId}:`,
-              msg,
-            );
-          });
-      } else {
-        console.log(
-          `[subscription] Late-join skipped: syncActiveTrades is false for strategy ${strategyId}`,
-        );
-      }
 
       void logUserActivity(prisma, {
         userId,
         kind: "SUBSCRIPTION_CREATED",
-        message: `Subscribed with multiplier ${multiplier}x`,
+        message: `Added strategy to My Strategies (inactive)`,
       });
 
       res.status(201).json(subscription);
@@ -313,19 +274,20 @@ export function createSubscriptionController(prisma: PrismaClient) {
         where: {
           userId,
           strategyId: strategyId.trim(),
-          status: SubscriptionStatus.ACTIVE,
+          status: {
+            in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
+          },
         },
         select: { id: true },
       });
 
       if (!sub) {
-        res.status(404).json({ error: "Active subscription not found" });
+        res.status(404).json({ error: "Subscription not found" });
         return;
       }
 
-      await prisma.userSubscription.update({
+      await prisma.userSubscription.delete({
         where: { id: sub.id },
-        data: { status: SubscriptionStatus.CANCELLED },
       });
 
       void logUserActivity(prisma, {
@@ -340,9 +302,171 @@ export function createSubscriptionController(prisma: PrismaClient) {
     }
   }
 
+  async function deploy(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+
+      const body = req.body as { multiplier?: unknown; exchangeAccountId?: unknown };
+      const multiplier = parsePositiveMultiplier(body.multiplier);
+      if (multiplier == null) {
+        return void res.status(400).json({ error: "multiplier must be a positive number" });
+      }
+      const ex = await validateExchangeAccountOwnership(userId, body.exchangeAccountId);
+      if (!ex.ok) return void res.status(400).json({ error: ex.error });
+
+      const sub = await prisma.userSubscription.findFirst({
+        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
+        include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
+      });
+      if (!sub) return void res.status(404).json({ error: "Subscription not found" });
+
+      const updated = await prisma.userSubscription.update({
+        where: { id: sub.id },
+        data: {
+          multiplier,
+          exchangeAccountId: ex.id,
+          status: SubscriptionStatus.ACTIVE,
+        },
+        include: {
+          strategy: { select: strategySelectPublic },
+          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
+        },
+      });
+
+      if (sub.strategy.syncActiveTrades) {
+        void import("../services/tradeEngine.js")
+          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
+            lateJoinMirrorOpenPositionsForSubscriber(prisma, { strategyId, userId }),
+          )
+          .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[subscription] deploy late-join failed strategyId=${strategyId} userId=${userId}:`, msg);
+          });
+      }
+
+      res.json({ subscription: updated });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function modify(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const body = req.body as { multiplier?: unknown };
+      const multiplier = parsePositiveMultiplier(body.multiplier);
+      if (multiplier == null) {
+        return void res.status(400).json({ error: "multiplier must be a positive number" });
+      }
+
+      const sub = await prisma.userSubscription.findFirst({
+        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
+        select: { id: true },
+      });
+      if (!sub) return void res.status(404).json({ error: "Subscription not found" });
+
+      const updated = await prisma.userSubscription.update({
+        where: { id: sub.id },
+        data: { multiplier },
+        include: {
+          strategy: { select: strategySelectPublic },
+          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
+        },
+      });
+      res.json({ subscription: updated });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function pause(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const sub = await prisma.userSubscription.findFirst({
+        where: { userId, strategyId, status: SubscriptionStatus.ACTIVE },
+        select: { id: true },
+      });
+      if (!sub) return void res.status(404).json({ error: "Active subscription not found" });
+      const updated = await prisma.userSubscription.update({
+        where: { id: sub.id },
+        data: { status: USER_PAUSED_STATUS },
+        include: {
+          strategy: { select: strategySelectPublic },
+          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
+        },
+      });
+      res.json({ subscription: updated });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function resume(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) return void res.status(401).json({ error: "Unauthorized" });
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const sub = await prisma.userSubscription.findFirst({
+        where: { userId, strategyId, status: USER_PAUSED_STATUS },
+        include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
+      });
+      if (!sub) return void res.status(404).json({ error: "Paused subscription not found" });
+      if (!sub.exchangeAccountId) {
+        return void res.status(400).json({ error: "Deploy this strategy first (missing exchange account)." });
+      }
+
+      const updated = await prisma.userSubscription.update({
+        where: { id: sub.id },
+        data: { status: SubscriptionStatus.ACTIVE },
+        include: {
+          strategy: { select: strategySelectPublic },
+          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
+        },
+      });
+
+      if (sub.strategy.syncActiveTrades) {
+        void import("../services/tradeEngine.js")
+          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
+            lateJoinMirrorOpenPositionsForSubscriber(prisma, { strategyId, userId }),
+          )
+          .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[subscription] resume late-join failed strategyId=${strategyId} userId=${userId}:`, msg);
+          });
+      }
+
+      res.json({ subscription: updated });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     subscribe,
     unsubscribe,
+    remove: unsubscribe,
+    deploy,
+    modify,
+    pause,
+    resume,
     listStrategies,
     listMySubscriptions,
     getStrategy,
