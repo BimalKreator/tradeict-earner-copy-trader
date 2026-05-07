@@ -845,8 +845,10 @@ async function notifyMasterFlat(
     `[EXECUTION] notifyMasterFlat fanout strategyId=${strategyId} symbol=${snap.symbol} activeSubs=${subs.length}`,
   );
 
+  const uniqueSubs = Array.from(new Map(subs.map((s) => [s.userId, s])).values());
+
   await Promise.all(
-    subs.map(async (sub) => {
+    uniqueSubs.map(async (sub) => {
       const followerContracts = followerContractsFromMaster(
         snap.masterContracts,
         sub.multiplier,
@@ -1166,18 +1168,21 @@ class StrategyMasterSocket {
       if (records.length === 0) records.push(parsed);
 
       for (const r of records) {
-        const o = mergePayloadLayers(r);
-        const orderIdRaw = o.id ?? o.order_id;
-        const orderId =
-          orderIdRaw === undefined || orderIdRaw === null
-            ? ""
-            : String(orderIdRaw).trim();
+        const row = r as {
+          id?: unknown;
+          order_id?: unknown;
+          payload?: { id?: unknown; order_id?: unknown } | null;
+        };
+        const orderId = String(
+          row.id ??
+            row.order_id ??
+            (row.payload && (row.payload.id || row.payload.order_id)) ??
+            "",
+        );
         if (orderId) {
           if (this.processedOrderIds.has(orderId)) continue;
           this.processedOrderIds.add(orderId);
-          if (this.processedOrderIds.size > 500) {
-            this.processedOrderIds.clear();
-          }
+          if (this.processedOrderIds.size > 500) this.processedOrderIds.clear();
         }
 
         const sig = extractOrderFillSignal(r);
