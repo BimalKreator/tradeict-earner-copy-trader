@@ -4,6 +4,7 @@ import {
   type PrismaClient,
   InvoiceStatus,
   Role,
+  TradeStatus,
   UserStatus,
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
@@ -33,6 +34,11 @@ function parsePerformanceMetrics(
   if (v === null) return undefined;
   if (typeof v === "object") return v as Prisma.InputJsonValue;
   return undefined;
+}
+
+function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
+  if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
+  return Number.isFinite(trade.pnl ?? NaN) ? (trade.pnl as number) : 0;
 }
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
@@ -99,6 +105,94 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           joinedDate: s.joinedDate,
           exchangeAccount: s.exchangeAccount,
         })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/users/:id/trades-billing", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, email: true, name: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const trades = await prisma.trade.findMany({
+        where: { userId: id },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+        select: {
+          id: true,
+          createdAt: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          tradePnl: true,
+          pnl: true,
+          revenueShareAmt: true,
+          status: true,
+          strategy: { select: { title: true, profitShare: true } },
+        },
+      });
+
+      const normalizedTrades = trades.map((t) => {
+        const realized = realizedTradePnl(t);
+        const adminRevenue =
+          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
+            ? t.revenueShareAmt
+            : realized > 0
+              ? realized * (t.strategy.profitShare / 100)
+              : 0;
+        return {
+          id: t.id,
+          createdAt: t.createdAt,
+          strategyId: t.strategyId,
+          strategyTitle: t.strategy.title,
+          symbol: t.symbol,
+          side: t.side,
+          size: t.size,
+          entryPrice: t.entryPrice,
+          exitPrice: t.exitPrice,
+          status: t.status,
+          pnl: realized,
+          adminRevenue,
+        };
+      });
+
+      const totalPnl = normalizedTrades.reduce((s, t) => s + t.pnl, 0);
+      const totalAdminCommission = normalizedTrades.reduce(
+        (s, t) => s + t.adminRevenue,
+        0,
+      );
+      const [paidAgg, dueAgg] = await Promise.all([
+        prisma.invoice.aggregate({
+          where: { userId: id, status: InvoiceStatus.PAID },
+          _sum: { amountDue: true },
+        }),
+        prisma.invoice.aggregate({
+          where: { userId: id, status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] } },
+          _sum: { amountDue: true },
+        }),
+      ]);
+
+      res.json({
+        user,
+        trades: normalizedTrades,
+        billingSummary: {
+          totalPnlToDate: totalPnl,
+          totalAdminCommissionEarned: totalAdminCommission,
+          amountPaid: paidAgg._sum.amountDue ?? 0,
+          balanceDue: dueAgg._sum.amountDue ?? 0,
+        },
       });
     } catch (err) {
       next(err);
@@ -682,6 +776,126 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         collectedRevenue: paidAgg._sum.amountDue ?? 0,
         pendingDues: pendingAgg._sum.amountDue ?? 0,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/revenue/analytics", async (_req, res, next) => {
+    try {
+      const now = new Date();
+      const monthStart = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+      );
+
+      const [paidAgg, pendingAgg, monthPnlAgg, allClosedTrades] = await Promise.all([
+        prisma.invoice.aggregate({
+          where: { status: InvoiceStatus.PAID },
+          _sum: { amountDue: true },
+        }),
+        prisma.invoice.aggregate({
+          where: { status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] } },
+          _sum: { amountDue: true },
+        }),
+        prisma.pnLRecord.aggregate({
+          where: { timestamp: { gte: monthStart } },
+          _sum: { commissionAmount: true },
+        }),
+        prisma.trade.findMany({
+          where: { status: TradeStatus.CLOSED },
+          select: {
+            id: true,
+            strategyId: true,
+            tradePnl: true,
+            pnl: true,
+            revenueShareAmt: true,
+            strategy: { select: { title: true, profitShare: true } },
+          },
+        }),
+      ]);
+
+      const totalUserPnl = allClosedTrades.reduce(
+        (s, t) => s + realizedTradePnl(t),
+        0,
+      );
+      const strategyAgg = new Map<
+        string,
+        {
+          strategyName: string;
+          totalTrades: number;
+          wins: number;
+          revenueForAdmin: number;
+        }
+      >();
+
+      for (const t of allClosedTrades) {
+        const realized = realizedTradePnl(t);
+        const row = strategyAgg.get(t.strategyId) ?? {
+          strategyName: t.strategy.title,
+          totalTrades: 0,
+          wins: 0,
+          revenueForAdmin: 0,
+        };
+        row.totalTrades += 1;
+        if (realized > 0) row.wins += 1;
+        const estRevenue =
+          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
+            ? t.revenueShareAmt
+            : realized > 0
+              ? realized * (t.strategy.profitShare / 100)
+              : 0;
+        row.revenueForAdmin += estRevenue;
+        strategyAgg.set(t.strategyId, row);
+      }
+
+      const strategyWisePerformance = Array.from(strategyAgg.values()).map((r) => ({
+        strategyName: r.strategyName,
+        totalTrades: r.totalTrades,
+        totalRevenueForAdmin: r.revenueForAdmin,
+        winRate: r.totalTrades > 0 ? (r.wins / r.totalTrades) * 100 : 0,
+      }));
+
+      res.json({
+        stats: {
+          totalRevenueGenerated: paidAgg._sum.amountDue ?? 0,
+          thisMonthRevenue: monthPnlAgg._sum.commissionAmount ?? 0,
+          totalUserPnl,
+          pendingPaymentsReceivables: pendingAgg._sum.amountDue ?? 0,
+        },
+        strategyWisePerformance,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/revenue/monthly-breakdown", async (_req, res, next) => {
+    try {
+      const rows = await prisma.invoice.findMany({
+        orderBy: [{ year: "desc" }, { month: "desc" }],
+        select: { year: true, month: true, amountDue: true, status: true },
+      });
+      const byMonth = new Map<
+        string,
+        { year: number; month: number; paid: number; pending: number; overdue: number; total: number }
+      >();
+      for (const r of rows) {
+        const key = `${r.year}-${r.month}`;
+        const entry = byMonth.get(key) ?? {
+          year: r.year,
+          month: r.month,
+          paid: 0,
+          pending: 0,
+          overdue: 0,
+          total: 0,
+        };
+        entry.total += r.amountDue;
+        if (r.status === InvoiceStatus.PAID) entry.paid += r.amountDue;
+        if (r.status === InvoiceStatus.PENDING) entry.pending += r.amountDue;
+        if (r.status === InvoiceStatus.OVERDUE) entry.overdue += r.amountDue;
+        byMonth.set(key, entry);
+      }
+      res.json({ months: Array.from(byMonth.values()) });
     } catch (err) {
       next(err);
     }

@@ -35,10 +35,17 @@ type AdminInvoice = {
 };
 
 type RevenueStats = {
-  totalPlatformPnl: number;
-  expectedRevenue: number;
-  collectedRevenue: number;
-  pendingDues: number;
+  totalRevenueGenerated: number;
+  thisMonthRevenue: number;
+  totalUserPnl: number;
+  pendingPaymentsReceivables: number;
+};
+
+type StrategyRevenueRow = {
+  strategyName: string;
+  totalTrades: number;
+  totalRevenueForAdmin: number;
+  winRate: number;
 };
 
 type FilterMode = "all" | "outstanding";
@@ -125,6 +132,7 @@ async function authFetch(path: string): Promise<Response> {
 
 export default function AdminRevenuePage() {
   const [stats, setStats] = useState<RevenueStats | null>(null);
+  const [strategyRows, setStrategyRows] = useState<StrategyRevenueRow[]>([]);
   const [invoices, setInvoices] = useState<AdminInvoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -137,7 +145,7 @@ export default function AdminRevenuePage() {
   const load = useCallback(async (silent: boolean) => {
     try {
       const [statsRes, invRes] = await Promise.all([
-        authFetch("/admin/revenue-stats"),
+        authFetch("/admin/revenue/analytics"),
         authFetch("/admin/invoices"),
       ]);
 
@@ -164,9 +172,13 @@ export default function AdminRevenuePage() {
         throw new Error(`Request failed (${codes})`);
       }
 
-      const s = (await statsRes.json()) as RevenueStats;
+      const s = (await statsRes.json()) as {
+        stats: RevenueStats;
+        strategyWisePerformance?: StrategyRevenueRow[];
+      };
       const inv = (await invRes.json()) as { invoices?: AdminInvoice[] };
-      setStats(s);
+      setStats(s.stats);
+      setStrategyRows(Array.isArray(s.strategyWisePerformance) ? s.strategyWisePerformance : []);
       setInvoices(Array.isArray(inv.invoices) ? inv.invoices : []);
       if (!silent) {
         setError(null);
@@ -286,34 +298,70 @@ export default function AdminRevenuePage() {
         <StatCard
           tone="sky"
           icon={<TrendingUp className="h-5 w-5 text-sky-400" aria-hidden />}
-          label="Total platform PnL"
-          subLabel="This UTC month, all users"
-          value={loading && !stats ? "—" : fmtUsdSigned(stats?.totalPlatformPnl ?? 0)}
-          valueToneClass={pnlToneClass(stats?.totalPlatformPnl ?? null)}
+          label="Total User P&L"
+          subLabel="All-time across closed trades"
+          value={loading && !stats ? "—" : fmtUsdSigned(stats?.totalUserPnl ?? 0)}
+          valueToneClass={pnlToneClass(stats?.totalUserPnl ?? null)}
         />
         <StatCard
           tone="primary"
           icon={
             <CircleDollarSign className="h-5 w-5 text-primary" aria-hidden />
           }
-          label="Expected revenue"
-          subLabel="If month closed today (active subs)"
-          value={loading && !stats ? "—" : fmtUsd(stats?.expectedRevenue ?? 0)}
+          label="Total Revenue Generated"
+          subLabel="Collected from PAID invoices"
+          value={loading && !stats ? "—" : fmtUsd(stats?.totalRevenueGenerated ?? 0)}
         />
         <StatCard
           tone="emerald"
           icon={<Banknote className="h-5 w-5 text-emerald-400" aria-hidden />}
-          label="Collected revenue"
-          subLabel="Σ amountDue from PAID invoices"
-          value={loading && !stats ? "—" : fmtUsd(stats?.collectedRevenue ?? 0)}
+          label="This Month Revenue"
+          subLabel="Estimated from profit-share this month"
+          value={loading && !stats ? "—" : fmtUsd(stats?.thisMonthRevenue ?? 0)}
         />
         <StatCard
           tone="amber"
           icon={<Clock className="h-5 w-5 text-amber-400" aria-hidden />}
-          label="Pending dues"
-          subLabel="PENDING + OVERDUE"
-          value={loading && !stats ? "—" : fmtUsd(stats?.pendingDues ?? 0)}
+          label="Pending Payments (Receivables)"
+          subLabel="Outstanding invoices"
+          value={loading && !stats ? "—" : fmtUsd(stats?.pendingPaymentsReceivables ?? 0)}
         />
+      </div>
+
+      <div className="glass-card mb-8 border border-glassBorder overflow-hidden">
+        <div className="border-b border-glassBorder bg-white/[0.03] px-4 py-3">
+          <h2 className="text-sm font-semibold text-white">Strategy Wise Performance</h2>
+        </div>
+        <div className="scroll-table overflow-x-auto">
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead className="border-b border-glassBorder bg-white/[0.02]">
+              <tr>
+                <th className="px-4 py-3 font-medium text-white/70">Strategy Name</th>
+                <th className="px-4 py-3 text-right font-medium text-white/70">Total Trades</th>
+                <th className="px-4 py-3 text-right font-medium text-white/70">Total Revenue for Admin</th>
+                <th className="px-4 py-3 text-right font-medium text-white/70">Overall Win Rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {strategyRows.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-8 text-center text-white/45">
+                    No strategy data yet.
+                  </td>
+                </tr>
+              ) : (
+                strategyRows.map((r) => (
+                  <tr key={r.strategyName} className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]">
+                    <td className="px-4 py-3 text-white">{r.strategyName}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-white/80">{r.totalTrades}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-white">{fmtUsd(r.totalRevenueForAdmin)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-white/80">{r.winRate.toFixed(1)}%</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

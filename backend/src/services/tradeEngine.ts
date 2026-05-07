@@ -9,6 +9,7 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
+  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   normalizeDeltaPerpSymbolForCcxt,
   type DeltaLivePosition,
@@ -264,14 +265,17 @@ async function recordTrade(
   }
 }
 
-function realizedPnlUsd(args: {
+async function realizedPnlUsd(args: {
+  symbol: string;
   side: TradeSide;
   entryPrice: number;
   exitPrice: number;
-  size: number;
-}): number {
+  contracts: number;
+}): Promise<number> {
+  const contractSize = await fetchDeltaSwapContractSize(args.symbol);
+  const realBaseSize = Math.abs(args.contracts) * contractSize;
   const diff = args.exitPrice - args.entryPrice;
-  return args.side === "BUY" ? diff * args.size : -diff * args.size;
+  return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
 }
 
 function entryPriceMatches(stored: number, leader: number): boolean {
@@ -326,11 +330,12 @@ async function closeFollowerTradeAndRecordPnl(
 
   if (!open) return;
 
-  const tradeProfit = realizedPnlUsd({
+  const tradeProfit = await realizedPnlUsd({
+    symbol: args.symbol,
     side: args.side,
     entryPrice: args.masterEntryPrice,
     exitPrice: args.exitPrice,
-    size: args.sizedPosition,
+    contracts: args.sizedPosition,
   });
 
   // Fetch profitShare for the per-trade revenue-share snapshot. Closes are
@@ -1654,9 +1659,15 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             /* keep entryPrice fallback */
           }
 
-          const sign = String(trade.side).toUpperCase() === "BUY" ? 1 : -1;
-          const pnlRaw = (exitPrice - trade.entryPrice) * trade.size * sign;
-          const pnl = Number.isFinite(pnlRaw) ? pnlRaw : 0;
+          const tradeSide: TradeSide =
+            String(trade.side).toUpperCase() === "BUY" ? "BUY" : "SELL";
+          const pnl = await realizedPnlUsd({
+            symbol: trade.symbol,
+            side: tradeSide,
+            entryPrice: trade.entryPrice,
+            exitPrice,
+            contracts: trade.size,
+          });
           const revenueShareAmt = computeRevenueShareAmt(
             pnl,
             strat.profitShare,
