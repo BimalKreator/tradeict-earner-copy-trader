@@ -48,6 +48,31 @@ function clampMultiplier(v: number): number {
   return Math.min(10, Math.max(0.1, Math.round(v * 10) / 10));
 }
 
+function dedupeSubscriptions(rows: SubscriptionRow[]): SubscriptionRow[] {
+  const grouped = new Map<string, SubscriptionRow[]>();
+  for (const row of rows) {
+    const key = row.strategy.id;
+    const bucket = grouped.get(key);
+    if (bucket) bucket.push(row);
+    else grouped.set(key, [row]);
+  }
+
+  const out: SubscriptionRow[] = [];
+  for (const bucket of grouped.values()) {
+    const active = bucket.find((r) => r.status.toUpperCase() === "ACTIVE");
+    if (active) {
+      out.push(active);
+      continue;
+    }
+    const newest = [...bucket].sort(
+      (a, b) =>
+        new Date(b.joinedDate).getTime() - new Date(a.joinedDate).getTime(),
+    )[0];
+    if (newest) out.push(newest);
+  }
+  return out;
+}
+
 export default function StrategySubscriptionLifecyclePage() {
   const apiBase = useMemo(resolveApiBase, []);
   const [tab, setTab] = useState<Tab>("marketplace");
@@ -104,7 +129,11 @@ export default function StrategySubscriptionLifecyclePage() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const subsByStrategy = useMemo(() => new Map(subs.map((s) => [s.strategy.id, s])), [subs]);
+  const dedupedSubs = useMemo(() => dedupeSubscriptions(subs), [subs]);
+  const subsByStrategy = useMemo(
+    () => new Map(dedupedSubs.map((s) => [s.strategy.id, s])),
+    [dedupedSubs],
+  );
 
   async function post(path: string, body?: unknown) {
     const res = await fetch(`${apiBase}${path}`, {
@@ -282,12 +311,12 @@ export default function StrategySubscriptionLifecyclePage() {
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {subs.length === 0 ? (
+          {dedupedSubs.length === 0 ? (
             <div className="rounded-xl border border-white/10 bg-white/[0.03] px-6 py-10 text-center text-sm text-white/55">
               No strategies added yet.
             </div>
           ) : (
-            subs.map((sub) => {
+            dedupedSubs.map((sub) => {
               const isPaused = pausedLike(sub.status);
               const configured = Boolean(sub.exchangeAccount);
               return (
