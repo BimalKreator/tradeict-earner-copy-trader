@@ -9,7 +9,7 @@ const links = [
   { href: "/admin/strategies", label: "Strategies" },
   { href: "/admin/live-trades", label: "Live trades" },
   { href: "/admin/funds", label: "Funds" },
-  { href: "/admin/revenue", label: "Revenue" },
+  { href: "/admin/revenue", label: "Revenue Analytics" },
 ];
 
 export function AdminSidebar() {

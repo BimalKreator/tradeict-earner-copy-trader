@@ -9,7 +9,6 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
-  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   normalizeDeltaPerpSymbolForCcxt,
   type DeltaLivePosition,
@@ -272,8 +271,8 @@ async function realizedPnlUsd(args: {
   exitPrice: number;
   contracts: number;
 }): Promise<number> {
-  const contractSize = await fetchDeltaSwapContractSize(args.symbol);
-  const realBaseSize = Math.abs(args.contracts) * contractSize;
+  const btcContractFactor = args.symbol.toUpperCase().includes("BTC") ? 0.001 : 1;
+  const realBaseSize = Math.abs(args.contracts) * btcContractFactor;
   const diff = args.exitPrice - args.entryPrice;
   return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
 }

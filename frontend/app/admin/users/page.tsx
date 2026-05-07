@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 const ENV_API_BASE =
@@ -251,13 +252,18 @@ export default function AdminUsersPage() {
                       className="border-b border-white/[0.06] hover:bg-white/[0.02]"
                     >
                       <td className="px-4 py-3 font-medium text-white">
-                        <button
-                          type="button"
-                          onClick={() => void toggleUserStrategies(u.id)}
-                          className="text-left hover:text-primary"
-                        >
-                          {u.email}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void toggleUserStrategies(u.id)}
+                            className="text-left hover:text-primary"
+                          >
+                            {u.email}
+                          </button>
+                          <Link href={`/admin/users/${u.id}`} className="text-xs text-primary hover:underline">
+                            Details
+                          </Link>
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-white/80">{u.role}</td>
                       <td className="px-4 py-3">

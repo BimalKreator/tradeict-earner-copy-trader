@@ -22,6 +22,7 @@ import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
+import { createAdminController } from "../controllers/adminController.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -43,6 +44,7 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
+  const adminController = createAdminController(prisma);
 
   router.use(authenticateToken(), isAdmin(prisma));
 
@@ -110,6 +112,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  router.get("/users/:id/trades", adminController.getUserTradesBilling);
 
   router.get("/users/:id/trades-billing", async (req, res, next) => {
     try {
@@ -612,56 +616,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/revenue", async (_req, res, next) => {
-    try {
-      const now = new Date();
-      const monthStart = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-      );
-
-      const [
-        paidAgg,
-        pendingAgg,
-        projectedAgg,
-        invoices,
-      ] = await Promise.all([
-        prisma.invoice.aggregate({
-          where: { status: InvoiceStatus.PAID },
-          _sum: { amountDue: true },
-        }),
-        prisma.invoice.aggregate({
-          where: {
-            status: {
-              in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE],
-            },
-          },
-          _sum: { amountDue: true },
-        }),
-        prisma.pnLRecord.aggregate({
-          where: { timestamp: { gte: monthStart } },
-          _sum: { commissionAmount: true },
-        }),
-        prisma.invoice.findMany({
-          orderBy: { dueDate: "desc" },
-          include: {
-            user: { select: { email: true } },
-            strategy: { select: { id: true, title: true } },
-          },
-        }),
-      ]);
-
-      res.json({
-        stats: {
-          totalRevenueReceived: paidAgg._sum.amountDue ?? 0,
-          pendingDuesUnpaid: pendingAgg._sum.amountDue ?? 0,
-          projectedEarnings: projectedAgg._sum.commissionAmount ?? 0,
-        },
-        invoices,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get("/revenue", adminController.getRevenueAnalytics);
 
   /**
    * Manual fire-the-cron endpoint for QA / staging.
@@ -781,93 +736,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/revenue/analytics", async (_req, res, next) => {
-    try {
-      const now = new Date();
-      const monthStart = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-      );
-
-      const [paidAgg, pendingAgg, monthPnlAgg, allClosedTrades] = await Promise.all([
-        prisma.invoice.aggregate({
-          where: { status: InvoiceStatus.PAID },
-          _sum: { amountDue: true },
-        }),
-        prisma.invoice.aggregate({
-          where: { status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] } },
-          _sum: { amountDue: true },
-        }),
-        prisma.pnLRecord.aggregate({
-          where: { timestamp: { gte: monthStart } },
-          _sum: { commissionAmount: true },
-        }),
-        prisma.trade.findMany({
-          where: { status: TradeStatus.CLOSED },
-          select: {
-            id: true,
-            strategyId: true,
-            tradePnl: true,
-            pnl: true,
-            revenueShareAmt: true,
-            strategy: { select: { title: true, profitShare: true } },
-          },
-        }),
-      ]);
-
-      const totalUserPnl = allClosedTrades.reduce(
-        (s, t) => s + realizedTradePnl(t),
-        0,
-      );
-      const strategyAgg = new Map<
-        string,
-        {
-          strategyName: string;
-          totalTrades: number;
-          wins: number;
-          revenueForAdmin: number;
-        }
-      >();
-
-      for (const t of allClosedTrades) {
-        const realized = realizedTradePnl(t);
-        const row = strategyAgg.get(t.strategyId) ?? {
-          strategyName: t.strategy.title,
-          totalTrades: 0,
-          wins: 0,
-          revenueForAdmin: 0,
-        };
-        row.totalTrades += 1;
-        if (realized > 0) row.wins += 1;
-        const estRevenue =
-          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
-            ? t.revenueShareAmt
-            : realized > 0
-              ? realized * (t.strategy.profitShare / 100)
-              : 0;
-        row.revenueForAdmin += estRevenue;
-        strategyAgg.set(t.strategyId, row);
-      }
-
-      const strategyWisePerformance = Array.from(strategyAgg.values()).map((r) => ({
-        strategyName: r.strategyName,
-        totalTrades: r.totalTrades,
-        totalRevenueForAdmin: r.revenueForAdmin,
-        winRate: r.totalTrades > 0 ? (r.wins / r.totalTrades) * 100 : 0,
-      }));
-
-      res.json({
-        stats: {
-          totalRevenueGenerated: paidAgg._sum.amountDue ?? 0,
-          thisMonthRevenue: monthPnlAgg._sum.commissionAmount ?? 0,
-          totalUserPnl,
-          pendingPaymentsReceivables: pendingAgg._sum.amountDue ?? 0,
-        },
-        strategyWisePerformance,
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get("/revenue/analytics", adminController.getRevenueAnalytics);
 
   router.get("/revenue/monthly-breakdown", async (_req, res, next) => {
     try {
