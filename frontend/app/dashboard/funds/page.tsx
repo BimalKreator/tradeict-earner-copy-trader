@@ -23,6 +23,9 @@ export default function DashboardFundsPage() {
   const [history, setHistory] = useState<DepositRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [txFromDate, setTxFromDate] = useState("");
+  const [txToDate, setTxToDate] = useState("");
+  const [downloadingTx, setDownloadingTx] = useState(false);
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
@@ -115,6 +118,42 @@ export default function DashboardFundsPage() {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleDownloadTransactions(): Promise<void> {
+    setError(null);
+    setSuccess(null);
+    if (!token) {
+      setError("You need to be logged in to download transactions.");
+      return;
+    }
+    setDownloadingTx(true);
+    try {
+      const qs = new URLSearchParams();
+      if (txFromDate) qs.set("startDate", txFromDate);
+      if (txToDate) qs.set("endDate", txToDate);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const res = await fetch(`${API_BASE}/user/transactions/export${suffix}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `transactions_${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setSuccess("Transactions downloaded successfully.");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to download transactions.",
+      );
+    } finally {
+      setDownloadingTx(false);
     }
   }
 
@@ -218,6 +257,34 @@ export default function DashboardFundsPage() {
           <p className="text-xs font-medium uppercase tracking-wider text-primary">
             Request History
           </p>
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <label className="text-xs text-white/60">
+              From Date
+              <input
+                type="date"
+                value={txFromDate}
+                onChange={(e) => setTxFromDate(e.target.value)}
+                className="mt-1 block rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+              />
+            </label>
+            <label className="text-xs text-white/60">
+              To Date
+              <input
+                type="date"
+                value={txToDate}
+                onChange={(e) => setTxToDate(e.target.value)}
+                className="mt-1 block rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleDownloadTransactions()}
+              disabled={downloadingTx}
+              className="rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-3 py-2 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/25 disabled:opacity-60"
+            >
+              {downloadingTx ? "Downloading..." : "Download Transactions"}
+            </button>
+          </div>
           <div className="mt-4 scroll-table overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-sm">
               <thead className="border-b border-glassBorder bg-white/[0.03] text-white/70">

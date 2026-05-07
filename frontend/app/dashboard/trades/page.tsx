@@ -101,7 +101,11 @@ export default function DashboardTradesPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [downloading, setDownloading] = useState(false);
 
   const load = useCallback(async (silent: boolean) => {
     // No synchronous setState before the first await — that would trip
@@ -158,6 +162,44 @@ export default function DashboardTradesPage() {
     void load(true);
   }, [load]);
 
+  const handleDownloadHistory = useCallback(async () => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (!token) {
+      setError("Please sign in to download trade history.");
+      return;
+    }
+    setDownloading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const qs = new URLSearchParams();
+      if (fromDate) qs.set("startDate", fromDate);
+      if (toDate) qs.set("endDate", toDate);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const res = await fetch(`${API_BASE}/user/trades/export${suffix}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        throw new Error(`Download failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `trade_history_${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setSuccess("Trade history downloaded successfully.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to download trade history.");
+    } finally {
+      setDownloading(false);
+    }
+  }, [fromDate, toDate]);
+
   const totalPnl = rows.reduce((acc, r) => {
     const v = realizedPnl(r);
     return acc + (v ?? 0);
@@ -203,18 +245,46 @@ export default function DashboardTradesPage() {
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={refreshing || loading}
-          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-glassBorder bg-white/[0.03] px-4 py-2 text-sm font-medium text-white/80 transition hover:bg-white/[0.06] disabled:opacity-50"
-        >
-          <RefreshCw
-            className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
-            aria-hidden
-          />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs text-white/55">
+            From Date
+            <input
+              type="date"
+              value={fromDate}
+              onChange={(e) => setFromDate(e.target.value)}
+              className="mt-1 block rounded-lg border border-glassBorder bg-white/[0.03] px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+            />
+          </label>
+          <label className="text-xs text-white/55">
+            To Date
+            <input
+              type="date"
+              value={toDate}
+              onChange={(e) => setToDate(e.target.value)}
+              className="mt-1 block rounded-lg border border-glassBorder bg-white/[0.03] px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void handleDownloadHistory()}
+            disabled={downloading}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/25 disabled:opacity-50"
+          >
+            {downloading ? "Downloading..." : "Download History"}
+          </button>
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-glassBorder bg-white/[0.03] px-4 py-2 text-sm font-medium text-white/80 transition hover:bg-white/[0.06] disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
+              aria-hidden
+            />
+            Refresh
+          </button>
+        </div>
       </header>
 
       {!loading && rows.length > 0 ? (
@@ -259,6 +329,11 @@ export default function DashboardTradesPage() {
       {error && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
+        </div>
+      )}
+      {success && (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+          {success}
         </div>
       )}
 

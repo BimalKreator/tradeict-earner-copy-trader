@@ -53,6 +53,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
   router.get("/dashboard-stats", adminController.getDashboardStats);
   router.get("/transactions", adminController.listTransactions);
+  router.get("/downloads", adminController.listDownloads);
+  router.delete("/downloads/:id", adminController.deleteDownload);
   router.get("/deposits", adminController.listAllDeposits);
   router.put("/deposits/:id", adminController.updateDepositStatus);
 
@@ -351,6 +353,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/users/:id/balance", adminController.getUserBalance);
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
   router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
+  router.post("/trades/export", adminController.exportTrades);
   router.post("/trades/close-manual", adminController.closeManualTrade);
 
   router.get("/users/:id/trades-billing", async (req, res, next) => {

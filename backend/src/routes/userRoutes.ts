@@ -43,6 +43,8 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.post("/deposits", jwtAuth, upload.single("screenshot"), user.createDeposit);
   router.get("/deposits", jwtAuth, user.listDeposits);
   router.get("/trades", jwtAuth, user.listTrades);
+  router.get("/trades/export", jwtAuth, user.exportTrades);
+  router.get("/transactions/export", jwtAuth, user.exportTransactions);
   router.get("/invoices", jwtAuth, user.listInvoices);
 
   return router;

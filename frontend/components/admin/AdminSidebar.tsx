@@ -2,14 +2,24 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import {
+  BarChart3,
+  Download,
+  FolderOpen,
+  LayoutDashboard,
+  LineChart,
+  Users,
+  Wallet,
+} from "lucide-react";
 
 const links = [
-  { href: "/admin", label: "Dashboard" },
-  { href: "/admin/users", label: "Trade History" },
-  { href: "/admin/strategies", label: "Strategies" },
-  { href: "/admin/live-trades", label: "Live trades" },
-  { href: "/admin/funds", label: "Funds" },
-  { href: "/admin/revenue", label: "Revenue Analytics" },
+  { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/admin/users", label: "Trade History", icon: BarChart3 },
+  { href: "/admin/strategies", label: "Strategies", icon: LineChart },
+  { href: "/admin/live-trades", label: "Live trades", icon: Users },
+  { href: "/admin/funds", label: "Funds", icon: Wallet },
+  { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
+  { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
 ];
 
 export function AdminSidebar() {
@@ -30,7 +40,7 @@ export function AdminSidebar() {
         <h1 className="mt-1 text-lg font-semibold text-white">Admin Panel</h1>
       </div>
       <nav className="flex flex-1 flex-col gap-1">
-        {links.map(({ href, label }) => {
+        {links.map(({ href, label, icon: Icon }) => {
           const active =
             href === "/admin"
               ? pathname === "/admin"
@@ -45,7 +55,10 @@ export function AdminSidebar() {
                   : "text-white/70 hover:bg-white/5 hover:text-white"
               }`}
             >
-              {label}
+              <span className="inline-flex items-center gap-2">
+                <Icon className="h-4 w-4" />
+                {label}
+              </span>
             </Link>
           );
         })}

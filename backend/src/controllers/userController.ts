@@ -1,11 +1,34 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { fetchDeltaTotalBalanceUsd } from "../services/exchangeService.js";
+import {
+  buildTimestampTag,
+  rowsToCsv,
+} from "../utils/exportService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
 
 export function createUserController(prisma: PrismaClient) {
+  function parseDateRange(req: Request): {
+    startDate?: Date;
+    endDate?: Date;
+  } {
+    const startRaw = typeof req.query.startDate === "string" ? req.query.startDate : "";
+    const endRaw = typeof req.query.endDate === "string" ? req.query.endDate : "";
+    const startDate =
+      startRaw.trim().length > 0 ? new Date(startRaw.trim()) : undefined;
+    const endDate = endRaw.trim().length > 0 ? new Date(endRaw.trim()) : undefined;
+    const out: { startDate?: Date; endDate?: Date } = {};
+    if (startDate && Number.isFinite(startDate.getTime())) {
+      out.startDate = startDate;
+    }
+    if (endDate && Number.isFinite(endDate.getTime())) {
+      out.endDate = endDate;
+    }
+    return out;
+  }
+
   async function createDeposit(
     req: Request,
     res: Response,
@@ -508,6 +531,146 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function exportTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const { startDate, endDate } = parseDateRange(req);
+      const rows = await prisma.trade.findMany({
+        where: {
+          userId,
+          ...(startDate || endDate
+            ? {
+                createdAt: {
+                  ...(startDate ? { gte: startDate } : {}),
+                  ...(endDate ? { lte: endDate } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          tradePnl: true,
+          tradingFee: true,
+          revenueShareAmt: true,
+          status: true,
+        },
+      });
+      const csv = rowsToCsv(
+        rows.map((r) => ({
+          id: r.id,
+          createdAt: r.createdAt.toISOString(),
+          strategyId: r.strategyId,
+          symbol: r.symbol,
+          side: r.side,
+          size: r.size,
+          entryPrice: r.entryPrice,
+          exitPrice: r.exitPrice ?? "",
+          netPnl: r.tradePnl,
+          tradingFee: r.tradingFee,
+          revenueShareAmt: r.revenueShareAmt,
+          status: r.status,
+        })),
+        [
+          { key: "id", label: "Trade ID" },
+          { key: "createdAt", label: "Created At" },
+          { key: "strategyId", label: "Strategy ID" },
+          { key: "symbol", label: "Symbol" },
+          { key: "side", label: "Side" },
+          { key: "size", label: "Size" },
+          { key: "entryPrice", label: "Entry Price" },
+          { key: "exitPrice", label: "Exit Price" },
+          { key: "netPnl", label: "Net PnL" },
+          { key: "tradingFee", label: "Trading Fee" },
+          { key: "revenueShareAmt", label: "Admin Revenue Share" },
+          { key: "status", label: "Status" },
+        ],
+      );
+      const fileName = `Trades_${userId}_${buildTimestampTag()}.csv`;
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      res.status(200).send(`\uFEFF${csv}`);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function exportTransactions(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const { startDate, endDate } = parseDateRange(req);
+      const rows = await prisma.transaction.findMany({
+        where: {
+          userId,
+          ...(startDate || endDate
+            ? {
+                createdAt: {
+                  ...(startDate ? { gte: startDate } : {}),
+                  ...(endDate ? { lte: endDate } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+          amount: true,
+          type: true,
+          status: true,
+          utrNumber: true,
+        },
+      });
+      const csv = rowsToCsv(
+        rows.map((r) => ({
+          id: r.id,
+          createdAt: r.createdAt.toISOString(),
+          amount: r.amount,
+          type: r.type,
+          status: r.status,
+          utrNumber: r.utrNumber ?? "",
+        })),
+        [
+          { key: "id", label: "Transaction ID" },
+          { key: "createdAt", label: "Created At" },
+          { key: "amount", label: "Amount" },
+          { key: "type", label: "Type" },
+          { key: "status", label: "Status" },
+          { key: "utrNumber", label: "UTR Number" },
+        ],
+      );
+      const fileName = `Transactions_${userId}_${buildTimestampTag()}.csv`;
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      res.status(200).send(`\uFEFF${csv}`);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
     patchMe,
@@ -516,5 +679,7 @@ export function createUserController(prisma: PrismaClient) {
     getDashboardOverview,
     createDeposit,
     listDeposits,
+    exportTrades,
+    exportTransactions,
   };
 }

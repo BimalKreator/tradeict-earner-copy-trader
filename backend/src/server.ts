@@ -71,6 +71,7 @@ app.use(
 );
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "../public/uploads")));
+app.use("/downloads", express.static(path.join(__dirname, "../public/downloads")));
 
 /** No auth: proves which `dist/` build is live. Stale PM2 shows wrong `deltaEthUsdtToCcxt` (must be `ETH/USD:USD`). */
 app.get("/api/health/build", (_req, res) => {

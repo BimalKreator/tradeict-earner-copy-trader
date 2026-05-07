@@ -1,12 +1,19 @@
 import type { NextFunction, Request, Response } from "express";
 import { InvoiceStatus, TradeStatus, type PrismaClient } from "@prisma/client";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   executeTrade,
   fetchDeltaTotalBalanceUsd,
   type TradeSide,
 } from "../services/exchangeService.js";
 import { sendPasswordResetLinkEmail } from "../utils/emailService.js";
+import {
+  buildTimestampTag,
+  rowsToCsv,
+  writeCsvToDownloads,
+} from "../utils/exportService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -14,6 +21,25 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
 }
 
 export function createAdminController(prisma: PrismaClient) {
+  function parseDateRange(req: Request): {
+    startDate?: Date;
+    endDate?: Date;
+  } {
+    const startRaw = typeof req.query.startDate === "string" ? req.query.startDate : "";
+    const endRaw = typeof req.query.endDate === "string" ? req.query.endDate : "";
+    const startDate =
+      startRaw.trim().length > 0 ? new Date(startRaw.trim()) : undefined;
+    const endDate = endRaw.trim().length > 0 ? new Date(endRaw.trim()) : undefined;
+    const out: { startDate?: Date; endDate?: Date } = {};
+    if (startDate && Number.isFinite(startDate.getTime())) {
+      out.startDate = startDate;
+    }
+    if (endDate && Number.isFinite(endDate.getTime())) {
+      out.endDate = endDate;
+    }
+    return out;
+  }
+
   function oppositeSide(side: TradeSide): TradeSide {
     return side === "BUY" ? "SELL" : "BUY";
   }
@@ -305,8 +331,244 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(400).json({ error: "User id is required" });
         return;
       }
-      const out = await prisma.trade.deleteMany({ where: { userId } });
-      res.json({ ok: true, deleted: out.count });
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, name: true, email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      const flushableTrades = await prisma.trade.findMany({
+        where: { userId, status: { not: TradeStatus.OPEN } },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          tradePnl: true,
+          tradingFee: true,
+          revenueShareAmt: true,
+          status: true,
+        },
+      });
+      if (flushableTrades.length === 0) {
+        res.json({
+          ok: true,
+          deleted: 0,
+          message: "No closed or failed trades found. Open trades were preserved.",
+        });
+        return;
+      }
+      const safeUserName = (user.name?.trim() || user.email || user.id).replace(
+        /[^a-zA-Z0-9_-]/g,
+        "_",
+      );
+      const fileName = `Flush_Trades_${safeUserName}_${buildTimestampTag()}.csv`;
+      const csv = rowsToCsv(
+        flushableTrades.map((t) => ({
+          id: t.id,
+          createdAt: t.createdAt.toISOString(),
+          strategyId: t.strategyId,
+          symbol: t.symbol,
+          side: t.side,
+          size: t.size,
+          entryPrice: t.entryPrice,
+          exitPrice: t.exitPrice ?? "",
+          netPnl: t.tradePnl,
+          tradingFee: t.tradingFee,
+          revenueShareAmt: t.revenueShareAmt,
+          status: t.status,
+        })),
+        [
+          { key: "id", label: "Trade ID" },
+          { key: "createdAt", label: "Created At" },
+          { key: "strategyId", label: "Strategy ID" },
+          { key: "symbol", label: "Symbol" },
+          { key: "side", label: "Side" },
+          { key: "size", label: "Size" },
+          { key: "entryPrice", label: "Entry Price" },
+          { key: "exitPrice", label: "Exit Price" },
+          { key: "netPnl", label: "Net PnL" },
+          { key: "tradingFee", label: "Trading Fee" },
+          { key: "revenueShareAmt", label: "Admin Revenue Share" },
+          { key: "status", label: "Status" },
+        ],
+      );
+      const saved = writeCsvToDownloads(fileName, csv);
+      await prisma.downloadFile.create({
+        data: {
+          fileName,
+          filePath: saved.relativePath,
+          fileType: "FLUSH_BACKUP",
+          status: "READY",
+        },
+      });
+      const out = await prisma.trade.deleteMany({
+        where: { userId, status: { not: TradeStatus.OPEN } },
+      });
+      res.json({
+        ok: true,
+        deleted: out.count,
+        backupFile: saved.relativePath,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function exportTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const { startDate, endDate } = parseDateRange(req);
+      const body = req.body as {
+        userId?: unknown;
+        strategyId?: unknown;
+      };
+      const userId =
+        typeof body.userId === "string" && body.userId.trim().length > 0
+          ? body.userId.trim()
+          : undefined;
+      const strategyId =
+        typeof body.strategyId === "string" && body.strategyId.trim().length > 0
+          ? body.strategyId.trim()
+          : undefined;
+      const rows = await prisma.trade.findMany({
+        where: {
+          ...(userId ? { userId } : {}),
+          ...(strategyId ? { strategyId } : {}),
+          ...(startDate || endDate
+            ? {
+                createdAt: {
+                  ...(startDate ? { gte: startDate } : {}),
+                  ...(endDate ? { lte: endDate } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+          userId: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          tradePnl: true,
+          tradingFee: true,
+          revenueShareAmt: true,
+          status: true,
+        },
+      });
+      const csv = rowsToCsv(
+        rows.map((r) => ({
+          id: r.id,
+          createdAt: r.createdAt.toISOString(),
+          userId: r.userId,
+          strategyId: r.strategyId,
+          symbol: r.symbol,
+          side: r.side,
+          size: r.size,
+          entryPrice: r.entryPrice,
+          exitPrice: r.exitPrice ?? "",
+          netPnl: r.tradePnl,
+          tradingFee: r.tradingFee,
+          revenueShareAmt: r.revenueShareAmt,
+          status: r.status,
+        })),
+        [
+          { key: "id", label: "Trade ID" },
+          { key: "createdAt", label: "Created At" },
+          { key: "userId", label: "User ID" },
+          { key: "strategyId", label: "Strategy ID" },
+          { key: "symbol", label: "Symbol" },
+          { key: "side", label: "Side" },
+          { key: "size", label: "Size" },
+          { key: "entryPrice", label: "Entry Price" },
+          { key: "exitPrice", label: "Exit Price" },
+          { key: "netPnl", label: "Net PnL" },
+          { key: "tradingFee", label: "Trading Fee" },
+          { key: "revenueShareAmt", label: "Admin Revenue Share" },
+          { key: "status", label: "Status" },
+        ],
+      );
+      const fileName = `Admin_Trades_Export_${buildTimestampTag()}.csv`;
+      const saved = writeCsvToDownloads(fileName, csv);
+      const row = await prisma.downloadFile.create({
+        data: {
+          fileName,
+          filePath: saved.relativePath,
+          fileType: "TRADES",
+          status: "READY",
+        },
+      });
+      res.status(201).json({
+        ok: true,
+        download: {
+          id: row.id,
+          fileName: row.fileName,
+          filePath: row.filePath,
+          fileType: row.fileType,
+          status: row.status,
+          createdAt: row.createdAt,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listDownloads(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rows = await prisma.downloadFile.findMany({
+        orderBy: { createdAt: "desc" },
+      });
+      res.json({ downloads: rows });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function deleteDownload(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      if (!id) {
+        res.status(400).json({ error: "Download id is required." });
+        return;
+      }
+      const row = await prisma.downloadFile.findUnique({ where: { id } });
+      if (!row) {
+        res.status(404).json({ error: "Download file not found." });
+        return;
+      }
+      const relativePath = row.filePath.startsWith("/")
+        ? row.filePath.slice(1)
+        : row.filePath;
+      const absolutePath = path.resolve(process.cwd(), "public", relativePath);
+      if (fs.existsSync(absolutePath)) {
+        fs.unlinkSync(absolutePath);
+      }
+      await prisma.downloadFile.delete({ where: { id: row.id } });
+      res.json({ ok: true });
     } catch (err) {
       next(err);
     }
@@ -604,6 +866,9 @@ export function createAdminController(prisma: PrismaClient) {
     getUserTradesBilling,
     closeManualTrade,
     flushUserTrades,
+    exportTrades,
+    listDownloads,
+    deleteDownload,
     sendResetPasswordLink,
     getDashboardStats,
     getUserBalance,

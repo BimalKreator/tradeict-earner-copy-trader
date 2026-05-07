@@ -256,6 +256,15 @@ model Notification {
   @@index([userId, isRead, createdAt])
 }
 
+model DownloadFile {
+  id        String   @id @default(uuid())
+  fileName  String
+  filePath  String
+  fileType  String
+  status    String   @default("READY")
+  createdAt DateTime @default(now())
+}
+
 model DeltaApiKey {
   id        String @id @default(uuid())
   userId    String
