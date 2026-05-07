@@ -18,6 +18,7 @@ function resolveAdminApiBase(): string {
 type LiveRow = {
   entryTime: string | null;
   token: string;
+  size: number | null;
   entryPrice: number | null;
   stopLoss: number | null;
   target: number | null;
@@ -26,7 +27,7 @@ type LiveRow = {
   side: string;
 };
 
-type FollowerRow = LiveRow & { userEmail: string };
+type FollowerRow = LiveRow & { userId: string; userEmail: string };
 
 type FollowerGroup = {
   token: string;
@@ -78,13 +79,26 @@ function fmtTime(iso: string | null): string {
 function PositionTable({
   rows,
   variant,
+  strategyId,
+  onCloseTrade,
+  closingKey,
 }: {
   rows: (LiveRow | FollowerRow)[];
   variant: "master" | "follower";
+  strategyId: string;
+  onCloseTrade: (args: {
+    strategyId: string;
+    userId?: string;
+    symbol: string;
+    side: string;
+    size: number;
+    isMaster: boolean;
+  }) => Promise<void>;
+  closingKey: string | null;
 }) {
   return (
     <div className="scroll-table overflow-x-auto">
-      <table className="w-full min-w-[880px] text-left text-sm">
+      <table className="w-full min-w-[980px] text-left text-sm">
         <thead
           className={
             variant === "master"
@@ -108,6 +122,7 @@ function PositionTable({
             <th className="px-3 py-2 font-medium text-white/70">Target</th>
             <th className="px-3 py-2 font-medium text-white/70">Live PnL</th>
             <th className="px-3 py-2 font-medium text-white/70">Mark price</th>
+            <th className="px-3 py-2 font-medium text-white/70">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -149,6 +164,35 @@ function PositionTable({
               <td className="px-3 py-2 tabular-nums text-white/80">
                 {fmtPrice(r.markPrice)}
               </td>
+              <td className="px-3 py-2">
+                {r.size != null && Number.isFinite(r.size) && r.size > 0 ? (
+                  <button
+                    type="button"
+                    disabled={
+                      closingKey ===
+                      `${strategyId}:${r.token}:${r.side}:${variant === "follower" ? (r as FollowerRow).userId : "master"}`
+                    }
+                    onClick={() =>
+                      void onCloseTrade({
+                        strategyId,
+                        userId:
+                          variant === "follower"
+                            ? (r as FollowerRow).userId
+                            : undefined,
+                        symbol: r.token,
+                        side: r.side,
+                        size: r.size ?? 0,
+                        isMaster: variant === "master",
+                      })
+                    }
+                    className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Close Trade
+                  </button>
+                ) : (
+                  <span className="text-xs text-white/35">—</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -163,6 +207,7 @@ export default function AdminLiveTradesPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [closingKey, setClosingKey] = useState<string | null>(null);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = Boolean(opts?.silent);
@@ -214,6 +259,48 @@ export default function AdminLiveTradesPage() {
       if (!silent) setLoading(false);
     }
   }, []);
+
+  const closeTrade = useCallback(
+    async (args: {
+      strategyId: string;
+      userId?: string;
+      symbol: string;
+      side: string;
+      size: number;
+      isMaster: boolean;
+    }) => {
+      const key = `${args.strategyId}:${args.symbol}:${args.side}:${args.userId ?? "master"}`;
+      setClosingKey(key);
+      try {
+        const base = resolveAdminApiBase();
+        const res = await fetch(`${base}/admin/trades/close-manual`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+          body: JSON.stringify(args),
+        });
+        const payload: unknown = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg =
+            typeof payload === "object" &&
+            payload !== null &&
+            "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+              ? (payload as { error: string }).error
+              : `Close failed (${res.status})`;
+          throw new Error(msg);
+        }
+        await load({ silent: true });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to close trade");
+      } finally {
+        setClosingKey(null);
+      }
+    },
+    [load],
+  );
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
@@ -298,7 +385,13 @@ export default function AdminLiveTradesPage() {
                   </p>
                 </div>
                 {s.masterPositions.length > 0 ? (
-                  <PositionTable rows={s.masterPositions} variant="master" />
+                  <PositionTable
+                    rows={s.masterPositions}
+                    variant="master"
+                    strategyId={s.strategyId}
+                    onCloseTrade={closeTrade}
+                    closingKey={closingKey}
+                  />
                 ) : (
                   <p className="px-4 py-6 text-sm text-white/50">
                     No open positions reported for this strategy&apos;s master Delta account.
@@ -332,7 +425,13 @@ export default function AdminLiveTradesPage() {
                             No matching open Delta positions for active subscribers on this leg.
                           </p>
                         ) : (
-                          <PositionTable rows={g.followers} variant="follower" />
+                          <PositionTable
+                            rows={g.followers}
+                            variant="follower"
+                            strategyId={s.strategyId}
+                            onCloseTrade={closeTrade}
+                            closingKey={closingKey}
+                          />
                         )}
                       </div>
                     ))}

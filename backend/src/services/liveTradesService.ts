@@ -15,6 +15,7 @@ import {
 export type LiveTradeRow = {
   entryTime: string | null;
   token: string;
+  size: number | null;
   entryPrice: number | null;
   stopLoss: number | null;
   target: number | null;
@@ -29,6 +30,7 @@ export type UserLiveTradeRow = LiveTradeRow & {
 };
 
 export type AdminFollowerRow = LiveTradeRow & {
+  userId: string;
   userEmail: string;
 };
 
@@ -196,6 +198,7 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   return {
     entryTime: p.entryTime,
     token: p.symbolKey,
+    size: p.contracts,
     entryPrice: p.entryPrice,
     stopLoss: p.stopLoss,
     target: p.takeProfit,
@@ -355,6 +358,7 @@ export async function getUserLiveTradeRows(
       strategyTitle: t.strategy.title,
       entryTime,
       token: t.symbol,
+      size: t.size,
       entryPrice: t.entryPrice,
       stopLoss,
       target,
@@ -487,6 +491,7 @@ export async function getAdminGroupedLiveTrades(
         const m = matchDeltaPosition(positions, pos.symbolKey, pos.side);
         if (!m) continue;
         followers.push({
+          userId: sub.userId,
           userEmail: sub.user.email,
           ...(await enrichPositionLiveRow(m)),
         });

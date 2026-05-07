@@ -114,6 +114,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   router.get("/users/:id/trades", adminController.getUserTradesBilling);
+  router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
+  router.post("/trades/close-manual", adminController.closeManualTrade);
 
   router.get("/users/:id/trades-billing", async (req, res, next) => {
     try {

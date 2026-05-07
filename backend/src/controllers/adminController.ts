@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { InvoiceStatus, TradeStatus, type PrismaClient } from "@prisma/client";
+import { executeTrade, type TradeSide } from "../services/exchangeService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -7,6 +8,10 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
 }
 
 export function createAdminController(prisma: PrismaClient) {
+  function oppositeSide(side: TradeSide): TradeSide {
+    return side === "BUY" ? "SELL" : "BUY";
+  }
+
   async function getRevenueAnalytics(
     _req: Request,
     res: Response,
@@ -181,6 +186,127 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
-  return { getRevenueAnalytics, getUserTradesBilling };
+  async function closeManualTrade(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        strategyId?: unknown;
+        userId?: unknown;
+        symbol?: unknown;
+        side?: unknown;
+        size?: unknown;
+        isMaster?: unknown;
+      };
+      const strategyId = String(body.strategyId ?? "").trim();
+      const userId = String(body.userId ?? "").trim();
+      const symbol = String(body.symbol ?? "").trim();
+      const sideRaw = String(body.side ?? "").toUpperCase();
+      const size = Number(body.size);
+      const isMaster = Boolean(body.isMaster);
+
+      if (!strategyId || !symbol || !Number.isFinite(size) || size <= 0) {
+        res.status(400).json({ error: "strategyId, symbol and positive size are required" });
+        return;
+      }
+      if (sideRaw !== "BUY" && sideRaw !== "SELL") {
+        res.status(400).json({ error: "side must be BUY or SELL" });
+        return;
+      }
+      if (!isMaster && !userId) {
+        res.status(400).json({ error: "userId is required for follower close" });
+        return;
+      }
+
+      const strategy = await prisma.strategy.findUnique({
+        where: { id: strategyId },
+        select: { id: true, masterApiKey: true, masterApiSecret: true },
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      let apiKey = "";
+      let apiSecret = "";
+      if (isMaster) {
+        apiKey = strategy.masterApiKey?.trim() ?? "";
+        apiSecret = strategy.masterApiSecret?.trim() ?? "";
+      } else {
+        const sub = await prisma.userSubscription.findFirst({
+          where: { userId, strategyId },
+          orderBy: { joinedDate: "desc" },
+          select: { exchangeAccountId: true },
+        });
+        if (!sub) {
+          res.status(404).json({ error: "Subscription not found for user and strategy" });
+          return;
+        }
+
+        if (sub.exchangeAccountId) {
+          const ex = await prisma.exchangeAccount.findUnique({
+            where: { id: sub.exchangeAccountId },
+            select: { apiKey: true, apiSecret: true },
+          });
+          apiKey = ex?.apiKey?.trim() ?? "";
+          apiSecret = ex?.apiSecret?.trim() ?? "";
+        }
+        if (!apiKey || !apiSecret) {
+          const fallback = await prisma.deltaApiKey.findFirst({
+            where: { userId },
+            orderBy: { id: "desc" },
+            select: { apiKey: true, apiSecret: true },
+          });
+          apiKey = fallback?.apiKey?.trim() ?? apiKey;
+          apiSecret = fallback?.apiSecret?.trim() ?? apiSecret;
+        }
+      }
+
+      if (!apiKey || !apiSecret) {
+        res.status(400).json({ error: "Delta credentials are missing for this account" });
+        return;
+      }
+
+      const closeSide = oppositeSide(sideRaw as TradeSide);
+      const result = await executeTrade(apiKey, apiSecret, symbol, closeSide, size, {
+        reduceOnly: true,
+      });
+      if (!result.success) {
+        res.status(502).json({ error: result.error ?? "Manual close order failed" });
+        return;
+      }
+
+      res.json({ ok: true, orderId: result.orderId ?? null, raw: result.raw ?? null });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function flushUserTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const out = await prisma.trade.deleteMany({ where: { userId } });
+      res.json({ ok: true, deleted: out.count });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  return {
+    getRevenueAnalytics,
+    getUserTradesBilling,
+    closeManualTrade,
+    flushUserTrades,
+  };
 }
 

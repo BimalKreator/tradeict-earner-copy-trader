@@ -52,6 +52,7 @@ export default function AdminUserDetailPage() {
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [strategies, setStrategies] = useState<UserStrategy[]>([]);
   const [tab, setTab] = useState<"trades" | "strategies">("trades");
+  const [flushing, setFlushing] = useState(false);
 
   const authHeaders = useMemo(() => {
     const token =
@@ -89,6 +90,28 @@ export default function AdminUserDetailPage() {
     if (!userId) return;
     void load();
   }, [load, userId]);
+
+  const flushTradeHistory = useCallback(async () => {
+    if (!userId) return;
+    const ok = window.confirm(
+      "Delete all trade records for this user? This action cannot be undone.",
+    );
+    if (!ok) return;
+    setFlushing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}/trades/flush`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      if (!res.ok) throw new Error(`Flush failed (${res.status})`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to flush trade history");
+    } finally {
+      setFlushing(false);
+    }
+  }, [authHeaders, load, userId]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -151,6 +174,18 @@ export default function AdminUserDetailPage() {
               Strategies
             </button>
           </div>
+          {tab === "trades" && (
+            <div>
+              <button
+                type="button"
+                onClick={() => void flushTradeHistory()}
+                disabled={flushing}
+                className="rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {flushing ? "Flushing..." : "Flush Trade History"}
+              </button>
+            </div>
+          )}
 
           {tab === "trades" ? (
             <div className="glass-card border border-glassBorder overflow-hidden">
