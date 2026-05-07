@@ -57,6 +57,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const users = await prisma.user.findMany({
         select: {
           id: true,
+          name: true,
           email: true,
           role: true,
           status: true,
@@ -64,7 +65,138 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         },
         orderBy: { createdAt: "desc" },
       });
-      res.json(users);
+      const pnlAgg = await prisma.trade.groupBy({
+        by: ["userId"],
+        _sum: { tradePnl: true },
+      });
+      const pnlByUser = new Map<string, number>(
+        pnlAgg.map((r) => [r.userId, r._sum.tradePnl ?? 0]),
+      );
+      res.json(
+        users.map((u) => ({
+          ...u,
+          totalPnlToDate: pnlByUser.get(u.id) ?? 0,
+        })),
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/users/:id/management", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          status: true,
+          deltaApiKeys: {
+            orderBy: { id: "desc" },
+            take: 1,
+            select: { id: true, nickname: true, apiKey: true, apiSecret: true },
+          },
+          exchangeAccounts: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              nickname: true,
+              exchange: true,
+              apiKey: true,
+              apiSecret: true,
+            },
+          },
+        },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      res.json({
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          status: user.status,
+        },
+        deltaApiKey: user.deltaApiKeys[0] ?? null,
+        exchangeAccount: user.exchangeAccounts[0] ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/users/:id/status", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const status = String((req.body as { status?: unknown }).status ?? "").toUpperCase();
+      if (!statusValues.has(status)) {
+        res.status(400).json({ error: "status must be ACTIVE or SUSPENDED" });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id },
+        data: { status: status as UserStatus },
+        select: { id: true, status: true, email: true, name: true },
+      });
+      res.json(user);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/users/:id/api-keys", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const body = req.body as {
+        apiKey?: unknown;
+        apiSecret?: unknown;
+        nickname?: unknown;
+      };
+      if (
+        typeof body.apiKey !== "string" ||
+        typeof body.apiSecret !== "string" ||
+        body.apiKey.trim() === "" ||
+        body.apiSecret.trim() === ""
+      ) {
+        res.status(400).json({ error: "apiKey and apiSecret are required" });
+        return;
+      }
+      const nickname =
+        typeof body.nickname === "string" && body.nickname.trim()
+          ? body.nickname.trim()
+          : "Primary";
+
+      const existing = await prisma.deltaApiKey.findFirst({
+        where: { userId: id },
+        orderBy: { id: "desc" },
+        select: { id: true },
+      });
+      const deltaApiKey = existing
+        ? await prisma.deltaApiKey.update({
+            where: { id: existing.id },
+            data: {
+              nickname,
+              apiKey: body.apiKey.trim(),
+              apiSecret: body.apiSecret.trim(),
+            },
+            select: { id: true, nickname: true, apiKey: true, apiSecret: true },
+          })
+        : await prisma.deltaApiKey.create({
+            data: {
+              userId: id,
+              nickname,
+              apiKey: body.apiKey.trim(),
+              apiSecret: body.apiSecret.trim(),
+            },
+            select: { id: true, nickname: true, apiKey: true, apiSecret: true },
+          });
+
+      res.json({ deltaApiKey });
     } catch (err) {
       next(err);
     }

@@ -33,6 +33,7 @@ type UserState = {
   id: string;
   email: string;
   name: string | null;
+  status?: string;
 };
 
 type UserStrategy = {
@@ -41,6 +42,22 @@ type UserStrategy = {
   status: string;
   multiplier: number;
   exchangeAccount: { id: string; nickname: string; exchange: string } | null;
+};
+
+type ManagementPayload = {
+  user: { id: string; name: string | null; email: string; status: string };
+  deltaApiKey:
+    | { id: string; nickname: string; apiKey: string; apiSecret: string }
+    | null;
+  exchangeAccount:
+    | {
+        id: string;
+        nickname: string;
+        exchange: string;
+        apiKey: string;
+        apiSecret: string;
+      }
+    | null;
 };
 
 export default function AdminUserDetailPage() {
@@ -52,8 +69,14 @@ export default function AdminUserDetailPage() {
   const [trades, setTrades] = useState<UserTrade[]>([]);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [strategies, setStrategies] = useState<UserStrategy[]>([]);
-  const [tab, setTab] = useState<"trades" | "strategies">("trades");
+  const [tab, setTab] = useState<"management" | "subscriptions" | "trades">("management");
   const [flushing, setFlushing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [statusDraft, setStatusDraft] = useState("ACTIVE");
+  const [nicknameDraft, setNicknameDraft] = useState("Primary");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiSecretDraft, setApiSecretDraft] = useState("");
+  const [exchangeHint, setExchangeHint] = useState<string>("");
 
   const authHeaders = useMemo(() => {
     const token =
@@ -65,18 +88,32 @@ export default function AdminUserDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const [tbRes, stRes] = await Promise.all([
+      const [tbRes, stRes, mgRes] = await Promise.all([
         fetch(`${API_BASE}/admin/users/${userId}/trades`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/strategies`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/management`, { headers: authHeaders }),
       ]);
-      if (!tbRes.ok || !stRes.ok) throw new Error(`Request failed (${tbRes.status}/${stRes.status})`);
+      if (!tbRes.ok || !stRes.ok || !mgRes.ok) {
+        throw new Error(`Request failed (${tbRes.status}/${stRes.status}/${mgRes.status})`);
+      }
       const tb = (await tbRes.json()) as {
         user: UserState;
         trades: UserTrade[];
         billingSummary: BillingSummary;
       };
       const st = (await stRes.json()) as { strategies?: UserStrategy[] };
+      const mg = (await mgRes.json()) as ManagementPayload;
       setUser(tb.user);
+      setStatusDraft(mg.user.status);
+      const source = mg.deltaApiKey ?? mg.exchangeAccount;
+      setNicknameDraft(source?.nickname ?? "Primary");
+      setApiKeyDraft(source?.apiKey ?? "");
+      setApiSecretDraft(source?.apiSecret ?? "");
+      setExchangeHint(
+        mg.exchangeAccount
+          ? `Exchange account detected: ${mg.exchangeAccount.exchange} / ${mg.exchangeAccount.nickname}`
+          : "Using Delta API key profile",
+      );
       setTrades(tb.trades ?? []);
       setBilling(tb.billingSummary ?? null);
       setStrategies(st.strategies ?? []);
@@ -113,6 +150,44 @@ export default function AdminUserDetailPage() {
       setFlushing(false);
     }
   }, [authHeaders, load, userId]);
+
+  const saveManagement = useCallback(async () => {
+    if (!userId) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const [statusRes, keysRes] = await Promise.all([
+        fetch(`${API_BASE}/admin/users/${userId}/status`, {
+          method: "PATCH",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ status: statusDraft }),
+        }),
+        fetch(`${API_BASE}/admin/users/${userId}/api-keys`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            nickname: nicknameDraft,
+            apiKey: apiKeyDraft,
+            apiSecret: apiSecretDraft,
+          }),
+        }),
+      ]);
+      if (!statusRes.ok || !keysRes.ok) {
+        throw new Error(`Save failed (${statusRes.status}/${keysRes.status})`);
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save management changes");
+    } finally {
+      setSaving(false);
+    }
+  }, [apiKeyDraft, apiSecretDraft, authHeaders, load, nicknameDraft, statusDraft, userId]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -162,20 +237,111 @@ export default function AdminUserDetailPage() {
           <div className="inline-flex rounded-lg border border-glassBorder bg-white/[0.03] p-1 text-sm">
             <button
               type="button"
+              onClick={() => setTab("management")}
+              className={`rounded-md px-3 py-1.5 ${tab === "management" ? "bg-primary/20 text-primary" : "text-white/70 hover:bg-white/5"}`}
+            >
+              Management
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("subscriptions")}
+              className={`rounded-md px-3 py-1.5 ${tab === "subscriptions" ? "bg-primary/20 text-primary" : "text-white/70 hover:bg-white/5"}`}
+            >
+              Subscriptions
+            </button>
+            <button
+              type="button"
               onClick={() => setTab("trades")}
               className={`rounded-md px-3 py-1.5 ${tab === "trades" ? "bg-primary/20 text-primary" : "text-white/70 hover:bg-white/5"}`}
             >
               Trade History
             </button>
-            <button
-              type="button"
-              onClick={() => setTab("strategies")}
-              className={`rounded-md px-3 py-1.5 ${tab === "strategies" ? "bg-primary/20 text-primary" : "text-white/70 hover:bg-white/5"}`}
-            >
-              Strategies
-            </button>
           </div>
-          {tab === "trades" && (
+
+          {tab === "management" ? (
+            <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.02] p-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-white/70">
+                  User Status
+                  <select
+                    value={statusDraft}
+                    onChange={(e) => setStatusDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  >
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="SUSPENDED">SUSPENDED</option>
+                  </select>
+                </label>
+                <label className="text-sm text-white/70">
+                  API Nickname
+                  <input
+                    value={nicknameDraft}
+                    onChange={(e) => setNicknameDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="text-sm text-white/70">
+                  API Key
+                  <input
+                    value={apiKeyDraft}
+                    onChange={(e) => setApiKeyDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <label className="text-sm text-white/70">
+                  API Secret
+                  <input
+                    value={apiSecretDraft}
+                    onChange={(e) => setApiSecretDraft(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+              </div>
+              <p className="text-xs text-white/45">{exchangeHint}</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void saveManagement()}
+                  disabled={saving}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
+                >
+                  {saving ? "Saving..." : "Save Management Changes"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void flushTradeHistory()}
+                  disabled={flushing}
+                  className="rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {flushing ? "Flushing..." : "Flush Trade History"}
+                </button>
+              </div>
+            </div>
+          ) : tab === "subscriptions" ? (
+            <div className="space-y-2">
+              {strategies.length === 0 ? (
+                <p className="text-sm text-white/55">No deployed strategies found.</p>
+              ) : (
+                strategies.map((s) => (
+                  <div key={s.id} className="rounded-lg border border-glassBorder bg-white/[0.02] px-4 py-3 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-white">{s.strategyTitle}</span>
+                      <span className={`rounded px-2 py-0.5 text-xs ${
+                        s.status === "ACTIVE"
+                          ? "bg-emerald-500/15 text-emerald-300"
+                          : "bg-amber-500/15 text-amber-200"
+                      }`}>
+                        {s.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-white/60">
+                      Multiplier: {s.multiplier}x · {s.exchangeAccount ? `Account: ${s.exchangeAccount.nickname}` : "Not configured"}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : (
             <div>
               <button
                 type="button"
@@ -231,27 +397,7 @@ export default function AdminUserDetailPage() {
                 </table>
               </div>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {strategies.map((s) => (
-                <div key={s.id} className="rounded-lg border border-glassBorder bg-white/[0.02] px-4 py-3 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-white">{s.strategyTitle}</span>
-                    <span className={`rounded px-2 py-0.5 text-xs ${
-                      s.status === "ACTIVE"
-                        ? "bg-emerald-500/15 text-emerald-300"
-                        : "bg-amber-500/15 text-amber-200"
-                    }`}>
-                      {s.status}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-white/60">
-                    Multiplier: {s.multiplier}x · {s.exchangeAccount ? `Account: ${s.exchangeAccount.nickname}` : "Not configured"}
-                  </p>
-                </div>
-              ))}
-            </div>
-          )}
+          ) : null}
         </>
       )}
     </div>
