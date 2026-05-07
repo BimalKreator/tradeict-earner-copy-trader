@@ -18,6 +18,7 @@ type UserTrade = {
   exitPrice: number | null;
   status: string;
   pnl: number;
+  tradingFee: number;
   adminRevenue: number;
 };
 
@@ -200,13 +201,14 @@ export default function AdminUserDetailPage() {
                       <th className="px-3 py-2 font-medium">Entry</th>
                       <th className="px-3 py-2 font-medium">Exit</th>
                       <th className="px-3 py-2 font-medium">P&L</th>
+                      <th className="px-3 py-2 font-medium">Trading Fee</th>
                       <th className="px-3 py-2 font-medium">Admin Revenue</th>
                     </tr>
                   </thead>
                   <tbody>
                     {trades.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-3 py-8 text-center text-white/45">
+                        <td colSpan={9} className="px-3 py-8 text-center text-white/45">
                           No trade history found.
                         </td>
                       </tr>
@@ -220,6 +222,7 @@ export default function AdminUserDetailPage() {
                           <td className="px-3 py-2 text-white/80 tabular-nums">${t.entryPrice.toFixed(2)}</td>
                           <td className="px-3 py-2 text-white/80 tabular-nums">{t.exitPrice != null ? `$${t.exitPrice.toFixed(2)}` : "—"}</td>
                           <td className={`px-3 py-2 tabular-nums ${t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>${t.pnl.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-white tabular-nums">${t.tradingFee.toFixed(2)}</td>
                           <td className="px-3 py-2 text-white tabular-nums">${t.adminRevenue.toFixed(2)}</td>
                         </tr>
                       ))

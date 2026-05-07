@@ -18,6 +18,7 @@ type TradeRow = {
   exitPrice: number | null;
   pnl: number | null;
   tradePnl: number;
+  tradingFee: number;
   revenueShareAmt: number;
   status: "OPEN" | "CLOSED" | "FAILED";
 };
@@ -161,7 +162,11 @@ export default function DashboardTradesPage() {
     const v = realizedPnl(r);
     return acc + (v ?? 0);
   }, 0);
-  const totalFee = rows.reduce(
+  const totalTradingFee = rows.reduce(
+    (acc, r) => acc + (Number.isFinite(r.tradingFee) ? r.tradingFee : 0),
+    0,
+  );
+  const totalRevenueShare = rows.reduce(
     (acc, r) =>
       acc + (Number.isFinite(r.revenueShareAmt) ? r.revenueShareAmt : 0),
     0,
@@ -213,7 +218,7 @@ export default function DashboardTradesPage() {
       </header>
 
       {!loading && rows.length > 0 ? (
-        <section className="grid gap-4 sm:grid-cols-3">
+        <section className="grid gap-4 sm:grid-cols-4">
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
               Trades
@@ -224,7 +229,7 @@ export default function DashboardTradesPage() {
           </div>
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Realized PnL
+              Net PnL
             </p>
             <p
               className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(totalPnl)}`}
@@ -234,10 +239,18 @@ export default function DashboardTradesPage() {
           </div>
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Total Est. Fees
+              Total Trading Fees
             </p>
             <p className="mt-2 text-2xl font-semibold text-white/90 tabular-nums">
-              {fmtFee(totalFee)}
+              {fmtFee(totalTradingFee)}
+            </p>
+          </div>
+          <div className="glass-card border border-glassBorder p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
+              Revenue Share
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-white/90 tabular-nums">
+              {fmtFee(totalRevenueShare)}
             </p>
           </div>
         </section>
@@ -251,7 +264,7 @@ export default function DashboardTradesPage() {
 
       <section className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[920px] text-left text-sm">
+          <table className="w-full min-w-[1060px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Date</th>
@@ -267,24 +280,27 @@ export default function DashboardTradesPage() {
                   Exit price
                 </th>
                 <th className="px-4 py-3 text-right font-medium text-white/70">
-                  Trade PnL
+                  Net PnL
                 </th>
                 <th className="px-4 py-3 text-right font-medium text-white/70">
-                  Est. fee
+                  Trading Fee
+                </th>
+                <th className="px-4 py-3 text-right font-medium text-white/70">
+                  Revenue Share
                 </th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-14 text-center">
+                  <td colSpan={9} className="px-4 py-14 text-center">
                     <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={8}
+                    colSpan={9}
                     className="px-4 py-16 text-center text-white/55"
                   >
                     <p className="text-sm">No trades executed yet.</p>
@@ -343,6 +359,9 @@ export default function DashboardTradesPage() {
                         ) : (
                           fmtPnl(realized)
                         )}
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-white/85">
+                        {fmtFee(r.tradingFee)}
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums text-white/85">
                         {fmtFee(r.revenueShareAmt)}

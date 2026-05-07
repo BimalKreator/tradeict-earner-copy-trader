@@ -99,8 +99,33 @@ export type TradeSide = "BUY" | "SELL";
 export interface ExecuteTradeResult {
   success: boolean;
   orderId?: string;
+  feeCost?: number;
   raw?: unknown;
   error?: string;
+}
+
+function numberOrNull(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function extractFeeCostFromOrder(order: unknown): number | null {
+  if (order == null || typeof order !== "object") return null;
+  const o = order as {
+    fee?: { cost?: unknown } | null;
+    fees?: Array<{ cost?: unknown } | null> | null;
+  };
+  const direct = numberOrNull(o.fee?.cost);
+  if (direct != null) return Math.abs(direct);
+  if (Array.isArray(o.fees)) {
+    const sum = o.fees.reduce((acc, f) => acc + (numberOrNull(f?.cost) ?? 0), 0);
+    if (Number.isFinite(sum) && sum > 0) return Math.abs(sum);
+  }
+  return null;
 }
 
 /** Normalized open perpetual position from Delta (for dashboards). */
@@ -285,9 +310,42 @@ export async function executeTrade(
       };
     }
 
+    const orderObj = order as {
+      average?: unknown;
+      price?: unknown;
+      last?: unknown;
+    };
+    const explicitFee = extractFeeCostFromOrder(order);
+    let feeCost = explicitFee ?? 0;
+    if (!(Number.isFinite(feeCost) && feeCost > 0)) {
+      let contractSize = 1;
+      try {
+        const m = exchange.market(ccxtSymbol);
+        const cs = Number(m.contractSize ?? 1);
+        contractSize =
+          Number.isFinite(cs) && cs > 0
+            ? cs
+            : symbol.toUpperCase().includes("BTC")
+              ? 0.001
+              : 1;
+      } catch {
+        contractSize = symbol.toUpperCase().includes("BTC") ? 0.001 : 1;
+      }
+      const executedPrice =
+        numberOrNull(orderObj.average) ??
+        numberOrNull(orderObj.price) ??
+        numberOrNull(orderObj.last);
+      if (executedPrice != null && Number.isFinite(executedPrice) && executedPrice > 0) {
+        feeCost = Math.abs(size) * contractSize * executedPrice * 0.0005;
+      } else {
+        feeCost = 0;
+      }
+    }
+
     return {
       success: true,
       orderId: order.id ?? undefined,
+      feeCost,
       raw: order,
     };
   } catch (err) {

@@ -39,6 +39,7 @@ export function createAdminController(prisma: PrismaClient) {
             strategyId: true,
             tradePnl: true,
             pnl: true,
+            tradingFee: true,
             revenueShareAmt: true,
             strategy: { select: { title: true, profitShare: true } },
           },
@@ -124,6 +125,7 @@ export function createAdminController(prisma: PrismaClient) {
           exitPrice: true,
           tradePnl: true,
           pnl: true,
+          tradingFee: true,
           revenueShareAmt: true,
           status: true,
           strategy: { select: { title: true, profitShare: true } },
@@ -150,6 +152,8 @@ export function createAdminController(prisma: PrismaClient) {
           exitPrice: t.exitPrice,
           status: t.status,
           pnl: realized,
+          tradingFee:
+            Number.isFinite(t.tradingFee) && t.tradingFee > 0 ? t.tradingFee : 0,
           adminRevenue,
         };
       });

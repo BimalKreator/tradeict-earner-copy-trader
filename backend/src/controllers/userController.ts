@@ -109,8 +109,8 @@ export function createUserController(prisma: PrismaClient) {
    *   status — `OPEN | CLOSED | FAILED` (omit for all)
    *
    * Returns a flat `{ trades: [...] }` shape so the frontend can render a
-   * data table directly. Includes `tradePnl` and `revenueShareAmt` so the
-   * client can show realized PnL + the per-trade revenue-share fee.
+ * data table directly. Includes `tradePnl`, `tradingFee`, and `revenueShareAmt`
+ * so the client can show net realized PnL + fee breakdown.
    */
   async function listTrades(
     req: Request,
@@ -161,6 +161,7 @@ export function createUserController(prisma: PrismaClient) {
           exitPrice: true,
           pnl: true,
           tradePnl: true,
+          tradingFee: true,
           revenueShareAmt: true,
           status: true,
           strategy: { select: { title: true } },
@@ -179,6 +180,7 @@ export function createUserController(prisma: PrismaClient) {
         exitPrice: r.exitPrice,
         pnl: r.pnl,
         tradePnl: r.tradePnl,
+        tradingFee: r.tradingFee,
         revenueShareAmt: r.revenueShareAmt,
         status: r.status,
       }));

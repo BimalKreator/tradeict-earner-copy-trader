@@ -214,6 +214,7 @@ async function recordTrade(
     status: TradeStatus;
     exitPrice?: number | null;
     pnl?: number | null;
+    tradingFee?: number;
   },
 ) {
   await prisma.trade.create({
@@ -227,6 +228,7 @@ async function recordTrade(
       status: args.status,
       ...(args.exitPrice != null ? { exitPrice: args.exitPrice } : {}),
       ...(args.pnl != null ? { pnl: args.pnl } : {}),
+      ...(args.tradingFee != null ? { tradingFee: args.tradingFee } : {}),
     },
   });
 
@@ -310,6 +312,7 @@ async function closeFollowerTradeAndRecordPnl(
     masterEntryPrice: number;
     sizedPosition: number;
     exitPrice: number;
+    exitFee: number;
   },
 ): Promise<void> {
   const candidates = await prisma.trade.findMany({
@@ -329,13 +332,16 @@ async function closeFollowerTradeAndRecordPnl(
 
   if (!open) return;
 
-  const tradeProfit = await realizedPnlUsd({
+  const grossPnl = await realizedPnlUsd({
     symbol: args.symbol,
     side: args.side,
     entryPrice: args.masterEntryPrice,
     exitPrice: args.exitPrice,
     contracts: args.sizedPosition,
   });
+  const totalTradingFee =
+    Math.max(0, Number(open.tradingFee ?? 0)) + Math.max(0, Number(args.exitFee ?? 0));
+  const netPnl = grossPnl - totalTradingFee;
 
   // Fetch profitShare for the per-trade revenue-share snapshot. Closes are
   // infrequent so a single extra select is cheap; doing it here keeps every
@@ -345,14 +351,15 @@ async function closeFollowerTradeAndRecordPnl(
     select: { profitShare: true },
   });
   const profitSharePct = strategyMeta?.profitShare ?? 0;
-  const revenueShareAmt = computeRevenueShareAmt(tradeProfit, profitSharePct);
+  const revenueShareAmt = computeRevenueShareAmt(netPnl, profitSharePct);
 
   await prisma.trade.update({
     where: { id: open.id },
     data: {
       exitPrice: args.exitPrice,
-      pnl: tradeProfit,
-      tradePnl: tradeProfit,
+      tradingFee: totalTradingFee,
+      pnl: netPnl,
+      tradePnl: netPnl,
       revenueShareAmt,
       status: TradeStatus.CLOSED,
     },
@@ -361,7 +368,7 @@ async function closeFollowerTradeAndRecordPnl(
   await recordTradePnl(prisma, {
     userId: args.userId,
     strategyId: args.strategyId,
-    tradeProfit,
+    tradeProfit: netPnl,
   });
 }
 
@@ -557,6 +564,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       size: followerContracts,
       entryPrice: leader.entryPrice,
       status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+      tradingFee: result.success ? (result.feeCost ?? 0) : 0,
     });
   }
 }
@@ -796,6 +804,7 @@ async function copyMasterFillToSubscribers(
         size: followerContracts,
         entryPrice: args.avgPrice,
         status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+        tradingFee: result.success ? (result.feeCost ?? 0) : 0,
       });
     }),
   );
@@ -914,6 +923,7 @@ async function notifyMasterFlat(
         masterEntryPrice: snap.masterEntryPrice,
         sizedPosition: followerContracts,
         exitPrice,
+        exitFee: closeResult.feeCost ?? 0,
       });
     }),
   );
@@ -1667,8 +1677,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             exitPrice,
             contracts: trade.size,
           });
+          const totalTradingFee = Math.max(0, Number(trade.tradingFee ?? 0));
+          const netPnl = pnl - totalTradingFee;
           const revenueShareAmt = computeRevenueShareAmt(
-            pnl,
+            netPnl,
             strat.profitShare,
           );
 
@@ -1677,8 +1689,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             data: {
               status: TradeStatus.CLOSED,
               exitPrice,
-              pnl,
-              tradePnl: pnl,
+              tradingFee: totalTradingFee,
+              pnl: netPnl,
+              tradePnl: netPnl,
               revenueShareAmt,
             },
           });
