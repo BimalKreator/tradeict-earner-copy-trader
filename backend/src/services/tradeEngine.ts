@@ -699,6 +699,8 @@ async function copyMasterFillToSubscribers(
     },
   });
 
+  const uniqueSubs = Array.from(new Map(subs.map((s) => [s.userId, s])).values());
+
   const skipAll =
     marketPrice !== undefined &&
     percentSlippage(args.avgPrice, marketPrice) > strategy.slippage;
@@ -708,7 +710,7 @@ async function copyMasterFillToSubscribers(
       `[tradeEngine] Slippage exceeded for ${args.symbol}; skipping copy for strategy ${strategyId}`,
     );
     await Promise.all(
-      subs.map(async (sub) => {
+      uniqueSubs.map(async (sub) => {
         const followerContracts = followerContractsFromMaster(
           args.masterContracts,
           sub.multiplier,
@@ -731,7 +733,7 @@ async function copyMasterFillToSubscribers(
   }
 
   await Promise.all(
-    subs.map(async (sub) => {
+    uniqueSubs.map(async (sub) => {
       const followerContracts = followerContractsFromMaster(
         args.masterContracts,
         sub.multiplier,
@@ -929,7 +931,6 @@ class StrategyMasterSocket {
   /** Last non-zero position per product (for closed detection). */
   private readonly lastPositionContracts = new Map<string, number>();
   private readonly lastOpenMeta = new Map<string, LastOpenMeta>();
-  private readonly processedOrderIds = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -1168,23 +1169,6 @@ class StrategyMasterSocket {
       if (records.length === 0) records.push(parsed);
 
       for (const r of records) {
-        const orderId = String(
-          (r as { id?: unknown }).id ??
-            (r as { order_id?: unknown }).order_id ??
-            ((r as { payload?: { id?: unknown; order_id?: unknown } | null })
-              .payload &&
-              ((r as { payload?: { id?: unknown; order_id?: unknown } | null })
-                .payload?.id ||
-                (r as { payload?: { id?: unknown; order_id?: unknown } | null })
-                  .payload?.order_id)) ??
-            "",
-        );
-        if (orderId) {
-          if (this.processedOrderIds.has(orderId)) continue;
-          this.processedOrderIds.add(orderId);
-          if (this.processedOrderIds.size > 500) this.processedOrderIds.clear();
-        }
-
         const sig = extractOrderFillSignal(r);
         if (!sig || sig.reduceOnly) continue;
         await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
