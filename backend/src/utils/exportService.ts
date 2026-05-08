@@ -46,7 +46,7 @@ export function writeCsvToDownloads(fileName: string, csv: string): {
   fs.writeFileSync(absolutePath, `\uFEFF${csv}`, "utf8");
   return {
     absolutePath,
-    relativePath: `/downloads/${fileName}`,
+    relativePath: `/api/downloads/${fileName}`,
   };
 }
 
