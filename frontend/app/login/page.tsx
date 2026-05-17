@@ -209,7 +209,15 @@ function LoginForm() {
               />
             </label>
             <label className="block">
-              <span className="text-xs font-medium text-white/60">Password</span>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-white/60">Password</span>
+                <Link
+                  href="/forgot-password"
+                  className="text-xs font-medium text-primary underline-offset-2 hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              </div>
               <input
                 type="password"
                 autoComplete="current-password"

@@ -389,10 +389,118 @@ export function createAuthController(prisma: PrismaClient) {
     }
   }
 
+  async function forgotPassword(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const emailRaw = (req.body as { email?: unknown }).email;
+      if (typeof emailRaw !== "string" || !emailRaw.trim()) {
+        res.status(400).json({ error: "email is required" });
+        return;
+      }
+      const email = emailRaw.trim().toLowerCase();
+
+      const user = await prisma.user.findUnique({ where: { email } });
+      if (user) {
+        if (await rejectDisallowedEmail(res, email)) return;
+
+        const otpCode = generateSixDigitOtp();
+        const otpExpiry = new Date(Date.now() + OTP_TTL_MS);
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { otpCode, otpExpiry },
+        });
+
+        await sendOtpEmail(email, otpCode, "Password Reset");
+      }
+
+      res.status(200).json({
+        ok: true,
+        message:
+          "If an account exists for this email, a password reset code has been sent.",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function resetPassword(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        email?: unknown;
+        otp?: unknown;
+        newPassword?: unknown;
+      };
+      const email =
+        typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const otp =
+        typeof body.otp === "string"
+          ? body.otp.trim()
+          : typeof body.otp === "number"
+            ? String(body.otp)
+            : "";
+      const newPassword =
+        typeof body.newPassword === "string" ? body.newPassword : "";
+
+      if (!email || !otp || !newPassword) {
+        res.status(400).json({
+          error: "email, otp, and newPassword are required",
+        });
+        return;
+      }
+      if (newPassword.length < 8) {
+        res.status(400).json({
+          error: "newPassword must be at least 8 characters",
+        });
+        return;
+      }
+
+      if (await rejectDisallowedEmail(res, email)) return;
+
+      const user = await prisma.user.findUnique({ where: { email } });
+      if (!user || !user.otpCode || !user.otpExpiry) {
+        res.status(401).json({ error: "Invalid or expired OTP" });
+        return;
+      }
+
+      if (user.otpCode !== otp || user.otpExpiry <= new Date()) {
+        res.status(401).json({ error: "Invalid or expired OTP" });
+        return;
+      }
+
+      const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          password: passwordHash,
+          otpCode: null,
+          otpExpiry: null,
+        },
+      });
+
+      res.status(200).json({
+        ok: true,
+        message: "Password reset successful. You can sign in with your new password.",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     sendSignupOtp,
     registerWithOtp,
     login,
     verifyOtp,
+    forgotPassword,
+    resetPassword,
   };
 }

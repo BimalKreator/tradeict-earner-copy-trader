@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-export type OtpEmailPurpose = "Sign Up" | "Login";
+export type OtpEmailPurpose = "Sign Up" | "Login" | "Password Reset";
 
 /**
  * Brevo (formerly Sendinblue) SMTP — configure via environment (same keys work with Brevo’s SMTP relay):
@@ -128,6 +128,9 @@ function buildOtpText(otp: string, purpose: OtpEmailPurpose): string {
 function subjectForPurpose(purpose: OtpEmailPurpose): string {
   if (purpose === "Sign Up") {
     return "Verify your email — TradeICT Earner";
+  }
+  if (purpose === "Password Reset") {
+    return "Reset your password — TradeICT Earner";
   }
   return "Your login code — TradeICT Earner";
 }
