@@ -1243,6 +1243,173 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  const cryptoArbitrageSelect = {
+    id: true,
+    cryptoArbitrageEnabled: true,
+    cryptoBalance: true,
+    cryptoCapitalPerTradePercent: true,
+  } as const;
+
+  async function getUserCryptoArbitrage(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: cryptoArbitrageSelect,
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      res.json({
+        userId: user.id,
+        cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+        cryptoBalance: user.cryptoBalance,
+        cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function patchUserCryptoArbitrageEnabled(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      const body = req.body as { enabled?: unknown; cryptoArbitrageEnabled?: unknown };
+      const enabled =
+        typeof body.enabled === "boolean"
+          ? body.enabled
+          : typeof body.cryptoArbitrageEnabled === "boolean"
+            ? body.cryptoArbitrageEnabled
+            : undefined;
+      if (enabled === undefined) {
+        res.status(400).json({ error: "Provide enabled (boolean)" });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { cryptoArbitrageEnabled: enabled },
+        select: cryptoArbitrageSelect,
+      });
+      res.json({
+        userId: user.id,
+        cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+        cryptoBalance: user.cryptoBalance,
+        cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function patchUserCryptoArbitrageBalance(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      const body = req.body as {
+        balance?: unknown;
+        delta?: unknown;
+        adjustment?: unknown;
+      };
+
+      const existing = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, cryptoBalance: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      let nextBalance: number | undefined;
+      if (typeof body.balance === "number" && Number.isFinite(body.balance)) {
+        nextBalance = Math.max(0, body.balance);
+      } else {
+        const deltaRaw =
+          typeof body.delta === "number"
+            ? body.delta
+            : typeof body.adjustment === "number"
+              ? body.adjustment
+              : undefined;
+        if (deltaRaw === undefined || !Number.isFinite(deltaRaw)) {
+          res.status(400).json({
+            error: "Provide balance (absolute) or delta/adjustment (add/subtract)",
+          });
+          return;
+        }
+        nextBalance = Math.max(0, existing.cryptoBalance + deltaRaw);
+      }
+
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { cryptoBalance: nextBalance },
+        select: cryptoArbitrageSelect,
+      });
+      res.json({
+        userId: user.id,
+        cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+        cryptoBalance: user.cryptoBalance,
+        cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function patchUserCryptoArbitrageAllocation(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      const body = req.body as {
+        percent?: unknown;
+        cryptoCapitalPerTradePercent?: unknown;
+      };
+      const percent =
+        typeof body.percent === "number"
+          ? body.percent
+          : typeof body.cryptoCapitalPerTradePercent === "number"
+            ? body.cryptoCapitalPerTradePercent
+            : undefined;
+      if (percent === undefined || !Number.isFinite(percent) || percent <= 0 || percent > 100) {
+        res.status(400).json({
+          error: "percent must be a number greater than 0 and at most 100",
+        });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { cryptoCapitalPerTradePercent: percent },
+        select: cryptoArbitrageSelect,
+      });
+      res.json({
+        userId: user.id,
+        cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+        cryptoBalance: user.cryptoBalance,
+        cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -1260,6 +1427,10 @@ export function createAdminController(prisma: PrismaClient) {
     listTransactions,
     listAllDeposits,
     updateDepositStatus,
+    getUserCryptoArbitrage,
+    patchUserCryptoArbitrageEnabled,
+    patchUserCryptoArbitrageBalance,
+    patchUserCryptoArbitrageAllocation,
   };
 }
 

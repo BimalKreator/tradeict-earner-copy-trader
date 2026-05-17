@@ -1,5 +1,9 @@
 import type { NextFunction, Request, Response } from "express";
-import { getDexArbitrageData } from "../services/arbitrageService.js";
+import {
+  CACHE_TTL_MS,
+  getDexArbitrageData,
+  invalidateDexArbitrageCache,
+} from "../services/arbitrageService.js";
 
 export function createArbitrageController() {
   async function getDexArbitrage(
@@ -11,13 +15,20 @@ export function createArbitrageController() {
       const forceRefresh =
         req.query.refresh === "1" ||
         req.query.refresh === "true" ||
+        req.query.force === "1" ||
         req.query.force === "true";
+
+      if (forceRefresh) {
+        invalidateDexArbitrageCache();
+      }
 
       const { data, fromCache } = await getDexArbitrageData(forceRefresh);
 
+      res.setHeader("Cache-Control", "no-store");
       res.json({
         ...data,
         fromCache,
+        cacheTtlSeconds: Math.floor(CACHE_TTL_MS / 1000),
       });
     } catch (err) {
       next(err);

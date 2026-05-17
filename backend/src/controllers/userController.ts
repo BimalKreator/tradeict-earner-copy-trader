@@ -3,7 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   activeStrategiesForUser,
   checkDeltaApiConnected,
-  fetchUserAvailableCapital,
+  fetchUserCapitalBreakdown,
   monthlyWinRate,
   pnlPercentOfCapital,
   resolveUserDeltaCreds,
@@ -171,7 +171,7 @@ export function createUserController(prisma: PrismaClient) {
       const dayStart = startOfUtcDay();
       const monthStart = startOfUtcMonth();
 
-      const [userRow, todayPnl, monthlyPnl, availableCapital, totalDue, winRate, activeStrategies] =
+      const [userRow, todayPnl, monthlyPnl, capital, totalDue, winRate, activeStrategies] =
         await Promise.all([
           prisma.user.findUnique({
             where: { id: userId },
@@ -179,7 +179,7 @@ export function createUserController(prisma: PrismaClient) {
           }),
           sumClosedTradePnlSince(prisma, userId, dayStart),
           sumClosedTradePnlSince(prisma, userId, monthStart),
-          fetchUserAvailableCapital(prisma, userId),
+          fetchUserCapitalBreakdown(prisma, userId),
           userTotalDue(prisma, userId),
           monthlyWinRate(prisma, userId),
           activeStrategiesForUser(prisma, userId),
@@ -195,10 +195,13 @@ export function createUserController(prisma: PrismaClient) {
 
       res.json({
         todayPnl,
-        todayPnlPercent: pnlPercentOfCapital(todayPnl, availableCapital),
+        todayPnlPercent: pnlPercentOfCapital(todayPnl, capital.availableBalance),
         monthlyPnl,
-        monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, availableCapital),
-        availableCapital,
+        monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, capital.availableBalance),
+        availableCapital: capital.availableBalance,
+        totalBalance: capital.totalBalance,
+        availableBalance: capital.availableBalance,
+        usedBalance: capital.usedBalance,
         totalDue,
         winRate,
         activeStrategies,

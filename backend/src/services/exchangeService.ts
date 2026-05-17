@@ -651,9 +651,15 @@ export async function fetchDeltaOpenPositions(
   return out;
 }
 
+export type DeltaBalanceBreakdown = {
+  totalBalance: number;
+  availableBalance: number;
+  usedBalance: number;
+};
+
 function balanceFieldUsd(
   bal: Awaited<ReturnType<InstanceType<typeof ccxt.delta>["fetchBalance"]>>,
-  bucket: "free" | "total",
+  bucket: "free" | "used" | "total",
 ): number | null {
   const map = bal[bucket] as Record<string, unknown> | undefined;
   if (!map) return null;
@@ -664,35 +670,70 @@ function balanceFieldUsd(
   return null;
 }
 
+function parseDeltaBalanceBreakdown(
+  bal: Awaited<ReturnType<InstanceType<typeof ccxt.delta>["fetchBalance"]>>,
+): DeltaBalanceBreakdown {
+  const info = (bal.info ?? {}) as Record<string, unknown>;
+
+  const totalCcxt = balanceFieldUsd(bal, "total");
+  const freeCcxt = balanceFieldUsd(bal, "free");
+  const usedCcxt = balanceFieldUsd(bal, "used");
+
+  const totalInfo = numberOrNull(info.total_balance);
+  const availableInfo =
+    numberOrNull(info.available_balance) ?? numberOrNull(info.available_margin);
+  const usedInfo =
+    numberOrNull(info.used_balance) ??
+    numberOrNull(info.position_margin) ??
+    numberOrNull(info.blocked_margin);
+
+  let totalBalance = totalCcxt ?? totalInfo ?? 0;
+  let availableBalance = freeCcxt ?? availableInfo ?? 0;
+  let usedBalance = usedCcxt ?? usedInfo ?? 0;
+
+  if (totalBalance <= 0 && availableBalance > 0) {
+    totalBalance = availableBalance + usedBalance;
+  }
+  if (usedBalance <= 0 && totalBalance > 0 && availableBalance >= 0) {
+    usedBalance = Math.max(0, totalBalance - availableBalance);
+  }
+  if (totalBalance <= 0 && availableBalance <= 0 && usedBalance > 0) {
+    totalBalance = usedBalance;
+  }
+
+  return {
+    totalBalance: Number.isFinite(totalBalance) ? totalBalance : 0,
+    availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
+    usedBalance: Number.isFinite(usedBalance) ? usedBalance : 0,
+  };
+}
+
 /**
- * User-facing available capital from the subscriber's own Delta credentials (CCXT).
- * Prefers withdrawable / available balance over wallet total when the exchange exposes it.
+ * Total, free (available), and used (locked) USD balance from CCXT `fetchBalance()`.
+ */
+export async function fetchDeltaBalanceBreakdownUsd(
+  apiKeyStored: string,
+  apiSecretStored: string,
+): Promise<DeltaBalanceBreakdown> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  if (!apiKey.trim() || !secret.trim()) {
+    return { totalBalance: 0, availableBalance: 0, usedBalance: 0 };
+  }
+  const exchange = await getAuthClient(apiKey, secret);
+  const bal = await exchange.fetchBalance();
+  return parseDeltaBalanceBreakdown(bal);
+}
+
+/**
+ * User-facing available (free) capital from the subscriber's own Delta credentials (CCXT).
  */
 export async function fetchDeltaAvailableBalanceUsd(
   apiKeyStored: string,
   apiSecretStored: string,
 ): Promise<number> {
-  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
-  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
-  if (!apiKey.trim() || !secret.trim()) {
-    return 0;
-  }
-  const exchange = await getAuthClient(apiKey, secret);
-  const bal = await exchange.fetchBalance();
-  const info = (bal.info ?? {}) as Record<string, unknown>;
-
-  const candidates = [
-    numberOrNull(info.available_balance),
-    numberOrNull(info.available_margin),
-    balanceFieldUsd(bal, "free"),
-    balanceFieldUsd(bal, "total"),
-    numberOrNull(info.total_balance),
-  ];
-
-  for (const n of candidates) {
-    if (n !== null && Number.isFinite(n) && n >= 0) return n;
-  }
-  return 0;
+  const breakdown = await fetchDeltaBalanceBreakdownUsd(apiKeyStored, apiSecretStored);
+  return breakdown.availableBalance;
 }
 
 /** @deprecated Prefer {@link fetchDeltaAvailableBalanceUsd} for user dashboards. */

@@ -5,7 +5,13 @@ import {
   type PrismaClient,
 } from "@prisma/client";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
-import { fetchDeltaAvailableBalanceUsd } from "./exchangeService.js";
+import {
+  type DeltaBalanceBreakdown,
+  fetchDeltaAvailableBalanceUsd,
+  fetchDeltaBalanceBreakdownUsd,
+} from "./exchangeService.js";
+
+export type { DeltaBalanceBreakdown };
 
 export function startOfUtcDay(ref = new Date()): Date {
   return new Date(
@@ -148,17 +154,31 @@ export async function resolveUserDeltaCreds(
   return null;
 }
 
+const ZERO_BREAKDOWN: DeltaBalanceBreakdown = {
+  totalBalance: 0,
+  availableBalance: 0,
+  usedBalance: 0,
+};
+
+export async function fetchUserCapitalBreakdown(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<DeltaBalanceBreakdown> {
+  const creds = await resolveUserDeltaCreds(prisma, userId);
+  if (!creds) return { ...ZERO_BREAKDOWN };
+  try {
+    return await fetchDeltaBalanceBreakdownUsd(creds.apiKey, creds.apiSecret);
+  } catch {
+    return { ...ZERO_BREAKDOWN };
+  }
+}
+
 export async function fetchUserAvailableCapital(
   prisma: PrismaClient,
   userId: string,
 ): Promise<number> {
-  const creds = await resolveUserDeltaCreds(prisma, userId);
-  if (!creds) return 0;
-  try {
-    return await fetchDeltaAvailableBalanceUsd(creds.apiKey, creds.apiSecret);
-  } catch {
-    return 0;
-  }
+  const breakdown = await fetchUserCapitalBreakdown(prisma, userId);
+  return breakdown.availableBalance;
 }
 
 export async function checkDeltaApiConnected(

@@ -114,6 +114,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           aadhaarNumber: true,
           status: true,
           copyTradingPaused: true,
+          cryptoArbitrageEnabled: true,
+          cryptoBalance: true,
+          cryptoCapitalPerTradePercent: true,
           deltaApiKeys: {
             orderBy: { id: "desc" },
             take: 1,
@@ -147,6 +150,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           aadhaarNumber: user.aadhaarNumber,
           status: user.status,
           copyTradingPaused: user.copyTradingPaused,
+          cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+          cryptoBalance: user.cryptoBalance,
+          cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
         },
         deltaApiKey: user.deltaApiKeys[0] ?? null,
         exchangeAccount: user.exchangeAccounts[0] ?? null,
@@ -155,6 +161,20 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  router.get("/users/:id/crypto-arbitrage", adminController.getUserCryptoArbitrage);
+  router.patch(
+    "/users/:id/crypto-arbitrage/enabled",
+    adminController.patchUserCryptoArbitrageEnabled,
+  );
+  router.patch(
+    "/users/:id/crypto-arbitrage/balance",
+    adminController.patchUserCryptoArbitrageBalance,
+  );
+  router.patch(
+    "/users/:id/crypto-arbitrage/allocation",
+    adminController.patchUserCryptoArbitrageAllocation,
+  );
 
   router.patch("/users/:id/copy-trading", async (req, res, next) => {
     try {

@@ -142,11 +142,28 @@ const TOKEN_CATALOG: { symbol: string; name: string; coingeckoId: string }[] = [
   { symbol: "CAKE", name: "PancakeSwap", coingeckoId: "pancakeswap-token" },
 ];
 
-const CACHE_TTL_MS = 4 * 60 * 1000;
+export const CACHE_TTL_MS = 4 * 60 * 1000;
 
 let cache: DexArbitragePayload | null = null;
 let cacheExpiresAt = 0;
 let refreshInFlight: Promise<DexArbitragePayload> | null = null;
+
+/** Clears in-memory cache so the next request fetches fresh aggregator data. */
+export function invalidateDexArbitrageCache(): void {
+  cache = null;
+  cacheExpiresAt = 0;
+  refreshInFlight = null;
+}
+
+function isCacheValid(now = Date.now()): boolean {
+  return cache != null && now < cacheExpiresAt;
+}
+
+/** Fresh random fee in [7.00, 9.00] (2 dp) — not seeded; new value each refresh. */
+function randomEstimatedFeePercent(): number {
+  const raw = 7 + Math.random() * 2;
+  return Math.round(raw * 100) / 100;
+}
 
 function seededUnit(seed: string, salt: string): number {
   let h = 2166136261;
@@ -196,10 +213,12 @@ async function fetchCoinGeckoUsdPrices(
 function simulateDexQuotes(
   symbol: string,
   basePrice: number,
+  refreshSalt: string,
 ): { dex: ArbitrageDex; price: number }[] {
   return ARBITRAGE_DEXES.map((dex, idx) => {
-    const u = seededUnit(symbol, dex);
-    const bias = (u - 0.5) * 0.06;
+    const u = seededUnit(symbol, `${refreshSalt}::${dex}`);
+    const jitter = (Math.random() - 0.5) * 0.012;
+    const bias = (u - 0.5) * 0.06 + jitter;
     const dexSkew = (idx - 4.5) * 0.0015;
     const price = basePrice * (1 + bias + dexSkew);
     return { dex, price: Math.max(price, basePrice * 0.0001) };
@@ -211,6 +230,7 @@ function buildRow(
   rank: number,
   oracleUsd: Map<string, number>,
   usedOracle: { value: boolean },
+  refreshSalt: string,
 ): DexArbitrageRow {
   const fromOracle = oracleUsd.get(entry.coingeckoId);
   const basePrice =
@@ -220,7 +240,7 @@ function buildRow(
 
   if (fromOracle != null) usedOracle.value = true;
 
-  const quotes = simulateDexQuotes(entry.symbol, basePrice);
+  const quotes = simulateDexQuotes(entry.symbol, basePrice, refreshSalt);
   let lowest = quotes[0]!;
   let highest = quotes[0]!;
   for (const q of quotes) {
@@ -230,11 +250,13 @@ function buildRow(
 
   const spreadUsd = highest.price - lowest.price;
   const spreadPercentage =
-    lowest.price > 0 ? (spreadUsd / lowest.price) * 100 : 0;
+    lowest.price > 0
+      ? Math.round((spreadUsd / lowest.price) * 10000) / 100
+      : 0;
 
-  const estimatedFeePercent =
-    Math.round((7 + seededUnit(entry.symbol, "est-fee") * 2) * 100) / 100;
-  const netSpreadPercent = spreadPercentage - estimatedFeePercent;
+  const estimatedFeePercent = randomEstimatedFeePercent();
+  const netSpreadPercent =
+    Math.round((spreadPercentage - estimatedFeePercent) * 100) / 100;
 
   return {
     token: entry.symbol,
@@ -252,6 +274,7 @@ function buildRow(
 }
 
 async function refreshDexArbitrageData(): Promise<DexArbitragePayload> {
+  const refreshSalt = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const ids = [...new Set(TOKEN_CATALOG.map((t) => t.coingeckoId))];
   let oracleUsd = new Map<string, number>();
   const usedOracle = { value: false };
@@ -263,7 +286,7 @@ async function refreshDexArbitrageData(): Promise<DexArbitragePayload> {
   }
 
   const rows = TOKEN_CATALOG.map((entry, idx) =>
-    buildRow(entry, idx, oracleUsd, usedOracle),
+    buildRow(entry, idx, oracleUsd, usedOracle, refreshSalt),
   ).sort((a, b) => b.spreadPercentage - a.spreadPercentage);
 
   return {
@@ -278,22 +301,29 @@ export async function getDexArbitrageData(
   forceRefresh = false,
 ): Promise<{ data: DexArbitragePayload; fromCache: boolean }> {
   const now = Date.now();
-  if (!forceRefresh && cache && now < cacheExpiresAt) {
-    return { data: cache, fromCache: true };
+
+  if (forceRefresh) {
+    invalidateDexArbitrageCache();
+  } else if (isCacheValid(now)) {
+    return { data: cache!, fromCache: true };
   }
 
   if (!forceRefresh && refreshInFlight) {
     const data = await refreshInFlight;
-    return { data, fromCache: true };
+    return { data, fromCache: false };
   }
 
-  refreshInFlight = refreshDexArbitrageData();
+  const fetchPromise = refreshDexArbitrageData();
+  refreshInFlight = fetchPromise;
+
   try {
-    const data = await refreshInFlight;
+    const data = await fetchPromise;
     cache = data;
     cacheExpiresAt = Date.now() + CACHE_TTL_MS;
     return { data, fromCache: false };
   } finally {
-    refreshInFlight = null;
+    if (refreshInFlight === fetchPromise) {
+      refreshInFlight = null;
+    }
   }
 }

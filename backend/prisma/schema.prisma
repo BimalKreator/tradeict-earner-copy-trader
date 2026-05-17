@@ -67,6 +67,12 @@ model User {
   status             UserStatus          @default(ACTIVE)
   /** When true, copy engine skips this user even if subscriptions are ACTIVE. */
   copyTradingPaused  Boolean             @default(false)
+  /** Crypto arbitrage bot enabled for this user. */
+  cryptoArbitrageEnabled       Boolean @default(false)
+  /** Simulated / platform crypto arbitrage balance (USDT). */
+  cryptoBalance                Float   @default(0.0)
+  /** Percent of cryptoBalance allocated per arbitrage trade. */
+  cryptoCapitalPerTradePercent Float   @default(10.0)
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique
@@ -87,6 +93,7 @@ model User {
   depositRequests      DepositRequest[]
   paymentTransactions  PaymentTransaction[]
   notifications        Notification[]
+  arbitrageTrades      ArbitrageTrade[]
 }
 
 model OtpRecord {
@@ -349,4 +356,23 @@ model PnLRecord {
 
   user     User     @relation(fields: [userId], references: [id])
   strategy Strategy @relation(fields: [strategyId], references: [id])
+}
+
+model ArbitrageTrade {
+  id          String   @id @default(uuid())
+  userId      String
+  token       String
+  qty         Float
+  buyPrice    Float
+  sellPrice   Float
+  buyDex      String
+  sellDex     String
+  feePercent  Float
+  feeAmount   Float
+  netProfit   Float
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }

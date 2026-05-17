@@ -19,6 +19,9 @@ type UserState = {
   aadhaarNumber: string | null;
   status: "ACTIVE" | "SUSPENDED" | string;
   copyTradingPaused?: boolean;
+  cryptoArbitrageEnabled?: boolean;
+  cryptoBalance?: number;
+  cryptoCapitalPerTradePercent?: number;
 };
 
 type ManagementPayload = {
@@ -111,6 +114,11 @@ export default function AdminUserDetails({
   const [tradeStartDate, setTradeStartDate] = useState("");
   const [tradeEndDate, setTradeEndDate] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [cryptoArbitrageEnabledDraft, setCryptoArbitrageEnabledDraft] = useState(false);
+  const [cryptoBalanceDraft, setCryptoBalanceDraft] = useState(0);
+  const [cryptoBalanceAdjustment, setCryptoBalanceAdjustment] = useState("");
+  const [cryptoAllocationDraft, setCryptoAllocationDraft] = useState("10");
+  const [savingArbitrage, setSavingArbitrage] = useState(false);
 
   const authHeaders = useMemo(() => {
     const token =
@@ -196,6 +204,19 @@ export default function AdminUserDetails({
       setUser(mg.user);
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
       setCopyTradingPausedDraft(Boolean(mg.user.copyTradingPaused));
+      setCryptoArbitrageEnabledDraft(Boolean(mg.user.cryptoArbitrageEnabled));
+      setCryptoBalanceDraft(
+        typeof mg.user.cryptoBalance === "number" && Number.isFinite(mg.user.cryptoBalance)
+          ? mg.user.cryptoBalance
+          : 0,
+      );
+      setCryptoAllocationDraft(
+        typeof mg.user.cryptoCapitalPerTradePercent === "number" &&
+          Number.isFinite(mg.user.cryptoCapitalPerTradePercent)
+          ? String(mg.user.cryptoCapitalPerTradePercent)
+          : "10",
+      );
+      setCryptoBalanceAdjustment("");
       const source = mg.deltaApiKey ?? mg.exchangeAccount;
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyDraft(source?.apiKey ?? "");
@@ -255,6 +276,69 @@ export default function AdminUserDetails({
     setSelectedTradeIds((prev) => [
       ...new Set([...prev, ...flushableFilteredTrades.map((t) => t.id)]),
     ]);
+  }
+
+  async function saveCryptoArbitrage(): Promise<void> {
+    setSavingArbitrage(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const allocation = Number(cryptoAllocationDraft);
+      if (!Number.isFinite(allocation) || allocation <= 0 || allocation > 100) {
+        throw new Error("Trade allocation must be greater than 0 and at most 100.");
+      }
+
+      const adjustment = cryptoBalanceAdjustment.trim();
+      const requests: Promise<Response>[] = [
+        fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/enabled`, {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: cryptoArbitrageEnabledDraft }),
+        }),
+        fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/allocation`, {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ percent: allocation }),
+        }),
+      ];
+
+      if (adjustment !== "") {
+        const delta = Number(adjustment);
+        if (!Number.isFinite(delta)) {
+          throw new Error("Balance adjustment must be a valid number.");
+        }
+        requests.push(
+          fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/balance`, {
+            method: "PATCH",
+            headers: { ...authHeaders, "Content-Type": "application/json" },
+            body: JSON.stringify({ delta }),
+          }),
+        );
+      }
+
+      const results = await Promise.all(requests);
+      if (results.some((r) => !r.ok)) {
+        throw new Error("Failed to save crypto arbitrage settings.");
+      }
+
+      const balanceRes = results.find((r) =>
+        r.url.includes("/crypto-arbitrage/balance"),
+      );
+      if (balanceRes?.ok) {
+        const bal = (await balanceRes.json()) as { cryptoBalance?: number };
+        if (typeof bal.cryptoBalance === "number") {
+          setCryptoBalanceDraft(bal.cryptoBalance);
+        }
+      }
+
+      setCryptoBalanceAdjustment("");
+      setNotice("Crypto arbitrage settings updated successfully.");
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save crypto arbitrage settings.");
+    } finally {
+      setSavingArbitrage(false);
+    }
   }
 
   async function saveManagement(): Promise<void> {
@@ -516,6 +600,7 @@ export default function AdminUserDetails({
           </div>
 
           {tab === "management" && (
+            <div className="space-y-4">
             <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.02] p-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="text-sm text-white/70">
@@ -593,6 +678,78 @@ export default function AdminUserDetails({
                   {deleting ? "Deleting..." : "Delete User"}
                 </button>
               </div>
+            </div>
+
+            <div className="space-y-4 rounded-xl border border-cyan-500/25 bg-cyan-500/[0.03] p-4">
+              <h2 className="text-lg font-semibold text-white">
+                Crypto Arbitrage Trading Management
+              </h2>
+              <p className="text-sm text-white/55">
+                Enable arbitrage, fund the user&apos;s crypto balance, and set per-trade capital
+                allocation.
+              </p>
+
+              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border border-glassBorder bg-black/30 px-4 py-3">
+                <span className="text-sm text-white/80">Arbitrage enabled</span>
+                <span className="relative inline-flex h-6 w-11 shrink-0 items-center">
+                  <input
+                    type="checkbox"
+                    checked={cryptoArbitrageEnabledDraft}
+                    onChange={(e) => setCryptoArbitrageEnabledDraft(e.target.checked)}
+                    className="peer sr-only"
+                  />
+                  <span className="absolute inset-0 rounded-full bg-slate-700 transition peer-checked:bg-cyan-600" />
+                  <span className="absolute left-0.5 h-5 w-5 rounded-full bg-white transition peer-checked:translate-x-5" />
+                </span>
+              </label>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-lg border border-glassBorder bg-black/30 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wider text-white/45">
+                    Current crypto balance
+                  </p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-white">
+                    {cryptoBalanceDraft.toFixed(2)} USDT
+                  </p>
+                </div>
+                <label className="text-sm text-white/70">
+                  Adjust balance (add or subtract)
+                  <input
+                    type="number"
+                    step="0.01"
+                    placeholder="e.g. 100 or -25"
+                    value={cryptoBalanceAdjustment}
+                    onChange={(e) => setCryptoBalanceAdjustment(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                  />
+                  <span className="mt-1 block text-xs text-white/45">
+                    Leave empty to keep balance unchanged. Negative values reduce capital.
+                  </span>
+                </label>
+                <label className="text-sm text-white/70 md:col-span-2">
+                  Trade Allocation % (
+                  <code className="text-cyan-300/90">cryptoCapitalPerTradePercent</code>)
+                  <input
+                    type="number"
+                    min={0.01}
+                    max={100}
+                    step={0.1}
+                    value={cryptoAllocationDraft}
+                    onChange={(e) => setCryptoAllocationDraft(e.target.value)}
+                    className="mt-1 w-full max-w-xs rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void saveCryptoArbitrage()}
+                disabled={savingArbitrage}
+                className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+              >
+                {savingArbitrage ? "Saving..." : "Save Arbitrage Settings"}
+              </button>
+            </div>
             </div>
           )}
 
