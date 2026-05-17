@@ -10,6 +10,7 @@ import {
   executeTrade,
   fetchDeltaOpenPositions,
   fetchDeltaTicker,
+  isDeltaOptionProductId,
   normalizeDeltaPerpSymbolForCcxt,
   type DeltaLivePosition,
   type TradeSide,
@@ -44,6 +45,20 @@ function wsAuthSignature(secretPlain: string, timestampSec: string): string {
 function percentSlippage(entry: number, market: number): number {
   if (entry <= 0) return Number.POSITIVE_INFINITY;
   return (Math.abs(market - entry) / entry) * 100;
+}
+
+/**
+ * Whether copy execution should be blocked by slippage. Options are exempt: premiums
+ * move in large % vs bid/ask, which false-triggers perp-style thresholds.
+ */
+function slippageBlocksCopy(
+  symbol: string,
+  entry: number,
+  market: number,
+  strategySlippagePct: number,
+): boolean {
+  if (isDeltaOptionProductId(symbol)) return false;
+  return percentSlippage(entry, market) > strategySlippagePct;
 }
 
 /** Delta India CCXT market orders use contract/lot count; enforce integer follower size. */
@@ -510,7 +525,12 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
 
     if (
       marketPrice !== undefined &&
-      percentSlippage(leader.entryPrice, marketPrice) > strategy.slippage
+      slippageBlocksCopy(
+        leader.deltaSymbol,
+        leader.entryPrice,
+        marketPrice,
+        strategy.slippage,
+      )
     ) {
       console.log(
         `[EXECUTION] Late-join skip (slippage) user ${sub.userId} — ${leader.deltaSymbol} ${leader.side} — would place ${followerContracts} contracts`,
@@ -739,7 +759,12 @@ async function copyMasterFillToSubscribers(
 
   const skipAll =
     marketPrice !== undefined &&
-    percentSlippage(args.avgPrice, marketPrice) > strategy.slippage;
+    slippageBlocksCopy(
+      args.symbol,
+      args.avgPrice,
+      marketPrice,
+      strategy.slippage,
+    );
 
   if (skipAll) {
     console.warn(
