@@ -120,6 +120,10 @@ model Strategy {
   minCapital         Float
   /** When true, new subscribers mirror the strategy's currently open master (leader) positions on Delta (late-join). */
   syncActiveTrades   Boolean @default(false)
+  /** Total master unrealized PnL (USD) at or above this value triggers auto-exit (close all master legs). */
+  autoExitTarget     Float?
+  /** Total master unrealized PnL (USD) at or below negative this value triggers auto-exit (e.g. 5 → exit at -$5). */
+  autoExitStopLoss   Float?
   createdAt          DateTime @default(now())
 
   subscriptions UserSubscription[]

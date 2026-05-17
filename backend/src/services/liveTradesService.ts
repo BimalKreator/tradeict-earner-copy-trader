@@ -44,6 +44,8 @@ export type AdminMasterGroupRow = {
 export type AdminStrategyLiveSection = {
   strategyId: string;
   strategyTitle: string;
+  autoExitTarget: number | null;
+  autoExitStopLoss: number | null;
   /** Open positions on the master Delta (India) account from {@link fetchDeltaOpenPositions} (CCXT). */
   masterPositions: LiveTradeRow[];
   groups: AdminMasterGroupRow[];
@@ -381,6 +383,8 @@ export async function getAdminGroupedLiveTrades(
       title: true,
       masterApiKey: true,
       masterApiSecret: true,
+      autoExitTarget: true,
+      autoExitStopLoss: true,
     },
   });
 
@@ -453,6 +457,8 @@ export async function getAdminGroupedLiveTrades(
       out.push({
         strategyId: strat.id,
         strategyTitle: strat.title,
+        autoExitTarget: strat.autoExitTarget,
+        autoExitStopLoss: strat.autoExitStopLoss,
         masterPositions,
         groups,
         masterMeta: metaBase,
@@ -507,6 +513,8 @@ export async function getAdminGroupedLiveTrades(
     out.push({
       strategyId: strat.id,
       strategyTitle: strat.title,
+      autoExitTarget: strat.autoExitTarget,
+      autoExitStopLoss: strat.autoExitStopLoss,
       masterPositions,
       groups,
       masterMeta: metaBase,

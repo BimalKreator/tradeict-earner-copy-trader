@@ -354,6 +354,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
   router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
   router.post("/trades/export", adminController.exportTrades);
+  router.patch(
+    "/strategies/:id/auto-exit",
+    adminController.patchStrategyAutoExit,
+  );
   router.post("/trades/close-manual", adminController.closeManualTrade);
 
   router.get("/users/:id/trades-billing", async (req, res, next) => {

@@ -24,6 +24,7 @@ import {
 } from "../prisma/strategySelect.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
+import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
 
 /** Delta Exchange India private WebSocket (see Delta WebSocket docs). */
 const DELTA_INDIA_PRIVATE_WS = "wss://socket.india.delta.exchange";
@@ -36,6 +37,8 @@ const MAX_RECONNECT_MS = 60_000;
 const ROSTER_SYNC_MS = 15_000;
 /** How often to reconcile DB OPEN trades against master REST positions (safety net). */
 const SAFETY_RECONCILE_MS = 30_000;
+/** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
+const AUTO_EXIT_CHECK_MS = 5_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -1520,6 +1523,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   const sockets = new Map<string, StrategyMasterSocket>();
   let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconcileTimeout: ReturnType<typeof setTimeout> | null = null;
+  let autoExitTimeout: ReturnType<typeof setTimeout> | null = null;
 
   async function syncRoster(): Promise<void> {
     if (cancelled.value) return;
@@ -1757,11 +1761,31 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     }, SAFETY_RECONCILE_MS);
   }
 
+  async function runAutoExitPass(): Promise<void> {
+    if (cancelled.value) return;
+    try {
+      await runAllStrategyAutoExitChecks(prisma);
+    } catch (err) {
+      console.error("[tradeEngine] auto-exit pass failed:", err);
+    }
+  }
+
+  function scheduleAutoExit(): void {
+    autoExitTimeout = setTimeout(() => {
+      void runAutoExitPass().finally(() => {
+        if (!cancelled.value) scheduleAutoExit();
+      });
+    }, AUTO_EXIT_CHECK_MS);
+  }
+
   void syncRoster().finally(() => {
     if (!cancelled.value) scheduleRoster();
   });
   void reconcileGhostExits().finally(() => {
     if (!cancelled.value) scheduleReconcile();
+  });
+  void runAutoExitPass().finally(() => {
+    if (!cancelled.value) scheduleAutoExit();
   });
 
   return () => {
@@ -1773,6 +1797,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     if (reconcileTimeout != null) {
       clearTimeout(reconcileTimeout);
       reconcileTimeout = null;
+    }
+    if (autoExitTimeout != null) {
+      clearTimeout(autoExitTimeout);
+      autoExitTimeout = null;
     }
     for (const s of sockets.values()) {
       s.destroy();

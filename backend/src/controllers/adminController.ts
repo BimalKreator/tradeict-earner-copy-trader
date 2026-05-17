@@ -222,6 +222,86 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function patchStrategyAutoExit(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      if (!id) {
+        res.status(400).json({ error: "strategy id is required" });
+        return;
+      }
+
+      const body = req.body as {
+        autoExitTarget?: unknown;
+        autoExitStopLoss?: unknown;
+      };
+
+      const data: {
+        autoExitTarget?: number | null;
+        autoExitStopLoss?: number | null;
+      } = {};
+
+      if ("autoExitTarget" in body) {
+        if (body.autoExitTarget === null) {
+          data.autoExitTarget = null;
+        } else if (
+          typeof body.autoExitTarget === "number" &&
+          Number.isFinite(body.autoExitTarget) &&
+          body.autoExitTarget >= 0
+        ) {
+          data.autoExitTarget = body.autoExitTarget;
+        } else {
+          res.status(400).json({
+            error: "autoExitTarget must be a non-negative number or null",
+          });
+          return;
+        }
+      }
+
+      if ("autoExitStopLoss" in body) {
+        if (body.autoExitStopLoss === null) {
+          data.autoExitStopLoss = null;
+        } else if (
+          typeof body.autoExitStopLoss === "number" &&
+          Number.isFinite(body.autoExitStopLoss) &&
+          body.autoExitStopLoss > 0
+        ) {
+          data.autoExitStopLoss = body.autoExitStopLoss;
+        } else {
+          res.status(400).json({
+            error: "autoExitStopLoss must be a positive number or null",
+          });
+          return;
+        }
+      }
+
+      if (!("autoExitTarget" in body) && !("autoExitStopLoss" in body)) {
+        res.status(400).json({
+          error: "Provide autoExitTarget and/or autoExitStopLoss",
+        });
+        return;
+      }
+
+      const updated = await prisma.strategy.update({
+        where: { id },
+        data,
+        select: {
+          id: true,
+          title: true,
+          autoExitTarget: true,
+          autoExitStopLoss: true,
+        },
+      });
+
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function closeManualTrade(
     req: Request,
     res: Response,
@@ -864,6 +944,7 @@ export function createAdminController(prisma: PrismaClient) {
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
+    patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
     exportTrades,

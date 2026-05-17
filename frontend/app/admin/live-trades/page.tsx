@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Layers, Loader2 } from "lucide-react";
+import { Layers, Loader2, Shield, Target, TrendingDown } from "lucide-react";
 import Link from "next/link";
 
 const ENV_API_BASE =
@@ -38,6 +38,8 @@ type FollowerGroup = {
 type StrategySection = {
   strategyId: string;
   strategyTitle: string;
+  autoExitTarget: number | null;
+  autoExitStopLoss: number | null;
   /** CCXT open positions on the strategy master Delta (India) account. */
   masterPositions: LiveRow[];
   groups: FollowerGroup[];
@@ -65,6 +67,201 @@ function fmtPrice(n: number | null | undefined): string {
 function fmtPnl(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return usdPnlFmt.format(n);
+}
+
+function sumMasterLivePnl(rows: LiveRow[]): number {
+  return rows.reduce((acc, r) => {
+    if (r.livePnl != null && Number.isFinite(r.livePnl)) return acc + r.livePnl;
+    return acc;
+  }, 0);
+}
+
+function RiskManagementPanel({
+  strategy,
+  totalLivePnl,
+  onSaved,
+}: {
+  strategy: StrategySection;
+  totalLivePnl: number;
+  onSaved: (message: string, updated?: { autoExitTarget: number | null; autoExitStopLoss: number | null }) => void;
+}) {
+  const [targetInput, setTargetInput] = useState(
+    strategy.autoExitTarget != null ? String(strategy.autoExitTarget) : "",
+  );
+  const [stopInput, setStopInput] = useState(
+    strategy.autoExitStopLoss != null ? String(strategy.autoExitStopLoss) : "",
+  );
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTargetInput(
+      strategy.autoExitTarget != null ? String(strategy.autoExitTarget) : "",
+    );
+    setStopInput(
+      strategy.autoExitStopLoss != null ? String(strategy.autoExitStopLoss) : "",
+    );
+  }, [strategy.autoExitTarget, strategy.autoExitStopLoss]);
+
+  const pnlPositive = totalLivePnl > 0;
+  const pnlNegative = totalLivePnl < 0;
+
+  const saveAutoExit = async () => {
+    const base = resolveAdminApiBase();
+    if (!base) {
+      onSaved("API base URL is not configured.");
+      return;
+    }
+
+    const body: {
+      autoExitTarget?: number | null;
+      autoExitStopLoss?: number | null;
+    } = {};
+
+    if (targetInput.trim() === "") {
+      body.autoExitTarget = null;
+    } else {
+      const t = Number(targetInput);
+      if (!Number.isFinite(t) || t < 0) {
+        onSaved("Target profit must be a non-negative number.");
+        return;
+      }
+      body.autoExitTarget = t;
+    }
+
+    if (stopInput.trim() === "") {
+      body.autoExitStopLoss = null;
+    } else {
+      const s = Number(stopInput);
+      if (!Number.isFinite(s) || s <= 0) {
+        onSaved("Stop loss must be a positive number.");
+        return;
+      }
+      body.autoExitStopLoss = s;
+    }
+
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `${base}/admin/strategies/${strategy.strategyId}/auto-exit`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      const payload: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof payload === "object" &&
+          payload !== null &&
+          "error" in payload &&
+          typeof (payload as { error: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : `Save failed (${res.status})`;
+        throw new Error(msg);
+      }
+      const saved =
+        typeof payload === "object" &&
+        payload !== null &&
+        "autoExitTarget" in payload
+          ? {
+              autoExitTarget:
+                (payload as { autoExitTarget: number | null }).autoExitTarget,
+              autoExitStopLoss:
+                (payload as { autoExitStopLoss: number | null }).autoExitStopLoss,
+            }
+          : undefined;
+      onSaved("Auto-exit settings saved.", saved);
+    } catch (e) {
+      onSaved(e instanceof Error ? e.message : "Failed to save auto-exit");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="mt-6 overflow-hidden rounded-xl border border-amber-500/25 bg-gradient-to-br from-amber-500/[0.07] via-black/30 to-emerald-500/[0.05] p-4 md:p-5"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
+            <Shield className="h-5 w-5 text-amber-300" aria-hidden />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold tracking-wide text-white">
+              Risk Management &amp; Summary
+            </h3>
+            <p className="mt-0.5 max-w-xl text-xs text-white/45">
+              Total unrealized PnL across all master legs. When thresholds are
+              hit, the trade engine closes every master position (followers copy
+              via WebSocket).
+            </p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+            Total live PnL
+          </p>
+          <p
+            className={`mt-0.5 text-2xl font-bold tabular-nums ${
+              pnlPositive
+                ? "text-emerald-400"
+                : pnlNegative
+                  ? "text-red-400"
+                  : "text-white/70"
+            }`}
+          >
+            {fmtPnl(totalLivePnl)}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
+        <label className="block">
+          <span className="flex items-center gap-1.5 text-xs font-medium text-white/55">
+            <Target className="h-3.5 w-3.5 text-emerald-400/80" aria-hidden />
+            Target profit ($)
+          </span>
+          <input
+            type="number"
+            min={0}
+            step="any"
+            placeholder="e.g. 500"
+            value={targetInput}
+            onChange={(e) => setTargetInput(e.target.value)}
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+          />
+        </label>
+        <label className="block">
+          <span className="flex items-center gap-1.5 text-xs font-medium text-white/55">
+            <TrendingDown className="h-3.5 w-3.5 text-red-400/80" aria-hidden />
+            Stop loss ($)
+          </span>
+          <input
+            type="number"
+            min={0}
+            step="any"
+            placeholder="e.g. 5 (exits at −$5)"
+            value={stopInput}
+            onChange={(e) => setStopInput(e.target.value)}
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => void saveAutoExit()}
+          className="rounded-lg border border-primary/50 bg-primary/20 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {saving ? "Saving…" : "Save Auto-Exit"}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function fmtTime(iso: string | null): string {
@@ -208,6 +405,7 @@ export default function AdminLiveTradesPage() {
   const [forbidden, setForbidden] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [closingKey, setClosingKey] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = Boolean(opts?.silent);
@@ -242,13 +440,32 @@ export default function AdminLiveTradesPage() {
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
-      const list =
+      const rawList =
         typeof data === "object" &&
         data !== null &&
         "strategies" in data &&
         Array.isArray((data as { strategies: unknown }).strategies)
-          ? ((data as { strategies: StrategySection[] }).strategies)
+          ? (data as { strategies: unknown[] }).strategies
           : [];
+      const list: StrategySection[] = rawList.map((item) => {
+        const row = item as Record<string, unknown>;
+        return {
+          strategyId: String(row.strategyId ?? ""),
+          strategyTitle: String(row.strategyTitle ?? ""),
+          autoExitTarget:
+            typeof row.autoExitTarget === "number" ? row.autoExitTarget : null,
+          autoExitStopLoss:
+            typeof row.autoExitStopLoss === "number"
+              ? row.autoExitStopLoss
+              : null,
+          masterPositions: Array.isArray(row.masterPositions)
+            ? (row.masterPositions as LiveRow[])
+            : [],
+          groups: Array.isArray(row.groups)
+            ? (row.groups as FollowerGroup[])
+            : [],
+        };
+      });
       setStrategies(list);
       setLastRefreshed(new Date());
     } catch (e) {
@@ -314,6 +531,12 @@ export default function AdminLiveTradesPage() {
     return () => window.clearInterval(id);
   }, [load]);
 
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
   if (forbidden) {
     return (
       <div className="rounded-xl border border-red-500/35 bg-red-500/10 px-6 py-10 text-center text-sm text-red-100">
@@ -350,6 +573,12 @@ export default function AdminLiveTradesPage() {
         </div>
       </header>
 
+      {toast && (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+          {toast}
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
@@ -374,6 +603,26 @@ export default function AdminLiveTradesPage() {
                 Strategy ID:{" "}
                 <span className="font-mono text-white/55">{s.strategyId}</span>
               </p>
+
+              <RiskManagementPanel
+                strategy={s}
+                totalLivePnl={sumMasterLivePnl(s.masterPositions)}
+                onSaved={(message, updated) => {
+                  setToast(message);
+                  if (updated) {
+                    setStrategies((prev) =>
+                      prev.map((row) =>
+                        row.strategyId === s.strategyId
+                          ? { ...row, ...updated }
+                          : row,
+                      ),
+                    );
+                  }
+                  if (message.includes("saved")) {
+                    void load({ silent: true });
+                  }
+                }}
+              />
 
               <div className="mt-6 overflow-hidden rounded-xl border border-primary/25 bg-black/20">
                 <div className="border-b border-primary/25 bg-primary/5 px-4 py-2">
