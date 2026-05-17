@@ -8,6 +8,7 @@ import {
   FolderOpen,
   LayoutDashboard,
   LineChart,
+  Settings,
   Users,
   Wallet,
 } from "lucide-react";
@@ -20,6 +21,7 @@ const links = [
   { href: "/admin/funds", label: "Funds", icon: Wallet },
   { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
   { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
+  { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 
 export function AdminSidebar() {

@@ -271,6 +271,122 @@ export async function sendExpertTraderApplicationEmail(
   await sendExpertTraderApplicationEmails(payload);
 }
 
+export type PaymentReceiptEmailPayload = {
+  userName: string;
+  userEmail: string;
+  method: string;
+  baseAmountInr: number;
+  feeAmountInr: number;
+  totalAmountInr: number;
+  netCreditUsd: number;
+  referenceId?: string;
+};
+
+function fmtInr(n: number): string {
+  return `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtUsd(n: number): string {
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+export async function sendPaymentReceiptEmail(
+  payload: PaymentReceiptEmailPayload,
+): Promise<void> {
+  const transport = createMailTransport();
+  const from = getFromAddress();
+  const refLine = payload.referenceId
+    ? `Reference: ${payload.referenceId}\n`
+    : "";
+
+  const text = [
+    `Dear ${payload.userName || "Customer"},`,
+    "",
+    "Payment Received Successfully",
+    "",
+    `Method: ${payload.method}`,
+    `Base amount: ${fmtInr(payload.baseAmountInr)}`,
+    `Gateway fee: ${fmtInr(payload.feeAmountInr)}`,
+    `Total paid: ${fmtInr(payload.totalAmountInr)}`,
+    `Net wallet credit: ${fmtUsd(payload.netCreditUsd)}`,
+    refLine,
+    "",
+    "Thank you for using TradeICT Earner.",
+    "Tradeict AI Private Limited",
+  ].join("\n");
+
+  const html = `<!DOCTYPE html>
+<html lang="en"><body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0f172a;color:#e2e8f0;">
+<div style="max-width:560px;margin:0 auto;">
+  <h1 style="margin:0 0 8px;font-size:22px;color:#34d399;">Payment Received Successfully</h1>
+  <p style="color:#cbd5e1;">Dear ${escapeHtml(payload.userName || "Customer")},</p>
+  <table style="width:100%;margin:20px 0;border-collapse:collapse;background:#1e293b;border-radius:12px;overflow:hidden;">
+    <tr><td style="padding:10px 14px;color:#94a3b8;">Method</td><td style="padding:10px 14px;color:#f8fafc;">${escapeHtml(payload.method)}</td></tr>
+    <tr><td style="padding:10px 14px;color:#94a3b8;">Base amount</td><td style="padding:10px 14px;color:#f8fafc;">${escapeHtml(fmtInr(payload.baseAmountInr))}</td></tr>
+    <tr><td style="padding:10px 14px;color:#94a3b8;">Gateway fee</td><td style="padding:10px 14px;color:#f8fafc;">${escapeHtml(fmtInr(payload.feeAmountInr))}</td></tr>
+    <tr><td style="padding:10px 14px;color:#94a3b8;">Total paid</td><td style="padding:10px 14px;color:#f8fafc;">${escapeHtml(fmtInr(payload.totalAmountInr))}</td></tr>
+    <tr><td style="padding:10px 14px;color:#94a3b8;">Net wallet credit</td><td style="padding:10px 14px;color:#34d399;font-weight:600;">${escapeHtml(fmtUsd(payload.netCreditUsd))}</td></tr>
+    ${payload.referenceId ? `<tr><td style="padding:10px 14px;color:#94a3b8;">Reference</td><td style="padding:10px 14px;color:#f8fafc;">${escapeHtml(payload.referenceId)}</td></tr>` : ""}
+  </table>
+  <p style="font-size:13px;color:#94a3b8;">Tradeict AI Private Limited · TradeICT Earner</p>
+</div>
+</body></html>`;
+
+  await transport.sendMail({
+    from,
+    to: payload.userEmail,
+    subject: "Payment Received Successfully — TradeICT Earner",
+    text,
+    html,
+  });
+}
+
+export async function sendAdminPaymentNotificationEmail(
+  payload: PaymentReceiptEmailPayload,
+): Promise<void> {
+  const transport = createMailTransport();
+  const from = getFromAddress();
+  const adminTo =
+    process.env.PAYMENT_ADMIN_EMAIL?.trim() || "support@tradeictai.com";
+
+  const text = [
+    "New Payment Received",
+    "",
+    `User: ${payload.userName} <${payload.userEmail}>`,
+    `Method: ${payload.method}`,
+    `Base: ${fmtInr(payload.baseAmountInr)}`,
+    `Fee: ${fmtInr(payload.feeAmountInr)}`,
+    `Total: ${fmtInr(payload.totalAmountInr)}`,
+    `Net credit: ${fmtUsd(payload.netCreditUsd)}`,
+    payload.referenceId ? `Reference: ${payload.referenceId}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  await transport.sendMail({
+    from,
+    to: adminTo,
+    subject: `New Payment Received — ${payload.userEmail}`,
+    text,
+    html: `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;padding:20px;">
+<h2>New Payment Received</h2>
+<p><strong>User:</strong> ${escapeHtml(payload.userName)} (${escapeHtml(payload.userEmail)})</p>
+<p><strong>Method:</strong> ${escapeHtml(payload.method)}</p>
+<p><strong>Amount:</strong> ${escapeHtml(fmtInr(payload.totalAmountInr))} (fee ${escapeHtml(fmtInr(payload.feeAmountInr))})</p>
+<p><strong>Net wallet credit:</strong> ${escapeHtml(fmtUsd(payload.netCreditUsd))}</p>
+</body></html>`,
+  });
+}
+
+export async function sendPaymentReceiptEmails(
+  payload: PaymentReceiptEmailPayload,
+): Promise<void> {
+  await Promise.all([
+    sendPaymentReceiptEmail(payload),
+    sendAdminPaymentNotificationEmail(payload),
+  ]);
+}
+
 export async function sendPasswordResetLinkEmail(
   to: string,
   resetLink: string,

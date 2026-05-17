@@ -1076,9 +1076,71 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
-      const updated = await prisma.depositRequest.update({
+      const deposit = await prisma.depositRequest.findUnique({
         where: { id },
-        data: { status, adminReason },
+        include: { paymentTransaction: true },
+      });
+      if (!deposit) {
+        res.status(404).json({ error: "Deposit request not found" });
+        return;
+      }
+
+      const updated = await prisma.$transaction(async (tx) => {
+        const row = await tx.depositRequest.update({
+          where: { id },
+          data: { status, adminReason },
+        });
+
+        if (status === "APPROVED" && deposit.paymentTransaction) {
+          const pay = deposit.paymentTransaction;
+          if (pay.status !== "APPROVED") {
+            const netUsd =
+              deposit.netCreditUsd ??
+              pay.netCreditUsd ??
+              deposit.amount / 83;
+
+            let wallet = await tx.wallet.findUnique({
+              where: { userId: deposit.userId },
+            });
+            if (!wallet) {
+              wallet = await tx.wallet.create({
+                data: {
+                  userId: deposit.userId,
+                  balance: 0,
+                  pendingFees: 0,
+                },
+              });
+            }
+
+            await tx.wallet.update({
+              where: { id: wallet.id },
+              data: { balance: { increment: netUsd } },
+            });
+
+            await tx.walletTransaction.create({
+              data: {
+                walletId: wallet.id,
+                amount: netUsd,
+                type: "MANUAL_DEPOSIT",
+                status: "COMPLETED",
+              },
+            });
+
+            await tx.paymentTransaction.update({
+              where: { id: pay.id },
+              data: { status: "APPROVED" },
+            });
+          }
+        }
+
+        if (status === "REJECTED" && deposit.paymentTransaction) {
+          await tx.paymentTransaction.update({
+            where: { id: deposit.paymentTransaction.id },
+            data: { status: "REJECTED" },
+          });
+        }
+
+        return row;
       });
 
       await prisma.notification.create({
@@ -1087,7 +1149,7 @@ export function createAdminController(prisma: PrismaClient) {
           title: "Deposit Request Update",
           message:
             status === "APPROVED"
-              ? "Your deposit request has been approved."
+              ? "Your deposit request has been approved and your wallet has been credited."
               : `Your deposit request has been rejected.${
                   adminReason ? ` Reason: ${adminReason}` : ""
                 }`,

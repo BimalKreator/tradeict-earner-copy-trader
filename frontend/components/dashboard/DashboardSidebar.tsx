@@ -11,7 +11,7 @@ const links = [
   { href: "/dashboard/strategies", label: "Strategies" },
   { href: "/dashboard/live-trades", label: "Live trades" },
   { href: "/dashboard/trades", label: "Trades" },
-  { href: "/dashboard/funds", label: "Funds" },
+  { href: "/dashboard/payments", label: "Payments" },
   { href: "/dashboard/billing", label: "Billing" },
   { href: "/dashboard/settings", label: "Settings" },
 ];

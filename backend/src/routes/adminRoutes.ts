@@ -26,6 +26,7 @@ import {
   applyNoStoreCacheHeaders,
   createAdminController,
 } from "../controllers/adminController.js";
+import { createSettingsController } from "../controllers/settingsController.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -48,8 +49,12 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
 export function createAdminRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const adminController = createAdminController(prisma);
+  const settings = createSettingsController(prisma);
 
   router.use(authenticateToken(), isAdmin(prisma));
+
+  router.get("/settings/payment", settings.getPaymentSettings);
+  router.put("/settings/payment", settings.updatePaymentSettings);
 
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });

@@ -1,19 +1,21 @@
 import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import type { PrismaClient } from "@prisma/client";
+import { TransactionStatus, type PrismaClient } from "@prisma/client";
 import Razorpay from "razorpay";
 import {
   creditWalletAfterGateway,
   settleInvoiceAfterGateway,
 } from "../services/billingService.js";
+import {
+  calculateFeeBreakdown,
+  inrToUsd,
+  roundInr,
+  type PaymentMethodKind,
+} from "../services/paymentFeeService.js";
+import { getPgFeePercent } from "../services/settingsService.js";
+import { sendPaymentReceiptEmails } from "../utils/emailService.js";
 
 const DEFAULT_CURRENCY = "INR";
-
-function usdInrRate(): number {
-  const raw = process.env.RAZORPAY_USD_INR_RATE ?? "83";
-  const n = Number.parseFloat(raw);
-  return Number.isFinite(n) && n > 0 ? n : 83;
-}
 
 function getRazorpay(): Razorpay {
   const keyId = process.env.RAZORPAY_KEY_ID?.trim();
@@ -46,7 +48,67 @@ function verifyRazorpaySignature(
   }
 }
 
+function parseDateRange(query: Record<string, unknown>): {
+  start?: Date;
+  end?: Date;
+} {
+  const start =
+    typeof query.startDate === "string" && query.startDate
+      ? new Date(query.startDate)
+      : undefined;
+  const end =
+    typeof query.endDate === "string" && query.endDate
+      ? new Date(query.endDate)
+      : undefined;
+  if (start && Number.isNaN(start.getTime())) return {};
+  if (end && Number.isNaN(end.getTime())) return {};
+  if (end) {
+    end.setHours(23, 59, 59, 999);
+  }
+  const out: { start?: Date; end?: Date } = {};
+  if (start) out.start = start;
+  if (end) out.end = end;
+  return out;
+}
+
+function serializePayment(row: {
+  id: string;
+  method: string;
+  baseAmountInr: number;
+  feeAmountInr: number;
+  totalAmountInr: number;
+  netCreditUsd: number;
+  referenceId: string | null;
+  status: TransactionStatus;
+  createdAt: Date;
+}) {
+  return {
+    id: row.id,
+    date: row.createdAt.toISOString(),
+    method: row.method,
+    amount: row.baseAmountInr,
+    fee: row.feeAmountInr,
+    netCredit: row.netCreditUsd,
+    totalInr: row.totalAmountInr,
+    status: row.status,
+    referenceId: row.referenceId,
+  };
+}
+
 export function createPaymentController(prisma: PrismaClient) {
+  async function getPgFee(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const pgFeePercent = await getPgFeePercent(prisma);
+      res.json({ pgFeePercent });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function createOrder(
     req: Request,
     res: Response,
@@ -76,7 +138,8 @@ export function createPaymentController(prisma: PrismaClient) {
             ? "invoice"
             : "wallet";
 
-      let amountInr: number;
+      const pgFeePercent = await getPgFeePercent(prisma);
+      let breakdown;
       let notes: Record<string, string>;
 
       if (purpose === "invoice") {
@@ -95,28 +158,43 @@ export function createPaymentController(prisma: PrismaClient) {
           res.status(409).json({ error: "Invoice already paid" });
           return;
         }
-        amountInr = Math.ceil(invoice.amountDue * usdInrRate());
+        const baseInr = Math.ceil(invoice.amountDue * (Number(process.env.RAZORPAY_USD_INR_RATE) || 83));
+        breakdown = calculateFeeBreakdown(baseInr, pgFeePercent, "RAZORPAY");
         notes = {
           userId,
           purpose: "invoice",
           invoiceId,
           amountUsd: String(invoice.amountDue),
+          baseAmountInr: String(breakdown.baseAmountInr),
+          feeAmountInr: String(breakdown.feeAmountInr),
+          totalAmountInr: String(breakdown.totalAmountInr),
         };
       } else {
-        const rawAmount = body.amount;
-        if (typeof rawAmount !== "number" || !Number.isFinite(rawAmount) || rawAmount <= 0) {
-          res.status(400).json({ error: "amount must be a positive number (INR)" });
+        const rawBase = body.baseAmount ?? body.amount;
+        const baseAmount =
+          typeof rawBase === "number"
+            ? rawBase
+            : typeof rawBase === "string"
+              ? Number.parseFloat(rawBase)
+              : NaN;
+        if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
+          res.status(400).json({
+            error: "baseAmount must be a positive number (INR)",
+          });
           return;
         }
-        amountInr = Math.ceil(rawAmount);
+        breakdown = calculateFeeBreakdown(baseAmount, pgFeePercent, "RAZORPAY");
         notes = {
           userId,
           purpose: "wallet",
-          amountInr: String(amountInr),
+          baseAmountInr: String(breakdown.baseAmountInr),
+          feeAmountInr: String(breakdown.feeAmountInr),
+          totalAmountInr: String(breakdown.totalAmountInr),
         };
       }
 
-      if (amountInr < 1) {
+      const totalInr = Math.ceil(breakdown.totalAmountInr);
+      if (totalInr < 1) {
         res.status(400).json({ error: "Order amount must be at least ₹1" });
         return;
       }
@@ -124,7 +202,7 @@ export function createPaymentController(prisma: PrismaClient) {
       const razorpay = getRazorpay();
       const receipt = `tict_${purpose}_${userId.slice(0, 8)}_${Date.now()}`;
       const order = await razorpay.orders.create({
-        amount: amountInr * 100,
+        amount: totalInr * 100,
         currency,
         receipt,
         notes,
@@ -132,7 +210,11 @@ export function createPaymentController(prisma: PrismaClient) {
 
       res.status(200).json({
         orderId: order.id,
-        amount: amountInr,
+        baseAmount: breakdown.baseAmountInr,
+        feeAmount: breakdown.feeAmountInr,
+        amount: totalInr,
+        totalPayable: totalInr,
+        pgFeePercent,
         currency: order.currency,
         keyId: process.env.RAZORPAY_KEY_ID,
         purpose,
@@ -177,6 +259,14 @@ export function createPaymentController(prisma: PrismaClient) {
         return;
       }
 
+      const existing = await prisma.paymentTransaction.findUnique({
+        where: { razorpayPaymentId: paymentId },
+      });
+      if (existing?.status === TransactionStatus.APPROVED) {
+        res.status(200).json({ ok: true, alreadyProcessed: true });
+        return;
+      }
+
       if (!verifyRazorpaySignature(orderId, paymentId, signature)) {
         res.status(400).json({ error: "Invalid payment signature" });
         return;
@@ -190,7 +280,26 @@ export function createPaymentController(prisma: PrismaClient) {
         return;
       }
 
+      const baseAmountInr = roundInr(
+        Number.parseFloat(notes.baseAmountInr ?? "0") ||
+          Number(order.amount) / 100,
+      );
+      const feeAmountInr = roundInr(Number.parseFloat(notes.feeAmountInr ?? "0"));
+      const totalAmountInr = roundInr(
+        Number.parseFloat(notes.totalAmountInr ?? "0") ||
+          Number(order.amount) / 100,
+      );
+      const netCreditUsd = inrToUsd(baseAmountInr);
       const purpose = notes.purpose ?? "wallet";
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true, name: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
 
       if (purpose === "invoice") {
         const invoiceId = notes.invoiceId?.trim();
@@ -206,6 +315,33 @@ export function createPaymentController(prisma: PrismaClient) {
           res.status(outcome.status).json({ error: outcome.message });
           return;
         }
+
+        await prisma.paymentTransaction.create({
+          data: {
+            userId,
+            method: "RAZORPAY",
+            baseAmountInr,
+            feeAmountInr,
+            totalAmountInr,
+            netCreditUsd: outcome.amountDue,
+            referenceId: paymentId,
+            razorpayOrderId: orderId,
+            razorpayPaymentId: paymentId,
+            status: TransactionStatus.APPROVED,
+          },
+        });
+
+        void sendPaymentReceiptEmails({
+          userName: user.name ?? user.email,
+          userEmail: user.email,
+          method: "RAZORPAY (Invoice)",
+          baseAmountInr,
+          feeAmountInr,
+          totalAmountInr,
+          netCreditUsd: outcome.amountDue,
+          referenceId: paymentId,
+        }).catch(() => {});
+
         res.status(200).json({
           ok: true,
           purpose: "invoice",
@@ -215,27 +351,246 @@ export function createPaymentController(prisma: PrismaClient) {
         return;
       }
 
-      const paidInr = Number(order.amount) / 100;
-      const amountUsd = paidInr / usdInrRate();
       const credit = await creditWalletAfterGateway(prisma, {
         userId,
-        amountUsd,
+        amountUsd: netCreditUsd,
       });
       if (!credit.ok) {
         res.status(credit.status).json({ error: credit.message });
         return;
       }
 
+      await prisma.paymentTransaction.create({
+        data: {
+          userId,
+          method: "RAZORPAY",
+          baseAmountInr,
+          feeAmountInr,
+          totalAmountInr,
+          netCreditUsd,
+          referenceId: paymentId,
+          razorpayOrderId: orderId,
+          razorpayPaymentId: paymentId,
+          status: TransactionStatus.APPROVED,
+        },
+      });
+
+      void sendPaymentReceiptEmails({
+        userName: user.name ?? user.email,
+        userEmail: user.email,
+        method: "RAZORPAY",
+        baseAmountInr,
+        feeAmountInr,
+        totalAmountInr,
+        netCreditUsd,
+        referenceId: paymentId,
+      }).catch(() => {});
+
       res.status(200).json({
         ok: true,
         purpose: "wallet",
         amountCreditedUsd: credit.amountCredited,
         walletBalance: credit.walletBalance,
+        baseAmountInr,
+        feeAmountInr,
+        totalAmountInr,
       });
     } catch (err) {
       next(err);
     }
   }
 
-  return { createOrder, verifyPayment };
+  async function manualDeposit(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as Record<string, unknown>;
+      const amount = Number(body.amount);
+      const methodRaw =
+        typeof body.method === "string" ? body.method.trim().toUpperCase() : "";
+      const transactionId = String(body.transactionId ?? "").trim();
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: "amount must be a positive number" });
+        return;
+      }
+      if (methodRaw !== "UPI" && methodRaw !== "BANK") {
+        res.status(400).json({ error: "method must be UPI or BANK" });
+        return;
+      }
+      if (!transactionId) {
+        res.status(400).json({ error: "transactionId is required" });
+        return;
+      }
+
+      const method = methodRaw as PaymentMethodKind;
+      const pgFeePercent = await getPgFeePercent(prisma);
+      const breakdown = calculateFeeBreakdown(amount, pgFeePercent, method);
+      const netCreditUsd = inrToUsd(breakdown.netBaseInr);
+
+      const file = req.file as { filename?: string } | undefined;
+      const screenshotUrl = file?.filename ? `/uploads/${file.filename}` : null;
+
+      const result = await prisma.$transaction(async (tx) => {
+        const deposit = await tx.depositRequest.create({
+          data: {
+            userId,
+            amount: breakdown.baseAmountInr,
+            method: methodRaw,
+            baseAmountInr: breakdown.baseAmountInr,
+            feeAmountInr: breakdown.feeAmountInr,
+            netCreditUsd,
+            transactionId,
+            screenshotUrl,
+            status: "PENDING",
+          },
+        });
+
+        const payment = await tx.paymentTransaction.create({
+          data: {
+            userId,
+            method: methodRaw,
+            baseAmountInr: breakdown.baseAmountInr,
+            feeAmountInr: breakdown.feeAmountInr,
+            totalAmountInr: breakdown.totalAmountInr,
+            netCreditUsd,
+            referenceId: transactionId,
+            depositRequestId: deposit.id,
+            status: TransactionStatus.PENDING,
+          },
+        });
+
+        return { deposit, payment };
+      });
+
+      await prisma.notification.create({
+        data: {
+          userId: null,
+          title: "New Manual Deposit",
+          message: `User ${userId} submitted ${methodRaw} deposit ₹${breakdown.baseAmountInr} (UTR: ${transactionId}).`,
+        },
+      });
+
+      res.status(201).json({
+        id: result.payment.id,
+        depositId: result.deposit.id,
+        method: methodRaw,
+        baseAmount: breakdown.baseAmountInr,
+        feeAmount: breakdown.feeAmountInr,
+        netCreditUsd,
+        pgFeePercent,
+        status: "PENDING",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listHistory(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const { start, end } = parseDateRange(req.query as Record<string, unknown>);
+      const rows = await prisma.paymentTransaction.findMany({
+        where: {
+          userId,
+          ...(start || end
+            ? {
+                createdAt: {
+                  ...(start ? { gte: start } : {}),
+                  ...(end ? { lte: end } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      res.json({
+        transactions: rows.map(serializePayment),
+        pgFeePercent: await getPgFeePercent(prisma),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function exportHistory(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const { start, end } = parseDateRange(req.query as Record<string, unknown>);
+      const rows = await prisma.paymentTransaction.findMany({
+        where: {
+          userId,
+          ...(start || end
+            ? {
+                createdAt: {
+                  ...(start ? { gte: start } : {}),
+                  ...(end ? { lte: end } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const header =
+        "Date,Method,Amount (INR),Fee (INR),Net Credit (USD),Status,Reference\n";
+      const lines = rows.map((r: (typeof rows)[number]) => {
+        const cols = [
+          r.createdAt.toISOString(),
+          r.method,
+          r.baseAmountInr.toFixed(2),
+          r.feeAmountInr.toFixed(2),
+          r.netCreditUsd.toFixed(2),
+          r.status,
+          (r.referenceId ?? "").replace(/,/g, " "),
+        ];
+        return cols.join(",");
+      });
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="payments_${Date.now()}.csv"`,
+      );
+      res.send(header + lines.join("\n"));
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  return {
+    getPgFee,
+    createOrder,
+    verifyPayment,
+    manualDeposit,
+    listHistory,
+    exportHistory,
+  };
 }
