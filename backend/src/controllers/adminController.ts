@@ -725,6 +725,98 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function flushArbitrageTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = (req.body ?? {}) as { userId?: unknown; tradeIds?: unknown };
+      const userId = String(body.userId ?? req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      const tradeIdsRaw = body.tradeIds;
+      const tradeIds =
+        Array.isArray(tradeIdsRaw) && tradeIdsRaw.length > 0
+          ? tradeIdsRaw
+              .filter((id): id is string => typeof id === "string" && id.trim() !== "")
+              .map((id) => id.trim())
+          : undefined;
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, name: true, email: true, cryptoBalance: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const tradesToFlush = await prisma.arbitrageTrade.findMany({
+        where: {
+          userId,
+          ...(tradeIds?.length ? { id: { in: tradeIds } } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          token: true,
+          qty: true,
+          buyPrice: true,
+          sellPrice: true,
+          buyDex: true,
+          sellDex: true,
+          feePercent: true,
+          feeAmount: true,
+          netProfit: true,
+          createdAt: true,
+        },
+      });
+
+      if (tradesToFlush.length === 0) {
+        res.json({
+          ok: true,
+          deleted: 0,
+          netProfitReversed: 0,
+          message: tradeIds?.length
+            ? "No matching arbitrage trades found for the selected ids."
+            : "No arbitrage trades to flush.",
+        });
+        return;
+      }
+
+      const netProfitSum = tradesToFlush.reduce(
+        (sum, t) => sum + (Number.isFinite(t.netProfit) ? t.netProfit : 0),
+        0,
+      );
+      const tradeIdsToDelete = tradesToFlush.map((t) => t.id);
+
+      const result = await prisma.$transaction(async (tx) => {
+        const deleted = await tx.arbitrageTrade.deleteMany({
+          where: { id: { in: tradeIdsToDelete }, userId },
+        });
+        const nextBalance = Math.max(0, user.cryptoBalance - netProfitSum);
+        await tx.user.update({
+          where: { id: userId },
+          data: { cryptoBalance: nextBalance },
+        });
+        return { deleted: deleted.count };
+      });
+
+      res.json({
+        ok: true,
+        deleted: result.deleted,
+        netProfitReversed: netProfitSum,
+        cryptoBalance: Math.max(0, user.cryptoBalance - netProfitSum),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function exportTrades(
     req: Request,
     res: Response,
@@ -1418,6 +1510,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
+    flushArbitrageTrades,
     exportTrades,
     listDownloads,
     deleteDownload,

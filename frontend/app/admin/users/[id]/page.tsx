@@ -119,6 +119,7 @@ export default function AdminUserDetails({
   const [cryptoBalanceAdjustment, setCryptoBalanceAdjustment] = useState("");
   const [cryptoAllocationDraft, setCryptoAllocationDraft] = useState("10");
   const [savingArbitrage, setSavingArbitrage] = useState(false);
+  const [flushingArbitrage, setFlushingArbitrage] = useState(false);
 
   const authHeaders = useMemo(() => {
     const token =
@@ -276,6 +277,41 @@ export default function AdminUserDetails({
     setSelectedTradeIds((prev) => [
       ...new Set([...prev, ...flushableFilteredTrades.map((t) => t.id)]),
     ]);
+  }
+
+  async function flushArbitrageTrades(): Promise<void> {
+    const ok = window.confirm(
+      "Delete all arbitrage trades for this user? Their crypto balance will be reduced by the sum of flushed net profits.",
+    );
+    if (!ok) return;
+    setFlushingArbitrage(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/flush-arbitrage-trades`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? "Failed to flush arbitrage trades.");
+      }
+      const body = (await res.json()) as {
+        deleted?: number;
+        netProfitReversed?: number;
+        cryptoBalance?: number;
+      };
+      setNotice(
+        `Flushed ${body.deleted ?? 0} arbitrage trade(s). ` +
+          `${(body.netProfitReversed ?? 0).toFixed(2)} USDT reversed from crypto balance.`,
+      );
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to flush arbitrage trades.");
+    } finally {
+      setFlushingArbitrage(false);
+    }
   }
 
   async function saveCryptoArbitrage(): Promise<void> {
@@ -741,14 +777,24 @@ export default function AdminUserDetails({
                 </label>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void saveCryptoArbitrage()}
-                disabled={savingArbitrage}
-                className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
-              >
-                {savingArbitrage ? "Saving..." : "Save Arbitrage Settings"}
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void saveCryptoArbitrage()}
+                  disabled={savingArbitrage}
+                  className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+                >
+                  {savingArbitrage ? "Saving..." : "Save Arbitrage Settings"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void flushArbitrageTrades()}
+                  disabled={flushingArbitrage}
+                  className="rounded-lg border border-red-500/45 bg-red-500/15 px-4 py-2 text-sm font-medium text-red-200 hover:bg-red-500/25 disabled:opacity-60"
+                >
+                  {flushingArbitrage ? "Flushing..." : "Flush All Arbitrage Trades"}
+                </button>
+              </div>
             </div>
             </div>
           )}

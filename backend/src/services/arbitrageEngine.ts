@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { UserStatus, type PrismaClient } from "@prisma/client";
 import {
   CACHE_TTL_MS,
+  filterValidDexArbitrageRows,
   getDexArbitrageData,
   type DexArbitrageRow,
 } from "./arbitrageService.js";
@@ -28,7 +29,13 @@ export function pickBestArbitrageOpportunity(
 ): DexArbitrageRow | null {
   let best: DexArbitrageRow | null = null;
   for (const row of rows) {
-    if (!Number.isFinite(row.netSpreadPercent) || row.netSpreadPercent <= 0) {
+    if (
+      row.basePrice <= 0 ||
+      row.lowestPrice <= 0 ||
+      row.highestPrice <= 0 ||
+      !Number.isFinite(row.netSpreadPercent) ||
+      row.netSpreadPercent <= 0
+    ) {
       continue;
     }
     if (!best || row.netSpreadPercent > best.netSpreadPercent) {
@@ -43,7 +50,7 @@ function roundMoney(n: number): number {
 }
 
 export type ArbitrageTradeMath = {
-  capital: number;
+  capitalAllocated: number;
   qty: number;
   grossProfit: number;
   feePercent: number;
@@ -51,11 +58,22 @@ export type ArbitrageTradeMath = {
   netProfit: number;
 };
 
+/**
+ * PnL from allocated capital × scanner percentages (not fee-on-profit).
+ * gross = capital × spread%; fee = capital × fee%; net = capital × netSpread%.
+ */
 export function computeArbitrageTradeMath(
   userBalance: number,
   capitalPerTradePercent: number,
   opportunity: DexArbitrageRow,
 ): ArbitrageTradeMath | null {
+  if (
+    !Number.isFinite(opportunity.netSpreadPercent) ||
+    opportunity.netSpreadPercent <= 0
+  ) {
+    return null;
+  }
+
   const buyPrice = opportunity.lowestPrice;
   const sellPrice = opportunity.highestPrice;
   if (
@@ -66,26 +84,40 @@ export function computeArbitrageTradeMath(
     !Number.isFinite(buyPrice) ||
     buyPrice <= 0 ||
     !Number.isFinite(sellPrice) ||
+    sellPrice <= 0 ||
     sellPrice <= buyPrice
   ) {
     return null;
   }
 
-  const capital = roundMoney(userBalance * (capitalPerTradePercent / 100));
-  if (capital <= 0) return null;
+  const capitalAllocated = roundMoney(
+    userBalance * (capitalPerTradePercent / 100),
+  );
+  if (capitalAllocated <= 0) return null;
 
-  const qty = roundMoney(capital / buyPrice);
-  if (qty <= 0) return null;
-
-  const grossProfit = roundMoney((sellPrice - buyPrice) * qty);
-  if (grossProfit <= 0) return null;
-
+  const grossProfit = roundMoney(
+    capitalAllocated * (opportunity.spreadPercentage / 100),
+  );
   const feePercent = opportunity.estimatedFeePercent;
-  const feeAmount = roundMoney(grossProfit * (feePercent / 100));
-  const netProfit = roundMoney(grossProfit - feeAmount);
+  const feeAmount = roundMoney(
+    capitalAllocated * (feePercent / 100),
+  );
+  const netProfit = roundMoney(
+    capitalAllocated * (opportunity.netSpreadPercent / 100),
+  );
   if (netProfit <= 0) return null;
 
-  return { capital, qty, grossProfit, feePercent, feeAmount, netProfit };
+  const qty = roundMoney(capitalAllocated / buyPrice);
+  if (qty <= 0) return null;
+
+  return {
+    capitalAllocated,
+    qty,
+    grossProfit,
+    feePercent,
+    feeAmount,
+    netProfit,
+  };
 }
 
 async function userRecentlyTradedOpportunity(
@@ -116,7 +148,9 @@ export async function runArbitrageEngineCycle(
   prisma: PrismaClient,
 ): Promise<ArbitrageCycleResult> {
   const { data } = await getDexArbitrageData(true);
-  const best = pickBestArbitrageOpportunity(data.rows);
+  const best = pickBestArbitrageOpportunity(
+    filterValidDexArbitrageRows(data.rows),
+  );
 
   if (!best) {
     return {

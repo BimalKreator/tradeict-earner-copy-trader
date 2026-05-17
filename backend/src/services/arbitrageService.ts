@@ -39,6 +39,24 @@ export type DexArbitragePayload = {
   rows: DexArbitrageRow[];
 };
 
+/** Exclude rows with missing or zero oracle/DEX prices. */
+export function isValidDexArbitrageRow(row: DexArbitrageRow): boolean {
+  return (
+    Number.isFinite(row.basePrice) &&
+    row.basePrice > 0 &&
+    Number.isFinite(row.lowestPrice) &&
+    row.lowestPrice > 0 &&
+    Number.isFinite(row.highestPrice) &&
+    row.highestPrice > 0
+  );
+}
+
+export function filterValidDexArbitrageRows(
+  rows: DexArbitrageRow[],
+): DexArbitrageRow[] {
+  return rows.filter(isValidDexArbitrageRow);
+}
+
 /** Top 100 tokens (symbol → CoinGecko id). */
 const TOKEN_CATALOG: { symbol: string; name: string; coingeckoId: string }[] = [
   { symbol: "BTC", name: "Bitcoin", coingeckoId: "bitcoin" },
@@ -285,8 +303,10 @@ async function refreshDexArbitrageData(): Promise<DexArbitragePayload> {
     console.warn("[arbitrage] CoinGecko fetch failed, using simulated bases:", err);
   }
 
-  const rows = TOKEN_CATALOG.map((entry, idx) =>
-    buildRow(entry, idx, oracleUsd, usedOracle, refreshSalt),
+  const rows = filterValidDexArbitrageRows(
+    TOKEN_CATALOG.map((entry, idx) =>
+      buildRow(entry, idx, oracleUsd, usedOracle, refreshSalt),
+    ),
   ).sort((a, b) => b.spreadPercentage - a.spreadPercentage);
 
   return {
