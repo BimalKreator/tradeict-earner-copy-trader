@@ -4,6 +4,7 @@ import Link from "next/link";
 import {
   Activity,
   Calendar,
+  CircleDollarSign,
   CreditCard,
   KeyRound,
   Layers,
@@ -164,6 +165,14 @@ export default function DashboardPage() {
             label="Available Capital"
             value={fmtUsd(data.availableCapital)}
             sub={<span className="text-slate-500">Live Delta balance</span>}
+            valueClass="text-white text-3xl"
+          />
+
+          <MetricCard
+            icon={<CircleDollarSign className="h-5 w-5 text-teal-400" />}
+            label="Crypto Balance"
+            value="0.00 USDT"
+            sub={<span className="text-slate-500">Pending integration</span>}
             valueClass="text-white text-3xl"
           />
 

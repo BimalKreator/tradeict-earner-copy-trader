@@ -15,6 +15,8 @@ export type DexArbitrageRow = {
   highestDex: string;
   spreadUsd: number;
   spreadPercentage: number;
+  estimatedFeePercent: number;
+  netSpreadPercent: number;
 };
 
 type DexArbitrageResponse = {
@@ -30,7 +32,9 @@ type SortKey =
   | "lowestPrice"
   | "highestPrice"
   | "spreadUsd"
-  | "spreadPercentage";
+  | "spreadPercentage"
+  | "estimatedFeePercent"
+  | "netSpreadPercent";
 
 const usdFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -183,8 +187,12 @@ export function DexArbitrageTable() {
         case "spreadUsd":
           return mul * (a.spreadUsd - b.spreadUsd);
         case "spreadPercentage":
-        default:
           return mul * (a.spreadPercentage - b.spreadPercentage);
+        case "estimatedFeePercent":
+          return mul * (a.estimatedFeePercent - b.estimatedFeePercent);
+        case "netSpreadPercent":
+        default:
+          return mul * (a.netSpreadPercent - b.netSpreadPercent);
       }
     });
     return copy;
@@ -226,7 +234,7 @@ export function DexArbitrageTable() {
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-lg shadow-black/20">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-sm">
+          <table className="w-full min-w-[1120px] text-left text-sm">
             <thead className="border-b border-slate-800 bg-slate-950/60">
               <tr>
                 <SortHeader
@@ -258,18 +266,34 @@ export function DexArbitrageTable() {
                   onSort={handleSort}
                   align="right"
                 />
+                <SortHeader
+                  label="Est. Fee (%)"
+                  sortKey="estimatedFeePercent"
+                  activeKey={sortKey}
+                  dir={sortDir}
+                  onSort={handleSort}
+                  align="right"
+                />
+                <SortHeader
+                  label="Net Spread (%)"
+                  sortKey="netSpreadPercent"
+                  activeKey={sortKey}
+                  dir={sortDir}
+                  onSort={handleSort}
+                  align="right"
+                />
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center">
+                  <td colSpan={7} className="px-4 py-16 text-center">
                     <Loader2 className="mx-auto h-8 w-8 animate-spin text-cyan-400" />
                   </td>
                 </tr>
               ) : sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center text-slate-500">
+                  <td colSpan={7} className="px-4 py-16 text-center text-slate-500">
                     No spread data available.
                   </td>
                 </tr>
@@ -306,6 +330,20 @@ export function DexArbitrageTable() {
                       >
                         {pctFmt.format(r.spreadPercentage)}%
                       </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-slate-400">
+                        {pctFmt.format(r.estimatedFeePercent)}%
+                      </td>
+                      <td
+                        className={`px-4 py-3 text-right font-medium tabular-nums ${
+                          r.netSpreadPercent > 0
+                            ? "text-emerald-400"
+                            : r.netSpreadPercent < 0
+                              ? "text-red-400"
+                              : "text-slate-300"
+                        }`}
+                      >
+                        {pctFmt.format(r.netSpreadPercent)}%
+                      </td>
                     </tr>
                   );
                 })
@@ -317,8 +355,8 @@ export function DexArbitrageTable() {
 
       {!loading && sorted.length > 0 ? (
         <p className="text-xs text-slate-500">
-          Showing {sorted.length} token{sorted.length === 1 ? "" : "s"}. Green spread % indicates
-          opportunities above 1%.
+          Showing {sorted.length} token{sorted.length === 1 ? "" : "s"}. Green spread % is above 1%;
+          net spread is green when positive after estimated fees.
         </p>
       ) : null}
     </div>

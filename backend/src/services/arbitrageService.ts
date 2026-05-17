@@ -28,6 +28,8 @@ export type DexArbitrageRow = {
   highestDex: ArbitrageDex;
   spreadUsd: number;
   spreadPercentage: number;
+  estimatedFeePercent: number;
+  netSpreadPercent: number;
 };
 
 export type DexArbitragePayload = {
@@ -230,6 +232,10 @@ function buildRow(
   const spreadPercentage =
     lowest.price > 0 ? (spreadUsd / lowest.price) * 100 : 0;
 
+  const estimatedFeePercent =
+    Math.round((7 + seededUnit(entry.symbol, "est-fee") * 2) * 100) / 100;
+  const netSpreadPercent = spreadPercentage - estimatedFeePercent;
+
   return {
     token: entry.symbol,
     tokenName: entry.name,
@@ -240,6 +246,8 @@ function buildRow(
     highestDex: highest.dex,
     spreadUsd,
     spreadPercentage,
+    estimatedFeePercent,
+    netSpreadPercent,
   };
 }
 
