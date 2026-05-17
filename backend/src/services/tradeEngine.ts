@@ -25,6 +25,13 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
+import {
+  registerSymbolsForLivePrices,
+  startLivePriceTracker,
+} from "./livePriceTracker.js";
+
+/** Re-exported live mark cache (updated by {@link startLivePriceTracker} + public WS). */
+export { liveMarkPrices } from "./liveMarkPriceCache.js";
 
 /** Delta Exchange India private WebSocket (see Delta WebSocket docs). */
 const DELTA_INDIA_PRIVATE_WS = "wss://socket.india.delta.exchange";
@@ -38,7 +45,7 @@ const ROSTER_SYNC_MS = 15_000;
 /** How often to reconcile DB OPEN trades against master REST positions (safety net). */
 const SAFETY_RECONCILE_MS = 30_000;
 /** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
-const AUTO_EXIT_CHECK_MS = 5_000;
+const AUTO_EXIT_CHECK_MS = 1_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -1066,6 +1073,7 @@ class StrategyMasterSocket {
         strat.masterApiKey,
         strat.masterApiSecret,
       );
+      registerSymbolsForLivePrices(masters.map((m) => m.deltaSymbol));
       for (const m of masters) {
         const aliases = symbolAliasSet(m.deltaSymbol);
         for (const k of aliases) {
@@ -1237,6 +1245,7 @@ class StrategyMasterSocket {
       for (const r of records) {
         const sig = extractOrderFillSignal(r);
         if (!sig || sig.reduceOnly) continue;
+        registerSymbolsForLivePrices([sig.symbol]);
         await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
           symbol: sig.symbol,
           side: sig.side,
@@ -1494,6 +1503,7 @@ class StrategyMasterSocket {
         }
 
         if (next > 0) {
+          registerSymbolsForLivePrices([snap.symbol]);
           writeTracked(snap, next);
           console.log(
             `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
@@ -1520,6 +1530,7 @@ class StrategyMasterSocket {
  */
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
+  const stopLivePriceTracker = startLivePriceTracker(prisma);
   const sockets = new Map<string, StrategyMasterSocket>();
   let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconcileTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -1790,6 +1801,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
   return () => {
     cancelled.value = true;
+    stopLivePriceTracker();
     if (rosterTimeout != null) {
       clearTimeout(rosterTimeout);
       rosterTimeout = null;

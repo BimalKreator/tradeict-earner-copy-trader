@@ -539,7 +539,7 @@ export default function AdminLiveTradesPage() {
   useEffect(() => {
     const id = window.setInterval(() => {
       void load({ silent: true });
-    }, 8000);
+    }, 1000);
     return () => window.clearInterval(id);
   }, [load]);
 
@@ -572,7 +572,7 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Data comes from CCXT + market tickers. PnL and mark prices update about every 5 seconds
+              Data comes from CCXT + live WebSocket marks. PnL and mark prices refresh about every 1 second
               while this page is open. New master fills are copied to subscribers by the backend trade
               engine (WebSocket to Delta); restart the API if copy ever stops.
             </p>

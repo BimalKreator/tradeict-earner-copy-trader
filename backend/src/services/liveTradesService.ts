@@ -11,6 +11,10 @@ import {
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
+import {
+  resolveLiveMarkPrice,
+} from "./liveMarkPriceCache.js";
+import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 export type LiveTradeRow = {
   entryTime: string | null;
@@ -65,13 +69,29 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
+/** Mark from in-memory WS cache, then CCXT position mark, then REST ticker. */
+async function resolveMarkForLiveRow(
+  pos: DeltaLivePosition,
+): Promise<number | null> {
+  const cached = resolveLiveMarkPrice(pos.symbolKey);
+  if (cached != null) return cached;
+  if (
+    pos.markPrice != null &&
+    Number.isFinite(pos.markPrice) &&
+    pos.markPrice > 0
+  ) {
+    return pos.markPrice;
+  }
+  const tick = await fetchDeltaTicker(pos.symbolKey);
+  return tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
+}
+
 /** Fresh ticker mark + linear PnL using base size (`realBaseSize`), not raw contract count. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
-  const tick = await fetchDeltaTicker(pos.symbolKey);
-  const mark =
-    tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
+  registerSymbolsForLivePrices([pos.symbolKey]);
+  const mark = await resolveMarkForLiveRow(pos);
 
   const base = deltaToRow(pos);
   const entryPx =

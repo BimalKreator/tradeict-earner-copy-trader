@@ -2,18 +2,36 @@ import type { PrismaClient } from "@prisma/client";
 import {
   executeTrade,
   fetchDeltaOpenPositions,
-  fetchDeltaTicker,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
+import {
+  deltaContractSizeFallback,
+  estimateLivePnlUsd,
+  resolveLiveMarkPrice,
+} from "./liveMarkPriceCache.js";
+import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 const AUTO_EXIT_COOLDOWN_MS = 60_000;
 
 /** strategyId → timestamp when auto-exit last fired (prevents duplicate close bursts). */
 const lastAutoExitAt = new Map<string, number>();
 
-function estimateLivePnlUsd(pos: DeltaLivePosition, mark: number | null): number {
-  if (mark === null || !Number.isFinite(mark)) {
+function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
+  const cached = resolveLiveMarkPrice(pos.symbolKey);
+  if (cached != null) return cached;
+  if (
+    pos.markPrice != null &&
+    Number.isFinite(pos.markPrice) &&
+    pos.markPrice > 0
+  ) {
+    return pos.markPrice;
+  }
+  return null;
+}
+
+function legPnlUsd(pos: DeltaLivePosition, mark: number | null): number {
+  if (mark == null) {
     const u = pos.unrealizedPnl;
     return u != null && Number.isFinite(u) ? u : 0;
   }
@@ -21,8 +39,18 @@ function estimateLivePnlUsd(pos: DeltaLivePosition, mark: number | null): number
     pos.entryPrice != null && Number.isFinite(pos.entryPrice)
       ? pos.entryPrice
       : mark;
-  const sign = pos.side === "BUY" ? 1 : -1;
-  return (mark - entry) * pos.realBaseSize * sign;
+  const cs =
+    pos.realBaseSize > 0 && pos.contracts > 0
+      ? pos.realBaseSize / Math.abs(pos.contracts)
+      : deltaContractSizeFallback(pos.symbolKey);
+  return estimateLivePnlUsd({
+    symbolKey: pos.symbolKey,
+    side: pos.side,
+    entryPrice: entry,
+    contracts: Math.abs(pos.contracts),
+    markPrice: mark,
+    contractSize: cs,
+  });
 }
 
 export type MasterLegCloseTarget = {
@@ -36,6 +64,8 @@ export async function fetchMasterLegsWithTotalLivePnl(
   apiSecretStored: string,
 ): Promise<{ totalPnlUsd: number; legs: MasterLegCloseTarget[] }> {
   const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
+  registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
+
   const legs: MasterLegCloseTarget[] = [];
   let totalPnlUsd = 0;
 
@@ -43,10 +73,8 @@ export async function fetchMasterLegsWithTotalLivePnl(
     const contracts = Math.abs(pos.contracts);
     if (!Number.isFinite(contracts) || contracts < 1e-12) continue;
 
-    const tick = await fetchDeltaTicker(pos.symbolKey);
-    const mark =
-      tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
-    totalPnlUsd += estimateLivePnlUsd(pos, mark);
+    const mark = resolveMarkForPosition(pos);
+    totalPnlUsd += legPnlUsd(pos, mark);
 
     legs.push({
       symbolKey: pos.symbolKey,
