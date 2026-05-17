@@ -64,7 +64,9 @@ model User {
   panNumber     String?
   aadhaarNumber String?
   role          Role                @default(USER)
-  status        UserStatus          @default(ACTIVE)
+  status             UserStatus          @default(ACTIVE)
+  /** When true, copy engine skips this user even if subscriptions are ACTIVE. */
+  copyTradingPaused  Boolean             @default(false)
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique

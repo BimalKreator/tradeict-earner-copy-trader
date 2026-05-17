@@ -1,5 +1,13 @@
 import type { NextFunction, Request, Response } from "express";
-import { InvoiceStatus, TradeStatus, type PrismaClient } from "@prisma/client";
+import { InvoiceStatus, SubscriptionStatus, TradeStatus, type PrismaClient } from "@prisma/client";
+import {
+  aggregateUsersAum,
+  masterApiHealth,
+  startOfUtcDay,
+  startOfUtcMonth,
+  systemClosedPnlSince,
+  totalPendingRevenueAllUsers,
+} from "../services/dashboardMetricsService.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -704,28 +712,31 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
+      const dayStart = startOfUtcDay();
+      const monthStart = startOfUtcMonth();
+
       const [
         totalUsers,
-        activeStrategies,
-        pnlAgg,
-        revenueAgg,
+        activeSubscribers,
+        totalAUM,
+        systemTodayPnl,
+        systemMonthlyPnl,
+        totalPendingRevenue,
+        masterApi,
         pendingApprovals,
         recentTrades,
         leaderboardRows,
       ] =
         await Promise.all([
-          prisma.user.count(),
-          prisma.strategy.count({
-            where: { subscriptions: { some: { status: "ACTIVE" } } },
+          prisma.user.count({ where: { role: "USER" } }),
+          prisma.userSubscription.count({
+            where: { status: SubscriptionStatus.ACTIVE },
           }),
-          prisma.trade.aggregate({
-            where: { status: TradeStatus.CLOSED },
-            _sum: { tradePnl: true },
-          }),
-          prisma.trade.aggregate({
-            where: { status: TradeStatus.CLOSED },
-            _sum: { revenueShareAmt: true },
-          }),
+          aggregateUsersAum(prisma),
+          systemClosedPnlSince(prisma, dayStart),
+          systemClosedPnlSince(prisma, monthStart),
+          totalPendingRevenueAllUsers(prisma),
+          masterApiHealth(prisma),
           prisma.profileUpdateRequest.count({ where: { status: "PENDING" } }),
           prisma.trade.findMany({
             orderBy: { createdAt: "desc" },
@@ -766,9 +777,13 @@ export function createAdminController(prisma: PrismaClient) {
 
       res.json({
         totalUsers,
-        activeStrategies,
-        totalPnlNet: pnlAgg._sum.tradePnl ?? 0,
-        totalRevenue: revenueAgg._sum.revenueShareAmt ?? 0,
+        activeSubscribers,
+        totalAUM,
+        systemTodayPnl,
+        systemMonthlyPnl,
+        totalPendingRevenue,
+        masterApiStatus: masterApi.connected ? "connected" : "disconnected",
+        masterApiStrategyTitle: masterApi.strategyTitle,
         pendingApprovals,
         leaderboard,
         recentLiveTrades: recentTrades.map((t) => ({

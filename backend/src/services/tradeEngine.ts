@@ -509,7 +509,13 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       },
     },
   });
-  if (!sub || sub.user.status !== UserStatus.ACTIVE) return;
+  if (
+    !sub ||
+    sub.user.status !== UserStatus.ACTIVE ||
+    sub.user.copyTradingPaused
+  ) {
+    return;
+  }
 
   let leaders: MasterLedTrade[];
   try {
@@ -639,7 +645,7 @@ export async function lateJoinMirrorForAllActiveSubscribers(
     where: {
       strategyId,
       status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
+      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
     },
     select: { userId: true },
   });
@@ -700,7 +706,7 @@ export async function forceMirrorOpenPositionsForAllSubscribers(
     where: {
       strategyId,
       status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
+      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
     },
     select: { userId: true },
   });
@@ -751,7 +757,7 @@ async function copyMasterFillToSubscribers(
     where: {
       strategyId,
       status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
+      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
     },
     include: {
       exchangeAccount: true,
@@ -906,7 +912,7 @@ async function notifyMasterFlat(
     where: {
       strategyId,
       status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
+      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
     },
     include: {
       exchangeAccount: true,

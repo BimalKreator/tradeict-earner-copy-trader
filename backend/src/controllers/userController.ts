@@ -1,6 +1,17 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { fetchDeltaTotalBalanceUsd } from "../services/exchangeService.js";
+import {
+  activeStrategiesForUser,
+  checkDeltaApiConnected,
+  fetchUserAvailableCapital,
+  monthlyWinRate,
+  pnlPercentOfCapital,
+  resolveUserDeltaCreds,
+  startOfUtcDay,
+  startOfUtcMonth,
+  sumClosedTradePnlSince,
+  userTotalDue,
+} from "../services/dashboardMetricsService.js";
 import {
   buildTimestampTag,
   rowsToCsv,
@@ -157,81 +168,89 @@ export function createUserController(prisma: PrismaClient) {
         return;
       }
 
-      const [activeSubs, allClosedTrades, todayTrades, userWithCreds, strategyPnl] =
+      const dayStart = startOfUtcDay();
+      const monthStart = startOfUtcMonth();
+
+      const [userRow, todayPnl, monthlyPnl, availableCapital, totalDue, winRate, activeStrategies] =
         await Promise.all([
-          prisma.userSubscription.count({
-            where: { userId, status: "ACTIVE" },
-          }),
-          prisma.trade.findMany({
-            where: { userId, status: "CLOSED" },
-            select: { tradePnl: true },
-          }),
-          prisma.trade.findMany({
-            where: { userId, status: "CLOSED", createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-            select: { tradePnl: true },
-          }),
           prisma.user.findUnique({
             where: { id: userId },
-            select: {
-              exchangeAccounts: {
-                orderBy: { createdAt: "desc" },
-                take: 1,
-                select: { apiKey: true, apiSecret: true },
-              },
-              deltaApiKeys: {
-                orderBy: { id: "desc" },
-                take: 1,
-                select: { apiKey: true, apiSecret: true },
-              },
-            },
+            select: { copyTradingPaused: true },
           }),
-          prisma.pnLRecord.groupBy({
-            by: ["strategyId"],
-            where: { userId },
-            _sum: { profitAmount: true },
-            orderBy: { _sum: { profitAmount: "desc" } },
-            take: 6,
-          }),
+          sumClosedTradePnlSince(prisma, userId, dayStart),
+          sumClosedTradePnlSince(prisma, userId, monthStart),
+          fetchUserAvailableCapital(prisma, userId),
+          userTotalDue(prisma, userId),
+          monthlyWinRate(prisma, userId),
+          activeStrategiesForUser(prisma, userId),
         ]);
 
-      const wins = allClosedTrades.filter((t) => t.tradePnl > 0).length;
-      const totalClosed = allClosedTrades.length;
-      const totalWinRate = totalClosed > 0 ? (wins / totalClosed) * 100 : 0;
-      const todaysPnl = todayTrades.reduce((s, t) => s + t.tradePnl, 0);
+      const creds = await resolveUserDeltaCreds(prisma, userId);
+      const apiStatus = creds
+        ? (await checkDeltaApiConnected(creds)) ? "connected" : "disconnected"
+        : "disconnected";
 
-      const strategyIds = strategyPnl.map((s) => s.strategyId);
-      const strategies = await prisma.strategy.findMany({
-        where: { id: { in: strategyIds } },
-        select: { id: true, title: true },
-      });
-      const titleMap = new Map(strategies.map((s) => [s.id, s.title]));
-
-      let totalPortfolioValueUsd = 0;
-      const creds =
-        userWithCreds?.exchangeAccounts[0] ?? userWithCreds?.deltaApiKeys[0] ?? null;
-      if (creds) {
-        try {
-          totalPortfolioValueUsd = await fetchDeltaTotalBalanceUsd(
-            creds.apiKey,
-            creds.apiSecret,
-          );
-        } catch {
-          totalPortfolioValueUsd = 0;
-        }
-      }
+      const copyTradingActive =
+        !userRow?.copyTradingPaused && apiStatus === "connected";
 
       res.json({
-        totalPortfolioValueUsd,
-        activeSubscriptions: activeSubs,
-        quickStats: {
-          todaysPnl,
-          totalWinRate,
-        },
-        activeStrategyPerformance: strategyPnl.map((s) => ({
-          strategyId: s.strategyId,
-          strategyTitle: titleMap.get(s.strategyId) ?? "Unknown Strategy",
-          pnl: s._sum.profitAmount ?? 0,
-        })),
+        todayPnl,
+        todayPnlPercent: pnlPercentOfCapital(todayPnl, availableCapital),
+        monthlyPnl,
+        monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, availableCapital),
+        availableCapital,
+        totalDue,
+        winRate,
+        activeStrategies,
+        apiStatus,
+        copyTradingActive,
+        copyTradingPaused: userRow?.copyTradingPaused ?? false,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function patchCopyTrading(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { paused?: unknown; active?: unknown };
+      let paused: boolean | undefined;
+      if (typeof body.paused === "boolean") {
+        paused = body.paused;
+      } else if (typeof body.active === "boolean") {
+        paused = !body.active;
+      }
+
+      if (paused === undefined) {
+        res.status(400).json({ error: "Provide paused (boolean) or active (boolean)" });
+        return;
+      }
+
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { copyTradingPaused: paused },
+        select: { copyTradingPaused: true },
+      });
+
+      const creds = await resolveUserDeltaCreds(prisma, userId);
+      const apiStatus = creds
+        ? (await checkDeltaApiConnected(creds)) ? "connected" : "disconnected"
+        : "disconnected";
+
+      res.json({
+        copyTradingPaused: user.copyTradingPaused,
+        copyTradingActive: !user.copyTradingPaused && apiStatus === "connected",
+        apiStatus,
       });
     } catch (err) {
       next(err);
@@ -677,6 +696,7 @@ export function createUserController(prisma: PrismaClient) {
     listTrades,
     listInvoices,
     getDashboardOverview,
+    patchCopyTrading,
     createDeposit,
     listDeposits,
     exportTrades,
