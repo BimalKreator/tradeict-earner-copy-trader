@@ -34,6 +34,12 @@ type DashboardOverview = {
   apiStatus: "connected" | "disconnected";
   copyTradingActive: boolean;
   copyTradingPaused: boolean;
+  cryptoBalance: number;
+  arbitrageTodayPnl: number;
+  arbitrageMonthlyPnl: number;
+  arbitrageTodayPnlPercent: number;
+  arbitrageMonthlyPnlPercent: number;
+  cryptoArbitrageEnabled: boolean;
 };
 
 function fmtUsd(n: number): string {
@@ -284,51 +290,87 @@ export default function DashboardPage() {
 
       <DashboardSection
         title="Crypto Arbitrage Trading"
-        subtitle="Cross-exchange arbitrage performance (Pending Integration)."
+        subtitle="Cross-exchange arbitrage performance and automated execution."
       >
+        {loading ? (
+          <div className="flex justify-center rounded-xl border border-slate-800 bg-slate-900 py-20">
+            <Loader2 className="h-8 w-8 animate-spin text-teal-400" />
+          </div>
+        ) : data ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             icon={<Activity className="h-5 w-5 text-teal-400" />}
             label="Today's Arbitrage PnL"
-            value="$0.00"
-            sub={<span className="text-slate-500">Pending integration</span>}
-            valueClass="text-slate-300"
+            value={fmtUsd(data.arbitrageTodayPnl ?? 0)}
+            sub={
+              <span className={pnlTone(data.arbitrageTodayPnlPercent ?? 0)}>
+                {fmtPct(data.arbitrageTodayPnlPercent ?? 0)} of crypto balance
+              </span>
+            }
+            valueClass={pnlTone(data.arbitrageTodayPnl ?? 0)}
           />
 
           <MetricCard
             icon={<Calendar className="h-5 w-5 text-teal-400/80" />}
             label="Monthly Arbitrage PnL"
-            value="$0.00"
-            sub={<span className="text-slate-500">Pending integration</span>}
-            valueClass="text-slate-300"
+            value={fmtUsd(data.arbitrageMonthlyPnl ?? 0)}
+            sub={
+              <span className={pnlTone(data.arbitrageMonthlyPnlPercent ?? 0)}>
+                {fmtPct(data.arbitrageMonthlyPnlPercent ?? 0)} of crypto balance
+              </span>
+            }
+            valueClass={pnlTone(data.arbitrageMonthlyPnl ?? 0)}
           />
 
           <MetricCard
             icon={<CircleDollarSign className="h-5 w-5 text-teal-400" />}
             label="Crypto Balance"
-            value="0.00 USDT"
-            sub={<span className="text-slate-500">Pending integration</span>}
+            value={`${(data.cryptoBalance ?? 0).toFixed(2)} USDT`}
+            sub={
+              <Link
+                href="/dashboard/arbitrage-trades"
+                className="text-xs text-teal-400/90 hover:text-teal-300"
+              >
+                View arbitrage trades →
+              </Link>
+            }
             valueClass="text-white text-3xl"
           />
 
           <MetricCard
             icon={<Bot className="h-5 w-5 text-teal-400" />}
             label="Active Arbitrage Bots"
-            value="0"
-            sub={<span className="text-slate-500">No bots configured</span>}
+            value={data.cryptoArbitrageEnabled ? "1" : "0"}
+            sub={
+              <span className="text-slate-500">
+                {data.cryptoArbitrageEnabled
+                  ? "Automated execution enabled"
+                  : "Contact support to enable"}
+              </span>
+            }
             valueClass="text-3xl text-white"
           />
 
           <MetricCard
-            icon={<GitCompare className="h-5 w-5 text-slate-400" />}
-            label="Arbitrage API Status"
-            value="Not Connected"
+            icon={<GitCompare className="h-5 w-5 text-teal-400" />}
+            label="Arbitrage Status"
+            value={data.cryptoArbitrageEnabled ? "Active" : "Paused"}
             sub={
-              <StatusDot connected={false} label="Connect arbitrage API when available" />
+              <StatusDot
+                connected={data.cryptoArbitrageEnabled}
+                label={
+                  data.cryptoArbitrageEnabled
+                    ? "Scanning and executing opportunities"
+                    : "Arbitrage execution is paused"
+                }
+              />
             }
-            valueClass="text-red-400"
+            valueClass={
+              data.cryptoArbitrageEnabled ? "text-emerald-400" : "text-slate-400"
+            }
           />
         </div>
+        ) : null}
       </DashboardSection>
     </div>
   );

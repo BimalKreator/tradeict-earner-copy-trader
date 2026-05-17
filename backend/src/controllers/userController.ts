@@ -13,6 +13,10 @@ import {
   userTotalDue,
 } from "../services/dashboardMetricsService.js";
 import {
+  getUserArbitrageDashboardMetrics,
+  sumArbitrageNetProfitAllTime,
+} from "../services/arbitrageMetricsService.js";
+import {
   buildTimestampTag,
   rowsToCsv,
 } from "../utils/exportService.js";
@@ -171,19 +175,28 @@ export function createUserController(prisma: PrismaClient) {
       const dayStart = startOfUtcDay();
       const monthStart = startOfUtcMonth();
 
-      const [userRow, todayPnl, monthlyPnl, capital, totalDue, winRate, activeStrategies] =
-        await Promise.all([
-          prisma.user.findUnique({
-            where: { id: userId },
-            select: { copyTradingPaused: true },
-          }),
-          sumClosedTradePnlSince(prisma, userId, dayStart),
-          sumClosedTradePnlSince(prisma, userId, monthStart),
-          fetchUserCapitalBreakdown(prisma, userId),
-          userTotalDue(prisma, userId),
-          monthlyWinRate(prisma, userId),
-          activeStrategiesForUser(prisma, userId),
-        ]);
+      const [
+        userRow,
+        todayPnl,
+        monthlyPnl,
+        capital,
+        totalDue,
+        winRate,
+        activeStrategies,
+        arbitrage,
+      ] = await Promise.all([
+        prisma.user.findUnique({
+          where: { id: userId },
+          select: { copyTradingPaused: true },
+        }),
+        sumClosedTradePnlSince(prisma, userId, dayStart),
+        sumClosedTradePnlSince(prisma, userId, monthStart),
+        fetchUserCapitalBreakdown(prisma, userId),
+        userTotalDue(prisma, userId),
+        monthlyWinRate(prisma, userId),
+        activeStrategiesForUser(prisma, userId),
+        getUserArbitrageDashboardMetrics(prisma, userId),
+      ]);
 
       const creds = await resolveUserDeltaCreds(prisma, userId);
       const apiStatus = creds
@@ -208,6 +221,69 @@ export function createUserController(prisma: PrismaClient) {
         apiStatus,
         copyTradingActive,
         copyTradingPaused: userRow?.copyTradingPaused ?? false,
+        cryptoBalance: arbitrage.cryptoBalance,
+        arbitrageTodayPnl: arbitrage.todayPnl,
+        arbitrageMonthlyPnl: arbitrage.monthlyPnl,
+        arbitrageTodayPnlPercent: pnlPercentOfCapital(
+          arbitrage.todayPnl,
+          arbitrage.cryptoBalance,
+        ),
+        arbitrageMonthlyPnlPercent: pnlPercentOfCapital(
+          arbitrage.monthlyPnl,
+          arbitrage.cryptoBalance,
+        ),
+        cryptoArbitrageEnabled: arbitrage.cryptoArbitrageEnabled,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listArbitrageTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const limitRaw = Number(req.query.limit ?? DEFAULT_TRADE_LIMIT);
+      const limit = Number.isFinite(limitRaw)
+        ? Math.min(Math.max(1, Math.floor(limitRaw)), MAX_TRADE_LIMIT)
+        : DEFAULT_TRADE_LIMIT;
+
+      const [totalEarnings, trades] = await Promise.all([
+        sumArbitrageNetProfitAllTime(prisma, userId),
+        prisma.arbitrageTrade.findMany({
+          where: { userId },
+          orderBy: { createdAt: "desc" },
+          take: limit,
+          select: {
+            id: true,
+            token: true,
+            qty: true,
+            buyPrice: true,
+            sellPrice: true,
+            buyDex: true,
+            sellDex: true,
+            feePercent: true,
+            feeAmount: true,
+            netProfit: true,
+            createdAt: true,
+          },
+        }),
+      ]);
+
+      res.json({
+        totalEarnings,
+        trades: trades.map((t) => ({
+          ...t,
+          createdAt: t.createdAt.toISOString(),
+        })),
       });
     } catch (err) {
       next(err);
@@ -704,6 +780,7 @@ export function createUserController(prisma: PrismaClient) {
     listTrades,
     listInvoices,
     getDashboardOverview,
+    listArbitrageTrades,
     patchCopyTrading,
     createDeposit,
     listDeposits,

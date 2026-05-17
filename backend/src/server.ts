@@ -27,6 +27,7 @@ import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
+import { initArbitrageEngine } from "./services/arbitrageEngine.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
 import {
@@ -48,6 +49,7 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 initBillingCronJobs(prisma);
+initArbitrageEngine(prisma);
 initTelegramBot(prisma);
 initTelegramCronJobs(prisma);
 
@@ -153,4 +155,5 @@ app.listen(PORT, "0.0.0.0", () => {
     `[BOOT] Admin API http://0.0.0.0:${PORT} deltaEthUSDT→ccxt=${DELTA_INDIA_CCXT_SAMPLE_SYMBOL} | verify: curl -s http://127.0.0.1:${PORT}/api/health/build`,
   );
   console.log("[BOOT] Trade engine (master Delta WebSocket copy) is running.");
+  console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
 });
