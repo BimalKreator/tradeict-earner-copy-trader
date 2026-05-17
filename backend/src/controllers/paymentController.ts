@@ -10,6 +10,7 @@ import {
   calculateFeeBreakdown,
   inrToUsd,
   roundInr,
+  usdInrRate,
   type PaymentMethodKind,
 } from "../services/paymentFeeService.js";
 import { getPgFeePercent } from "../services/settingsService.js";
@@ -525,6 +526,7 @@ export function createPaymentController(prisma: PrismaClient) {
       res.json({
         transactions: rows.map(serializePayment),
         pgFeePercent: await getPgFeePercent(prisma),
+        usdInrRate: usdInrRate(),
       });
     } catch (err) {
       next(err);

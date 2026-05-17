@@ -174,7 +174,7 @@ export default function DashboardPage() {
             sub={
               data.totalDue > 0 ? (
                 <Link
-                  href="/dashboard/billing"
+                  href="/dashboard/wallet"
                   className="inline-flex items-center rounded-md bg-cyan-500/15 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-500/30 transition hover:bg-cyan-500/25"
                 >
                   Pay Now
