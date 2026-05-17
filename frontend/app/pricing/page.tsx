@@ -18,7 +18,7 @@ export default function PricingPage() {
           <p>
             {COMPANY.legalName} charges for software access and performance-based revenue share.
             All amounts are displayed in your dashboard before you confirm payment via our
-            payment gateway (Cashfree or other authorized partners). GST ({COMPANY.gstin}) applies
+            payment gateway (Razorpay or other authorized partners). GST ({COMPANY.gstin}) applies
             where applicable.
           </p>
         </header>

@@ -56,7 +56,7 @@ export default function TermsPage() {
           </p>
           <p>
             You authorize us to raise invoices and collect amounts via our payment partner (e.g.
-            Cashfree). Failure to pay may result in suspension of copy trading or strategy access.
+            Razorpay). Failure to pay may result in suspension of copy trading or strategy access.
           </p>
         </section>
 

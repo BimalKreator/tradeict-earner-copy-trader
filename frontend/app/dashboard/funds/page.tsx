@@ -1,8 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Copy, CreditCard, Loader2 } from "lucide-react";
+import { COMPANY } from "@/lib/company";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+
+const upiQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
+  `upi://pay?pa=${COMPANY.razorpayUpiId}&pn=${encodeURIComponent(COMPANY.legalName)}`,
+)}`;
 
 type DepositRow = {
   id: string;
@@ -26,6 +33,9 @@ export default function DashboardFundsPage() {
   const [txFromDate, setTxFromDate] = useState("");
   const [txToDate, setTxToDate] = useState("");
   const [downloadingTx, setDownloadingTx] = useState(false);
+  const [razorpayAmountInr, setRazorpayAmountInr] = useState("");
+  const [razorpayLoading, setRazorpayLoading] = useState(false);
+  const [copiedUpi, setCopiedUpi] = useState(false);
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
@@ -121,6 +131,118 @@ export default function DashboardFundsPage() {
     }
   }
 
+  async function handleRazorpayPay(): Promise<void> {
+    setError(null);
+    setSuccess(null);
+    const inr = Number(razorpayAmountInr);
+    if (!Number.isFinite(inr) || inr < 1) {
+      setError("Enter a valid amount in INR (minimum ₹1) for Razorpay checkout.");
+      return;
+    }
+    if (!token) {
+      setError("You need to be logged in to pay with Razorpay.");
+      return;
+    }
+
+    setRazorpayLoading(true);
+    try {
+      const orderRes = await fetch(`${API_BASE}/payments/create-order`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          amount: inr,
+          currency: "INR",
+          purpose: "wallet",
+        }),
+      });
+      const orderData: unknown = await orderRes.json().catch(() => ({}));
+      if (!orderRes.ok) {
+        const msg =
+          typeof orderData === "object" &&
+          orderData !== null &&
+          "error" in orderData &&
+          typeof (orderData as { error?: unknown }).error === "string"
+            ? (orderData as { error: string }).error
+            : `Could not create order (${orderRes.status})`;
+        throw new Error(msg);
+      }
+      if (
+        typeof orderData !== "object" ||
+        orderData === null ||
+        !("orderId" in orderData) ||
+        !("keyId" in orderData)
+      ) {
+        throw new Error("Invalid order response");
+      }
+      const { orderId, keyId, amount, currency } = orderData as {
+        orderId: string;
+        keyId: string;
+        amount: number;
+        currency: string;
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        void openRazorpayCheckout({
+          keyId,
+          orderId,
+          amountInr: amount,
+          currency,
+          name: COMPANY.legalName,
+          description: "Wallet top-up — TradeICT Earner",
+          onSuccess: async (rzpResponse) => {
+            try {
+              const verifyRes = await fetch(`${API_BASE}/payments/verify`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(rzpResponse),
+              });
+              const verifyBody: unknown = await verifyRes.json().catch(() => ({}));
+              if (!verifyRes.ok) {
+                const msg =
+                  typeof verifyBody === "object" &&
+                  verifyBody !== null &&
+                  "error" in verifyBody &&
+                  typeof (verifyBody as { error?: unknown }).error === "string"
+                    ? (verifyBody as { error: string }).error
+                    : `Verification failed (${verifyRes.status})`;
+                throw new Error(msg);
+              }
+              setSuccess(
+                "Payment successful! Your wallet will reflect the credited balance shortly.",
+              );
+              setRazorpayAmountInr("");
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          },
+          onDismiss: () => reject(new Error("Payment cancelled")),
+        }).catch(reject);
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Razorpay payment failed";
+      if (msg !== "Payment cancelled") setError(msg);
+    } finally {
+      setRazorpayLoading(false);
+    }
+  }
+
+  async function copyUpiId(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(COMPANY.razorpayUpiId);
+      setCopiedUpi(true);
+      setTimeout(() => setCopiedUpi(false), 2000);
+    } catch {
+      setError("Could not copy UPI ID to clipboard.");
+    }
+  }
+
   async function handleDownloadTransactions(): Promise<void> {
     setError(null);
     setSuccess(null);
@@ -164,11 +286,98 @@ export default function DashboardFundsPage() {
           Funds
         </h1>
         <p className="mt-2 text-sm text-white/55">
-          Submit your deposit request and track approval status.
+          Top up via Razorpay or manual UPI/bank transfer, then track approval status.
         </p>
       </header>
 
       <div className="space-y-6">
+        <div className="glass-card border border-cyan-500/25 bg-gradient-to-br from-slate-900/80 to-cyan-950/20 p-6 md:p-8">
+          <p className="text-xs font-medium uppercase tracking-wider text-cyan-400">
+            Pay with Razorpay (Instant)
+          </p>
+          <p className="mt-2 text-sm text-white/60">
+            Card, UPI, netbanking — wallet credited automatically after payment.
+          </p>
+          <div className="mt-5 flex flex-col gap-4 sm:flex-row sm:items-end">
+            <label className="block flex-1">
+              <span className="text-xs font-medium text-white/60">Amount (INR)</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={razorpayAmountInr}
+                onChange={(e) => setRazorpayAmountInr(e.target.value)}
+                disabled={razorpayLoading}
+                placeholder="e.g. 5000"
+                className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2 disabled:opacity-50"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleRazorpayPay()}
+              disabled={razorpayLoading}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50 sm:min-w-[160px]"
+            >
+              {razorpayLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  Processing…
+                </>
+              ) : (
+                <>
+                  <CreditCard className="h-4 w-4" aria-hidden />
+                  Pay Now
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        <div className="glass-card border border-glassBorder p-6 md:p-8">
+          <p className="text-xs font-medium uppercase tracking-wider text-primary">
+            Manual payment (UPI / QR)
+          </p>
+          <div className="mt-6 flex flex-col items-center gap-6 sm:flex-row sm:items-start">
+            <div className="shrink-0 rounded-xl border border-white/10 bg-white p-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={upiQrUrl}
+                alt="UPI QR code for manual payment"
+                width={220}
+                height={220}
+                className="h-[220px] w-[220px]"
+              />
+            </div>
+            <div className="flex-1 space-y-4 text-center sm:text-left">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-white/45">UPI ID</p>
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                  <code className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100">
+                    {COMPANY.razorpayUpiId}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => void copyUpiId()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 px-3 py-2 text-xs text-white/70 transition hover:bg-white/5"
+                  >
+                    <Copy className="h-3.5 w-3.5" aria-hidden />
+                    {copiedUpi ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+              <ul className="space-y-2 text-sm leading-relaxed text-amber-100/90">
+                <li className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2">
+                  <strong>Note:</strong> Please include the applicable Razorpay convenience fee in
+                  your total amount when paying manually via QR or UPI.
+                </li>
+                <li className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-white/65">
+                  Manual payments will be updated within 24 hours.
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
         <div className="glass-card border border-glassBorder p-6 md:p-8">
           <p className="text-xs font-medium uppercase tracking-wider text-primary">
             Bank Details

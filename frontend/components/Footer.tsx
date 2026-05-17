@@ -113,7 +113,7 @@ export function Footer() {
 
         <p className="border-t border-white/10 pt-6 text-center text-xs text-white/40">
           {COMPANY.legalName} © 2025. All rights reserved. Payments processed via authorized
-          payment partners (e.g. Cashfree). Trading involves substantial risk of loss.
+          payment partners (e.g. Razorpay). Trading involves substantial risk of loss.
         </p>
       </div>
     </footer>

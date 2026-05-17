@@ -452,6 +452,122 @@ export type PayInvoiceOutcome =
  * not exist, is not owned by `userId`, is not in PENDING state, or wallet
  * funds are insufficient.
  */
+/**
+ * Marks an invoice paid after an external gateway (e.g. Razorpay) — no wallet debit.
+ */
+export async function settleInvoiceAfterGateway(
+  prisma: PrismaClient,
+  args: { userId: string; invoiceId: string },
+): Promise<PayInvoiceOutcome> {
+  return prisma.$transaction(async (tx) => {
+    const invoice = await tx.invoice.findUnique({
+      where: { id: args.invoiceId },
+    });
+    if (!invoice) {
+      return { ok: false, status: 404, message: "Invoice not found" } as const;
+    }
+    if (invoice.userId !== args.userId) {
+      return {
+        ok: false,
+        status: 403,
+        message: "You do not own this invoice",
+      } as const;
+    }
+    if (invoice.status === InvoiceStatus.PAID) {
+      return {
+        ok: true,
+        invoiceId: invoice.id,
+        amountDue: invoice.amountDue,
+        walletBalance:
+          (await tx.wallet.findUnique({ where: { userId: args.userId } }))
+            ?.balance ?? 0,
+      } as const;
+    }
+    if (
+      invoice.status !== InvoiceStatus.PENDING &&
+      invoice.status !== InvoiceStatus.OVERDUE
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        message: `Invoice in unexpected status ${invoice.status}`,
+      } as const;
+    }
+
+    await tx.invoice.update({
+      where: { id: invoice.id },
+      data: { status: InvoiceStatus.PAID },
+    });
+
+    await tx.userSubscription.updateMany({
+      where: {
+        userId: args.userId,
+        strategyId: invoice.strategyId,
+        status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+      },
+      data: { status: SubscriptionStatus.ACTIVE },
+    });
+
+    const wallet = await tx.wallet.findUnique({
+      where: { userId: args.userId },
+    });
+
+    return {
+      ok: true,
+      invoiceId: invoice.id,
+      amountDue: invoice.amountDue,
+      walletBalance: wallet?.balance ?? 0,
+    } as const;
+  });
+}
+
+export type CreditWalletOutcome =
+  | { ok: true; walletBalance: number; amountCredited: number }
+  | { ok: false; status: number; message: string };
+
+/**
+ * Credits wallet balance after a Razorpay top-up (amount in USD).
+ */
+export async function creditWalletAfterGateway(
+  prisma: PrismaClient,
+  args: { userId: string; amountUsd: number },
+): Promise<CreditWalletOutcome> {
+  if (!Number.isFinite(args.amountUsd) || args.amountUsd <= 0) {
+    return { ok: false, status: 400, message: "Invalid credit amount" };
+  }
+
+  return prisma.$transaction(async (tx) => {
+    let wallet = await tx.wallet.findUnique({
+      where: { userId: args.userId },
+    });
+    if (!wallet) {
+      wallet = await tx.wallet.create({
+        data: { userId: args.userId, balance: 0, pendingFees: 0 },
+      });
+    }
+
+    const updated = await tx.wallet.update({
+      where: { id: wallet.id },
+      data: { balance: { increment: args.amountUsd } },
+    });
+
+    await tx.walletTransaction.create({
+      data: {
+        walletId: wallet.id,
+        amount: args.amountUsd,
+        type: "RAZORPAY_TOPUP",
+        status: WALLET_TXN_STATUS_COMPLETED,
+      },
+    });
+
+    return {
+      ok: true,
+      walletBalance: updated.balance,
+      amountCredited: args.amountUsd,
+    };
+  });
+}
+
 export async function payInvoiceFromWallet(
   prisma: PrismaClient,
   args: { userId: string; invoiceId: string },

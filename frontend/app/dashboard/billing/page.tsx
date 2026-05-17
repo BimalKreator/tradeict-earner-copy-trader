@@ -6,14 +6,20 @@ import {
   AlertCircle,
   CheckCircle2,
   CircleDollarSign,
+  CreditCard,
   Info,
   Loader2,
   Plus,
   RefreshCw,
   Wallet as WalletIcon,
 } from "lucide-react";
+import { COMPANY } from "@/lib/company";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const USD_INR_RATE = Number.parseFloat(
+  process.env.NEXT_PUBLIC_RAZORPAY_USD_INR_RATE ?? "83",
+);
 
 type LiveCycleStrategy = {
   strategyId: string;
@@ -182,6 +188,7 @@ export default function DashboardBillingPage() {
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
   const [payingId, setPayingId] = useState<string | null>(null);
+  const [razorpayPayingId, setRazorpayPayingId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast>(null);
 
   const loadAll = useCallback(async (silent: boolean) => {
@@ -296,6 +303,99 @@ export default function DashboardBillingPage() {
       }
     },
     [loadAll, wallet],
+  );
+
+  const payInvoiceWithRazorpay = useCallback(
+    async (invoice: InvoiceRow) => {
+      setRazorpayPayingId(invoice.id);
+      try {
+        const orderRes = await authFetch("/payments/create-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            purpose: "invoice",
+            invoiceId: invoice.id,
+            currency: "INR",
+          }),
+        });
+        const orderData: unknown = await orderRes.json().catch(() => ({}));
+        if (!orderRes.ok) {
+          const msg =
+            typeof orderData === "object" &&
+            orderData !== null &&
+            "error" in orderData &&
+            typeof (orderData as { error?: unknown }).error === "string"
+              ? (orderData as { error: string }).error
+              : `Could not create order (${orderRes.status})`;
+          throw new Error(msg);
+        }
+        if (
+          typeof orderData !== "object" ||
+          orderData === null ||
+          !("orderId" in orderData) ||
+          !("keyId" in orderData) ||
+          typeof (orderData as { orderId?: unknown }).orderId !== "string" ||
+          typeof (orderData as { keyId?: unknown }).keyId !== "string"
+        ) {
+          throw new Error("Invalid order response from server");
+        }
+        const { orderId, keyId, amount, currency } = orderData as {
+          orderId: string;
+          keyId: string;
+          amount: number;
+          currency: string;
+        };
+
+        await new Promise<void>((resolve, reject) => {
+          void openRazorpayCheckout({
+            keyId,
+            orderId,
+            amountInr: amount,
+            currency,
+            name: COMPANY.legalName,
+            description: `Revenue share — ${fmtMonth(invoice.month, invoice.year)} (${invoice.strategyTitle})`,
+            onSuccess: async (rzpResponse) => {
+              try {
+                const verifyRes = await authFetch("/payments/verify", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(rzpResponse),
+                });
+                const verifyBody: unknown = await verifyRes.json().catch(() => ({}));
+                if (!verifyRes.ok) {
+                  const msg =
+                    typeof verifyBody === "object" &&
+                    verifyBody !== null &&
+                    "error" in verifyBody &&
+                    typeof (verifyBody as { error?: unknown }).error === "string"
+                      ? (verifyBody as { error: string }).error
+                      : `Verification failed (${verifyRes.status})`;
+                  throw new Error(msg);
+                }
+                setToast({
+                  kind: "success",
+                  text: `Payment successful. Invoice for ${fmtMonth(invoice.month, invoice.year)} is now settled.`,
+                });
+                setRefreshing(true);
+                await loadAll(true);
+                resolve();
+              } catch (e) {
+                reject(e);
+              }
+            },
+            onDismiss: () => reject(new Error("Payment cancelled")),
+          }).catch(reject);
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Razorpay payment failed";
+        if (msg !== "Payment cancelled") {
+          setToast({ kind: "error", text: msg });
+        }
+      } finally {
+        setRazorpayPayingId(null);
+      }
+    },
+    [loadAll],
   );
 
   const pendingCount = useMemo(
@@ -567,6 +667,8 @@ export default function DashboardBillingPage() {
                         wallet !== null &&
                         wallet.balance + 1e-9 < inv.amountDue;
                       const isPaying = payingId === inv.id;
+                      const isRazorpayPaying = razorpayPayingId === inv.id;
+                      const estInr = Math.ceil(inv.amountDue * USD_INR_RATE);
                       return (
                         <tr
                           key={inv.id}
@@ -607,35 +709,51 @@ export default function DashboardBillingPage() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             {isPayable ? (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void payInvoice(inv);
-                                }}
-                                disabled={isPaying || insufficient}
-                                className={`inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                                  insufficient
-                                    ? "bg-white/10 text-white/55 ring-1 ring-white/10"
-                                    : "bg-red-500 text-white shadow-lg shadow-red-500/20 hover:bg-red-500/90"
-                                }`}
-                                title={
-                                  insufficient
-                                    ? "Insufficient wallet balance"
-                                    : `Pay ${fmtUsd(inv.amountDue)} from wallet`
-                                }
-                              >
-                                {isPaying ? (
-                                  <>
-                                    <Loader2
-                                      className="h-3.5 w-3.5 animate-spin"
-                                      aria-hidden
-                                    />
-                                    Paying…
-                                  </>
-                                ) : (
-                                  "Pay now"
-                                )}
-                              </button>
+                              <div className="flex flex-col items-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void payInvoiceWithRazorpay(inv);
+                                  }}
+                                  disabled={isRazorpayPaying || isPaying}
+                                  className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                  title={`Pay via Razorpay (~₹${estInr.toLocaleString("en-IN")})`}
+                                >
+                                  {isRazorpayPaying ? (
+                                    <>
+                                      <Loader2
+                                        className="h-3.5 w-3.5 animate-spin"
+                                        aria-hidden
+                                      />
+                                      Processing…
+                                    </>
+                                  ) : (
+                                    <>
+                                      <CreditCard className="h-3.5 w-3.5" aria-hidden />
+                                      Pay Now
+                                    </>
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void payInvoice(inv);
+                                  }}
+                                  disabled={isPaying || isRazorpayPaying || insufficient}
+                                  className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                    insufficient
+                                      ? "text-white/35"
+                                      : "text-white/55 hover:text-white/80"
+                                  }`}
+                                  title={
+                                    insufficient
+                                      ? "Insufficient wallet balance"
+                                      : `Pay ${fmtUsd(inv.amountDue)} from wallet`
+                                  }
+                                >
+                                  {isPaying ? "Wallet…" : "Use wallet"}
+                                </button>
+                              </div>
                             ) : (
                               <span className="text-xs text-white/40">
                                 {inv.status === "PAID" ? "Settled" : "—"}

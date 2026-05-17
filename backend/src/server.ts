@@ -22,6 +22,7 @@ import { createUserRoutes } from "./routes/userRoutes.js";
 import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
 import { createBillingRoutes } from "./routes/billingRoutes.js";
+import { createPaymentRoutes } from "./routes/paymentRoutes.js";
 import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
@@ -115,6 +116,10 @@ const billingRoutes = createBillingRoutes(prisma);
 app.use("/api/billing", billingRoutes);
 /** Alias when `NEXT_PUBLIC_API_URL` is the origin without `/api`. */
 app.use("/billing", billingRoutes);
+
+const paymentRoutes = createPaymentRoutes(prisma);
+app.use("/api/payments", paymentRoutes);
+app.use("/payments", paymentRoutes);
 
 app.use(
   (

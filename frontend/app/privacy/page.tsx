@@ -76,7 +76,7 @@ export default function PrivacyPage() {
         <section className="space-y-4">
           <h2>5. Sharing with third parties</h2>
           <ul>
-            <li>Payment processors (e.g. Cashfree) for collections.</li>
+            <li>Payment processors (e.g. Razorpay) for collections.</li>
             <li>Cloud hosting and infrastructure providers under confidentiality obligations.</li>
             <li>Exchanges/brokers you connect (data flows as required for trading).</li>
             <li>Authorities when required by applicable law or court order.</li>
