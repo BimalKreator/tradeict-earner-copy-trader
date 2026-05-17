@@ -463,6 +463,7 @@ export function createUserController(prisma: PrismaClient) {
           tradingFee: true,
           revenueShareAmt: true,
           status: true,
+          exitReason: true,
           strategy: { select: { title: true } },
         },
       });
@@ -482,6 +483,7 @@ export function createUserController(prisma: PrismaClient) {
         tradingFee: r.tradingFee,
         revenueShareAmt: r.revenueShareAmt,
         status: r.status,
+        exitReason: r.exitReason,
       }));
 
       res.json({ trades });
@@ -588,6 +590,7 @@ export function createUserController(prisma: PrismaClient) {
           tradingFee: true,
           revenueShareAmt: true,
           status: true,
+          exitReason: true,
         },
       });
       const csv = rowsToCsv(
@@ -604,6 +607,7 @@ export function createUserController(prisma: PrismaClient) {
           tradingFee: r.tradingFee,
           revenueShareAmt: r.revenueShareAmt,
           status: r.status,
+          exitReason: r.exitReason ?? "",
         })),
         [
           { key: "id", label: "Trade ID" },
@@ -618,6 +622,7 @@ export function createUserController(prisma: PrismaClient) {
           { key: "tradingFee", label: "Trading Fee" },
           { key: "revenueShareAmt", label: "Admin Revenue Share" },
           { key: "status", label: "Status" },
+          { key: "exitReason", label: "Close Reason" },
         ],
       );
       const fileName = `Trades_${userId}_${buildTimestampTag()}.csv`;

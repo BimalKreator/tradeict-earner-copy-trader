@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { History, Loader2, RefreshCw } from "lucide-react";
 import Link from "next/link";
 
@@ -21,6 +22,7 @@ type TradeRow = {
   tradingFee: number;
   revenueShareAmt: number;
   status: "OPEN" | "CLOSED" | "FAILED";
+  exitReason: string | null;
 };
 
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
@@ -339,7 +341,7 @@ export default function DashboardTradesPage() {
 
       <section className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1060px] text-left text-sm">
+          <table className="w-full min-w-[1180px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Date</th>
@@ -363,19 +365,20 @@ export default function DashboardTradesPage() {
                 <th className="px-4 py-3 text-right font-medium text-white/70">
                   Revenue Share
                 </th>
+                <th className="px-4 py-3 font-medium text-white/70">Close Reason</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-14 text-center">
+                  <td colSpan={10} className="px-4 py-14 text-center">
                     <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={9}
+                    colSpan={10}
                     className="px-4 py-16 text-center text-white/55"
                   >
                     <p className="text-sm">No trades executed yet.</p>
@@ -440,6 +443,9 @@ export default function DashboardTradesPage() {
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums text-white/85">
                         {fmtFee(r.revenueShareAmt)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <ExitReasonBadge reason={r.exitReason} />
                       </td>
                     </tr>
                   );

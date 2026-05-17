@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { Loader2 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
@@ -47,6 +48,7 @@ type UserTrade = {
   pnl: number;
   tradingFee: number;
   adminRevenue: number;
+  exitReason: string | null;
 };
 
 type UserTransaction = {
@@ -490,12 +492,13 @@ export default function AdminUserDetails({
                       <th className="px-3 py-2 font-medium">Net PnL</th>
                       <th className="px-3 py-2 font-medium">Trading Fee</th>
                       <th className="px-3 py-2 font-medium">Admin Revenue</th>
+                      <th className="px-3 py-2 font-medium">Close Reason</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredTrades.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-3 py-8 text-center text-white/45">
+                        <td colSpan={7} className="px-3 py-8 text-center text-white/45">
                           No trades found for selected range.
                         </td>
                       </tr>
@@ -510,6 +513,9 @@ export default function AdminUserDetails({
                           </td>
                           <td className="px-3 py-2 text-white">${t.tradingFee.toFixed(2)}</td>
                           <td className="px-3 py-2 text-white">${t.adminRevenue.toFixed(2)}</td>
+                          <td className="px-3 py-2">
+                            <ExitReasonBadge reason={t.exitReason} />
+                          </td>
                         </tr>
                       ))
                     )}

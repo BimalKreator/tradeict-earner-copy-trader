@@ -1,5 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 import {
+  EXIT_REASON,
+  markBotInitiatedClose,
+  setPendingStrategyExitReason,
+} from "../constants/exitReasons.js";
+import {
   executeTrade,
   fetchDeltaOpenPositions,
   type TradeSide,
@@ -202,6 +207,16 @@ export async function runStrategyAutoExitCheck(
     autoExitStopLoss: strategy.autoExitStopLoss,
   });
   if (!breach) return;
+
+  const exitReason =
+    breach.reason === "target"
+      ? EXIT_REASON.AUTO_EXIT_TARGET
+      : EXIT_REASON.AUTO_EXIT_STOP_LOSS;
+
+  for (const leg of legs) {
+    markBotInitiatedClose(strategy.id, leg.symbolKey, exitReason);
+  }
+  setPendingStrategyExitReason(strategy.id, exitReason);
 
   console.warn(
     `[auto-exit] THRESHOLD BREACHED strategy="${strategy.title}" (${strategy.id}) ` +

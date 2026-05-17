@@ -18,6 +18,14 @@ import {
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import {
+  EXIT_REASON,
+  consumeBotInitiatedCloseReason,
+  resolveCloseExitReason,
+  resolveClosureOrigin,
+  type ExitReasonValue,
+} from "../constants/exitReasons.js";
+import { isHardExecutionError } from "./followerTradeExecution.js";
+import {
   STRATEGY_SELECT_LATE_JOIN,
   STRATEGY_SELECT_SLIPPAGE,
   STRATEGY_SELECT_WS_CREDS,
@@ -258,6 +266,7 @@ async function recordTrade(
     exitPrice?: number | null;
     pnl?: number | null;
     tradingFee?: number;
+    exitReason?: ExitReasonValue | null;
   },
 ) {
   await prisma.trade.create({
@@ -272,6 +281,7 @@ async function recordTrade(
       ...(args.exitPrice != null ? { exitPrice: args.exitPrice } : {}),
       ...(args.pnl != null ? { pnl: args.pnl } : {}),
       ...(args.tradingFee != null ? { tradingFee: args.tradingFee } : {}),
+      ...(args.exitReason ? { exitReason: args.exitReason } : {}),
     },
   });
 
@@ -363,8 +373,14 @@ async function closeFollowerTradeAndRecordPnl(
     sizedPosition: number;
     exitPrice: number;
     exitFee: number;
+    exitReason?: ExitReasonValue | null;
   },
 ): Promise<void> {
+  const exitReason = resolveCloseExitReason(
+    args.strategyId,
+    args.symbol,
+    args.exitReason,
+  );
   const candidates = await prisma.trade.findMany({
     where: {
       userId: args.userId,
@@ -412,6 +428,7 @@ async function closeFollowerTradeAndRecordPnl(
       tradePnl: netPnl,
       revenueShareAmt,
       status: TradeStatus.CLOSED,
+      exitReason,
     },
   });
 
@@ -420,6 +437,82 @@ async function closeFollowerTradeAndRecordPnl(
     strategyId: args.strategyId,
     tradeProfit: netPnl,
   });
+}
+
+/** Closes every OPEN DB leg for a user/strategy/symbol/side after an admin manual close. */
+export async function closeOpenTradesForManualAdmin(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    side: TradeSide;
+    exitPrice: number;
+    exitFee: number;
+  },
+): Promise<number> {
+  const opens = await prisma.trade.findMany({
+    where: {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.symbol,
+      side: args.side,
+      status: TradeStatus.OPEN,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  if (opens.length === 0) return 0;
+
+  const strategyMeta = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+    select: { profitShare: true },
+  });
+  const profitSharePct = strategyMeta?.profitShare ?? 0;
+
+  let closed = 0;
+  for (let i = 0; i < opens.length; i += 1) {
+    const open = opens[i]!;
+    const legExitFee = i === opens.length - 1 ? Math.max(0, args.exitFee) : 0;
+    const grossPnl = await realizedPnlUsd({
+      symbol: args.symbol,
+      side: args.side,
+      entryPrice: open.entryPrice,
+      exitPrice: args.exitPrice,
+      contracts: open.size,
+    });
+    const totalTradingFee =
+      Math.max(0, Number(open.tradingFee ?? 0)) + legExitFee;
+    const netPnl = grossPnl - totalTradingFee;
+    const revenueShareAmt = computeRevenueShareAmt(netPnl, profitSharePct);
+
+    await prisma.trade.update({
+      where: { id: open.id },
+      data: {
+        exitPrice: args.exitPrice,
+        tradingFee: totalTradingFee,
+        pnl: netPnl,
+        tradePnl: netPnl,
+        revenueShareAmt,
+        status: TradeStatus.CLOSED,
+        exitReason: EXIT_REASON.ADMIN_PANEL,
+      },
+    });
+
+    await recordTradePnl(prisma, {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      tradeProfit: netPnl,
+    });
+    closed += 1;
+  }
+  return closed;
+}
+
+function failedReasonFromExecutionError(error?: string): ExitReasonValue {
+  if (error && isHardExecutionError(error)) {
+    return EXIT_REASON.INSUFFICIENT_MARGIN;
+  }
+  return EXIT_REASON.EXECUTION_FAILED;
 }
 
 /** Leader snapshot for late-join REST sync — sizes are **contracts (lots)**, not base currency. */
@@ -560,6 +653,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
         size: followerContracts,
         entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
+        exitReason: EXIT_REASON.SLIPPAGE_EXCEEDED,
       });
       continue;
     }
@@ -594,6 +688,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
         size: followerContracts,
         entryPrice: leader.entryPrice,
         status: TradeStatus.FAILED,
+        exitReason: EXIT_REASON.NO_API_CREDENTIALS,
       });
       continue;
     }
@@ -627,6 +722,11 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       entryPrice: leader.entryPrice,
       status: result.success && result.verified ? TradeStatus.OPEN : TradeStatus.FAILED,
       tradingFee: result.success ? (result.feeCost ?? 0) : 0,
+      ...(!result.success || !result.verified
+        ? {
+            exitReason: failedReasonFromExecutionError(result.error),
+          }
+        : {}),
     });
   }
 }
@@ -805,6 +905,7 @@ async function copyMasterFillToSubscribers(
           size: followerContracts,
           entryPrice: args.avgPrice,
           status: TradeStatus.FAILED,
+          exitReason: EXIT_REASON.SLIPPAGE_EXCEEDED,
         });
       }),
     );
@@ -847,6 +948,7 @@ async function copyMasterFillToSubscribers(
           size: followerContracts,
           entryPrice: args.avgPrice,
           status: TradeStatus.FAILED,
+          exitReason: EXIT_REASON.NO_API_CREDENTIALS,
         });
         return;
       }
@@ -876,6 +978,11 @@ async function copyMasterFillToSubscribers(
             ? TradeStatus.OPEN
             : TradeStatus.FAILED,
         tradingFee: result.success ? (result.feeCost ?? 0) : 0,
+        ...(!result.success || !result.verified
+          ? {
+              exitReason: failedReasonFromExecutionError(result.error),
+            }
+          : {}),
       });
     }),
   );
@@ -890,10 +997,19 @@ async function notifyMasterFlat(
     masterEntryPrice: number;
     masterContracts: number;
   },
+  options?: { exitReason?: ExitReasonValue },
 ): Promise<void> {
-  console.log(
-    `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice}`,
+  const closureOrigin = resolveClosureOrigin(
+    strategyId,
+    snap.symbol,
+    options?.exitReason,
   );
+
+  console.log(
+    `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice} origin="${closureOrigin}"`,
+  );
+
+  try {
   const tick = await fetchDeltaTicker(snap.symbol);
   // Don't bail on missing ticker — sending the close order is more important
   // than recording a perfect PnL row. We use the master entry as fallback
@@ -995,9 +1111,13 @@ async function notifyMasterFlat(
         sizedPosition: followerContracts,
         exitPrice,
         exitFee: closeResult.feeCost ?? 0,
+        exitReason: closureOrigin,
       });
     }),
   );
+  } finally {
+    consumeBotInitiatedCloseReason(strategyId, snap.symbol);
+  }
 }
 
 type LastOpenMeta = {
@@ -1767,6 +1887,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               pnl: netPnl,
               tradePnl: netPnl,
               revenueShareAmt,
+              exitReason: EXIT_REASON.EXTERNAL_DELTA,
             },
           });
         }

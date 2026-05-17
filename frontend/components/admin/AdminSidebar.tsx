@@ -14,7 +14,7 @@ import {
 
 const links = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/admin/users", label: "Trade History", icon: BarChart3 },
+  { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
   { href: "/admin/strategies", label: "Strategies", icon: LineChart },
   { href: "/admin/live-trades", label: "Live trades", icon: Users },
   { href: "/admin/funds", label: "Funds", icon: Wallet },

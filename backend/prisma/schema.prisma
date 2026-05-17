@@ -177,6 +177,8 @@ model Trade {
   tradingFee      Float       @default(0)
   revenueShareAmt Float       @default(0)
   status          TradeStatus @default(OPEN)
+  /** Why the trade was closed or marked failed (set by trade engine / admin). */
+  exitReason      String?
   createdAt       DateTime    @default(now())
 
   user       User        @relation(fields: [userId], references: [id])

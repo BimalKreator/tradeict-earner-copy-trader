@@ -8,11 +8,18 @@ import {
   systemClosedPnlSince,
   totalPendingRevenueAllUsers,
 } from "../services/dashboardMetricsService.js";
+import {
+  EXIT_REASON,
+  markBotInitiatedClose,
+  setPendingStrategyExitReason,
+} from "../constants/exitReasons.js";
+import { closeOpenTradesForManualAdmin } from "../services/tradeEngine.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
   executeTrade,
+  fetchDeltaTicker,
   fetchDeltaTotalBalanceUsd,
   type TradeSide,
 } from "../services/exchangeService.js";
@@ -178,6 +185,7 @@ export function createAdminController(prisma: PrismaClient) {
           tradingFee: true,
           revenueShareAmt: true,
           status: true,
+          exitReason: true,
           strategy: { select: { title: true, profitShare: true } },
         },
       });
@@ -201,6 +209,7 @@ export function createAdminController(prisma: PrismaClient) {
           entryPrice: t.entryPrice,
           exitPrice: t.exitPrice,
           status: t.status,
+          exitReason: t.exitReason,
           pnl: realized,
           tradingFee:
             Number.isFinite(t.tradingFee) && t.tradingFee > 0 ? t.tradingFee : 0,
@@ -320,6 +329,85 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listAllTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const limitRaw = req.query.limit;
+      let limit = 200;
+      if (typeof limitRaw === "string") {
+        const parsed = Number(limitRaw);
+        if (Number.isFinite(parsed)) {
+          limit = Math.min(500, Math.max(1, Math.floor(parsed)));
+        }
+      }
+
+      const statusRaw = req.query.status;
+      const allowedStatuses = new Set(["OPEN", "CLOSED", "FAILED"]);
+      const where: {
+        status?: TradeStatus;
+      } = {};
+      if (typeof statusRaw === "string") {
+        const upper = statusRaw.trim().toUpperCase();
+        if (allowedStatuses.has(upper)) {
+          where.status = upper as TradeStatus;
+        }
+      }
+
+      const rows = await prisma.trade.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: limit,
+        select: {
+          id: true,
+          createdAt: true,
+          userId: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          pnl: true,
+          tradePnl: true,
+          tradingFee: true,
+          revenueShareAmt: true,
+          status: true,
+          exitReason: true,
+          user: { select: { email: true, name: true } },
+          strategy: { select: { title: true } },
+        },
+      });
+
+      res.json({
+        trades: rows.map((r) => ({
+          id: r.id,
+          createdAt: r.createdAt.toISOString(),
+          userId: r.userId,
+          userEmail: r.user.email,
+          userName: r.user.name,
+          strategyId: r.strategyId,
+          strategyTitle: r.strategy.title,
+          symbol: r.symbol,
+          side: r.side,
+          size: r.size,
+          entryPrice: r.entryPrice,
+          exitPrice: r.exitPrice,
+          pnl: r.pnl,
+          tradePnl: r.tradePnl,
+          tradingFee: r.tradingFee,
+          revenueShareAmt: r.revenueShareAmt,
+          status: r.status,
+          exitReason: r.exitReason,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function closeManualTrade(
     req: Request,
     res: Response,
@@ -404,6 +492,9 @@ export function createAdminController(prisma: PrismaClient) {
       }
 
       const closeSide = oppositeSide(sideRaw as TradeSide);
+      markBotInitiatedClose(strategyId, symbol, EXIT_REASON.ADMIN_PANEL);
+      setPendingStrategyExitReason(strategyId, EXIT_REASON.ADMIN_PANEL);
+
       const result = await executeTrade(apiKey, apiSecret, symbol, closeSide, size, {
         reduceOnly: true,
       });
@@ -412,7 +503,47 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
-      res.json({ ok: true, orderId: result.orderId ?? null, raw: result.raw ?? null });
+      let dbClosed = 0;
+      if (!isMaster && userId) {
+        let exitPrice = 0;
+        try {
+          const tick = await fetchDeltaTicker(symbol);
+          if (tick.last != null && Number.isFinite(tick.last)) {
+            exitPrice = tick.last;
+          }
+        } catch {
+          /* fallback below */
+        }
+        if (exitPrice <= 0) {
+          const open = await prisma.trade.findFirst({
+            where: {
+              userId,
+              strategyId,
+              symbol,
+              side: sideRaw,
+              status: TradeStatus.OPEN,
+            },
+            select: { entryPrice: true },
+          });
+          exitPrice = open?.entryPrice ?? 0;
+        }
+
+        dbClosed = await closeOpenTradesForManualAdmin(prisma, {
+          userId,
+          strategyId,
+          symbol,
+          side: sideRaw as TradeSide,
+          exitPrice,
+          exitFee: result.feeCost ?? 0,
+        });
+      }
+
+      res.json({
+        ok: true,
+        orderId: result.orderId ?? null,
+        raw: result.raw ?? null,
+        dbTradesClosed: dbClosed,
+      });
     } catch (err) {
       next(err);
     }
@@ -567,6 +698,7 @@ export function createAdminController(prisma: PrismaClient) {
           tradingFee: true,
           revenueShareAmt: true,
           status: true,
+          exitReason: true,
         },
       });
       const csv = rowsToCsv(
@@ -584,6 +716,7 @@ export function createAdminController(prisma: PrismaClient) {
           tradingFee: r.tradingFee,
           revenueShareAmt: r.revenueShareAmt,
           status: r.status,
+          exitReason: r.exitReason ?? "",
         })),
         [
           { key: "id", label: "Trade ID" },
@@ -599,6 +732,7 @@ export function createAdminController(prisma: PrismaClient) {
           { key: "tradingFee", label: "Trading Fee" },
           { key: "revenueShareAmt", label: "Admin Revenue Share" },
           { key: "status", label: "Status" },
+          { key: "exitReason", label: "Close Reason" },
         ],
       );
       const fileName = `Admin_Trades_Export_${buildTimestampTag()}.csv`;
@@ -969,6 +1103,7 @@ export function createAdminController(prisma: PrismaClient) {
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
+    listAllTrades,
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
