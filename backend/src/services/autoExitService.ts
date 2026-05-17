@@ -18,9 +18,22 @@ import {
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 const AUTO_EXIT_COOLDOWN_MS = 60_000;
+/** Consecutive 1s poll ticks the threshold must stay breached before closing. */
+const SUSTAINED_BREACH_TICKS = 3;
+/** Ignore auto-exit right after new legs appear (basket / partial fills settling). */
+const POSITION_SETTLE_GRACE_MS = 5_000;
 
 /** strategyId → timestamp when auto-exit last fired (prevents duplicate close bursts). */
 const lastAutoExitAt = new Map<string, number>();
+
+/** strategyId → consecutive poll ticks where PnL stayed past target/stop. */
+const breachCounters = new Map<string, number>();
+
+/** strategyId → do not evaluate auto-exit until this timestamp (ms). */
+const positionSettleUntil = new Map<string, number>();
+
+/** strategyId → open leg count on previous tick (detect new basket legs). */
+const lastLegCountByStrategy = new Map<string, number>();
 
 function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   const cached = resolveLiveMarkPrice(pos.symbolKey);
@@ -199,14 +212,55 @@ export async function runStrategyAutoExitCheck(
     return;
   }
 
-  if (legs.length === 0) return;
+  const strategyId = strategy.id;
+  const prevLegCount = lastLegCountByStrategy.get(strategyId) ?? 0;
+
+  if (legs.length === 0) {
+    breachCounters.set(strategyId, 0);
+    lastLegCountByStrategy.delete(strategyId);
+    positionSettleUntil.delete(strategyId);
+    return;
+  }
+
+  if (legs.length > prevLegCount) {
+    positionSettleUntil.set(strategyId, Date.now() + POSITION_SETTLE_GRACE_MS);
+    breachCounters.set(strategyId, 0);
+    console.log(
+      `[auto-exit] New/changed legs detected strategyId=${strategyId} ` +
+        `(${prevLegCount} → ${legs.length}) — ${POSITION_SETTLE_GRACE_MS / 1000}s settle grace`,
+    );
+  }
+  lastLegCountByStrategy.set(strategyId, legs.length);
+
+  const settleUntil = positionSettleUntil.get(strategyId) ?? 0;
+  if (Date.now() < settleUntil) {
+    return;
+  }
 
   const breach = evaluateAutoExitThresholds({
     totalPnlUsd,
     autoExitTarget: strategy.autoExitTarget,
     autoExitStopLoss: strategy.autoExitStopLoss,
   });
-  if (!breach) return;
+
+  if (!breach) {
+    breachCounters.set(strategyId, 0);
+    return;
+  }
+
+  const count = (breachCounters.get(strategyId) ?? 0) + 1;
+  breachCounters.set(strategyId, count);
+
+  console.warn(
+    `[auto-exit] Threshold breached for strategy ${strategyId}. Verifying... (${count}/${SUSTAINED_BREACH_TICKS} seconds) ` +
+      `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} threshold=${breach.thresholdUsd}`,
+  );
+
+  if (count < SUSTAINED_BREACH_TICKS) {
+    return;
+  }
+
+  breachCounters.set(strategyId, 0);
 
   const exitReason =
     breach.reason === "target"
@@ -214,17 +268,17 @@ export async function runStrategyAutoExitCheck(
       : EXIT_REASON.AUTO_EXIT_STOP_LOSS;
 
   for (const leg of legs) {
-    markBotInitiatedClose(strategy.id, leg.symbolKey, exitReason);
+    markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
   }
-  setPendingStrategyExitReason(strategy.id, exitReason);
+  setPendingStrategyExitReason(strategyId, exitReason);
 
   console.warn(
-    `[auto-exit] THRESHOLD BREACHED strategy="${strategy.title}" (${strategy.id}) ` +
+    `[auto-exit] SUSTAINED THRESHOLD CONFIRMED strategy="${strategy.title}" (${strategyId}) ` +
       `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
       `threshold=${breach.thresholdUsd} openLegs=${legs.length} — closing ALL master positions`,
   );
 
-  lastAutoExitAt.set(strategy.id, Date.now());
+  lastAutoExitAt.set(strategyId, Date.now());
 
   const { closed, errors } = await closeAllMasterPositionsMarket(
     strategy.masterApiKey,
