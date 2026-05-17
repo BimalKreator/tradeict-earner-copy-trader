@@ -36,13 +36,15 @@ export type UserLiveTradeRow = LiveTradeRow & {
 export type AdminFollowerRow = LiveTradeRow & {
   userId: string;
   userEmail: string;
+  multiplier: number;
 };
 
-export type AdminMasterGroupRow = {
-  /** Symbol key (e.g. ETHUSDT) for this master leg. */
-  token: string;
-  side: string;
-  followers: AdminFollowerRow[];
+/** Active subscriber with all matched open legs on Delta (grouped by user). */
+export type AdminSubscriberUserSection = {
+  userId: string;
+  userEmail: string;
+  multiplier: number;
+  positions: LiveTradeRow[];
 };
 
 export type AdminStrategyLiveSection = {
@@ -52,7 +54,7 @@ export type AdminStrategyLiveSection = {
   autoExitStopLoss: number | null;
   /** Open positions on the master Delta (India) account from {@link fetchDeltaOpenPositions} (CCXT). */
   masterPositions: LiveTradeRow[];
-  groups: AdminMasterGroupRow[];
+  subscribers: AdminSubscriberUserSection[];
   masterMeta: {
     credentialsPresent: boolean;
     fetchException?: string;
@@ -470,8 +472,33 @@ export async function getAdminGroupedLiveTrades(
       }
     }
 
-    const groups: AdminMasterGroupRow[] = [];
     const masterPositions: LiveTradeRow[] = [];
+    const subscriberMap = new Map<string, AdminSubscriberUserSection>();
+
+    const upsertSubscriberPosition = async (
+      sub: (typeof subs)[number],
+      deltaPos: DeltaLivePosition,
+    ): Promise<void> => {
+      const legKey = `${deltaPos.symbolKey}:${deltaPos.side}`;
+      let section = subscriberMap.get(sub.userId);
+      if (!section) {
+        section = {
+          userId: sub.userId,
+          userEmail: sub.user.email,
+          multiplier: sub.multiplier,
+          positions: [],
+        };
+        subscriberMap.set(sub.userId, section);
+      }
+      if (
+        section.positions.some(
+          (p) => `${p.token}:${p.side}` === legKey,
+        )
+      ) {
+        return;
+      }
+      section.positions.push(await enrichPositionLiveRow(deltaPos));
+    };
 
     if (masterList.length === 0) {
       out.push({
@@ -480,7 +507,7 @@ export async function getAdminGroupedLiveTrades(
         autoExitTarget: strat.autoExitTarget,
         autoExitStopLoss: strat.autoExitStopLoss,
         masterPositions,
-        groups,
+        subscribers: [],
         masterMeta: metaBase,
       });
       continue;
@@ -489,8 +516,6 @@ export async function getAdminGroupedLiveTrades(
     for (const pos of masterList) {
       const masterRow = await enrichPositionLiveRow(pos);
       masterPositions.push(masterRow);
-
-      const followers: AdminFollowerRow[] = [];
 
       for (const sub of subs) {
         const creds =
@@ -516,19 +541,13 @@ export async function getAdminGroupedLiveTrades(
         );
         const m = matchDeltaPosition(positions, pos.symbolKey, pos.side);
         if (!m) continue;
-        followers.push({
-          userId: sub.userId,
-          userEmail: sub.user.email,
-          ...(await enrichPositionLiveRow(m)),
-        });
+        await upsertSubscriberPosition(sub, m);
       }
-
-      groups.push({
-        token: pos.symbolKey,
-        side: pos.side,
-        followers,
-      });
     }
+
+    const subscribers = Array.from(subscriberMap.values()).sort((a, b) =>
+      a.userEmail.localeCompare(b.userEmail),
+    );
 
     out.push({
       strategyId: strat.id,
@@ -536,7 +555,7 @@ export async function getAdminGroupedLiveTrades(
       autoExitTarget: strat.autoExitTarget,
       autoExitStopLoss: strat.autoExitStopLoss,
       masterPositions,
-      groups,
+      subscribers,
       masterMeta: metaBase,
     });
   }
