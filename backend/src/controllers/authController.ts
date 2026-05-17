@@ -8,8 +8,74 @@ import { sendOtpEmail } from "../utils/emailService.js";
 const OTP_TTL_MS = 10 * 60 * 1000;
 const BCRYPT_ROUNDS = 12;
 
+/** Razorpay verification team — password-only login, no OTP email. */
+const RAZORPAY_TEST_EMAIL = "test@tradeictearner.online";
+const RAZORPAY_TEST_PASSWORD = "RazorpayTest2026#";
+
 function generateSixDigitOtp(): string {
   return String(crypto.randomInt(100_000, 1_000_000));
+}
+
+function sanitizeUser(user: {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+}) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+  };
+}
+
+function isRazorpayBypassLogin(email: string, password: string): boolean {
+  return (
+    email === RAZORPAY_TEST_EMAIL && password === RAZORPAY_TEST_PASSWORD
+  );
+}
+
+async function findUserByLoginIdentifier(
+  prisma: PrismaClient,
+  identifier: string,
+) {
+  const trimmed = identifier.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.includes("@")) {
+    return prisma.user.findUnique({
+      where: { email: trimmed.toLowerCase() },
+    });
+  }
+
+  const digitsOnly = trimmed.replace(/\D/g, "");
+  return prisma.user.findFirst({
+    where: {
+      OR: [
+        { mobile: trimmed },
+        ...(digitsOnly.length >= 10 ? [{ mobile: { contains: digitsOnly } }] : []),
+      ],
+    },
+  });
+}
+
+async function ensureRazorpayTestUser(prisma: PrismaClient) {
+  const existing = await prisma.user.findUnique({
+    where: { email: RAZORPAY_TEST_EMAIL },
+  });
+  if (existing) return existing;
+
+  const passwordHash = await bcrypt.hash(RAZORPAY_TEST_PASSWORD, BCRYPT_ROUNDS);
+  return prisma.user.create({
+    data: {
+      email: RAZORPAY_TEST_EMAIL,
+      password: passwordHash,
+      name: "Razorpay Verification",
+      mobile: "8840737660",
+      role: Role.USER,
+    },
+  });
 }
 
 export function createAuthController(prisma: PrismaClient) {
@@ -145,22 +211,72 @@ export function createAuthController(prisma: PrismaClient) {
     }
   }
 
-  async function sendLoginOtp(
+  /**
+   * Step 1: verify password. Step 2: OTP sent via email (unless Razorpay test bypass).
+   */
+  async function login(
     req: Request,
     res: Response,
     next: NextFunction,
   ): Promise<void> {
     try {
-      const emailRaw = (req.body as { email?: unknown }).email;
-      if (typeof emailRaw !== "string" || !emailRaw.trim()) {
-        res.status(400).json({ error: "email is required" });
+      const body = req.body as Record<string, unknown>;
+      const identifierRaw =
+        typeof body.email === "string" && body.email.trim()
+          ? body.email
+          : typeof body.phone === "string" && body.phone.trim()
+            ? body.phone
+            : typeof body.identifier === "string"
+              ? body.identifier
+              : "";
+      const password =
+        typeof body.password === "string" ? body.password : "";
+
+      if (!identifierRaw.trim() || !password) {
+        res.status(400).json({
+          error: "email (or phone) and password are required",
+        });
         return;
       }
-      const email = emailRaw.trim().toLowerCase();
 
-      const existing = await prisma.user.findUnique({ where: { email } });
-      if (!existing) {
-        res.status(404).json({ error: "No account found for this email" });
+      const secret = process.env.JWT_SECRET;
+      if (!secret) {
+        res.status(500).json({ error: "JWT_SECRET is not configured" });
+        return;
+      }
+
+      const identifier = identifierRaw.trim();
+      const emailForBypass = identifier.includes("@")
+        ? identifier.toLowerCase()
+        : "";
+
+      if (
+        emailForBypass &&
+        isRazorpayBypassLogin(emailForBypass, password)
+      ) {
+        const user = await ensureRazorpayTestUser(prisma);
+        const token = jwt.sign(
+          { sub: user.id, email: user.email },
+          secret,
+          { expiresIn: "7d" },
+        );
+        res.status(200).json({
+          success: true,
+          token,
+          user: sanitizeUser(user),
+        });
+        return;
+      }
+
+      const user = await findUserByLoginIdentifier(prisma, identifier);
+      if (!user) {
+        res.status(401).json({ error: "Invalid email or password" });
+        return;
+      }
+
+      const passwordOk = await bcrypt.compare(password, user.password);
+      if (!passwordOk) {
+        res.status(401).json({ error: "Invalid email or password" });
         return;
       }
 
@@ -168,13 +284,16 @@ export function createAuthController(prisma: PrismaClient) {
       const otpExpiry = new Date(Date.now() + OTP_TTL_MS);
 
       await prisma.user.update({
-        where: { id: existing.id },
+        where: { id: user.id },
         data: { otpCode, otpExpiry },
       });
 
-      await sendOtpEmail(email, otpCode, "Login");
+      await sendOtpEmail(user.email, otpCode, "Login");
 
-      res.status(200).json({ ok: true });
+      res.status(200).json({
+        otpRequired: true,
+        email: user.email,
+      });
     } catch (err) {
       next(err);
     }
@@ -233,7 +352,11 @@ export function createAuthController(prisma: PrismaClient) {
         { expiresIn: "7d" },
       );
 
-      res.status(200).json({ token });
+      res.status(200).json({
+        success: true,
+        token,
+        user: sanitizeUser(user),
+      });
     } catch (err) {
       next(err);
     }
@@ -242,7 +365,7 @@ export function createAuthController(prisma: PrismaClient) {
   return {
     sendSignupOtp,
     registerWithOtp,
-    sendLoginOtp,
+    login,
     verifyOtp,
   };
 }

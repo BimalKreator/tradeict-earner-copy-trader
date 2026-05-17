@@ -13,7 +13,9 @@ export function createAuthRoutes(prisma: PrismaClient): Router {
 
   router.post("/send-otp", auth.sendSignupOtp);
   router.post("/register", auth.registerWithOtp);
-  router.post("/send-login-otp", auth.sendLoginOtp);
+  router.post("/login", auth.login);
+  /** @deprecated Use POST /auth/login with email + password */
+  router.post("/send-login-otp", auth.login);
   router.post("/verify-otp", auth.verifyOtp);
 
   router.post("/telegram-link-token", authenticateJwt(), async (req, res, next) => {
