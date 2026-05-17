@@ -6,7 +6,7 @@ import {
   ingestLivePriceWsMessage,
 } from "./liveMarkPriceCache.js";
 
-/** Delta Exchange India public WebSocket (mark_price, v2/ticker). */
+/** Delta Exchange India public WebSocket — mark_price + ticker (mark_price field only). */
 const DELTA_INDIA_PUBLIC_WS = "wss://public-socket.india.delta.exchange";
 
 const HEARTBEAT_WATCHDOG_MS = 35_000;
@@ -46,11 +46,11 @@ function sendSubscribe(socket: WebSocket, symbols: string[]): void {
       type: "subscribe",
       payload: {
         channels: [
-          // Primary: `ticker` on public-socket.india (replaces legacy v2/ticker).
+          // Authoritative mark feed (~2s); PnL must not use LTP from order book.
+          { name: "mark_price", symbols: markSyms },
+          // Ticker carries mark_price / `m` — ingested with strict field filter only.
           { name: "ticker", symbols },
           { name: "v2/ticker", symbols },
-          // Fallback: mark_price publishes ~every 2s.
-          { name: "mark_price", symbols: markSyms },
         ],
       },
     }),
@@ -66,7 +66,7 @@ function syncSubscriptions(): void {
   if (symbols.length === 0) return;
   sendSubscribe(ws, symbols);
   console.log(
-    `[livePriceTracker] subscribed ticker/v2/ticker + mark_price for ${symbols.length} symbol(s)`,
+    `[livePriceTracker] subscribed mark_price + ticker (mark only) for ${symbols.length} symbol(s)`,
   );
 }
 

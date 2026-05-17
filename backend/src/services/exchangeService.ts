@@ -433,8 +433,58 @@ export async function fetchDeltaSwapContractSize(symbol: string): Promise<number
   }
 }
 
+function extractMarkFromCcxtTicker(ticker: {
+  mark?: unknown;
+  info?: unknown;
+}): number | null {
+  const markDirect = numberOrNull(ticker.mark);
+  if (markDirect != null && markDirect > 0) return markDirect;
+
+  const info =
+    ticker.info != null && typeof ticker.info === "object"
+      ? (ticker.info as Record<string, unknown>)
+      : undefined;
+  const fromInfo = numberOrNull(
+    info?.mark_price ?? info?.markPrice ?? info?.m,
+  );
+  if (fromInfo != null && fromInfo > 0) return fromInfo;
+  return null;
+}
+
 /**
- * Public market data for slippage checks (no API keys required).
+ * Public **mark** price for PnL (aligns with Delta Terminal). Never returns LTP.
+ */
+export async function fetchDeltaMarkPrice(
+  symbol: string,
+): Promise<{ markPrice: number | null }> {
+  try {
+    const exchange = await getPublicClient();
+    const ccxtSymbol = resolveCcxtSymbol(exchange, symbol);
+    try {
+      const ticker = await exchange.fetchTicker(ccxtSymbol);
+      const mark = extractMarkFromCcxtTicker(ticker);
+      return { markPrice: mark };
+    } catch (tickerErr) {
+      const msg =
+        tickerErr instanceof Error ? tickerErr.message : String(tickerErr);
+      console.warn(
+        `[exchangeService] fetchTicker (mark) failed symbol=${symbol} ccxt=${ccxtSymbol}:`,
+        msg,
+      );
+      return { markPrice: null };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[exchangeService] fetchDeltaMarkPrice failed symbol=${symbol}:`,
+      msg,
+    );
+    return { markPrice: null };
+  }
+}
+
+/**
+ * Public last traded price — for slippage checks only (not for unrealized PnL).
  * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure.
  */
 export async function fetchDeltaTicker(

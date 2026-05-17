@@ -5,12 +5,13 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
+  fetchDeltaMarkPrice,
   fetchDeltaOpenPositions,
-  fetchDeltaTicker,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
 import {
+  estimateLivePnlUsd,
   resolveLiveMarkPrice,
 } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
@@ -70,7 +71,7 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Mark from in-memory WS cache, then CCXT position mark, then REST ticker. */
+/** Mark from WS cache → CCXT position mark → REST mark (never LTP / last / bid / ask). */
 async function resolveMarkForLiveRow(
   pos: DeltaLivePosition,
 ): Promise<number | null> {
@@ -83,8 +84,8 @@ async function resolveMarkForLiveRow(
   ) {
     return pos.markPrice;
   }
-  const tick = await fetchDeltaTicker(pos.symbolKey);
-  return tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
+  const rest = await fetchDeltaMarkPrice(pos.symbolKey);
+  return rest.markPrice;
 }
 
 /** Mark + PnL for dashboards: native Delta UPNL first; manual estimate only if missing. */
@@ -98,21 +99,29 @@ async function enrichPositionLiveRow(
   const entryPx =
     base.entryPrice ?? (mark != null && Number.isFinite(mark) ? mark : null);
   const realSize = pos.realBaseSize;
+  const contractSize =
+    pos.contracts > 0 && pos.realBaseSize > 0
+      ? pos.realBaseSize / Math.abs(pos.contracts)
+      : undefined;
+
   let livePnl = base.livePnl;
   if (
-    (livePnl == null || !Number.isFinite(livePnl)) &&
+    mark != null &&
     entryPx != null &&
     Number.isFinite(entryPx) &&
     Number.isFinite(realSize) &&
-    realSize > 0 &&
-    mark != null
+    realSize > 0
   ) {
-    livePnl = estimateLeaderPnl({
-      entryPrice: entryPx,
+    livePnl = estimateLivePnlUsd({
+      symbolKey: pos.symbolKey,
       side: pos.side,
-      realSize,
-      mark,
+      entryPrice: entryPx,
+      contracts: pos.contracts,
+      markPrice: mark,
+      ...(contractSize != null ? { contractSize } : {}),
     });
+  } else if (livePnl == null || !Number.isFinite(livePnl)) {
+    livePnl = base.livePnl;
   }
 
   return {
@@ -292,22 +301,6 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
     markPrice: p.markPrice,
     side: p.side,
   };
-}
-
-/**
- * Linear USD-settled perp: `(mark - entry) × realBaseSize × (long ? 1 : -1)`.
- * `realBaseSize` must be contracts × `market.contractSize` (see {@link fetchDeltaOpenPositions}).
- */
-function estimateLeaderPnl(args: {
-  entryPrice: number;
-  side: TradeSide;
-  realSize: number;
-  mark: number | null;
-}): number | null {
-  const { mark } = args;
-  if (mark === null || !Number.isFinite(mark)) return null;
-  const sign = args.side === "BUY" ? 1 : -1;
-  return (mark - args.entryPrice) * args.realSize * sign;
 }
 
 /**

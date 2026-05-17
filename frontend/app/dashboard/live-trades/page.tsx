@@ -240,7 +240,9 @@ export default function DashboardLiveTradesPage() {
                   Entry price
                 </th>
                 <th className="px-4 py-3 font-medium text-white/70">
-                  Mark price
+                  <span title="Delta mark price (same as Terminal — not LTP)">
+                    Mark price
+                  </span>
                 </th>
                 <th className="px-4 py-3 font-medium text-white/70">
                   Live PnL

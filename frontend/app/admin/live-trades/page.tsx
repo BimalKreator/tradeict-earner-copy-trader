@@ -352,7 +352,12 @@ function PositionTable({
             <th className="px-3 py-2 font-medium text-white/70">Side</th>
             <th className="px-3 py-2 font-medium text-white/70">Entry price</th>
             <th className="px-3 py-2 font-medium text-white/70">Live PnL</th>
-            <th className="px-3 py-2 font-medium text-white/70">Mark price</th>
+            <th
+              className="px-3 py-2 font-medium text-white/70"
+              title="Delta mark price (same as Terminal — not LTP)"
+            >
+              Mark price
+            </th>
             <th className="px-3 py-2 font-medium text-white/70">Actions</th>
           </tr>
         </thead>

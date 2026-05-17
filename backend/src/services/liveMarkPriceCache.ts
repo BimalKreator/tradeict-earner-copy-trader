@@ -1,6 +1,6 @@
 import type { TradeSide } from "./exchangeService.js";
 
-/** Delta product symbol → latest mark / last price (USD). */
+/** Delta product symbol → latest **mark** price (USD). Never stores LTP / bid / ask. */
 export const liveMarkPrices = new Map<string, number>();
 
 function num(v: unknown): number | null {
@@ -15,6 +15,19 @@ function num(v: unknown): number | null {
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   return v as Record<string, unknown>;
+}
+
+/**
+ * Extract mark price only — matches Delta Terminal (ignores last, close, bid, ask).
+ * Delta WS ticker uses `mark_price` / `m`; mark_price channel uses `p` / `mark_price`.
+ */
+export function extractStrictMarkPrice(row: Record<string, unknown>): number | null {
+  return num(
+    row.mark_price ??
+      row.markPrice ??
+      row.m ??
+      null,
+  );
 }
 
 /** Store under product symbol and common perp aliases (ETHUSDT ↔ ETHUSD). */
@@ -67,7 +80,11 @@ export function deltaContractSizeFallback(symbol: string): number {
   return 1;
 }
 
-/** `(mark - entry) × contracts × contractSize × sideSign` */
+/**
+ * Unrealized PnL from mark price (Delta formula):
+ * BUY:  (mark - entry) × |contracts| × contractSize
+ * SELL: (entry - mark) × |contracts| × contractSize
+ */
 export function estimateLivePnlUsd(args: {
   symbolKey: string;
   side: TradeSide;
@@ -91,11 +108,11 @@ function ingestTickerRow(row: unknown): void {
   const sym = String(
     r.s ?? r.symbol ?? r.product_symbol ?? r.sy ?? "",
   ).trim();
-  const p = num(r.m ?? r.mark_price ?? r.mark ?? r.close ?? r.last);
-  if (sym && p != null) cacheLiveMarkPrice(sym, p);
+  const p = extractStrictMarkPrice(r);
+  if (sym && p != null && p > 0) cacheLiveMarkPrice(sym, p);
 }
 
-/** `ticker` / `v2/ticker` — primary high-frequency mark source on Delta India public WS. */
+/** `ticker` / `v2/ticker` — mark_price field only (no LTP). */
 function ingestTickerMessage(msg: Record<string, unknown>): void {
   const layers: unknown[] = [msg.d, msg.data];
   const payload = asRecord(msg.payload);
@@ -112,23 +129,28 @@ function ingestTickerMessage(msg: Record<string, unknown>): void {
   }
 }
 
+function ingestMarkPriceChannelMessage(msg: Record<string, unknown>): void {
+  const sy = String(msg.sy ?? msg.symbol ?? "");
+  const p = num(msg.p ?? msg.mark_price);
+  if (p == null || p <= 0) return;
+  const product = sy.startsWith("MARK:") ? sy.slice(5) : sy;
+  if (product.trim()) cacheLiveMarkPrice(product, p);
+}
+
+/**
+ * Ingest Delta India public WS — **mark price only** (aligns with Delta Terminal PnL).
+ */
 export function ingestLivePriceWsMessage(raw: unknown): void {
   if (!raw || typeof raw !== "object") return;
   const msg = raw as Record<string, unknown>;
   const type = String(msg.type ?? "");
 
-  // Priority: ticker (~5s or faster incremental) before mark_price (~2s batch).
-  if (type === "v2/ticker" || type === "ticker") {
-    ingestTickerMessage(msg);
+  if (type === "mark_price") {
+    ingestMarkPriceChannelMessage(msg);
     return;
   }
 
-  if (type === "mark_price") {
-    const sy = String(msg.sy ?? msg.symbol ?? "");
-    const p = num(msg.p ?? msg.mark_price);
-    if (p != null) {
-      const product = sy.startsWith("MARK:") ? sy.slice(5) : sy;
-      cacheLiveMarkPrice(product, p);
-    }
+  if (type === "v2/ticker" || type === "ticker") {
+    ingestTickerMessage(msg);
   }
 }
