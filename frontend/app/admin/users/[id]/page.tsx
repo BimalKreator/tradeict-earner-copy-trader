@@ -87,6 +87,7 @@ export default function AdminUserDetails({
 
   const [user, setUser] = useState<UserState | null>(null);
   const [balanceUsd, setBalanceUsd] = useState<number>(0);
+  const [balanceStatus, setBalanceStatus] = useState<string | null>(null);
   const [strategies, setStrategies] = useState<UserStrategy[]>([]);
   const [trades, setTrades] = useState<UserTrade[]>([]);
   const [transactions, setTransactions] = useState<UserTransaction[]>([]);
@@ -122,7 +123,7 @@ export default function AdminUserDetails({
     setLoading(true);
     setError(null);
     try {
-      const [mgRes, balRes, stRes, trRes, txRes, reqRes] = await Promise.all([
+      const results = await Promise.allSettled([
         fetch(`${API_BASE}/admin/users/${userId}/management`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/balance`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/strategies`, { headers: authHeaders }),
@@ -130,19 +131,67 @@ export default function AdminUserDetails({
         fetch(`${API_BASE}/admin/users/${userId}/transactions`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
       ]);
-      if (!mgRes.ok || !balRes.ok || !stRes.ok || !trRes.ok || !txRes.ok || !reqRes.ok) {
+
+      const mgRes = results[0].status === "fulfilled" ? results[0].value : null;
+      const balRes = results[1].status === "fulfilled" ? results[1].value : null;
+      const stRes = results[2].status === "fulfilled" ? results[2].value : null;
+      const trRes = results[3].status === "fulfilled" ? results[3].value : null;
+      const txRes = results[4].status === "fulfilled" ? results[4].value : null;
+      const reqRes = results[5].status === "fulfilled" ? results[5].value : null;
+
+      if (!mgRes?.ok) {
         throw new Error("Failed to load user details.");
       }
 
       const mg = (await mgRes.json()) as ManagementPayload;
-      const bal = (await balRes.json()) as { totalBalanceUsd?: number };
-      const st = (await stRes.json()) as { strategies?: UserStrategy[] };
-      const tr = (await trRes.json()) as { trades?: UserTrade[] };
-      const tx = (await txRes.json()) as { transactions?: UserTransaction[] };
-      const reqData = (await reqRes.json()) as {
-        current?: { address: string | null; panNumber: string | null; aadhaarNumber: string | null };
-        requests?: ProfileChangeRequest[];
-      };
+      const st = stRes?.ok
+        ? ((await stRes.json()) as { strategies?: UserStrategy[] })
+        : { strategies: [] as UserStrategy[] };
+      const tr = trRes?.ok
+        ? ((await trRes.json()) as { trades?: UserTrade[] })
+        : { trades: [] as UserTrade[] };
+      const tx = txRes?.ok
+        ? ((await txRes.json()) as { transactions?: UserTransaction[] })
+        : { transactions: [] as UserTransaction[] };
+      const reqData = reqRes?.ok
+        ? ((await reqRes.json()) as {
+            current?: {
+              address: string | null;
+              panNumber: string | null;
+              aadhaarNumber: string | null;
+            };
+            requests?: ProfileChangeRequest[];
+          })
+        : { current: null, requests: [] as ProfileChangeRequest[] };
+
+      let nextBalance = 0;
+      let nextBalanceStatus: string | null = null;
+      if (balRes?.ok) {
+        const bal = (await balRes.json()) as {
+          balance?: number;
+          totalBalanceUsd?: number;
+          status?: string;
+          error?: string;
+        };
+        const raw =
+          typeof bal.balance === "number"
+            ? bal.balance
+            : typeof bal.totalBalanceUsd === "number"
+              ? bal.totalBalanceUsd
+              : 0;
+        nextBalance = Number.isFinite(raw) ? raw : 0;
+        if (bal.status === "Connected") {
+          nextBalanceStatus = null;
+        } else {
+          const err = bal.error?.toLowerCase() ?? "";
+          nextBalanceStatus =
+            err.includes("credential") || err.includes("configured")
+              ? "Keys not set"
+              : "Not connected";
+        }
+      } else {
+        nextBalanceStatus = "Keys not set";
+      }
 
       setUser(mg.user);
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
@@ -151,7 +200,8 @@ export default function AdminUserDetails({
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyDraft(source?.apiKey ?? "");
       setApiSecretDraft(source?.apiSecret ?? "");
-      setBalanceUsd(Number.isFinite(bal.totalBalanceUsd ?? NaN) ? (bal.totalBalanceUsd as number) : 0);
+      setBalanceUsd(nextBalance);
+      setBalanceStatus(nextBalanceStatus);
       setStrategies(st.strategies ?? []);
       setTrades(tr.trades ?? []);
       setTransactions(tx.transactions ?? []);
@@ -429,7 +479,14 @@ export default function AdminUserDetails({
               <InfoField label="Current Address" value={user?.address ?? "—"} />
               <InfoField label="PAN" value={user?.panNumber ?? "—"} />
               <InfoField label="Aadhaar" value={user?.aadhaarNumber ?? "—"} />
-              <InfoField label="Delta Exchange Total Balance" value={`$${balanceUsd.toFixed(2)}`} />
+              <InfoField
+                label="Delta Exchange Total Balance"
+                value={
+                  balanceStatus
+                    ? balanceStatus
+                    : `$${balanceUsd.toFixed(2)}`
+                }
+              />
             </div>
             <div className="mt-4">
               <button

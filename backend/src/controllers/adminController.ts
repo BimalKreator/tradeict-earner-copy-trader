@@ -1029,17 +1029,41 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(404).json({ error: "User not found" });
         return;
       }
-      const creds = await resolveUserDeltaCreds(prisma, userId);
-      if (!creds) {
-        res.status(400).json({ error: "No Delta credentials configured for this user" });
-        return;
-      }
-      const totalBalanceUsd = await fetchUserAvailableCapital(prisma, userId);
-      res.json({
+
+      const base = {
         userId: user.id,
         email: user.email,
-        totalBalanceUsd,
-      });
+        balance: 0,
+        totalBalanceUsd: 0,
+      };
+
+      const creds = await resolveUserDeltaCreds(prisma, userId);
+      if (!creds) {
+        res.status(200).json({
+          ...base,
+          status: "Not Connected",
+          error: "No Delta credentials configured for this user",
+        });
+        return;
+      }
+
+      try {
+        const totalBalanceUsd = await fetchUserAvailableCapital(prisma, userId);
+        res.status(200).json({
+          ...base,
+          balance: totalBalanceUsd,
+          totalBalanceUsd,
+          status: "Connected",
+        });
+      } catch (fetchErr) {
+        const message =
+          fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+        res.status(200).json({
+          ...base,
+          status: "Not Connected",
+          error: message,
+        });
+      }
     } catch (err) {
       next(err);
     }
