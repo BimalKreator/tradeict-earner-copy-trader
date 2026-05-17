@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { Loader2 } from "lucide-react";
@@ -17,6 +18,7 @@ type UserState = {
   panNumber: string | null;
   aadhaarNumber: string | null;
   status: "ACTIVE" | "SUSPENDED" | string;
+  copyTradingPaused?: boolean;
 };
 
 type ManagementPayload = {
@@ -72,6 +74,7 @@ export default function AdminUserDetails({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const router = useRouter();
   const { id } = React.use(params);
   const userId = String(id ?? "");
   const [loading, setLoading] = useState(true);
@@ -94,10 +97,12 @@ export default function AdminUserDetails({
   } | null>(null);
 
   const [statusDraft, setStatusDraft] = useState("ACTIVE");
+  const [copyTradingPausedDraft, setCopyTradingPausedDraft] = useState(false);
   const [nicknameDraft, setNicknameDraft] = useState("Primary");
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [apiSecretDraft, setApiSecretDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
   const [sendingReset, setSendingReset] = useState(false);
   const [tradeStartDate, setTradeStartDate] = useState("");
@@ -139,6 +144,7 @@ export default function AdminUserDetails({
 
       setUser(mg.user);
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
+      setCopyTradingPausedDraft(Boolean(mg.user.copyTradingPaused));
       const source = mg.deltaApiKey ?? mg.exchangeAccount;
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyDraft(source?.apiKey ?? "");
@@ -177,7 +183,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const [statusRes, keysRes] = await Promise.all([
+      const [statusRes, keysRes, copyRes] = await Promise.all([
         fetch(`${API_BASE}/admin/users/${userId}/status`, {
           method: "PATCH",
           headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -192,8 +198,13 @@ export default function AdminUserDetails({
             apiSecret: apiSecretDraft,
           }),
         }),
+        fetch(`${API_BASE}/admin/users/${userId}/copy-trading`, {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ paused: copyTradingPausedDraft }),
+        }),
       ]);
-      if (!statusRes.ok || !keysRes.ok) {
+      if (!statusRes.ok || !keysRes.ok || !copyRes.ok) {
         throw new Error("Failed to save management settings.");
       }
       setNotice("Management settings updated successfully.");
@@ -202,6 +213,28 @@ export default function AdminUserDetails({
       setError(e instanceof Error ? e.message : "Failed to save settings.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function deleteUser(): Promise<void> {
+    const ok = window.confirm(
+      "Permanently delete this user and all related data? This cannot be undone.",
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      if (!res.ok) throw new Error("Failed to delete user.");
+      router.push("/admin/users");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete user.");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -373,14 +406,27 @@ export default function AdminUserDetails({
             <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.02] p-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="text-sm text-white/70">
-                  User Status
+                  Account Status
                   <select
                     value={statusDraft}
                     onChange={(e) => setStatusDraft(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   >
                     <option value="ACTIVE">Active</option>
-                    <option value="SUSPENDED">Paused</option>
+                    <option value="SUSPENDED">Suspended</option>
+                  </select>
+                </label>
+                <label className="text-sm text-white/70">
+                  Copy Trading
+                  <select
+                    value={copyTradingPausedDraft ? "paused" : "active"}
+                    onChange={(e) =>
+                      setCopyTradingPausedDraft(e.target.value === "paused")
+                    }
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  >
+                    <option value="active">Active</option>
+                    <option value="paused">Paused</option>
                   </select>
                 </label>
                 <label className="text-sm text-white/70">
@@ -424,6 +470,14 @@ export default function AdminUserDetails({
                   className="rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/25 disabled:opacity-60"
                 >
                   {flushing ? "Flushing..." : "Flush Trade History"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void deleteUser()}
+                  disabled={deleting}
+                  className="rounded-lg border border-red-600/55 bg-red-600/20 px-3 py-2 text-xs font-medium text-red-100 hover:bg-red-600/30 disabled:opacity-60"
+                >
+                  {deleting ? "Deleting..." : "Delete User"}
                 </button>
               </div>
             </div>

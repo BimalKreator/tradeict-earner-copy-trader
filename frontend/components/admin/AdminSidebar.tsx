@@ -8,6 +8,7 @@ import {
   FolderOpen,
   LayoutDashboard,
   LineChart,
+  Radio,
   Settings,
   Users,
   Wallet,
@@ -16,8 +17,9 @@ import {
 const links = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
+  { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/strategies", label: "Strategies", icon: LineChart },
-  { href: "/admin/live-trades", label: "Live trades", icon: Users },
+  { href: "/admin/live-trades", label: "Live trades", icon: Radio },
   { href: "/admin/funds", label: "Funds", icon: Wallet },
   { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
   { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },

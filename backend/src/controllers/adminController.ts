@@ -345,15 +345,20 @@ export function createAdminController(prisma: PrismaClient) {
       }
 
       const statusRaw = req.query.status;
+      const userIdRaw = req.query.userId;
       const allowedStatuses = new Set(["OPEN", "CLOSED", "FAILED"]);
       const where: {
         status?: TradeStatus;
+        userId?: string;
       } = {};
       if (typeof statusRaw === "string") {
         const upper = statusRaw.trim().toUpperCase();
         if (allowedStatuses.has(upper)) {
           where.status = upper as TradeStatus;
         }
+      }
+      if (typeof userIdRaw === "string" && userIdRaw.trim()) {
+        where.userId = userIdRaw.trim();
       }
 
       const rows = await prisma.trade.findMany({
@@ -403,6 +408,22 @@ export function createAdminController(prisma: PrismaClient) {
           exitReason: r.exitReason,
         })),
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listUsersMinimal(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const users = await prisma.user.findMany({
+        select: { id: true, email: true },
+        orderBy: { email: "asc" },
+      });
+      res.json(users);
     } catch (err) {
       next(err);
     }
@@ -1166,6 +1187,7 @@ export function createAdminController(prisma: PrismaClient) {
     getRevenueAnalytics,
     getUserTradesBilling,
     listAllTrades,
+    listUsersMinimal,
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,

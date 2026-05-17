@@ -6,6 +6,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+type UserOption = {
+  id: string;
+  email: string;
+};
+
 type AdminTradeRow = {
   id: string;
   createdAt: string;
@@ -61,6 +66,8 @@ function realizedPnl(row: AdminTradeRow): number | null {
 
 export default function AdminTradeHistoryPage() {
   const [rows, setRows] = useState<AdminTradeRow[]>([]);
+  const [users, setUsers] = useState<UserOption[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +80,9 @@ export default function AdminTradeHistoryPage() {
   const load = useCallback(
     async (silent: boolean) => {
       try {
-        const res = await fetch(`${API_BASE}/admin/trades?limit=300`, {
+        const qs = new URLSearchParams({ limit: "300" });
+        if (selectedUserId) qs.set("userId", selectedUserId);
+        const res = await fetch(`${API_BASE}/admin/trades?${qs.toString()}`, {
           headers,
           cache: "no-store",
         });
@@ -90,10 +99,28 @@ export default function AdminTradeHistoryPage() {
         else setLoading(false);
       }
     },
-    [headers],
+    [headers, selectedUserId],
   );
 
   useEffect(() => {
+    async function loadUsers(): Promise<void> {
+      try {
+        const res = await fetch(`${API_BASE}/admin/users/list`, {
+          headers,
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as UserOption[];
+        if (Array.isArray(data)) setUsers(data);
+      } catch {
+        /* dropdown is optional; trades still load */
+      }
+    }
+    void loadUsers();
+  }, [headers]);
+
+  useEffect(() => {
+    setLoading(true);
     void load(false);
   }, [load]);
 
@@ -132,6 +159,24 @@ export default function AdminTradeHistoryPage() {
           {error}
         </div>
       )}
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <label className="text-sm text-slate-400">
+          Filter by User
+          <select
+            value={selectedUserId}
+            onChange={(e) => setSelectedUserId(e.target.value)}
+            className="mt-1 block w-full min-w-[240px] rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-cyan-500/40 sm:max-w-md"
+          >
+            <option value="">All users</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.email}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
 
       <section className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-lg shadow-black/20">
         <div className="overflow-x-auto">

@@ -66,6 +66,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/deposits", adminController.listAllDeposits);
   router.put("/deposits/:id", adminController.updateDepositStatus);
 
+  router.get("/users/list", adminController.listUsersMinimal);
+
   router.get("/users", async (_req, res, next) => {
     try {
       const users = await prisma.user.findMany({
@@ -111,6 +113,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           panNumber: true,
           aadhaarNumber: true,
           status: true,
+          copyTradingPaused: true,
           deltaApiKeys: {
             orderBy: { id: "desc" },
             take: 1,
@@ -143,10 +146,36 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           panNumber: user.panNumber,
           aadhaarNumber: user.aadhaarNumber,
           status: user.status,
+          copyTradingPaused: user.copyTradingPaused,
         },
         deltaApiKey: user.deltaApiKeys[0] ?? null,
         exchangeAccount: user.exchangeAccounts[0] ?? null,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch("/users/:id/copy-trading", async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const body = req.body as { paused?: unknown; active?: unknown };
+      let paused: boolean | undefined;
+      if (typeof body.paused === "boolean") {
+        paused = body.paused;
+      } else if (typeof body.active === "boolean") {
+        paused = !body.active;
+      }
+      if (paused === undefined) {
+        res.status(400).json({ error: "Provide paused (boolean) or active (boolean)" });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id },
+        data: { copyTradingPaused: paused },
+        select: { id: true, copyTradingPaused: true },
+      });
+      res.json(user);
     } catch (err) {
       next(err);
     }
