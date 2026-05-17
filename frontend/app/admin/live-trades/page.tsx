@@ -45,6 +45,28 @@ type StrategySection = {
   groups: FollowerGroup[];
 };
 
+interface AutoExitPayload {
+  autoExitTarget?: number | null;
+  autoExitStopLoss?: number | null;
+}
+
+type AutoExitSaved = Pick<StrategySection, "autoExitTarget" | "autoExitStopLoss">;
+
+function parseAutoExitSaved(payload: unknown): AutoExitSaved | undefined {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const p = payload as AutoExitPayload;
+  return {
+    autoExitTarget:
+      p.autoExitTarget === null || typeof p.autoExitTarget === "number"
+        ? (p.autoExitTarget ?? null)
+        : null,
+    autoExitStopLoss:
+      p.autoExitStopLoss === null || typeof p.autoExitStopLoss === "number"
+        ? (p.autoExitStopLoss ?? null)
+        : null,
+  };
+}
+
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -83,7 +105,7 @@ function RiskManagementPanel({
 }: {
   strategy: StrategySection;
   totalLivePnl: number;
-  onSaved: (message: string, updated?: { autoExitTarget: number | null; autoExitStopLoss: number | null }) => void;
+  onSaved: (message: string, updated?: AutoExitSaved) => void;
 }) {
   const [targetInput, setTargetInput] = useState(
     strategy.autoExitTarget != null ? String(strategy.autoExitTarget) : "",
@@ -163,17 +185,7 @@ function RiskManagementPanel({
             : `Save failed (${res.status})`;
         throw new Error(msg);
       }
-      const saved =
-        typeof payload === "object" &&
-        payload !== null &&
-        "autoExitTarget" in payload
-          ? {
-              autoExitTarget:
-                (payload as { autoExitTarget: number | null }).autoExitTarget,
-              autoExitStopLoss:
-                (payload as { autoExitStopLoss: number | null }).autoExitStopLoss,
-            }
-          : undefined;
+      const saved = parseAutoExitSaved(payload);
       onSaved("Auto-exit settings saved.", saved);
     } catch (e) {
       onSaved(e instanceof Error ? e.message : "Failed to save auto-exit");
