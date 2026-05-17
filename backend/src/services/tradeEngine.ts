@@ -75,6 +75,8 @@ function symbolAliasSet(raw: string): Set<string> {
   const out = new Set<string>();
   if (!u) return out;
   out.add(u);
+  // Delta options (C-… / P-…) use product ids as-is — no USDT/USD alias pairs.
+  if (u.startsWith("C-") || u.startsWith("P-")) return out;
   if (u.endsWith("USDT")) out.add(`${u.slice(0, -4)}USD`);
   if (u.endsWith("USD") && !u.endsWith("USDT")) out.add(`${u.slice(0, -3)}USDT`);
   return out;
@@ -99,6 +101,25 @@ function mergePayloadLayers(raw: unknown): Record<string, unknown> {
     }
   }
   return out;
+}
+
+/** Delta product id from WS / REST payloads (perps and options). */
+function extractDeltaProductSymbol(o: Record<string, unknown>): string {
+  const product = asRecord(o.product);
+  const candidates: unknown[] = [
+    o.product_symbol,
+    o.symbol,
+    o.contract_symbol,
+    o.instrument_name,
+    o.derivative_symbol,
+    product?.symbol,
+    product?.product_symbol,
+  ];
+  for (const c of candidates) {
+    const s = String(c ?? "").trim();
+    if (s) return s;
+  }
+  return "";
 }
 
 function orderStateIndicatesFill(state: string): boolean {
@@ -127,9 +148,7 @@ function extractOrderFillSignal(
   const state = String(o.state ?? o.order_state ?? o.status ?? "");
   if (!orderStateIndicatesFill(state)) return null;
 
-  const symbol = String(
-    o.product_symbol ?? o.symbol ?? o.contract_symbol ?? "",
-  ).trim();
+  const symbol = extractDeltaProductSymbol(o);
   if (!symbol) return null;
 
   const side = normalizeSide(o.side ?? o.order_side);
@@ -166,9 +185,7 @@ function extractPositionSnapshot(raw: unknown): {
   productKey: string;
 } | null {
   const o = mergePayloadLayers(raw);
-  const symbol = String(
-    o.product_symbol ?? o.symbol ?? o.contract_symbol ?? "",
-  ).trim();
+  const symbol = extractDeltaProductSymbol(o);
   const productKey = String(o.product_id ?? symbol).trim();
   if (!symbol && !productKey) return null;
 
@@ -266,6 +283,13 @@ async function recordTrade(
   }
 }
 
+function deltaContractSizeFallback(symbol: string): number {
+  const u = symbol.toUpperCase();
+  if (u.includes("BTC")) return 0.001;
+  if (u.includes("ETH")) return 0.01;
+  return 1;
+}
+
 async function realizedPnlUsd(args: {
   symbol: string;
   side: TradeSide;
@@ -273,8 +297,8 @@ async function realizedPnlUsd(args: {
   exitPrice: number;
   contracts: number;
 }): Promise<number> {
-  const btcContractFactor = args.symbol.toUpperCase().includes("BTC") ? 0.001 : 1;
-  const realBaseSize = Math.abs(args.contracts) * btcContractFactor;
+  const contractFactor = deltaContractSizeFallback(args.symbol);
+  const realBaseSize = Math.abs(args.contracts) * contractFactor;
   const diff = args.exitPrice - args.entryPrice;
   return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
 }
@@ -1283,9 +1307,7 @@ class StrategyMasterSocket {
           let closed = 0;
           for (const r of rows) {
             const item = mergePayloadLayers(r);
-            const symbol = String(
-              item.product_symbol ?? item.symbol ?? item.contract_symbol ?? "",
-            ).trim();
+            const symbol = extractDeltaProductSymbol(item);
             const productKey = String(item.product_id ?? "").trim();
 
             const candidateKeys = new Set<string>();
