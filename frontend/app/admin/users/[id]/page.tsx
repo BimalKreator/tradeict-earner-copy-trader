@@ -47,6 +47,7 @@ type UserTrade = {
   createdAt: string;
   symbol: string;
   side: string;
+  status: string;
   pnl: number;
   tradingFee: number;
   adminRevenue: number;
@@ -104,6 +105,7 @@ export default function AdminUserDetails({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
+  const [selectedTradeIds, setSelectedTradeIds] = useState<string[]>([]);
   const [sendingReset, setSendingReset] = useState(false);
   const [tradeStartDate, setTradeStartDate] = useState("");
   const [tradeEndDate, setTradeEndDate] = useState("");
@@ -178,6 +180,33 @@ export default function AdminUserDetails({
     });
   }, [tradeEndDate, tradeStartDate, trades]);
 
+  const flushableFilteredTrades = useMemo(
+    () => filteredTrades.filter((t) => t.status !== "OPEN"),
+    [filteredTrades],
+  );
+
+  const allFlushableSelected =
+    flushableFilteredTrades.length > 0 &&
+    flushableFilteredTrades.every((t) => selectedTradeIds.includes(t.id));
+
+  function toggleTradeSelection(tradeId: string, checked: boolean): void {
+    setSelectedTradeIds((prev) =>
+      checked ? [...new Set([...prev, tradeId])] : prev.filter((id) => id !== tradeId),
+    );
+  }
+
+  function toggleSelectAllFlushable(checked: boolean): void {
+    if (!checked) {
+      setSelectedTradeIds((prev) =>
+        prev.filter((id) => !flushableFilteredTrades.some((t) => t.id === id)),
+      );
+      return;
+    }
+    setSelectedTradeIds((prev) => [
+      ...new Set([...prev, ...flushableFilteredTrades.map((t) => t.id)]),
+    ]);
+  }
+
   async function saveManagement(): Promise<void> {
     setSaving(true);
     setError(null);
@@ -238,25 +267,40 @@ export default function AdminUserDetails({
     }
   }
 
-  async function flushTradeHistory(): Promise<void> {
+  async function flushTrades(tradeIds?: string[]): Promise<void> {
+    const selective = Boolean(tradeIds?.length);
     const ok = window.confirm(
-      "Delete only closed/failed trades for this user? Open trades will be kept and a backup CSV will be created.",
+      selective
+        ? `Delete ${tradeIds!.length} selected closed/failed trade(s)? A backup CSV will be created.`
+        : "Delete all closed/failed trades for this user? Open trades will be kept and a backup CSV will be created.",
     );
     if (!ok) return;
     setFlushing(true);
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${userId}/trades/flush`, {
-        method: "DELETE",
-        headers: authHeaders,
+      const res = await fetch(`${API_BASE}/admin/users/flush-trades`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          ...(selective ? { tradeIds } : {}),
+        }),
       });
-      if (!res.ok) throw new Error("Failed to flush trade history.");
-      const body = (await res.json()) as { backupFile?: string; deleted?: number };
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? "Failed to flush trade history.");
+      }
+      const body = (await res.json()) as {
+        backupFile?: string;
+        deleted?: number;
+        analyticsRemoved?: number;
+      };
+      setSelectedTradeIds([]);
       setNotice(
         body.backupFile
-          ? `Flush backup created and ${body.deleted ?? 0} records deleted successfully.`
-          : `${body.deleted ?? 0} records deleted successfully.`,
+          ? `Flush backup created. ${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`
+          : `${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`,
       );
       await loadAll();
     } catch (e) {
@@ -264,6 +308,18 @@ export default function AdminUserDetails({
     } finally {
       setFlushing(false);
     }
+  }
+
+  async function flushTradeHistory(): Promise<void> {
+    await flushTrades();
+  }
+
+  async function flushSelectedTrades(): Promise<void> {
+    if (selectedTradeIds.length === 0) {
+      setError("Select at least one closed or failed trade to flush.");
+      return;
+    }
+    await flushTrades(selectedTradeIds);
   }
 
   async function sendResetLink(): Promise<void> {
@@ -535,13 +591,40 @@ export default function AdminUserDetails({
                 >
                   {exporting ? "Generating..." : "Generate Export"}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => void flushSelectedTrades()}
+                  disabled={flushing || selectedTradeIds.length === 0}
+                  className="rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/25 disabled:opacity-60"
+                >
+                  {flushing ? "Flushing..." : `Flush Selected (${selectedTradeIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void flushTradeHistory()}
+                  disabled={flushing}
+                  className="rounded-lg border border-red-600/45 bg-red-600/15 px-3 py-2 text-xs font-medium text-red-100 hover:bg-red-600/25 disabled:opacity-60"
+                >
+                  Flush All Closed/Failed
+                </button>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[820px] text-left text-sm">
+                <table className="w-full min-w-[880px] text-left text-sm">
                   <thead className="border-b border-glassBorder bg-white/[0.03] text-white/70">
                     <tr>
+                      <th className="px-3 py-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={allFlushableSelected}
+                          disabled={flushableFilteredTrades.length === 0}
+                          onChange={(e) => toggleSelectAllFlushable(e.target.checked)}
+                          aria-label="Select all flushable trades in view"
+                          className="h-4 w-4 rounded border-glassBorder bg-black/40"
+                        />
+                      </th>
                       <th className="px-3 py-2 font-medium">Date</th>
                       <th className="px-3 py-2 font-medium">Symbol</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
                       <th className="px-3 py-2 font-medium">Side</th>
                       <th className="px-3 py-2 font-medium">Net PnL</th>
                       <th className="px-3 py-2 font-medium">Trading Fee</th>
@@ -552,26 +635,40 @@ export default function AdminUserDetails({
                   <tbody>
                     {filteredTrades.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-3 py-8 text-center text-white/45">
+                        <td colSpan={9} className="px-3 py-8 text-center text-white/45">
                           No trades found for selected range.
                         </td>
                       </tr>
                     ) : (
-                      filteredTrades.map((t) => (
-                        <tr key={t.id} className="border-b border-white/[0.06] last:border-0">
-                          <td className="px-3 py-2 text-white/60">{new Date(t.createdAt).toLocaleString()}</td>
-                          <td className="px-3 py-2 text-white">{t.symbol}</td>
-                          <td className="px-3 py-2 text-white/80">{t.side}</td>
-                          <td className={`px-3 py-2 ${t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
-                            ${t.pnl.toFixed(2)}
-                          </td>
-                          <td className="px-3 py-2 text-white">${t.tradingFee.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-white">${t.adminRevenue.toFixed(2)}</td>
-                          <td className="px-3 py-2">
-                            <ExitReasonBadge reason={t.exitReason} />
-                          </td>
-                        </tr>
-                      ))
+                      filteredTrades.map((t) => {
+                        const flushable = t.status !== "OPEN";
+                        return (
+                          <tr key={t.id} className="border-b border-white/[0.06] last:border-0">
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedTradeIds.includes(t.id)}
+                                disabled={!flushable}
+                                onChange={(e) => toggleTradeSelection(t.id, e.target.checked)}
+                                aria-label={`Select trade ${t.symbol}`}
+                                className="h-4 w-4 rounded border-glassBorder bg-black/40 disabled:opacity-40"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-white/60">{new Date(t.createdAt).toLocaleString()}</td>
+                            <td className="px-3 py-2 text-white">{t.symbol}</td>
+                            <td className="px-3 py-2 text-white/70">{t.status}</td>
+                            <td className="px-3 py-2 text-white/80">{t.side}</td>
+                            <td className={`px-3 py-2 ${t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                              ${t.pnl.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2 text-white">${t.tradingFee.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-white">${t.adminRevenue.toFixed(2)}</td>
+                            <td className="px-3 py-2">
+                              <ExitReasonBadge reason={t.exitReason} />
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

@@ -4,11 +4,26 @@ import {
   TradeStatus,
   type PrismaClient,
 } from "@prisma/client";
-import { fetchDeltaTotalBalanceUsd } from "./exchangeService.js";
+import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
+import { fetchDeltaAvailableBalanceUsd } from "./exchangeService.js";
 
 export function startOfUtcDay(ref = new Date()): Date {
   return new Date(
     Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate()),
+  );
+}
+
+export function endOfUtcDay(ref = new Date()): Date {
+  return new Date(
+    Date.UTC(
+      ref.getUTCFullYear(),
+      ref.getUTCMonth(),
+      ref.getUTCDate(),
+      23,
+      59,
+      59,
+      999,
+    ),
   );
 }
 
@@ -43,6 +58,45 @@ export function pnlPercentOfCapital(pnl: number, capital: number): number {
 
 type UserCreds = { apiKey: string; apiSecret: string };
 
+function credsFromRow(row: {
+  apiKey: string;
+  apiSecret: string;
+} | null | undefined): UserCreds | null {
+  if (!row?.apiKey?.trim() || !row?.apiSecret?.trim()) return null;
+  return { apiKey: row.apiKey, apiSecret: row.apiSecret };
+}
+
+/** True when stored credentials match any strategy leader (master) API key pair. */
+export async function credentialsMatchStrategyMaster(
+  prisma: PrismaClient,
+  creds: UserCreds,
+): Promise<boolean> {
+  const userKey = decryptDeltaSecretOrPlain(creds.apiKey).trim();
+  const userSecret = decryptDeltaSecretOrPlain(creds.apiSecret).trim();
+  if (!userKey || !userSecret) return false;
+
+  const strategies = await prisma.strategy.findMany({
+    where: {
+      masterApiKey: { not: "" },
+      masterApiSecret: { not: "" },
+    },
+    select: { masterApiKey: true, masterApiSecret: true },
+  });
+
+  for (const s of strategies) {
+    const masterKey = decryptDeltaSecretOrPlain(s.masterApiKey).trim();
+    const masterSecret = decryptDeltaSecretOrPlain(s.masterApiSecret).trim();
+    if (masterKey && masterSecret && masterKey === userKey && masterSecret === userSecret) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolve the subscriber's Delta credentials (never strategy master keys).
+ * Priority: active subscription's linked exchange account → latest deltaApiKey → latest exchangeAccount.
+ */
 export async function resolveUserDeltaCreds(
   prisma: PrismaClient,
   userId: string,
@@ -50,22 +104,48 @@ export async function resolveUserDeltaCreds(
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
-      exchangeAccounts: {
-        orderBy: { createdAt: "desc" },
+      subscriptions: {
+        where: {
+          status: SubscriptionStatus.ACTIVE,
+          exchangeAccountId: { not: null },
+        },
+        orderBy: { joinedDate: "desc" },
         take: 1,
-        select: { apiKey: true, apiSecret: true },
+        select: {
+          exchangeAccount: {
+            select: { apiKey: true, apiSecret: true },
+          },
+        },
       },
       deltaApiKeys: {
         orderBy: { id: "desc" },
         take: 1,
         select: { apiKey: true, apiSecret: true },
       },
+      exchangeAccounts: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { apiKey: true, apiSecret: true },
+      },
     },
   });
   if (!user) return null;
-  const creds = user.exchangeAccounts[0] ?? user.deltaApiKeys[0] ?? null;
-  if (!creds?.apiKey?.trim() || !creds?.apiSecret?.trim()) return null;
-  return { apiKey: creds.apiKey, apiSecret: creds.apiSecret };
+
+  const candidates: UserCreds[] = [];
+  const subCreds = credsFromRow(user.subscriptions[0]?.exchangeAccount ?? null);
+  if (subCreds) candidates.push(subCreds);
+  const deltaCreds = credsFromRow(user.deltaApiKeys[0] ?? null);
+  if (deltaCreds) candidates.push(deltaCreds);
+  const exchangeCreds = credsFromRow(user.exchangeAccounts[0] ?? null);
+  if (exchangeCreds) candidates.push(exchangeCreds);
+
+  for (const creds of candidates) {
+    if (await credentialsMatchStrategyMaster(prisma, creds)) {
+      continue;
+    }
+    return creds;
+  }
+  return null;
 }
 
 export async function fetchUserAvailableCapital(
@@ -75,7 +155,7 @@ export async function fetchUserAvailableCapital(
   const creds = await resolveUserDeltaCreds(prisma, userId);
   if (!creds) return 0;
   try {
-    return await fetchDeltaTotalBalanceUsd(creds.apiKey, creds.apiSecret);
+    return await fetchDeltaAvailableBalanceUsd(creds.apiKey, creds.apiSecret);
   } catch {
     return 0;
   }
@@ -85,7 +165,7 @@ export async function checkDeltaApiConnected(
   creds: UserCreds,
 ): Promise<boolean> {
   try {
-    const bal = await fetchDeltaTotalBalanceUsd(creds.apiKey, creds.apiSecret);
+    const bal = await fetchDeltaAvailableBalanceUsd(creds.apiKey, creds.apiSecret);
     return Number.isFinite(bal);
   } catch {
     return false;
@@ -155,27 +235,13 @@ export async function activeStrategiesForUser(
 /** Sum Delta USD balance across users with linked credentials (deduped per user). */
 export async function aggregateUsersAum(prisma: PrismaClient): Promise<number> {
   const users = await prisma.user.findMany({
-    select: {
-      id: true,
-      exchangeAccounts: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { apiKey: true, apiSecret: true },
-      },
-      deltaApiKeys: {
-        orderBy: { id: "desc" },
-        take: 1,
-        select: { apiKey: true, apiSecret: true },
-      },
-    },
+    select: { id: true },
   });
 
   let total = 0;
   for (const u of users) {
-    const creds = u.exchangeAccounts[0] ?? u.deltaApiKeys[0];
-    if (!creds?.apiKey?.trim() || !creds?.apiSecret?.trim()) continue;
     try {
-      total += await fetchDeltaTotalBalanceUsd(creds.apiKey, creds.apiSecret);
+      total += await fetchUserAvailableCapital(prisma, u.id);
     } catch {
       /* skip user */
     }

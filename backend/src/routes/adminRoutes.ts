@@ -389,6 +389,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
   router.get("/users/:id/balance", adminController.getUserBalance);
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
+  router.post("/users/flush-trades", adminController.flushUserTrades);
   router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
   router.get("/trades", adminController.listAllTrades);
   router.post("/trades/export", adminController.exportTrades);

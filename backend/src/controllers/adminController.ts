@@ -2,12 +2,18 @@ import type { NextFunction, Request, Response } from "express";
 import { InvoiceStatus, SubscriptionStatus, TradeStatus, type PrismaClient } from "@prisma/client";
 import {
   aggregateUsersAum,
+  fetchUserAvailableCapital,
   masterApiHealth,
+  resolveUserDeltaCreds,
   startOfUtcDay,
   startOfUtcMonth,
   systemClosedPnlSince,
   totalPendingRevenueAllUsers,
 } from "../services/dashboardMetricsService.js";
+import {
+  buildFlushableTradeWhere,
+  purgeAnalyticsForDeletedTrades,
+} from "../services/tradeFlushService.js";
 import {
   EXIT_REASON,
   markBotInitiatedClose,
@@ -576,11 +582,23 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const userId = String(req.params.id ?? "").trim();
+      const body = (req.body ?? {}) as { userId?: unknown; tradeIds?: unknown };
+      const userId = String(
+        body.userId ?? req.params.id ?? "",
+      ).trim();
       if (!userId) {
-        res.status(400).json({ error: "User id is required" });
+        res.status(400).json({ error: "userId is required" });
         return;
       }
+
+      const tradeIdsRaw = body.tradeIds;
+      const tradeIds =
+        Array.isArray(tradeIdsRaw) && tradeIdsRaw.length > 0
+          ? tradeIdsRaw
+              .filter((id): id is string => typeof id === "string" && id.trim() !== "")
+              .map((id) => id.trim())
+          : undefined;
+
       const user = await prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, name: true, email: true },
@@ -589,8 +607,10 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(404).json({ error: "User not found" });
         return;
       }
+
+      const where = buildFlushableTradeWhere(userId, tradeIds);
       const flushableTrades = await prisma.trade.findMany({
-        where: { userId, status: { not: TradeStatus.OPEN } },
+        where,
         orderBy: { createdAt: "desc" },
         select: {
           id: true,
@@ -602,19 +622,37 @@ export function createAdminController(prisma: PrismaClient) {
           entryPrice: true,
           exitPrice: true,
           tradePnl: true,
+          pnl: true,
           tradingFee: true,
           revenueShareAmt: true,
           status: true,
         },
       });
+
       if (flushableTrades.length === 0) {
         res.json({
           ok: true,
           deleted: 0,
-          message: "No closed or failed trades found. Open trades were preserved.",
+          analyticsRemoved: 0,
+          message: tradeIds?.length
+            ? "No matching closed or failed trades found for the selected ids."
+            : "No closed or failed trades found. Open trades were preserved.",
         });
         return;
       }
+
+      const openInSelection =
+        tradeIds != null &&
+        (await prisma.trade.count({
+          where: { userId, id: { in: tradeIds }, status: TradeStatus.OPEN },
+        })) > 0;
+      if (openInSelection) {
+        res.status(400).json({
+          error: "Open trades cannot be flushed. Deselect open positions.",
+        });
+        return;
+      }
+
       const safeUserName = (user.name?.trim() || user.email || user.id).replace(
         /[^a-zA-Z0-9_-]/g,
         "_",
@@ -659,12 +697,27 @@ export function createAdminController(prisma: PrismaClient) {
           status: "READY",
         },
       });
-      const out = await prisma.trade.deleteMany({
-        where: { userId, status: { not: TradeStatus.OPEN } },
+
+      const flushAll = !tradeIds?.length;
+      const tradeIdsToDelete = flushableTrades.map((t) => t.id);
+
+      const result = await prisma.$transaction(async (tx) => {
+        const deletedTrades = await tx.trade.deleteMany({
+          where: { id: { in: tradeIdsToDelete }, userId },
+        });
+        const analyticsRemoved = await purgeAnalyticsForDeletedTrades(
+          tx,
+          userId,
+          flushableTrades,
+          flushAll,
+        );
+        return { deletedTrades: deletedTrades.count, analyticsRemoved };
       });
+
       res.json({
         ok: true,
-        deleted: out.count,
+        deleted: result.deletedTrades,
+        analyticsRemoved: result.analyticsRemoved,
         backupFile: saved.relativePath,
       });
     } catch (err) {
@@ -970,35 +1023,18 @@ export function createAdminController(prisma: PrismaClient) {
       }
       const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: {
-          id: true,
-          email: true,
-          exchangeAccounts: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { apiKey: true, apiSecret: true },
-          },
-          deltaApiKeys: {
-            orderBy: { id: "desc" },
-            take: 1,
-            select: { apiKey: true, apiSecret: true },
-          },
-        },
+        select: { id: true, email: true },
       });
       if (!user) {
         res.status(404).json({ error: "User not found" });
         return;
       }
-      const creds =
-        user.exchangeAccounts[0] ?? user.deltaApiKeys[0] ?? null;
+      const creds = await resolveUserDeltaCreds(prisma, userId);
       if (!creds) {
         res.status(400).json({ error: "No Delta credentials configured for this user" });
         return;
       }
-      const totalBalanceUsd = await fetchDeltaTotalBalanceUsd(
-        creds.apiKey,
-        creds.apiSecret,
-      );
+      const totalBalanceUsd = await fetchUserAvailableCapital(prisma, userId);
       res.json({
         userId: user.id,
         email: user.email,

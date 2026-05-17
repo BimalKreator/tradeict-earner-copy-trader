@@ -651,20 +651,54 @@ export async function fetchDeltaOpenPositions(
   return out;
 }
 
-export async function fetchDeltaTotalBalanceUsd(
+function balanceFieldUsd(
+  bal: Awaited<ReturnType<InstanceType<typeof ccxt.delta>["fetchBalance"]>>,
+  bucket: "free" | "total",
+): number | null {
+  const map = bal[bucket] as Record<string, unknown> | undefined;
+  if (!map) return null;
+  for (const ccy of ["USD", "USDT"]) {
+    const n = numberOrNull(map[ccy]);
+    if (n !== null && n >= 0) return n;
+  }
+  return null;
+}
+
+/**
+ * User-facing available capital from the subscriber's own Delta credentials (CCXT).
+ * Prefers withdrawable / available balance over wallet total when the exchange exposes it.
+ */
+export async function fetchDeltaAvailableBalanceUsd(
   apiKeyStored: string,
   apiSecretStored: string,
 ): Promise<number> {
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  if (!apiKey.trim() || !secret.trim()) {
+    return 0;
+  }
   const exchange = await getAuthClient(apiKey, secret);
   const bal = await exchange.fetchBalance();
-  const totalUsd = Number(
-    (bal.total as Record<string, unknown> | undefined)?.USD ??
-      (bal.total as Record<string, unknown> | undefined)?.USDT ??
-      (bal as { info?: { total_balance?: unknown } }).info?.total_balance ??
-      0,
-  );
-  if (Number.isFinite(totalUsd)) return totalUsd;
+  const info = (bal.info ?? {}) as Record<string, unknown>;
+
+  const candidates = [
+    numberOrNull(info.available_balance),
+    numberOrNull(info.available_margin),
+    balanceFieldUsd(bal, "free"),
+    balanceFieldUsd(bal, "total"),
+    numberOrNull(info.total_balance),
+  ];
+
+  for (const n of candidates) {
+    if (n !== null && Number.isFinite(n) && n >= 0) return n;
+  }
   return 0;
+}
+
+/** @deprecated Prefer {@link fetchDeltaAvailableBalanceUsd} for user dashboards. */
+export async function fetchDeltaTotalBalanceUsd(
+  apiKeyStored: string,
+  apiSecretStored: string,
+): Promise<number> {
+  return fetchDeltaAvailableBalanceUsd(apiKeyStored, apiSecretStored);
 }
