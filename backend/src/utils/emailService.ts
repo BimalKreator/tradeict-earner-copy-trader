@@ -171,14 +171,14 @@ function buildExpertApplicationHtml(p: ExpertTraderApplicationPayload): string {
     <h1 style="margin:0 0 8px 0;font-size:22px;color:#38bdf8;">New Expert Trader Application</h1>
     <p style="margin:0 0 24px 0;font-size:14px;color:#94a3b8;">Submitted via ${escapeHtml(p.name)} on TradeICT Earner.</p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:12px;border:1px solid #334155;overflow:hidden;">
-      ${row("Full name", p.name)}
+      ${row("Name", p.name)}
       ${row("Email", p.email)}
-      ${row("Mobile", p.mobile)}
-      ${row("Preferred exchange(s)", p.exchange)}
-      ${row("Min. capital required", p.requiredCapital)}
-      ${row("Expected revenue share", `${p.expectedRevenueShare}%`)}
+      ${row("Phone", p.mobile)}
+      ${row("Exchanges", p.exchange)}
+      ${row("Capital", p.requiredCapital)}
+      ${row("Expected Revenue %", `${p.expectedRevenueShare}%`)}
     </table>
-    <h2 style="margin:28px 0 12px 0;font-size:16px;color:#f8fafc;">Strategy idea / edge</h2>
+    <h2 style="margin:28px 0 12px 0;font-size:16px;color:#f8fafc;">Strategy</h2>
     <div style="padding:16px;background:#1e293b;border-radius:12px;border:1px solid #334155;font-size:14px;line-height:1.6;white-space:pre-wrap;">${escapeHtml(p.strategyIdea)}</div>
   </div>
 </body>
@@ -191,35 +191,84 @@ function buildExpertApplicationText(p: ExpertTraderApplicationPayload): string {
     "",
     `Name: ${p.name}`,
     `Email: ${p.email}`,
-    `Mobile: ${p.mobile}`,
-    `Exchange(s): ${p.exchange}`,
-    `Minimum capital: ${p.requiredCapital}`,
-    `Expected revenue share: ${p.expectedRevenueShare}%`,
+    `Phone: ${p.mobile}`,
+    `Exchanges: ${p.exchange}`,
+    `Capital: ${p.requiredCapital}`,
+    `Expected Revenue %: ${p.expectedRevenueShare}`,
     "",
-    "Strategy idea:",
+    "Strategy:",
     p.strategyIdea,
   ].join("\n");
 }
 
+function buildExpertApplicationConfirmationText(
+  p: ExpertTraderApplicationPayload,
+): string {
+  const contact = `${p.mobile} / ${p.email}`;
+  return [
+    `Dear ${p.name},`,
+    "",
+    "Thank you for applying to become an Expert Trader with Tradeict AI. We have successfully received your application and strategy details.",
+    "",
+    `Our onboarding team will review your submission and contact you shortly at ${contact} to discuss the next steps and integration process.`,
+    "",
+    "Best regards,",
+    "The Tradeict AI Team",
+  ].join("\n");
+}
+
+function buildExpertApplicationConfirmationHtml(
+  p: ExpertTraderApplicationPayload,
+): string {
+  const contact = escapeHtml(`${p.mobile} / ${p.email}`);
+  return `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0f172a;color:#e2e8f0;">
+  <div style="max-width:560px;margin:0 auto;">
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.7;color:#e2e8f0;">Dear ${escapeHtml(p.name)},</p>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.7;color:#cbd5e1;">Thank you for applying to become an Expert Trader with Tradeict AI. We have successfully received your application and strategy details.</p>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.7;color:#cbd5e1;">Our onboarding team will review your submission and contact you shortly at <strong style="color:#f8fafc;">${contact}</strong> to discuss the next steps and integration process.</p>
+    <p style="margin:24px 0 0 0;font-size:15px;line-height:1.7;color:#e2e8f0;">Best regards,<br/><span style="color:#94a3b8;">The Tradeict AI Team</span></p>
+  </div>
+</body>
+</html>`;
+}
+
 /**
- * Notifies operations when an expert trader applies via the public form.
- * Recipient: EXPERT_APPLICATION_TO or support@tradeictai.com
+ * Sends admin notification and applicant confirmation for expert trader applications.
  */
-export async function sendExpertTraderApplicationEmail(
+export async function sendExpertTraderApplicationEmails(
   payload: ExpertTraderApplicationPayload,
 ): Promise<void> {
   const transport = createMailTransport();
-  const to =
+  const from = getFromAddress();
+  const adminTo =
     process.env.EXPERT_APPLICATION_TO?.trim() || "support@tradeictai.com";
 
-  await transport.sendMail({
-    from: getFromAddress(),
-    to,
-    replyTo: payload.email,
-    subject: `New Expert Trader Application - ${payload.name}`,
-    text: buildExpertApplicationText(payload),
-    html: buildExpertApplicationHtml(payload),
-  });
+  await Promise.all([
+    transport.sendMail({
+      from,
+      to: adminTo,
+      replyTo: payload.email,
+      subject: `New Expert Trader Application - ${payload.name}`,
+      text: buildExpertApplicationText(payload),
+      html: buildExpertApplicationHtml(payload),
+    }),
+    transport.sendMail({
+      from,
+      to: payload.email,
+      subject: "Application Received - Tradeict AI Private Limited",
+      text: buildExpertApplicationConfirmationText(payload),
+      html: buildExpertApplicationConfirmationHtml(payload),
+    }),
+  ]);
+}
+
+/** @deprecated Use sendExpertTraderApplicationEmails */
+export async function sendExpertTraderApplicationEmail(
+  payload: ExpertTraderApplicationPayload,
+): Promise<void> {
+  await sendExpertTraderApplicationEmails(payload);
 }
 
 export async function sendPasswordResetLinkEmail(

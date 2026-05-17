@@ -133,6 +133,80 @@ export default function Home() {
           </div>
         </section>
 
+        <section className="relative overflow-hidden border-t border-white/[0.06] px-4 py-20 sm:px-6 lg:px-8">
+          <div
+            className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_70%_60%_at_80%_50%,rgba(6,182,212,0.14),transparent)]"
+            aria-hidden
+          />
+          <div className="mx-auto max-w-6xl">
+            <div className="relative overflow-hidden rounded-3xl border border-cyan-500/25 bg-gradient-to-br from-slate-900/95 via-slate-950 to-cyan-950/50 p-8 shadow-[0_0_60px_-12px_rgba(34,211,238,0.35)] sm:p-12 lg:p-14">
+              <div
+                className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-cyan-400/10 blur-3xl"
+                aria-hidden
+              />
+              <div
+                className="pointer-events-none absolute -bottom-20 -left-12 h-48 w-48 rounded-full bg-primary/15 blur-3xl"
+                aria-hidden
+              />
+              <div className="relative grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-400">
+                    For strategy providers
+                  </p>
+                  <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+                    Become an Expert Trader
+                  </h2>
+                  <p className="mt-4 max-w-xl text-base leading-relaxed text-white/70 sm:text-lg">
+                    Partner with TradeICT Earner and turn your proven edge into recurring revenue.
+                    We handle integration, billing, and subscriber onboarding — you focus on execution.
+                  </p>
+                  <Link
+                    href="/experts"
+                    className="mt-8 inline-flex items-center justify-center rounded-xl bg-gradient-to-r from-cyan-500 to-cyan-400 px-8 py-3.5 text-base font-semibold text-slate-950 shadow-lg shadow-cyan-500/30 transition hover:from-cyan-400 hover:to-cyan-300"
+                  >
+                    Apply as an Expert
+                  </Link>
+                </div>
+                <ul className="grid gap-4 sm:grid-cols-1">
+                  {[
+                    {
+                      title: "Monetize Your Edge",
+                      body: "Earn automated revenue share from every copier who follows your strategy.",
+                      icon: "₹",
+                    },
+                    {
+                      title: "Zero Coding Required",
+                      body: "Our team integrates your workflow — no platform build-out on your side.",
+                      icon: "⚡",
+                    },
+                    {
+                      title: "Global Reach",
+                      body: "Tap into our growing copy-trader base and transparent billing infrastructure.",
+                      icon: "🌐",
+                    },
+                  ].map(({ title, body, icon }) => (
+                    <li
+                      key={title}
+                      className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.04] p-5 backdrop-blur-sm transition hover:border-cyan-500/30 hover:bg-white/[0.06]"
+                    >
+                      <span
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-500/15 text-lg ring-1 ring-cyan-500/30"
+                        aria-hidden
+                      >
+                        {icon}
+                      </span>
+                      <div>
+                        <h3 className="font-semibold text-white">{title}</h3>
+                        <p className="mt-1 text-sm leading-relaxed text-white/60">{body}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="border-t border-white/[0.06] px-4 py-12 sm:px-6 lg:px-8">
           <div className="mx-auto max-w-4xl">
             <div className="rounded-2xl border-2 border-amber-500/60 bg-amber-500/[0.08] p-6 shadow-[0_0_40px_-8px_rgba(245,158,11,0.35)] sm:p-8">

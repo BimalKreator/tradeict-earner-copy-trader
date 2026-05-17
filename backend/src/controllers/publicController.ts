@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { sendExpertTraderApplicationEmail } from "../utils/emailService.js";
+import { sendExpertTraderApplicationEmails } from "../utils/emailService.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -71,7 +71,7 @@ export function createPublicController() {
         return;
       }
 
-      await sendExpertTraderApplicationEmail({
+      await sendExpertTraderApplicationEmails({
         name,
         email,
         mobile,
