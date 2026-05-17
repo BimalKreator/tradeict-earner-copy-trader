@@ -20,6 +20,16 @@ function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): numb
   return Number.isFinite(trade.pnl ?? NaN) ? (trade.pnl as number) : 0;
 }
 
+/** Prevent CDN/proxy/browser caching of live admin dashboards (PnL must be fresh). */
+export function applyNoStoreCacheHeaders(res: Response): void {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
 export function createAdminController(prisma: PrismaClient) {
   function parseDateRange(req: Request): {
     startDate?: Date;

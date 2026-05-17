@@ -12,6 +12,11 @@ function num(v: unknown): number | null {
   return null;
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
 /** Store under product symbol and common perp aliases (ETHUSDT ↔ ETHUSD). */
 export function cacheLiveMarkPrice(productSymbol: string, price: number): void {
   if (!Number.isFinite(price) || price <= 0) return;
@@ -80,10 +85,43 @@ export function estimateLivePnlUsd(args: {
   return (args.markPrice - args.entryPrice) * realBaseSize * sign;
 }
 
+function ingestTickerRow(row: unknown): void {
+  const r = asRecord(row);
+  if (!r) return;
+  const sym = String(
+    r.s ?? r.symbol ?? r.product_symbol ?? r.sy ?? "",
+  ).trim();
+  const p = num(r.m ?? r.mark_price ?? r.mark ?? r.close ?? r.last);
+  if (sym && p != null) cacheLiveMarkPrice(sym, p);
+}
+
+/** `ticker` / `v2/ticker` — primary high-frequency mark source on Delta India public WS. */
+function ingestTickerMessage(msg: Record<string, unknown>): void {
+  const layers: unknown[] = [msg.d, msg.data];
+  const payload = asRecord(msg.payload);
+  if (payload) {
+    layers.push(payload.d, payload.data, payload);
+  }
+
+  for (const layer of layers) {
+    if (Array.isArray(layer)) {
+      for (const row of layer) ingestTickerRow(row);
+    } else {
+      ingestTickerRow(layer);
+    }
+  }
+}
+
 export function ingestLivePriceWsMessage(raw: unknown): void {
   if (!raw || typeof raw !== "object") return;
   const msg = raw as Record<string, unknown>;
   const type = String(msg.type ?? "");
+
+  // Priority: ticker (~5s or faster incremental) before mark_price (~2s batch).
+  if (type === "v2/ticker" || type === "ticker") {
+    ingestTickerMessage(msg);
+    return;
+  }
 
   if (type === "mark_price") {
     const sy = String(msg.sy ?? msg.symbol ?? "");
@@ -91,19 +129,6 @@ export function ingestLivePriceWsMessage(raw: unknown): void {
     if (p != null) {
       const product = sy.startsWith("MARK:") ? sy.slice(5) : sy;
       cacheLiveMarkPrice(product, p);
-    }
-    return;
-  }
-
-  if (type === "v2/ticker" || type === "ticker") {
-    const rows = msg.d ?? msg.data;
-    if (!Array.isArray(rows)) return;
-    for (const row of rows) {
-      if (!row || typeof row !== "object") continue;
-      const r = row as Record<string, unknown>;
-      const sym = String(r.s ?? r.symbol ?? r.product_symbol ?? "");
-      const p = num(r.m ?? r.mark_price ?? r.close ?? r.last);
-      if (sym && p != null) cacheLiveMarkPrice(sym, p);
     }
   }
 }

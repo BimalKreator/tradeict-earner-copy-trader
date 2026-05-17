@@ -438,11 +438,17 @@ export default function AdminLiveTradesPage() {
       return;
     }
     try {
-      const res = await fetch(`${base}/admin/live-trades/grouped`, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+      const res = await fetch(
+        `${base}/admin/live-trades/grouped?t=${Date.now()}`,
+        {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache",
+          },
         },
-      });
+      );
       if (res.status === 403) {
         if (!silent) {
           setForbidden(true);
@@ -539,7 +545,7 @@ export default function AdminLiveTradesPage() {
   useEffect(() => {
     const id = window.setInterval(() => {
       void load({ silent: true });
-    }, 1000);
+    }, 500);
     return () => window.clearInterval(id);
   }, [load]);
 
@@ -572,7 +578,7 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Data comes from CCXT + live WebSocket marks. PnL and mark prices refresh about every 1 second
+              Data comes from CCXT + live WebSocket marks. PnL and mark prices refresh about every 0.5 seconds
               while this page is open. New master fills are copied to subscribers by the backend trade
               engine (WebSocket to Delta); restart the API if copy ever stops.
             </p>

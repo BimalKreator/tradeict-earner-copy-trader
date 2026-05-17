@@ -22,7 +22,10 @@ import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
-import { createAdminController } from "../controllers/adminController.js";
+import {
+  applyNoStoreCacheHeaders,
+  createAdminController,
+} from "../controllers/adminController.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -1091,6 +1094,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/live-trades/grouped", async (_req, res, next) => {
     try {
       const strategies = await getAdminGroupedLiveTrades(prisma);
+      applyNoStoreCacheHeaders(res);
       res.json({ strategies });
     } catch (err) {
       next(err);
@@ -1104,6 +1108,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/live-trades/master-positions", async (_req, res, next) => {
     try {
       const strategies = await getAdminMasterPositionSnapshots(prisma);
+      applyNoStoreCacheHeaders(res);
       res.json({ strategies });
     } catch (err) {
       next(err);

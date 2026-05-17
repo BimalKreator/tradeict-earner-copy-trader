@@ -4,6 +4,7 @@ import {
   authenticateToken,
   isAdmin,
 } from "../middleware/authMiddleware.js";
+import { applyNoStoreCacheHeaders } from "../controllers/adminController.js";
 import {
   getAdminGroupedLiveTrades,
   getUserLiveTradeRows,
@@ -31,6 +32,7 @@ export function createLiveTradesRoutes(prisma: PrismaClient): Router {
   router.get("/admin/grouped", ...adminOnly, async (_req, res, next) => {
     try {
       const strategies = await getAdminGroupedLiveTrades(prisma);
+      applyNoStoreCacheHeaders(res);
       res.json({ strategies });
     } catch (err) {
       next(err);

@@ -46,7 +46,10 @@ function sendSubscribe(socket: WebSocket, symbols: string[]): void {
       type: "subscribe",
       payload: {
         channels: [
+          // Primary: `ticker` on public-socket.india (replaces legacy v2/ticker).
+          { name: "ticker", symbols },
           { name: "v2/ticker", symbols },
+          // Fallback: mark_price publishes ~every 2s.
           { name: "mark_price", symbols: markSyms },
         ],
       },
@@ -63,7 +66,7 @@ function syncSubscriptions(): void {
   if (symbols.length === 0) return;
   sendSubscribe(ws, symbols);
   console.log(
-    `[livePriceTracker] subscribed v2/ticker + mark_price for ${symbols.length} symbol(s)`,
+    `[livePriceTracker] subscribed ticker/v2/ticker + mark_price for ${symbols.length} symbol(s)`,
   );
 }
 
