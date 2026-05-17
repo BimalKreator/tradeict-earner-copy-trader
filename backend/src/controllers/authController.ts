@@ -3,6 +3,10 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import type { NextFunction, Request, Response } from "express";
 import { Role, type PrismaClient } from "@prisma/client";
+import {
+  EMAIL_DOMAIN_BLOCKED_MESSAGE,
+  isEmailDomainAllowed,
+} from "../services/settingsService.js";
 import { sendOtpEmail } from "../utils/emailService.js";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -79,6 +83,21 @@ async function ensureRazorpayTestUser(prisma: PrismaClient) {
 }
 
 export function createAuthController(prisma: PrismaClient) {
+  async function rejectDisallowedEmail(
+    res: Response,
+    email: string,
+  ): Promise<boolean> {
+    if (email.trim().toLowerCase() === RAZORPAY_TEST_EMAIL) {
+      return false;
+    }
+    const allowed = await isEmailDomainAllowed(prisma, email);
+    if (!allowed) {
+      res.status(403).json({ error: EMAIL_DOMAIN_BLOCKED_MESSAGE });
+      return true;
+    }
+    return false;
+  }
+
   async function sendSignupOtp(
     req: Request,
     res: Response,
@@ -91,6 +110,8 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
       const email = emailRaw.trim().toLowerCase();
+
+      if (await rejectDisallowedEmail(res, email)) return;
 
       const existing = await prisma.user.findUnique({ where: { email } });
       if (existing) {
@@ -149,6 +170,8 @@ export function createAuthController(prisma: PrismaClient) {
         });
         return;
       }
+
+      if (await rejectDisallowedEmail(res, email)) return;
 
       const secret = process.env.JWT_SECRET;
       if (!secret) {
@@ -274,6 +297,8 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
+      if (await rejectDisallowedEmail(res, user.email)) return;
+
       const passwordOk = await bcrypt.compare(password, user.password);
       if (!passwordOk) {
         res.status(401).json({ error: "Invalid email or password" });
@@ -320,6 +345,8 @@ export function createAuthController(prisma: PrismaClient) {
 
       const email = body.email.trim().toLowerCase();
       const otpCode = body.otpCode.trim();
+
+      if (await rejectDisallowedEmail(res, email)) return;
 
       const secret = process.env.JWT_SECRET;
       if (!secret) {

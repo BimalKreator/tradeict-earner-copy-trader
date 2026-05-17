@@ -236,9 +236,10 @@ model ProfileUpdateRequest {
 }
 
 model SystemSettings {
-  id           String   @id @default("global")
-  pgFeePercent Float    @default(2.36)
-  updatedAt    DateTime @updatedAt
+  id                  String   @id @default("global")
+  pgFeePercent        Float    @default(2.36)
+  allowedEmailDomains String   @default("gmail.com,yahoo.com,hotmail.com,outlook.com")
+  updatedAt           DateTime @updatedAt
 }
 
 model PaymentTransaction {
