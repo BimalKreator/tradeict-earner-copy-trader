@@ -25,6 +25,7 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
+import { executeFollowerTradeWithVerification } from "./followerTradeExecution.js";
 import {
   registerSymbolsForLivePrices,
   startLivePriceTracker,
@@ -595,18 +596,19 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${leader.masterContracts} × ${sub.multiplier}) — ${leader.deltaSymbol} ${leader.side}`,
     );
 
-    const result = await executeTrade(
-      creds.apiKey,
-      creds.apiSecret,
-      leader.deltaSymbol,
-      leader.side,
-      followerContracts,
-    );
+    const result = await executeFollowerTradeWithVerification(prisma, {
+      userId: sub.userId,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      symbol: leader.deltaSymbol,
+      side: leader.side,
+      size: followerContracts,
+    });
 
     if (!result.success) {
       const ccxtSym = normalizeDeltaPerpSymbolForCcxt(leader.deltaSymbol);
       console.error(
-        `[late-join] executeTrade failed userId=${sub.userId} strategyId=${strategy.id} deltaSymbol=${leader.deltaSymbol} ccxtSymbol=${ccxtSym} side=${leader.side} contracts=${followerContracts}: ${result.error ?? "unknown"}`,
+        `[late-join] follower execution failed userId=${sub.userId} strategyId=${strategy.id} deltaSymbol=${leader.deltaSymbol} ccxtSymbol=${ccxtSym} side=${leader.side} contracts=${followerContracts} attempts=${result.attempts}: ${result.error ?? "unknown"}`,
       );
     }
 
@@ -617,7 +619,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       side: leader.side,
       size: followerContracts,
       entryPrice: leader.entryPrice,
-      status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+      status: result.success && result.verified ? TradeStatus.OPEN : TradeStatus.FAILED,
       tradingFee: result.success ? (result.feeCost ?? 0) : 0,
     });
   }
@@ -847,13 +849,14 @@ async function copyMasterFillToSubscribers(
         `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${args.masterContracts} × ${sub.multiplier}) — ${args.symbol} ${args.side}`,
       );
 
-      const result = await executeTrade(
-        creds.apiKey,
-        creds.apiSecret,
-        args.symbol,
-        args.side,
-        followerContracts,
-      );
+      const result = await executeFollowerTradeWithVerification(prisma, {
+        userId: sub.userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: args.symbol,
+        side: args.side,
+        size: followerContracts,
+      });
 
       await recordTrade(prisma, {
         userId: sub.userId,
@@ -862,7 +865,10 @@ async function copyMasterFillToSubscribers(
         side: args.side,
         size: followerContracts,
         entryPrice: args.avgPrice,
-        status: result.success ? TradeStatus.OPEN : TradeStatus.FAILED,
+        status:
+          result.success && result.verified
+            ? TradeStatus.OPEN
+            : TradeStatus.FAILED,
         tradingFee: result.success ? (result.feeCost ?? 0) : 0,
       });
     }),
