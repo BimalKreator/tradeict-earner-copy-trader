@@ -3,9 +3,11 @@
 import Link from "next/link";
 import {
   Activity,
+  Bot,
   Calendar,
   CircleDollarSign,
   CreditCard,
+  GitCompare,
   KeyRound,
   Layers,
   Loader2,
@@ -120,7 +122,7 @@ export default function DashboardPage() {
           Dashboard
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Real-time overview of your copy-trading performance and account health.
+          Delta copy-trading and crypto arbitrage at a glance.
         </p>
       </header>
 
@@ -130,42 +132,157 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {loading ? (
-        <div className="flex justify-center py-24">
-          <Loader2 className="h-8 w-8 animate-spin text-cyan-400" />
-        </div>
-      ) : data ? (
+      <DashboardSection
+        title="Delta Exchange Trading"
+        subtitle="Live copy-trading performance and account health."
+      >
+        {loading ? (
+          <div className="flex justify-center rounded-xl border border-slate-800 bg-slate-900 py-20">
+            <Loader2 className="h-8 w-8 animate-spin text-cyan-400" />
+          </div>
+        ) : data ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <MetricCard
+              icon={<Activity className="h-5 w-5 text-cyan-400" />}
+              label="Today's PnL"
+              value={fmtUsd(data.todayPnl)}
+              sub={
+                <span className={pnlTone(data.todayPnlPercent)}>
+                  {fmtPct(data.todayPnlPercent)} of capital
+                </span>
+              }
+              valueClass={pnlTone(data.todayPnl)}
+            />
+
+            <MetricCard
+              icon={<Calendar className="h-5 w-5 text-violet-400" />}
+              label="Monthly PnL"
+              value={fmtUsd(data.monthlyPnl)}
+              sub={
+                <span className={pnlTone(data.monthlyPnlPercent)}>
+                  {fmtPct(data.monthlyPnlPercent)} of capital
+                </span>
+              }
+              valueClass={pnlTone(data.monthlyPnl)}
+            />
+
+            <MetricCard
+              icon={<Wallet className="h-5 w-5 text-sky-400" />}
+              label="Available Capital"
+              value={fmtUsd(data.availableCapital)}
+              sub={<span className="text-slate-500">Live Delta balance</span>}
+              valueClass="text-white text-3xl"
+            />
+
+            <MetricCard
+              icon={<CreditCard className="h-5 w-5 text-amber-400" />}
+              label="Total Due"
+              value={fmtUsd(data.totalDue)}
+              sub={
+                data.totalDue > 0 ? (
+                  <Link
+                    href="/dashboard/wallet"
+                    className="inline-flex items-center rounded-md bg-cyan-500/15 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-500/30 transition hover:bg-cyan-500/25"
+                  >
+                    Pay Now
+                  </Link>
+                ) : (
+                  <span className="text-slate-500">No pending fees</span>
+                )
+              }
+              valueClass="text-amber-300"
+            />
+
+            <MetricCard
+              icon={<Percent className="h-5 w-5 text-emerald-400" />}
+              label="Total Win Rate"
+              value={`${data.winRate.toFixed(1)}%`}
+              sub={<span className="text-slate-500">Closed trades this month</span>}
+              valueClass="text-white"
+            />
+
+            <MetricCard
+              icon={<Layers className="h-5 w-5 text-indigo-400" />}
+              label="Active Strategies"
+              value={String(data.activeStrategies.count)}
+              sub={
+                data.activeStrategies.names.length > 0 ? (
+                  <p className="text-xs leading-relaxed text-slate-400">
+                    {data.activeStrategies.names.join(" · ")}
+                  </p>
+                ) : (
+                  <span className="text-slate-500">None deployed</span>
+                )
+              }
+              valueClass="text-3xl text-white"
+            />
+
+            <MetricCard
+              icon={<KeyRound className="h-5 w-5 text-slate-300" />}
+              label="API Status"
+              value={data.apiStatus === "connected" ? "Connected" : "Disconnected"}
+              sub={
+                <StatusDot
+                  connected={data.apiStatus === "connected"}
+                  label={
+                    data.apiStatus === "connected"
+                      ? "Delta keys verified"
+                      : "Check API keys in settings"
+                  }
+                />
+              }
+              valueClass={
+                data.apiStatus === "connected" ? "text-emerald-400" : "text-red-400"
+              }
+            />
+
+            <MetricCard
+              icon={<PlayCircle className="h-5 w-5 text-cyan-400" />}
+              label="Copy Trading"
+              value={data.copyTradingActive ? "Active" : "Paused"}
+              sub={
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-500">
+                    {data.copyTradingPaused
+                      ? "Paused globally"
+                      : data.apiStatus !== "connected"
+                        ? "Connect API to resume"
+                        : "Mirroring master trades"}
+                  </span>
+                  <ToggleSwitch
+                    checked={!data.copyTradingPaused}
+                    disabled={toggleBusy}
+                    onChange={() => void toggleCopyTrading()}
+                  />
+                </div>
+              }
+              valueClass={data.copyTradingActive ? "text-emerald-400" : "text-slate-400"}
+            />
+          </div>
+        ) : null}
+      </DashboardSection>
+
+      <div className="border-t border-slate-800/80 pt-10" aria-hidden />
+
+      <DashboardSection
+        title="Crypto Arbitrage Trading"
+        subtitle="Cross-exchange arbitrage performance (Pending Integration)."
+      >
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <MetricCard
-            icon={<Activity className="h-5 w-5 text-cyan-400" />}
-            label="Today's PnL"
-            value={fmtUsd(data.todayPnl)}
-            sub={
-              <span className={pnlTone(data.todayPnlPercent)}>
-                {fmtPct(data.todayPnlPercent)} of capital
-              </span>
-            }
-            valueClass={pnlTone(data.todayPnl)}
+            icon={<Activity className="h-5 w-5 text-teal-400" />}
+            label="Today's Arbitrage PnL"
+            value="$0.00"
+            sub={<span className="text-slate-500">Pending integration</span>}
+            valueClass="text-slate-300"
           />
 
           <MetricCard
-            icon={<Calendar className="h-5 w-5 text-violet-400" />}
-            label="Monthly PnL"
-            value={fmtUsd(data.monthlyPnl)}
-            sub={
-              <span className={pnlTone(data.monthlyPnlPercent)}>
-                {fmtPct(data.monthlyPnlPercent)} of capital
-              </span>
-            }
-            valueClass={pnlTone(data.monthlyPnl)}
-          />
-
-          <MetricCard
-            icon={<Wallet className="h-5 w-5 text-sky-400" />}
-            label="Available Capital"
-            value={fmtUsd(data.availableCapital)}
-            sub={<span className="text-slate-500">Live Delta balance</span>}
-            valueClass="text-white text-3xl"
+            icon={<Calendar className="h-5 w-5 text-teal-400/80" />}
+            label="Monthly Arbitrage PnL"
+            value="$0.00"
+            sub={<span className="text-slate-500">Pending integration</span>}
+            valueClass="text-slate-300"
           />
 
           <MetricCard
@@ -177,92 +294,47 @@ export default function DashboardPage() {
           />
 
           <MetricCard
-            icon={<CreditCard className="h-5 w-5 text-amber-400" />}
-            label="Total Due"
-            value={fmtUsd(data.totalDue)}
-            sub={
-              data.totalDue > 0 ? (
-                <Link
-                  href="/dashboard/wallet"
-                  className="inline-flex items-center rounded-md bg-cyan-500/15 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-500/30 transition hover:bg-cyan-500/25"
-                >
-                  Pay Now
-                </Link>
-              ) : (
-                <span className="text-slate-500">No pending fees</span>
-              )
-            }
-            valueClass="text-amber-300"
-          />
-
-          <MetricCard
-            icon={<Percent className="h-5 w-5 text-emerald-400" />}
-            label="Total Win Rate"
-            value={`${data.winRate.toFixed(1)}%`}
-            sub={<span className="text-slate-500">Closed trades this month</span>}
-            valueClass="text-white"
-          />
-
-          <MetricCard
-            icon={<Layers className="h-5 w-5 text-indigo-400" />}
-            label="Active Strategies"
-            value={String(data.activeStrategies.count)}
-            sub={
-              data.activeStrategies.names.length > 0 ? (
-                <p className="text-xs leading-relaxed text-slate-400">
-                  {data.activeStrategies.names.join(" · ")}
-                </p>
-              ) : (
-                <span className="text-slate-500">None deployed</span>
-              )
-            }
+            icon={<Bot className="h-5 w-5 text-teal-400" />}
+            label="Active Arbitrage Bots"
+            value="0"
+            sub={<span className="text-slate-500">No bots configured</span>}
             valueClass="text-3xl text-white"
           />
 
           <MetricCard
-            icon={<KeyRound className="h-5 w-5 text-slate-300" />}
-            label="API Status"
-            value={data.apiStatus === "connected" ? "Connected" : "Disconnected"}
+            icon={<GitCompare className="h-5 w-5 text-slate-400" />}
+            label="Arbitrage API Status"
+            value="Not Connected"
             sub={
-              <StatusDot
-                connected={data.apiStatus === "connected"}
-                label={
-                  data.apiStatus === "connected"
-                    ? "Delta keys verified"
-                    : "Check API keys in settings"
-                }
-              />
+              <StatusDot connected={false} label="Connect arbitrage API when available" />
             }
-            valueClass={
-              data.apiStatus === "connected" ? "text-emerald-400" : "text-red-400"
-            }
-          />
-
-          <MetricCard
-            icon={<PlayCircle className="h-5 w-5 text-cyan-400" />}
-            label="Copy Trading"
-            value={data.copyTradingActive ? "Active" : "Paused"}
-            sub={
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs text-slate-500">
-                  {data.copyTradingPaused
-                    ? "Paused globally"
-                    : data.apiStatus !== "connected"
-                      ? "Connect API to resume"
-                      : "Mirroring master trades"}
-                </span>
-                <ToggleSwitch
-                  checked={!data.copyTradingPaused}
-                  disabled={toggleBusy}
-                  onChange={() => void toggleCopyTrading()}
-                />
-              </div>
-            }
-            valueClass={data.copyTradingActive ? "text-emerald-400" : "text-slate-400"}
+            valueClass="text-red-400"
           />
         </div>
-      ) : null}
+      </DashboardSection>
     </div>
+  );
+}
+
+function DashboardSection({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold tracking-tight text-white md:text-xl">
+          {title}
+        </h2>
+        <p className="mt-1 text-sm text-slate-400">{subtitle}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 
