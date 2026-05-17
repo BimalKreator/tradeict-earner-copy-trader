@@ -23,6 +23,7 @@ export function createLiveTradesRoutes(prisma: PrismaClient): Router {
         return;
       }
       const positions = await getUserLiveTradeRows(prisma, userId);
+      applyNoStoreCacheHeaders(res);
       res.json({ positions });
     } catch (err) {
       next(err);

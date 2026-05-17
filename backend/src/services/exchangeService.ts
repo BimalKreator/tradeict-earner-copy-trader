@@ -113,6 +113,22 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
+/** Delta terminal UPNL from CCXT position (includes fees/spread in exchange calc). */
+export function extractNativeUnrealizedPnl(p: {
+  unrealizedPnl?: unknown;
+  info?: unknown;
+}): number | null {
+  const info =
+    p.info != null && typeof p.info === "object"
+      ? (p.info as Record<string, unknown>)
+      : undefined;
+  return (
+    numberOrNull(info?.unrealized_pnl) ??
+    numberOrNull(info?.unrealizedPnl) ??
+    numberOrNull(p.unrealizedPnl)
+  );
+}
+
 function extractFeeCostFromOrder(order: unknown): number | null {
   if (order == null || typeof order !== "object") return null;
   const o = order as {
@@ -525,18 +541,12 @@ export async function fetchDeltaOpenPositions(
         ? Number(p.markPrice)
         : null;
 
-    let unrealizedPnl: number | null = null;
+    let unrealizedPnl = extractNativeUnrealizedPnl(p);
     const ep = entryPrice != null && Number.isFinite(entryPrice) ? entryPrice : null;
     const mp = markPrice != null && Number.isFinite(markPrice) ? markPrice : null;
-    if (ep !== null && mp !== null) {
+    if (unrealizedPnl === null && ep !== null && mp !== null) {
       const sign = side === "BUY" ? 1 : -1;
       unrealizedPnl = (mp - ep) * realBaseSize * sign;
-    } else if (
-      p.unrealizedPnl !== undefined &&
-      p.unrealizedPnl !== null &&
-      Number.isFinite(Number(p.unrealizedPnl))
-    ) {
-      unrealizedPnl = Number(p.unrealizedPnl);
     }
 
     let stopLoss: number | null = null;

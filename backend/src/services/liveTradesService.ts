@@ -6,7 +6,6 @@ import {
 } from "@prisma/client";
 import {
   fetchDeltaOpenPositions,
-  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   type DeltaLivePosition,
   type TradeSide,
@@ -29,7 +28,7 @@ export type LiveTradeRow = {
 };
 
 export type UserLiveTradeRow = LiveTradeRow & {
-  strategyId: string;
+  strategyId: string | null;
   strategyTitle: string;
 };
 
@@ -88,7 +87,7 @@ async function resolveMarkForLiveRow(
   return tick.last != null && Number.isFinite(tick.last) ? tick.last : null;
 }
 
-/** Fresh ticker mark + linear PnL using base size (`realBaseSize`), not raw contract count. */
+/** Mark + PnL for dashboards: native Delta UPNL first; manual estimate only if missing. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
@@ -101,6 +100,7 @@ async function enrichPositionLiveRow(
   const realSize = pos.realBaseSize;
   let livePnl = base.livePnl;
   if (
+    (livePnl == null || !Number.isFinite(livePnl)) &&
     entryPx != null &&
     Number.isFinite(entryPx) &&
     Number.isFinite(realSize) &&
@@ -121,6 +121,68 @@ async function enrichPositionLiveRow(
     markPrice: mark ?? base.markPrice,
     livePnl,
   };
+}
+
+type UserDeltaCreds = {
+  cacheKey: string;
+  apiKey: string;
+  apiSecret: string;
+};
+
+async function resolveUserDeltaCredentialSets(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<UserDeltaCreds[]> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      exchangeAccounts: { orderBy: { createdAt: "desc" } },
+      deltaApiKeys: { orderBy: { id: "desc" } },
+    },
+  });
+  if (!user) return [];
+
+  const out: UserDeltaCreds[] = [];
+  const seen = new Set<string>();
+
+  for (const ex of user.exchangeAccounts) {
+    const key = ex.apiKey?.trim() ?? "";
+    const secret = ex.apiSecret?.trim() ?? "";
+    if (!key || !secret) continue;
+    const cacheKey = `ex:${ex.id}`;
+    if (seen.has(cacheKey)) continue;
+    seen.add(cacheKey);
+    out.push({ cacheKey, apiKey: ex.apiKey, apiSecret: ex.apiSecret });
+  }
+
+  for (const dk of user.deltaApiKeys) {
+    const key = dk.apiKey?.trim() ?? "";
+    const secret = dk.apiSecret?.trim() ?? "";
+    if (!key || !secret) continue;
+    const cacheKey = `dk:${dk.id}`;
+    if (seen.has(cacheKey)) continue;
+    seen.add(cacheKey);
+    out.push({ cacheKey, apiKey: dk.apiKey, apiSecret: dk.apiSecret });
+  }
+
+  return out;
+}
+
+function matchOpenTradeStrategy(
+  openTrades: Array<{
+    symbol: string;
+    side: string;
+    strategy: { id: string; title: string };
+  }>,
+  symbolKey: string,
+  side: TradeSide,
+): { id: string; title: string } | null {
+  for (const t of openTrades) {
+    if (!symbolsAlign(t.symbol, symbolKey)) continue;
+    if (!sidesAlign(t.side, side)) continue;
+    return { id: t.strategy.id, title: t.strategy.title };
+  }
+  return null;
 }
 
 /**
@@ -248,149 +310,66 @@ function estimateLeaderPnl(args: {
   return (mark - args.entryPrice) * args.realSize * sign;
 }
 
+/**
+ * All open Delta positions for the user via CCXT (includes manual trades not in DB).
+ * Optional strategy label when an OPEN copy-trade row matches symbol + side.
+ */
 export async function getUserLiveTradeRows(
   prisma: PrismaClient,
   userId: string,
 ): Promise<UserLiveTradeRow[]> {
+  const credsList = await resolveUserDeltaCredentialSets(prisma, userId);
+  if (credsList.length === 0) return [];
+
   const openTrades = await prisma.trade.findMany({
     where: { userId, status: TradeStatus.OPEN },
-    include: {
-      strategy: { select: { id: true, title: true } },
-    },
-    orderBy: { createdAt: "desc" },
+    include: { strategy: { select: { id: true, title: true } } },
   });
-
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      userId,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE },
-    },
-    include: { exchangeAccount: true },
-  });
-
-  const strategyToAccount = new Map<
-    string,
-    { id: string; apiKey: string; apiSecret: string }
-  >();
-  for (const s of subs) {
-    if (!s.exchangeAccount) continue;
-    if (!strategyToAccount.has(s.strategyId)) {
-      strategyToAccount.set(s.strategyId, {
-        id: s.exchangeAccount.id,
-        apiKey: s.exchangeAccount.apiKey,
-        apiSecret: s.exchangeAccount.apiSecret,
-      });
-    }
-  }
-
-  const positionsCache = new Map<string, DeltaLivePosition[]>();
-  const positionsCacheReliable = new Map<string, boolean>();
-
-  async function positionsForStrategy(
-    strategyId: string,
-  ): Promise<{ positions: DeltaLivePosition[]; reliable: boolean }> {
-    const creds = strategyToAccount.get(strategyId);
-    if (!creds) return { positions: [], reliable: false };
-    const hit = positionsCache.get(creds.id);
-    if (hit) {
-      return {
-        positions: hit,
-        reliable: positionsCacheReliable.get(creds.id) ?? true,
-      };
-    }
-    try {
-      const list = await fetchDeltaOpenPositions(
-        creds.apiKey,
-        creds.apiSecret,
-      );
-      positionsCache.set(creds.id, list);
-      positionsCacheReliable.set(creds.id, true);
-      return { positions: list, reliable: true };
-    } catch {
-      positionsCache.set(creds.id, []);
-      positionsCacheReliable.set(creds.id, false);
-      return { positions: [], reliable: false };
-    }
-  }
 
   const rows: UserLiveTradeRow[] = [];
+  const seenLegs = new Set<string>();
 
-  for (const t of openTrades) {
-    const { positions, reliable } = await positionsForStrategy(t.strategyId);
-    const match = matchDeltaPosition(positions, t.symbol, t.side);
-    if (!match && reliable) {
-      await prisma.trade.update({
-        where: { id: t.id },
-        data: { status: TradeStatus.CLOSED },
-      });
+  for (const creds of credsList) {
+    let positions: DeltaLivePosition[];
+    try {
+      positions = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret);
+    } catch (err) {
+      console.warn(
+        `[live-trades] user CCXT fetch failed userId=${userId}:`,
+        err instanceof Error ? err.message : err,
+      );
       continue;
     }
 
-    let markPrice: number | null = match?.markPrice ?? null;
-    let livePnl: number | null = match?.unrealizedPnl ?? null;
-    let stopLoss: number | null = match?.stopLoss ?? null;
-    let target: number | null = match?.takeProfit ?? null;
-    let entryTime: string | null =
-      match?.entryTime ?? t.createdAt.toISOString();
+    for (const pos of positions) {
+      const legKey = `${creds.cacheKey}:${pos.symbolKey}:${pos.side}`;
+      if (seenLegs.has(legKey)) continue;
+      seenLegs.add(legKey);
 
-    if (match) {
-      entryTime = match.entryTime ?? entryTime;
-      const tick = await fetchDeltaTicker(match.symbolKey);
-      const markFresh =
-        tick.last != null && Number.isFinite(tick.last)
-          ? tick.last
-          : match.markPrice;
-      markPrice = markFresh ?? match.markPrice ?? null;
-      const entryPx =
-        match.entryPrice != null && Number.isFinite(match.entryPrice)
-          ? match.entryPrice
-          : t.entryPrice;
-      const rs = match.realBaseSize;
-      if (
-        markPrice != null &&
-        Number.isFinite(markPrice) &&
-        Number.isFinite(entryPx) &&
-        Number.isFinite(rs) &&
-        rs > 0
-      ) {
-        livePnl = estimateLeaderPnl({
-          entryPrice: entryPx,
-          side: match.side,
-          realSize: rs,
-          mark: markPrice,
-        });
-      }
-    } else {
-      const tick = await fetchDeltaTicker(t.symbol);
-      if (tick.last != null && Number.isFinite(tick.last)) {
-        markPrice = tick.last;
-        const contractSize = await fetchDeltaSwapContractSize(t.symbol);
-        const realSize = Math.abs(t.size) * contractSize;
-        livePnl = estimateLeaderPnl({
-          entryPrice: t.entryPrice,
-          side: t.side.toUpperCase() === "BUY" ? "BUY" : "SELL",
-          realSize,
-          mark: markPrice,
-        });
-      }
-      entryTime = t.createdAt.toISOString();
+      const strat = matchOpenTradeStrategy(openTrades, pos.symbolKey, pos.side);
+      const enriched = await enrichPositionLiveRow(pos);
+
+      rows.push({
+        strategyId: strat?.id ?? null,
+        strategyTitle: strat?.title ?? "Manual on Delta",
+        entryTime: enriched.entryTime,
+        token: enriched.token,
+        size: enriched.size,
+        entryPrice: enriched.entryPrice,
+        stopLoss: null,
+        target: null,
+        livePnl: enriched.livePnl,
+        markPrice: enriched.markPrice,
+        side: enriched.side,
+      });
     }
-
-    rows.push({
-      strategyId: t.strategy.id,
-      strategyTitle: t.strategy.title,
-      entryTime,
-      token: t.symbol,
-      size: t.size,
-      entryPrice: t.entryPrice,
-      stopLoss,
-      target,
-      livePnl,
-      markPrice,
-      side: t.side,
-    });
   }
+
+  rows.sort((a, b) => {
+    const ta = a.entryTime ?? "";
+    const tb = b.entryTime ?? "";
+    return tb.localeCompare(ta);
+  });
 
   return rows;
 }
