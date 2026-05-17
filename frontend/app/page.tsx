@@ -7,16 +7,6 @@ const steps = [
   { n: 4, title: "Start copying trades automatically", body: "Trades sync in real time while you keep full custody of your funds." },
 ] as const;
 
-const footerLinks = [
-  { href: "/legal/terms", label: "Terms of Service" },
-  { href: "/legal/privacy", label: "Privacy Policy" },
-  { href: "/legal/cookies", label: "Cookies Policy" },
-  { href: "/legal/risk", label: "Risk Disclaimer" },
-  { href: "/legal/conflict", label: "Conflict of Interest Policy" },
-  { href: "/legal/consent", label: "Declaration of Consent" },
-  { href: "/legal/eula", label: "End-User License Agreement" },
-] as const;
-
 export default function Home() {
   return (
     <div className="flex min-h-full flex-col">
@@ -29,6 +19,12 @@ export default function Home() {
             <span className="text-primary">TradeICT</span> Earner
           </Link>
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+            <Link
+              href="/pricing"
+              className="hidden text-sm text-white/70 transition hover:text-white sm:inline"
+            >
+              Pricing
+            </Link>
             <Link
               href="/login"
               className="rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 sm:px-4"
@@ -150,38 +146,6 @@ export default function Home() {
           </div>
         </section>
       </main>
-
-      <footer className="mt-auto border-t border-white/[0.08] bg-black/40 px-4 py-12 sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-6xl">
-          <div className="flex flex-col items-center justify-between gap-8 sm:flex-row sm:items-start">
-            <div>
-              <p className="text-lg font-semibold text-white">
-                <span className="text-primary">TradeICT</span> Earner
-              </p>
-              <p className="mt-1 max-w-xs text-sm text-white/50">
-                Copy trading with custody where it belongs — with you.
-              </p>
-            </div>
-            <nav aria-label="Legal" className="w-full sm:w-auto">
-              <ul className="grid grid-cols-1 gap-x-8 gap-y-2 text-center sm:grid-cols-2 sm:text-left lg:grid-cols-1">
-                {footerLinks.map(({ href, label }) => (
-                  <li key={href}>
-                    <Link
-                      href={href}
-                      className="text-sm text-white/65 underline-offset-2 transition hover:text-primary hover:underline"
-                    >
-                      {label}
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </nav>
-          </div>
-          <p className="mt-10 text-center text-xs text-white/35">
-            © {new Date().getFullYear()} TradeICT Earner. All rights reserved.
-          </p>
-        </div>
-      </footer>
     </div>
   );
 }

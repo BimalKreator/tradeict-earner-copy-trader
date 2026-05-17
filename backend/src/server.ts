@@ -23,6 +23,7 @@ import { createExchangeAccountRoutes } from "./routes/exchangeAccountRoutes.js";
 import { createLiveTradesRoutes } from "./routes/liveTradesRoutes.js";
 import { createBillingRoutes } from "./routes/billingRoutes.js";
 import { createNotificationRoutes } from "./routes/notificationRoutes.js";
+import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
@@ -87,6 +88,10 @@ app.get("/health/build", (_req, res) => {
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
+
+const publicRoutes = createPublicRoutes();
+app.use("/api/public", publicRoutes);
+app.use("/public", publicRoutes);
 app.use("/api/user", createUserRoutes(prisma));
 app.use("/api/notifications", createNotificationRoutes(prisma));
 app.use("/api/exchange-accounts", createExchangeAccountRoutes(prisma));

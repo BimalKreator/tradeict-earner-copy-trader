@@ -10,6 +10,9 @@ export type OtpEmailPurpose = "Sign Up" | "Login";
  * - SMTP_PASS — your Brevo SMTP key
  * - SMTP_SECURE — optional; set "true" for port 465
  * - EMAIL_FROM — optional From display (defaults to SMTP_USER)
+ * - EXPERT_APPLICATION_TO — optional inbox for expert applications (defaults to support@tradeictai.com)
+ *
+ * Replace placeholder values in your `.env` before production (never commit real credentials).
  */
 export function createMailTransport(): nodemailer.Transporter {
   const host = process.env.SMTP_HOST;
@@ -144,6 +147,78 @@ export async function sendOtpEmail(
     subject: subjectForPurpose(purpose),
     text: buildOtpText(otp, purpose),
     html: buildOtpHtml(otp, purpose),
+  });
+}
+
+export type ExpertTraderApplicationPayload = {
+  name: string;
+  email: string;
+  mobile: string;
+  strategyIdea: string;
+  exchange: string;
+  requiredCapital: string;
+  expectedRevenueShare: string;
+};
+
+function buildExpertApplicationHtml(p: ExpertTraderApplicationPayload): string {
+  const row = (label: string, value: string) =>
+    `<tr><td style="padding:10px 12px;border-bottom:1px solid #1e293b;color:#94a3b8;font-size:13px;width:38%;vertical-align:top;">${escapeHtml(label)}</td><td style="padding:10px 12px;border-bottom:1px solid #1e293b;color:#f1f5f9;font-size:14px;">${escapeHtml(value)}</td></tr>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0f172a;color:#e2e8f0;">
+  <div style="max-width:560px;margin:0 auto;">
+    <h1 style="margin:0 0 8px 0;font-size:22px;color:#38bdf8;">New Expert Trader Application</h1>
+    <p style="margin:0 0 24px 0;font-size:14px;color:#94a3b8;">Submitted via ${escapeHtml(p.name)} on TradeICT Earner.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:12px;border:1px solid #334155;overflow:hidden;">
+      ${row("Full name", p.name)}
+      ${row("Email", p.email)}
+      ${row("Mobile", p.mobile)}
+      ${row("Preferred exchange(s)", p.exchange)}
+      ${row("Min. capital required", p.requiredCapital)}
+      ${row("Expected revenue share", `${p.expectedRevenueShare}%`)}
+    </table>
+    <h2 style="margin:28px 0 12px 0;font-size:16px;color:#f8fafc;">Strategy idea / edge</h2>
+    <div style="padding:16px;background:#1e293b;border-radius:12px;border:1px solid #334155;font-size:14px;line-height:1.6;white-space:pre-wrap;">${escapeHtml(p.strategyIdea)}</div>
+  </div>
+</body>
+</html>`;
+}
+
+function buildExpertApplicationText(p: ExpertTraderApplicationPayload): string {
+  return [
+    "New Expert Trader Application",
+    "",
+    `Name: ${p.name}`,
+    `Email: ${p.email}`,
+    `Mobile: ${p.mobile}`,
+    `Exchange(s): ${p.exchange}`,
+    `Minimum capital: ${p.requiredCapital}`,
+    `Expected revenue share: ${p.expectedRevenueShare}%`,
+    "",
+    "Strategy idea:",
+    p.strategyIdea,
+  ].join("\n");
+}
+
+/**
+ * Notifies operations when an expert trader applies via the public form.
+ * Recipient: EXPERT_APPLICATION_TO or support@tradeictai.com
+ */
+export async function sendExpertTraderApplicationEmail(
+  payload: ExpertTraderApplicationPayload,
+): Promise<void> {
+  const transport = createMailTransport();
+  const to =
+    process.env.EXPERT_APPLICATION_TO?.trim() || "support@tradeictai.com";
+
+  await transport.sendMail({
+    from: getFromAddress(),
+    to,
+    replyTo: payload.email,
+    subject: `New Expert Trader Application - ${payload.name}`,
+    text: buildExpertApplicationText(payload),
+    html: buildExpertApplicationHtml(payload),
   });
 }
 
