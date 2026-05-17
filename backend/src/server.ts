@@ -25,6 +25,7 @@ import { createBillingRoutes } from "./routes/billingRoutes.js";
 import { createPaymentRoutes } from "./routes/paymentRoutes.js";
 import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { createPublicRoutes } from "./routes/publicRoutes.js";
+import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
@@ -103,6 +104,11 @@ app.use("/api/live-trades", liveTradesRoutes);
 app.use("/live-trades", liveTradesRoutes);
 
 app.use("/api/analytics", createAnalyticsRoutes(prisma));
+
+const arbitrageRoutes = createArbitrageRoutes();
+app.use("/api/arbitrage", arbitrageRoutes);
+app.use("/arbitrage", arbitrageRoutes);
+
 app.use("/api/leaderboard", createLeaderboardRoutes(prisma));
 
 const subscriptionRoutes = createSubscriptionRoutes(prisma);

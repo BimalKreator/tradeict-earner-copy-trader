@@ -10,6 +10,7 @@ const links = [
   { href: "/dashboard/analytics", label: "Analytics" },
   { href: "/dashboard/strategies", label: "Strategies" },
   { href: "/dashboard/live-trades", label: "Live trades" },
+  { href: "/dashboard/dex-arbitrage", label: "Dex Arbitrage" },
   { href: "/dashboard/trades", label: "Trades" },
   { href: "/dashboard/payments", label: "Payments" },
   { href: "/dashboard/wallet", label: "Wallet" },
