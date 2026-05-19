@@ -60,13 +60,13 @@ function fmtTime(iso: string | null): string {
   }
 }
 
-/** Sum backend `livePnl` values as-is (exchange UPNL per leg; no client-side recalculation). */
+/** Sum backend `livePnl` as-is (includes 0 and negative values; no client-side PnL math). */
 function sumLivePnl(rows: LiveRow[]): number {
   let total = 0;
   for (const r of rows) {
-    if (typeof r.livePnl === "number" && Number.isFinite(r.livePnl)) {
-      total += r.livePnl;
-    }
+    const pnl = r.livePnl;
+    if (pnl === null || pnl === undefined) continue;
+    if (typeof pnl === "number" && Number.isFinite(pnl)) total += pnl;
   }
   return total;
 }

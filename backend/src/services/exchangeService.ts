@@ -113,52 +113,42 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
-/** Raw Delta position UPNL from `info` (trading + funding when both are present). */
-function extractDeltaUpnlFromInfo(
-  info: Record<string, unknown>,
-): number | null {
-  const tradingPnl =
-    numberOrNull(info.unrealized_pnl) ??
-    numberOrNull(info.unrealizedPnl) ??
-    numberOrNull(info.unrealised_pnl) ??
-    numberOrNull(info.unrealisedPnl) ??
-    numberOrNull(info.unrealized_pnl_usd) ??
-    numberOrNull(info.upnl) ??
-    numberOrNull(info.upl) ??
-    numberOrNull(info.total_unrealized_pnl) ??
-    numberOrNull(info.totalUnrealizedPnl);
-
-  const fundingPnl =
-    numberOrNull(info.unrealized_funding_pnl) ??
-    numberOrNull(info.unrealized_fundingPnl) ??
-    numberOrNull(info.unrealizedFundingPnl) ??
-    numberOrNull(info.unrealised_funding_pnl);
-
-  if (tradingPnl != null) {
-    if (fundingPnl != null) return tradingPnl + fundingPnl;
-    return tradingPnl;
-  }
-  if (fundingPnl != null) return fundingPnl;
-
-  return numberOrNull(info.pnl) ?? numberOrNull(info.profit);
-}
-
-/** Delta terminal UPNL from CCXT position (exchange-reported; never estimated here). */
-export function extractNativeUnrealizedPnl(p: {
+/**
+ * CCXT `unrealizedPnl` when present; otherwise `amount × (mark − entry)` with signed size
+ * (short/sell legs use negative amount when CCXT reports unsigned size).
+ */
+function resolveCcxtPositionUnrealizedPnl(p: {
   unrealizedPnl?: unknown;
-  info?: unknown;
+  amount?: unknown;
+  contracts?: unknown;
+  markPrice?: unknown;
+  entryPrice?: unknown;
+  side?: string | undefined;
 }): number | null {
-  const info =
-    p.info != null && typeof p.info === "object"
-      ? (p.info as Record<string, unknown>)
-      : undefined;
+  const fromCcxt = numberOrNull(p.unrealizedPnl);
+  if (fromCcxt != null) return fromCcxt;
 
-  if (info) {
-    const fromInfo = extractDeltaUpnlFromInfo(info);
-    if (fromInfo != null) return fromInfo;
+  const mark = numberOrNull(p.markPrice);
+  const entry = numberOrNull(p.entryPrice);
+  if (mark == null || entry == null) return null;
+
+  let amount = numberOrNull(p.amount);
+  if (amount == null) amount = numberOrNull(p.contracts);
+  if (amount == null || Math.abs(amount) < 1e-12) return null;
+
+  const sideRaw = (p.side ?? "").toLowerCase();
+  const isSell = sideRaw === "sell" || sideRaw === "short";
+  const isBuy = sideRaw === "buy" || sideRaw === "long";
+
+  if (isSell || isBuy) {
+    const absAmt = Math.abs(amount);
+    if (Math.abs(amount - absAmt) < 1e-12) {
+      const sign = isSell ? -1 : 1;
+      return sign * absAmt * (mark - entry);
+    }
   }
 
-  return numberOrNull(p.unrealizedPnl);
+  return amount * (mark - entry);
 }
 
 function extractFeeCostFromOrder(order: unknown): number | null {
@@ -623,7 +613,14 @@ export async function fetchDeltaOpenPositions(
         ? Number(p.markPrice)
         : null;
 
-    const unrealizedPnl = extractNativeUnrealizedPnl(p);
+    const unrealizedPnl = resolveCcxtPositionUnrealizedPnl({
+      unrealizedPnl: p.unrealizedPnl,
+      amount: amtRaw,
+      contracts: p.contracts,
+      markPrice: p.markPrice,
+      entryPrice: p.entryPrice,
+      side: typeof p.side === "string" ? p.side : undefined,
+    });
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
