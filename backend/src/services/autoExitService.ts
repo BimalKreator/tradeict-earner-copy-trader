@@ -49,10 +49,10 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
 }
 
 function legPnlUsd(pos: DeltaLivePosition, mark: number | null): number {
-  if (mark == null) {
-    const u = pos.unrealizedPnl;
-    return u != null && Number.isFinite(u) ? u : 0;
+  if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
+    return pos.unrealizedPnl;
   }
+  if (mark == null) return 0;
   const entry =
     pos.entryPrice != null && Number.isFinite(pos.entryPrice)
       ? pos.entryPrice

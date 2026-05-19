@@ -10,10 +10,7 @@ import {
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
-import {
-  estimateLivePnlUsd,
-  resolveLiveMarkPrice,
-} from "./liveMarkPriceCache.js";
+import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 export type LiveTradeRow = {
@@ -88,47 +85,17 @@ async function resolveMarkForLiveRow(
   return rest.markPrice;
 }
 
-/** Mark + PnL for dashboards: native Delta UPNL first; manual estimate only if missing. */
+/** Mark price for display; `livePnl` stays the exchange-reported UPNL from {@link deltaToRow}. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
   registerSymbolsForLivePrices([pos.symbolKey]);
   const mark = await resolveMarkForLiveRow(pos);
-
   const base = deltaToRow(pos);
-  const entryPx =
-    base.entryPrice ?? (mark != null && Number.isFinite(mark) ? mark : null);
-  const realSize = pos.realBaseSize;
-  const contractSize =
-    pos.contracts > 0 && pos.realBaseSize > 0
-      ? pos.realBaseSize / Math.abs(pos.contracts)
-      : undefined;
-
-  let livePnl = base.livePnl;
-  if (
-    mark != null &&
-    entryPx != null &&
-    Number.isFinite(entryPx) &&
-    Number.isFinite(realSize) &&
-    realSize > 0
-  ) {
-    livePnl = estimateLivePnlUsd({
-      symbolKey: pos.symbolKey,
-      side: pos.side,
-      entryPrice: entryPx,
-      contracts: pos.contracts,
-      markPrice: mark,
-      ...(contractSize != null ? { contractSize } : {}),
-    });
-  } else if (livePnl == null || !Number.isFinite(livePnl)) {
-    livePnl = base.livePnl;
-  }
 
   return {
     ...base,
-    entryPrice: entryPx,
     markPrice: mark ?? base.markPrice,
-    livePnl,
   };
 }
 

@@ -113,7 +113,37 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
-/** Delta terminal UPNL from CCXT position (includes fees/spread in exchange calc). */
+/** Raw Delta position UPNL from `info` (trading + funding when both are present). */
+function extractDeltaUpnlFromInfo(
+  info: Record<string, unknown>,
+): number | null {
+  const tradingPnl =
+    numberOrNull(info.unrealized_pnl) ??
+    numberOrNull(info.unrealizedPnl) ??
+    numberOrNull(info.unrealised_pnl) ??
+    numberOrNull(info.unrealisedPnl) ??
+    numberOrNull(info.unrealized_pnl_usd) ??
+    numberOrNull(info.upnl) ??
+    numberOrNull(info.upl) ??
+    numberOrNull(info.total_unrealized_pnl) ??
+    numberOrNull(info.totalUnrealizedPnl);
+
+  const fundingPnl =
+    numberOrNull(info.unrealized_funding_pnl) ??
+    numberOrNull(info.unrealized_fundingPnl) ??
+    numberOrNull(info.unrealizedFundingPnl) ??
+    numberOrNull(info.unrealised_funding_pnl);
+
+  if (tradingPnl != null) {
+    if (fundingPnl != null) return tradingPnl + fundingPnl;
+    return tradingPnl;
+  }
+  if (fundingPnl != null) return fundingPnl;
+
+  return numberOrNull(info.pnl) ?? numberOrNull(info.profit);
+}
+
+/** Delta terminal UPNL from CCXT position (exchange-reported; never estimated here). */
 export function extractNativeUnrealizedPnl(p: {
   unrealizedPnl?: unknown;
   info?: unknown;
@@ -122,11 +152,13 @@ export function extractNativeUnrealizedPnl(p: {
     p.info != null && typeof p.info === "object"
       ? (p.info as Record<string, unknown>)
       : undefined;
-  return (
-    numberOrNull(info?.unrealized_pnl) ??
-    numberOrNull(info?.unrealizedPnl) ??
-    numberOrNull(p.unrealizedPnl)
-  );
+
+  if (info) {
+    const fromInfo = extractDeltaUpnlFromInfo(info);
+    if (fromInfo != null) return fromInfo;
+  }
+
+  return numberOrNull(p.unrealizedPnl);
 }
 
 function extractFeeCostFromOrder(order: unknown): number | null {
@@ -591,13 +623,7 @@ export async function fetchDeltaOpenPositions(
         ? Number(p.markPrice)
         : null;
 
-    let unrealizedPnl = extractNativeUnrealizedPnl(p);
-    const ep = entryPrice != null && Number.isFinite(entryPrice) ? entryPrice : null;
-    const mp = markPrice != null && Number.isFinite(markPrice) ? markPrice : null;
-    if (unrealizedPnl === null && ep !== null && mp !== null) {
-      const sign = side === "BUY" ? 1 : -1;
-      unrealizedPnl = (mp - ep) * realBaseSize * sign;
-    }
+    const unrealizedPnl = extractNativeUnrealizedPnl(p);
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;

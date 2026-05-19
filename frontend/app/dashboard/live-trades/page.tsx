@@ -60,11 +60,15 @@ function fmtTime(iso: string | null): string {
   }
 }
 
+/** Sum backend `livePnl` values as-is (exchange UPNL per leg; no client-side recalculation). */
 function sumLivePnl(rows: LiveRow[]): number {
-  return rows.reduce((acc, r) => {
-    if (r.livePnl != null && Number.isFinite(r.livePnl)) return acc + r.livePnl;
-    return acc;
-  }, 0);
+  let total = 0;
+  for (const r of rows) {
+    if (typeof r.livePnl === "number" && Number.isFinite(r.livePnl)) {
+      total += r.livePnl;
+    }
+  }
+  return total;
 }
 
 export default function DashboardLiveTradesPage() {
@@ -123,7 +127,10 @@ export default function DashboardLiveTradesPage() {
           token: String(r.token ?? ""),
           entryPrice:
             typeof r.entryPrice === "number" ? r.entryPrice : null,
-          livePnl: typeof r.livePnl === "number" ? r.livePnl : null,
+          livePnl:
+            typeof r.livePnl === "number" && Number.isFinite(r.livePnl)
+              ? r.livePnl
+              : null,
           markPrice:
             typeof r.markPrice === "number" ? r.markPrice : null,
           side: String(r.side ?? ""),
