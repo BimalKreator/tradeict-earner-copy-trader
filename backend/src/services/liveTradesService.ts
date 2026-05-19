@@ -7,6 +7,7 @@ import {
 import {
   fetchDeltaMarkPrice,
   fetchDeltaOpenPositions,
+  isDeltaOptionProductId,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
@@ -68,12 +69,10 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Mark from WS cache → CCXT position mark → REST mark (never LTP / last / bid / ask). */
+/** Mark for display — options use exchange mark only (WS cache aliases break option premiums). */
 async function resolveMarkForLiveRow(
   pos: DeltaLivePosition,
 ): Promise<number | null> {
-  const cached = resolveLiveMarkPrice(pos.symbolKey);
-  if (cached != null) return cached;
   if (
     pos.markPrice != null &&
     Number.isFinite(pos.markPrice) &&
@@ -81,15 +80,26 @@ async function resolveMarkForLiveRow(
   ) {
     return pos.markPrice;
   }
+
+  if (isDeltaOptionProductId(pos.symbolKey)) {
+    const rest = await fetchDeltaMarkPrice(pos.symbolKey);
+    return rest.markPrice;
+  }
+
+  const cached = resolveLiveMarkPrice(pos.symbolKey);
+  if (cached != null) return cached;
+
   const rest = await fetchDeltaMarkPrice(pos.symbolKey);
   return rest.markPrice;
 }
 
-/** Mark for display only — never recalculate UPNL (exchangeService owns PnL). */
+/** Mark for display only — UPNL always from exchangeService (Delta unrealized_pnl). */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
-  registerSymbolsForLivePrices([pos.symbolKey]);
+  if (!isDeltaOptionProductId(pos.symbolKey)) {
+    registerSymbolsForLivePrices([pos.symbolKey]);
+  }
   const mark = await resolveMarkForLiveRow(pos);
   const base = deltaToRow(pos);
 

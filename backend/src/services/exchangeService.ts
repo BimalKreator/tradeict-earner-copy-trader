@@ -123,23 +123,51 @@ function extractDeltaFundingPnl(info: Record<string, unknown>): number {
   );
 }
 
-/** Trading UPNL only (exclude funding — added separately). */
+/** Trading UPNL only (exclude funding — added separately when present). */
 function extractDeltaTradingUpnl(info: Record<string, unknown>): number | null {
+  const product =
+    info.product != null && typeof info.product === "object"
+      ? (info.product as Record<string, unknown>)
+      : null;
+
+  const candidates: unknown[] = [
+    info.unrealized_pnl,
+    info.unrealised_pnl,
+    info.unrealizedPnl,
+    info.unrealisedPnl,
+    info.unrealized_pnl_usd,
+    info.unrealised_pnl_usd,
+    info.upnl,
+    info.upl,
+    info.pnl,
+    product?.unrealized_pnl,
+    product?.unrealised_pnl,
+  ];
+
+  for (const raw of candidates) {
+    const n = numberOrNull(raw);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function extractDeltaMarkPrice(position: Record<string, unknown>): number | null {
+  const product =
+    position.product != null && typeof position.product === "object"
+      ? (position.product as Record<string, unknown>)
+      : null;
+
   return (
-    numberOrNull(info.unrealized_pnl) ??
-    numberOrNull(info.unrealised_pnl) ??
-    numberOrNull(info.unrealizedPnl) ??
-    numberOrNull(info.unrealisedPnl) ??
-    numberOrNull(info.upnl) ??
-    numberOrNull(info.upl)
+    numberOrNull(position.mark_price) ??
+    numberOrNull(position.markPrice) ??
+    numberOrNull(product?.mark_price) ??
+    numberOrNull(product?.markPrice)
   );
 }
 
 /** @deprecated Use {@link resolveDeltaPositionUpnl} — kept for internal parse only. */
 function extractDeltaTerminalUpnl(info: Record<string, unknown>): number | null {
-  const trading = extractDeltaTradingUpnl(info);
-  if (trading === null) return null;
-  return trading + extractDeltaFundingPnl(info);
+  return extractDeltaTradingUpnl(info);
 }
 
 function deltaContractValueFromMarket(
@@ -198,7 +226,8 @@ function computeDeltaUpnlUsd(
 }
 
 /**
- * Prefer exchange UPNL when it matches computed; otherwise computed wins (fixes wrong sign/magnitude).
+ * Terminal UPNL: trust Delta `unrealized_pnl` when present (matches exchange UI).
+ * Override API only when sign clearly wrong vs size×Δmark (legacy +$408 bug).
  */
 function resolveDeltaPositionUpnl(args: {
   position: Record<string, unknown>;
@@ -215,18 +244,18 @@ function resolveDeltaPositionUpnl(args: {
   );
 
   const apiTrading = extractDeltaTradingUpnl(args.position);
-  if (apiTrading === null) return computed;
+  if (apiTrading !== null) {
+    const fromApi = apiTrading;
+    const oppositeSign =
+      Math.sign(fromApi) !== Math.sign(computed) &&
+      Math.abs(fromApi) > 5 &&
+      Math.abs(computed) > 5;
+    const magnitudeMismatch =
+      Math.abs(fromApi) > Math.max(75, Math.abs(computed) * 4);
 
-  const fromApi = apiTrading + funding;
-  const diff = Math.abs(fromApi - computed);
-  const tolerance = Math.max(2.5, Math.abs(computed) * 0.2);
-
-  const sameSign =
-    Math.sign(fromApi) === Math.sign(computed) ||
-    Math.abs(computed) < 0.05 ||
-    Math.abs(fromApi) < 0.05;
-
-  if (sameSign && diff <= tolerance) {
+    if (oppositeSign && magnitudeMismatch) {
+      return computed;
+    }
     return fromApi;
   }
 
@@ -686,7 +715,16 @@ export async function fetchDeltaOpenPositions(
     const entryPrice =
       numberOrNull(position.entry_price) ??
       numberOrNull(position.average_price);
-    const markPrice = numberOrNull(position.mark_price);
+    let markPrice = extractDeltaMarkPrice(position);
+
+    if (markPrice === null) {
+      try {
+        const ticker = await exchange.fetchTicker(unified);
+        markPrice = extractMarkFromCcxtTicker(ticker);
+      } catch {
+        /* mark stays null — UPNL may still come from unrealized_pnl */
+      }
+    }
 
     let unrealizedPnl: number | null = null;
     if (entryPrice !== null && markPrice !== null) {
