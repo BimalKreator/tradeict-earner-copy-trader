@@ -126,58 +126,6 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
-/**
- * Terminal UPNL column only — never `pnl` / `upnl` (those are other metrics and
- * caused +$315 instead of +$86 when misread as unrealized PnL).
- */
-function extractDeltaTradingUpnl(info: Record<string, unknown>): number | null {
-  const product =
-    info.product != null && typeof info.product === "object"
-      ? (info.product as Record<string, unknown>)
-      : null;
-
-  const candidates: unknown[] = [
-    info.unrealized_pnl,
-    info.unrealised_pnl,
-    info.unrealizedPnl,
-    info.unrealisedPnl,
-    info.unrealized_pnl_usd,
-    info.unrealised_pnl_usd,
-    product?.unrealized_pnl,
-    product?.unrealised_pnl,
-  ];
-
-  for (const raw of candidates) {
-    const n = numberOrNull(raw);
-    if (n !== null) return n;
-  }
-
-  const scanObject = (obj: Record<string, unknown>): number | null => {
-    for (const [key, value] of Object.entries(obj)) {
-      const k = key.toLowerCase().replace(/-/g, "_");
-      if (k.includes("realized") && !k.includes("unreal")) continue;
-      if (k.includes("funding") && !k.includes("unreal")) continue;
-      const isUpnl =
-        (k.includes("unreal") && k.includes("pnl")) ||
-        k === "upnl" ||
-        k === "upl";
-      if (!isUpnl) continue;
-      const n = numberOrNull(value);
-      if (n !== null) return n;
-    }
-    return null;
-  };
-
-  const fromRoot = scanObject(info);
-  if (fromRoot !== null) return fromRoot;
-  if (product) {
-    const fromProduct = scanObject(product);
-    if (fromProduct !== null) return fromProduct;
-  }
-
-  return null;
-}
-
 function extractDeltaMarkPrice(position: Record<string, unknown>): number | null {
   const product =
     position.product != null && typeof position.product === "object"
@@ -712,20 +660,23 @@ export async function fetchDeltaOpenPositions(
       }
     }
 
-    // 1) Exchange terminal UPNL (authoritative)
-    let unrealizedPnl = extractDeltaTradingUpnl(position);
+    // Delta native UPNL from margined position (authoritative); math fallback only if absent.
+    let unrealizedPnl: number | null = null;
+    const info = position;
+    const rawUpnl = info.unrealized_pnl ?? info.upnl;
 
-    // 2) Fallback only when Delta omits UPNL (should be rare on /positions/margined)
-    if (
-      unrealizedPnl === null &&
-      entryPrice !== null &&
-      markPrice !== null
-    ) {
-      unrealizedPnl = signedBtc * (markPrice - entryPrice);
+    if (rawUpnl !== undefined && rawUpnl !== null) {
+      unrealizedPnl = parseFloat(String(rawUpnl));
+      const funding = parseFloat(String(info.unrealized_funding_pnl ?? "0"));
+      if (!Number.isNaN(funding)) unrealizedPnl += funding;
+    } else if (entryPrice !== null && markPrice !== null) {
+      const sign = side === "SELL" ? -1 : 1;
+      unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
       console.warn(
-        `[exchangeService] Live UPNL fallback product=${productSymbol} signedBtc=${signedBtc} entry=${entryPrice} mark=${markPrice} computed=${unrealizedPnl} keys=${Object.keys(position).join(",")}`,
+        `[exchangeService] Live UPNL fallback product=${productSymbol} realBaseSize=${realBaseSize} side=${side} entry=${entryPrice} mark=${markPrice} computed=${unrealizedPnl}`,
       );
     }
+    if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
