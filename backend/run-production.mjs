@@ -26,11 +26,13 @@ for (const p of [exchangeSvc, serverJs]) {
 }
 
 const exBody = fs.readFileSync(exchangeSvc, "utf8");
-if (!exBody.includes("resolveDeltaPositionUpnl")) {
+if (
+  !exBody.includes("market.option === true || isDeltaOptionProductId") ||
+  exBody.includes("resolveDeltaPositionUpnl")
+) {
   fatal(
-    "FATAL: dist/services/exchangeService.js is stale (no Delta UPNL resolver).\n" +
-      "Live PnL will be wrong until you rebuild.\n" +
-      "Fix:\n" +
+    "FATAL: dist/services/exchangeService.js is stale (wrong Live PnL logic).\n" +
+      "Rebuild required:\n" +
       `  cd ${__dirname}\n` +
       "  rm -rf dist && npm ci && npm run build\n" +
       "  cd .. && pm2 delete tradeict-bot 2>/dev/null; pm2 start ecosystem.config.cjs && pm2 save\n",

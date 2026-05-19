@@ -113,17 +113,10 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
-function extractDeltaFundingPnl(info: Record<string, unknown>): number {
-  return (
-    numberOrNull(info.unrealized_funding_pnl) ??
-    numberOrNull(info.unrealised_funding_pnl) ??
-    numberOrNull(info.unrealized_funding) ??
-    numberOrNull(info.unrealised_funding) ??
-    0
-  );
-}
-
-/** Trading UPNL only (exclude funding — added separately when present). */
+/**
+ * Terminal UPNL column only — never `pnl` / `upnl` (those are other metrics and
+ * caused +$315 instead of +$86 when misread as unrealized PnL).
+ */
 function extractDeltaTradingUpnl(info: Record<string, unknown>): number | null {
   const product =
     info.product != null && typeof info.product === "object"
@@ -137,9 +130,6 @@ function extractDeltaTradingUpnl(info: Record<string, unknown>): number | null {
     info.unrealisedPnl,
     info.unrealized_pnl_usd,
     info.unrealised_pnl_usd,
-    info.upnl,
-    info.upl,
-    info.pnl,
     product?.unrealized_pnl,
     product?.unrealised_pnl,
   ];
@@ -163,11 +153,6 @@ function extractDeltaMarkPrice(position: Record<string, unknown>): number | null
     numberOrNull(product?.mark_price) ??
     numberOrNull(product?.markPrice)
   );
-}
-
-/** @deprecated Use {@link resolveDeltaPositionUpnl} — kept for internal parse only. */
-function extractDeltaTerminalUpnl(info: Record<string, unknown>): number | null {
-  return extractDeltaTradingUpnl(info);
 }
 
 function deltaContractValueFromMarket(
@@ -213,53 +198,6 @@ function deltaSignedBtcSize(rawSize: number, contractValue: number): number {
   }
 
   return rawSize;
-}
-
-/** Canonical options/perps UPNL: signed BTC × (mark − entry) + funding. */
-function computeDeltaUpnlUsd(
-  signedBtc: number,
-  entryPrice: number,
-  markPrice: number,
-  fundingPnl: number,
-): number {
-  return signedBtc * (markPrice - entryPrice) + fundingPnl;
-}
-
-/**
- * Terminal UPNL: trust Delta `unrealized_pnl` when present (matches exchange UI).
- * Override API only when sign clearly wrong vs size×Δmark (legacy +$408 bug).
- */
-function resolveDeltaPositionUpnl(args: {
-  position: Record<string, unknown>;
-  signedBtc: number;
-  entryPrice: number;
-  markPrice: number;
-}): number {
-  const funding = extractDeltaFundingPnl(args.position);
-  const computed = computeDeltaUpnlUsd(
-    args.signedBtc,
-    args.entryPrice,
-    args.markPrice,
-    funding,
-  );
-
-  const apiTrading = extractDeltaTradingUpnl(args.position);
-  if (apiTrading !== null) {
-    const fromApi = apiTrading;
-    const oppositeSign =
-      Math.sign(fromApi) !== Math.sign(computed) &&
-      Math.abs(fromApi) > 5 &&
-      Math.abs(computed) > 5;
-    const magnitudeMismatch =
-      Math.abs(fromApi) > Math.max(75, Math.abs(computed) * 4);
-
-    if (oppositeSign && magnitudeMismatch) {
-      return computed;
-    }
-    return fromApi;
-  }
-
-  return computed;
 }
 
 function extractFeeCostFromOrder(order: unknown): number | null {
@@ -704,8 +642,16 @@ export async function fetchDeltaOpenPositions(
       continue;
     }
 
-    const contractValue = deltaContractValueFromMarket(market, position);
-    const signedBtc = deltaSignedBtcSize(rawSize, contractValue);
+    const isOption =
+      market.option === true || isDeltaOptionProductId(productSymbol);
+
+    // Options: Delta `size` is already signed BTC (±0.1) — do not × contract_value again.
+    const signedBtc = isOption
+      ? rawSize
+      : deltaSignedBtcSize(
+          rawSize,
+          deltaContractValueFromMarket(market, position),
+        );
     if (Math.abs(signedBtc) < 1e-12) continue;
 
     const symbolKey = symbolKeyFromCcxtMarket(unified, market);
@@ -726,16 +672,16 @@ export async function fetchDeltaOpenPositions(
       }
     }
 
-    let unrealizedPnl: number | null = null;
-    if (entryPrice !== null && markPrice !== null) {
-      unrealizedPnl = resolveDeltaPositionUpnl({
-        position,
-        signedBtc,
-        entryPrice,
-        markPrice,
-      });
-    } else {
-      unrealizedPnl = extractDeltaTerminalUpnl(position);
+    // 1) Exchange terminal UPNL (authoritative)
+    let unrealizedPnl = extractDeltaTradingUpnl(position);
+
+    // 2) Fallback: signed BTC × (mark − entry) — options only when API omits UPNL
+    if (
+      unrealizedPnl === null &&
+      entryPrice !== null &&
+      markPrice !== null
+    ) {
+      unrealizedPnl = signedBtc * (markPrice - entryPrice);
     }
 
     let stopLoss: number | null = null;
