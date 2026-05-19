@@ -21,7 +21,7 @@ type LiveRow = {
   entryTime: string | null;
   token: string;
   entryPrice: number | null;
-  livePnl: number | null;
+  livePnl: number;
   markPrice: number | null;
   side: string;
   size?: number | null;
@@ -47,8 +47,10 @@ function fmtPrice(n: number | null | undefined): string {
 }
 
 function fmtPnl(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return usdPnlFmt.format(n);
+  if (typeof n === "number" && Number.isFinite(n)) {
+    return usdPnlFmt.format(n);
+  }
+  return usdPnlFmt.format(0);
 }
 
 function fmtTime(iso: string | null): string {
@@ -65,7 +67,6 @@ function sumLivePnl(rows: LiveRow[]): number {
   let total = 0;
   for (const r of rows) {
     const pnl = r.livePnl;
-    if (pnl === null || pnl === undefined) continue;
     if (typeof pnl === "number" && Number.isFinite(pnl)) total += pnl;
   }
   return total;
@@ -130,7 +131,7 @@ export default function DashboardLiveTradesPage() {
           livePnl:
             typeof r.livePnl === "number" && Number.isFinite(r.livePnl)
               ? r.livePnl
-              : null,
+              : 0,
           markPrice:
             typeof r.markPrice === "number" ? r.markPrice : null,
           side: String(r.side ?? ""),
@@ -293,11 +294,9 @@ export default function DashboardLiveTradesPage() {
                     </td>
                     <td
                       className={`px-4 py-3 tabular-nums font-medium ${
-                        r.livePnl != null && r.livePnl >= 0
+                        r.livePnl >= 0
                           ? "text-emerald-400"
-                          : r.livePnl != null
-                            ? "text-red-300"
-                            : "text-white/60"
+                          : "text-red-300"
                       }`}
                     >
                       {fmtPnl(r.livePnl)}
