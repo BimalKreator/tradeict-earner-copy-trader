@@ -678,6 +678,24 @@ export async function fetchDeltaOpenPositions(
     }
     if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
+    const contractLots = rawSize;
+    const pInfo = position;
+
+    console.log(`\n[PNL_TRACKER] -------------------------`);
+    console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side}`);
+    console.log(
+      `[PNL_TRACKER] CCXT Size (contracts): ${contractLots} | RealBaseSize: ${realBaseSize}`,
+    );
+    console.log(`[PNL_TRACKER] Entry Price: ${entryPrice} | Mark Price: ${markPrice}`);
+    console.log(`[PNL_TRACKER] CCXT Parsed PnL: null`);
+    console.log(
+      `[PNL_TRACKER] Raw API PnL (info.unrealized_pnl): ${
+        pInfo.unrealized_pnl ?? pInfo.upnl ?? "MISSING INFO"
+      }`,
+    );
+    console.log(`[PNL_TRACKER] FINAL LIVE PNL SENT TO UI: ${unrealizedPnl}`);
+    console.log(`[PNL_TRACKER] -------------------------\n`);
+
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
     const sl =
