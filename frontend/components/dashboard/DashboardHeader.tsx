@@ -78,7 +78,18 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
     };
   }, [accountMenuOpen]);
 
-  function handleLogout() {
+  async function handleLogout() {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    try {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch {
+      /* proceed with client logout */
+    }
     localStorage.removeItem("token");
     setAccountMenuOpen(false);
     router.push("/login");

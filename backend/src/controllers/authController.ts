@@ -8,6 +8,11 @@ import {
   isEmailDomainAllowed,
 } from "../services/settingsService.js";
 import { sendOtpEmail } from "../utils/emailService.js";
+import {
+  clearAuthCookie,
+  setAuthCookie,
+  signAuthToken,
+} from "../utils/authToken.js";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const BCRYPT_ROUNDS = 12;
@@ -32,6 +37,16 @@ function sanitizeUser(user: {
     name: user.name,
     role: user.role,
   };
+}
+
+function issueAuthSession(
+  res: Response,
+  user: { id: string; email: string },
+  secret: string,
+): string {
+  const token = signAuthToken({ sub: user.id, email: user.email }, secret);
+  setAuthCookie(res, token);
+  return token;
 }
 
 function isRazorpayBypassLogin(email: string, password: string): boolean {
@@ -222,11 +237,7 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
-      const token = jwt.sign(
-        { sub: user.id, email: user.email },
-        secret,
-        { expiresIn: "7d" },
-      );
+      const token = issueAuthSession(res, user, secret);
 
       res.status(200).json({ token });
     } catch (err) {
@@ -278,11 +289,7 @@ export function createAuthController(prisma: PrismaClient) {
         isRazorpayBypassLogin(emailForBypass, password)
       ) {
         const user = await ensureRazorpayTestUser(prisma);
-        const token = jwt.sign(
-          { sub: user.id, email: user.email },
-          secret,
-          { expiresIn: "7d" },
-        );
+        const token = issueAuthSession(res, user, secret);
         res.status(200).json({
           success: true,
           token,
@@ -373,11 +380,7 @@ export function createAuthController(prisma: PrismaClient) {
         },
       });
 
-      const token = jwt.sign(
-        { sub: user.id, email: user.email },
-        secret,
-        { expiresIn: "7d" },
-      );
+      const token = issueAuthSession(res, user, secret);
 
       res.status(200).json({
         success: true,
@@ -387,6 +390,11 @@ export function createAuthController(prisma: PrismaClient) {
     } catch (err) {
       next(err);
     }
+  }
+
+  async function logout(_req: Request, res: Response): Promise<void> {
+    clearAuthCookie(res);
+    res.status(200).json({ ok: true });
   }
 
   async function forgotPassword(
@@ -500,6 +508,7 @@ export function createAuthController(prisma: PrismaClient) {
     registerWithOtp,
     login,
     verifyOtp,
+    logout,
     forgotPassword,
     resetPassword,
   };

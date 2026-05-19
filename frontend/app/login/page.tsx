@@ -48,6 +48,7 @@ function LoginForm() {
     try {
       const res = await fetch(`${AUTH_API}/auth/login`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: identifier.trim(),
@@ -121,6 +122,7 @@ function LoginForm() {
     try {
       const res = await fetch(`${AUTH_API}/auth/verify-otp`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: email.trim().toLowerCase(),
