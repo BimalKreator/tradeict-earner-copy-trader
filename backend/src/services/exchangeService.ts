@@ -633,11 +633,17 @@ export async function fetchDeltaOpenPositions(
     const isOption =
       market.option === true || isDeltaOptionProductId(productSymbol);
 
-    // Options: Delta `size` is already signed BTC (±0.1) — do not × contract_value again.
+    const contractLots = rawSize;
+    const fallbackSize = deltaContractSizeFallback(unified);
+    const csRaw = Number(market.contractSize ?? fallbackSize);
+    const contractSize =
+      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : fallbackSize;
+
+    // Options: API `size` is contract count (±100) → scale to BTC (±0.1) via contractSize.
     const signedBtc = isOption
-      ? rawSize
+      ? contractLots * contractSize
       : deltaSignedBtcSize(
-          rawSize,
+          contractLots,
           deltaContractValueFromMarket(market, position),
         );
     if (Math.abs(signedBtc) < 1e-12) continue;
@@ -661,47 +667,34 @@ export async function fetchDeltaOpenPositions(
     }
 
     let unrealizedPnl: number | null = null;
-    const info = position;
+    const apiUpnlRaw = position.unrealized_pnl;
 
-    // STRICT RULE: NEVER fallback to `info.upnl` or `info.pnl`. They contain invalid metrics.
-    const rawUpnl = info.unrealized_pnl;
-
-    if (rawUpnl !== undefined && rawUpnl !== null) {
-      unrealizedPnl = parseFloat(String(rawUpnl));
-      const funding = parseFloat(String(info.unrealized_funding_pnl ?? "0"));
-      if (!Number.isNaN(funding)) unrealizedPnl += funding;
-    } else if (
-      position.unrealizedPnl !== undefined &&
-      position.unrealizedPnl !== null
-    ) {
-      unrealizedPnl = parseFloat(String(position.unrealizedPnl));
-    } else if (entryPrice !== null && markPrice !== null) {
-      // Correct mathematical fallback for options & perps
+    if (entryPrice !== null && markPrice !== null) {
+      // Options: Delta `unrealized_pnl` ≈ notional (mark×size), not terminal UPNL — always math.
+      // Perps: same formula; API field kept for debug only.
       const sign = side === "SELL" ? -1 : 1;
       unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
-      console.warn(
-        `[exchangeService] Live UPNL fallback product=${productSymbol} realBaseSize=${realBaseSize} side=${side} entry=${entryPrice} mark=${markPrice} computed=${unrealizedPnl}`,
-      );
+
+      const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
+      if (!Number.isNaN(funding)) unrealizedPnl += funding;
+    } else if (!isOption && apiUpnlRaw !== undefined && apiUpnlRaw !== null) {
+      unrealizedPnl = parseFloat(String(apiUpnlRaw));
+      const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
+      if (!Number.isNaN(funding) && unrealizedPnl !== null) unrealizedPnl += funding;
     }
 
     if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
-    const contractLots = rawSize;
-    const pInfo = position;
-
     console.log(`\n[PNL_TRACKER] -------------------------`);
-    console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side}`);
+    console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side} | option=${isOption}`);
     console.log(
-      `[PNL_TRACKER] CCXT Size (contracts): ${contractLots} | RealBaseSize: ${realBaseSize}`,
+      `[PNL_TRACKER] Contract lots: ${contractLots} × contractSize=${contractSize} → RealBaseSize(BTC)=${realBaseSize}`,
     );
     console.log(`[PNL_TRACKER] Entry Price: ${entryPrice} | Mark Price: ${markPrice}`);
-    console.log(`[PNL_TRACKER] CCXT Parsed PnL: null`);
     console.log(
-      `[PNL_TRACKER] Raw API PnL (unrealized_pnl only): ${
-        pInfo.unrealized_pnl ?? "MISSING — math fallback"
-      } | ignored upnl=${String(pInfo.upnl ?? "n/a")}`,
+      `[PNL_TRACKER] API unrealized_pnl (ignored for options): ${apiUpnlRaw ?? "n/a"}`,
     );
-    console.log(`[PNL_TRACKER] FINAL LIVE PNL SENT TO UI: ${unrealizedPnl}`);
+    console.log(`[PNL_TRACKER] FINAL LIVE PNL SENT TO UI (math): ${unrealizedPnl}`);
     console.log(`[PNL_TRACKER] -------------------------\n`);
 
     let stopLoss: number | null = null;
