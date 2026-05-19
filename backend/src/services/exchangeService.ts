@@ -655,14 +655,23 @@ export async function fetchDeltaOpenPositions(
     const entryPrice =
       numberOrNull(position.entry_price) ??
       numberOrNull(position.average_price);
-    let markPrice = extractDeltaMarkPrice(position);
 
-    if (markPrice === null) {
+    // Prefer Delta margined API `mark_price` — CCXT ticker marks are often stale for options.
+    let markPrice: number | null = null;
+    if (position.mark_price !== undefined && position.mark_price !== null) {
+      const parsed = parseFloat(String(position.mark_price));
+      markPrice = Number.isFinite(parsed) ? parsed : null;
+    } else if (position.markPrice !== undefined && position.markPrice !== null) {
+      const parsed = Number(position.markPrice);
+      markPrice = Number.isFinite(parsed) ? parsed : null;
+    }
+
+    if (markPrice === null && !isOption) {
       try {
         const ticker = await exchange.fetchTicker(unified);
         markPrice = extractMarkFromCcxtTicker(ticker);
       } catch {
-        /* mark stays null — UPNL may still come from unrealized_pnl */
+        /* perp mark stays null */
       }
     }
 

@@ -100,12 +100,11 @@ async function enrichPositionLiveRow(
   if (!isDeltaOptionProductId(pos.symbolKey)) {
     registerSymbolsForLivePrices([pos.symbolKey]);
   }
-  const mark = await resolveMarkForLiveRow(pos);
   const base = deltaToRow(pos);
 
   return {
     ...base,
-    markPrice: pos.markPrice ?? mark ?? base.markPrice,
+    markPrice: pos.markPrice ?? base.markPrice,
     livePnl: base.livePnl,
   };
 }
