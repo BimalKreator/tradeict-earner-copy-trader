@@ -113,88 +113,6 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
-/** Fail-safe UPNL: CCXT field → Delta `info` → signed-size formula (never NaN). */
-export function resolveCcxtPositionUnrealizedPnl(position: {
-  unrealizedPnl?: unknown;
-  markPrice?: unknown;
-  entryPrice?: unknown;
-  amount?: unknown;
-  contracts?: unknown;
-  side?: unknown;
-  info?: unknown;
-}): number {
-  // 1. Try standard CCXT parsed value first
-  if (
-    typeof position.unrealizedPnl === "number" &&
-    !Number.isNaN(position.unrealizedPnl)
-  ) {
-    return position.unrealizedPnl;
-  }
-  if (
-    typeof position.unrealizedPnl === "string" &&
-    position.unrealizedPnl.trim() !== ""
-  ) {
-    const parsedCcxt = Number.parseFloat(position.unrealizedPnl);
-    if (!Number.isNaN(parsedCcxt)) return parsedCcxt;
-  }
-
-  const info =
-    position.info != null && typeof position.info === "object"
-      ? (position.info as Record<string, unknown>)
-      : undefined;
-
-  // 2. Try raw Delta API extraction directly
-  const rawUpnl = info?.unrealized_pnl ?? info?.upnl;
-  if (rawUpnl !== undefined && rawUpnl !== null) {
-    const parsedRaw =
-      typeof rawUpnl === "number"
-        ? rawUpnl
-        : Number.parseFloat(String(rawUpnl));
-    if (!Number.isNaN(parsedRaw)) return parsedRaw;
-  }
-
-  // 3. Mathematical fallback with safe defaults to prevent NaN
-  const markFromInfo = info?.mark_price;
-  const entryFromInfo = info?.entry_price ?? info?.average_price;
-  const sizeFromInfo = info?.size;
-
-  const markPrice =
-    numberOrNull(position.markPrice) ??
-    (markFromInfo != null ? Number.parseFloat(String(markFromInfo)) : NaN);
-  const entryPrice =
-    numberOrNull(position.entryPrice) ??
-    (entryFromInfo != null ? Number.parseFloat(String(entryFromInfo)) : NaN);
-
-  const rawSize =
-    numberOrNull(position.amount) ??
-    numberOrNull(position.contracts) ??
-    (sizeFromInfo != null ? Number.parseFloat(String(sizeFromInfo)) : NaN);
-
-  const safeMark = Number.isFinite(markPrice) ? markPrice : 0;
-  const safeEntry = Number.isFinite(entryPrice) ? entryPrice : 0;
-  const safeRawSize = Number.isFinite(rawSize) ? rawSize : 0;
-
-  let signedSize = Math.abs(safeRawSize);
-  const side = position.side ?? info?.side;
-  const sideStr = typeof side === "string" ? side.toLowerCase() : "";
-  const infoSize =
-    sizeFromInfo != null ? Number.parseFloat(String(sizeFromInfo)) : NaN;
-
-  // Delta naturally sends negative sizes for short positions in raw info
-  if (
-    sideStr === "sell" ||
-    sideStr === "short" ||
-    (Number.isFinite(infoSize) && infoSize < 0)
-  ) {
-    signedSize = -Math.abs(safeRawSize);
-  }
-
-  const calculatedPnl = signedSize * (safeMark - safeEntry);
-
-  // Ensure we NEVER return NaN to the frontend
-  return Number.isNaN(calculatedPnl) ? 0 : calculatedPnl;
-}
-
 function extractFeeCostFromOrder(order: unknown): number | null {
   if (order == null || typeof order !== "object") return null;
   const o = order as {
@@ -657,12 +575,52 @@ export async function fetchDeltaOpenPositions(
         ? Number(p.markPrice)
         : null;
 
-    const unrealizedPnl = resolveCcxtPositionUnrealizedPnl(p);
+    const info = (
+      p.info != null && typeof p.info === "object"
+        ? p.info
+        : {}
+    ) as Record<string, unknown>;
+
+    let unrealizedPnl: number | null = null;
+
+    // 1. Direct from Delta's raw API response (matches terminal)
+    const rawUpnl = info.unrealized_pnl ?? info.upnl ?? info.unrealizedPnl;
+    if (rawUpnl !== undefined && rawUpnl !== null) {
+      const parsed = Number.parseFloat(String(rawUpnl));
+      if (!Number.isNaN(parsed)) {
+        unrealizedPnl = parsed;
+        const funding = Number.parseFloat(String(info.unrealized_funding_pnl ?? "0"));
+        if (!Number.isNaN(funding)) {
+          unrealizedPnl += funding;
+        }
+      }
+    }
+
+    // 2. Fallback to CCXT's parsed value if raw is missing
+    if (
+      unrealizedPnl === null &&
+      p.unrealizedPnl !== undefined &&
+      p.unrealizedPnl !== null
+    ) {
+      const parsed = Number.parseFloat(String(p.unrealizedPnl));
+      if (!Number.isNaN(parsed)) unrealizedPnl = parsed;
+    }
+
+    // 3. Mathematical fallback using correctly scaled realBaseSize
+    if (
+      unrealizedPnl === null &&
+      entryPrice !== null &&
+      markPrice !== null &&
+      Number.isFinite(entryPrice) &&
+      Number.isFinite(markPrice)
+    ) {
+      const sign = side === "SELL" ? -1 : 1;
+      unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+    }
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
-    const info = p.info as Record<string, unknown> | undefined;
-    if (info && typeof info === "object") {
+    if (Object.keys(info).length > 0) {
       const sl =
         typeof info.stop_loss_order_price === "number"
           ? info.stop_loss_order_price
@@ -698,7 +656,10 @@ export async function fetchDeltaOpenPositions(
       realBaseSize,
       entryPrice: Number.isFinite(entryPrice ?? NaN) ? entryPrice : null,
       markPrice: Number.isFinite(markPrice ?? NaN) ? markPrice : null,
-      unrealizedPnl: Number.isFinite(unrealizedPnl) ? unrealizedPnl : 0,
+      unrealizedPnl:
+        unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
+          ? unrealizedPnl
+          : null,
       stopLoss,
       takeProfit,
       entryTime,
