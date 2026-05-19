@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Menu, User } from "lucide-react";
+import { BrandLogo } from "@/components/BrandLogo";
 import { NotificationBell } from "@/components/common/NotificationBell";
 
 type DashboardHeaderProps = {
@@ -31,14 +32,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
           >
             <Menu className="h-5 w-5" strokeWidth={2} />
           </button>
-          <div className="min-w-0">
-            <span className="text-xs font-medium uppercase tracking-widest text-primary">
-              TradeICT
-            </span>
-            <p className="text-lg font-semibold leading-tight text-white">
-              TradeICT Earner
-            </p>
-          </div>
+          <BrandLogo href="/dashboard" width={150} height={40} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <NotificationBell />

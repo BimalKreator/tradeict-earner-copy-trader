@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { BrandLogo } from "@/components/BrandLogo";
 import {
   BarChart3,
   Download,
@@ -40,10 +41,8 @@ export function AdminSidebar() {
   return (
     <aside className="glass-card flex h-screen w-64 shrink-0 flex-col border border-glassBorder p-6 md:sticky md:top-0">
       <div className="mb-8">
-        <p className="text-xs font-medium uppercase tracking-widest text-primary">
-          TradeICT
-        </p>
-        <h1 className="mt-1 text-lg font-semibold text-white">Admin Panel</h1>
+        <BrandLogo href="/admin" width={150} height={40} />
+        <p className="mt-2 text-xs font-medium text-white/50">Admin Panel</p>
       </div>
       <nav className="flex flex-1 flex-col gap-1">
         {links.map(({ href, label, icon: Icon }) => {

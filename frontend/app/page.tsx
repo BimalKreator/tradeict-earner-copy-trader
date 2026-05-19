@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { BrandLogo } from "@/components/BrandLogo";
 
 const steps = [
   { n: 1, title: "Register with TradeICT", body: "Create your account and verify your email in minutes." },
@@ -12,12 +13,7 @@ export default function Home() {
     <div className="flex min-h-full flex-col">
       <header className="glass-nav sticky top-0 z-50">
         <nav className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
-          <Link
-            href="/"
-            className="text-lg font-semibold tracking-tight text-white transition hover:text-primary"
-          >
-            <span className="text-primary">TradeICT</span> Earner
-          </Link>
+          <BrandLogo href="/" width={150} height={40} priority />
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             <Link
               href="/pricing"

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { X } from "lucide-react";
+import { BrandLogo } from "@/components/BrandLogo";
 
 const links = [
   { href: "/dashboard", label: "Home" },
@@ -40,10 +41,8 @@ export function DashboardSidebar({ mobileOpen, onClose }: DashboardSidebarProps)
     >
       <div className="mb-8 flex items-start justify-between gap-2">
         <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-primary">
-            TradeICT
-          </p>
-          <h1 className="mt-1 text-lg font-semibold text-white">Dashboard</h1>
+          <BrandLogo href="/dashboard" width={150} height={40} />
+          <p className="mt-2 text-xs font-medium text-white/50">Dashboard</p>
         </div>
         <button
           type="button"
