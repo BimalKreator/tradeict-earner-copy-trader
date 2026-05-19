@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Footer } from "@/components/Footer";
+import { Providers } from "@/components/Providers";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -56,8 +57,10 @@ export default function RootLayout({
         <link rel="manifest" href="/manifest.json" />
       </head>
       <body className="flex min-h-full flex-col">
-        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
-        <Footer />
+        <Providers>
+          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+          <Footer />
+        </Providers>
       </body>
     </html>
   );

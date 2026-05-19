@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
+import { useAuth } from "@/context/AuthContext";
 import {
   BarChart3,
   Download,
@@ -32,9 +33,10 @@ const links = [
 export function AdminSidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { logout } = useAuth();
 
-  function handleLogout() {
-    localStorage.removeItem("token");
+  async function handleLogout() {
+    await logout();
     router.replace("/login");
   }
 

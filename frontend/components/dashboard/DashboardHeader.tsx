@@ -2,23 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LayoutGrid, LogOut, Menu, User, X } from "lucide-react";
 import { NotificationBell } from "@/components/common/NotificationBell";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
-
-type MeUser = {
-  name: string | null;
-  email: string;
-};
+import { useAuth } from "@/context/AuthContext";
 
 type DashboardHeaderProps = {
   onMenuClick: () => void;
   mobileNavOpen: boolean;
 };
 
-function displayNameFromUser(user: MeUser | null): string {
+function displayNameFromUser(user: { name: string | null; email: string } | null): string {
   if (!user) return "User";
   const name = user.name?.trim();
   if (name) return name;
@@ -29,36 +23,10 @@ function displayNameFromUser(user: MeUser | null): string {
 export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderProps) {
   const router = useRouter();
   const menuRef = useRef<HTMLDivElement>(null);
-  const [user, setUser] = useState<MeUser | null>(null);
+  const { user, logout } = useAuth();
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   const greetingName = displayNameFromUser(user);
-
-  const loadUser = useCallback(async () => {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    if (!token) return;
-    try {
-      const res = await fetch(`${API_BASE}/user/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as MeUser;
-      if (typeof data.email === "string") {
-        setUser({
-          name: typeof data.name === "string" ? data.name : null,
-          email: data.email,
-        });
-      }
-    } catch {
-      /* keep fallback greeting */
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadUser();
-  }, [loadUser]);
 
   useEffect(() => {
     if (!accountMenuOpen) return;
@@ -79,18 +47,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
   }, [accountMenuOpen]);
 
   async function handleLogout() {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    try {
-      await fetch(`${API_BASE}/auth/logout`, {
-        method: "POST",
-        credentials: "include",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-    } catch {
-      /* proceed with client logout */
-    }
-    localStorage.removeItem("token");
+    await logout();
     setAccountMenuOpen(false);
     router.push("/login");
   }

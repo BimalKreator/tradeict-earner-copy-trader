@@ -1,7 +1,8 @@
 "use client";
 
 import { Bell } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -17,10 +18,7 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<NotificationRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const token = useMemo(
-    () => (typeof window !== "undefined" ? localStorage.getItem("token") : null),
-    [],
-  );
+  const { token } = useAuth();
 
   const load = useCallback(async () => {
     if (!token) return;

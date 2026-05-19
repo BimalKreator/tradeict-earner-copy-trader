@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
+import { useAuth, type AuthUser } from "@/context/AuthContext";
 
 const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
@@ -21,17 +23,27 @@ function safePostLoginRedirect(raw: string | null): string {
 
 function persistSessionAndRedirect(
   token: string,
+  sessionUser: AuthUser | null,
+  setSession: (token: string, user?: AuthUser | null) => void,
   router: ReturnType<typeof useRouter>,
   redirectTo: string,
 ): void {
-  localStorage.setItem("token", token);
+  setSession(token, sessionUser);
   router.push(redirectTo);
 }
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { isLoading, isAuthenticated, setSession } = useAuth();
   const registeredSuccess = searchParams.get("registered") === "1";
+  const redirectTo = safePostLoginRedirect(searchParams.get("redirect"));
+
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      router.replace(redirectTo);
+    }
+  }, [isLoading, isAuthenticated, redirectTo, router]);
 
   const [step, setStep] = useState<Step>("credentials");
   const [identifier, setIdentifier] = useState("");
@@ -40,6 +52,10 @@ function LoginForm() {
   const [otpCode, setOtpCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  if (isLoading || isAuthenticated) {
+    return <AuthLoadingScreen message="Loading session…" />;
+  }
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -75,11 +91,18 @@ function LoginForm() {
         "token" in body &&
         typeof (body as { token?: unknown }).token === "string"
       ) {
-        const { token } = body as LoginSuccessBody;
+        const { token, user } = body as LoginSuccessBody;
         persistSessionAndRedirect(
           token,
+          {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: user.role,
+          },
+          setSession,
           router,
-          safePostLoginRedirect(searchParams.get("redirect")),
+          redirectTo,
         );
         return;
       }
@@ -152,11 +175,21 @@ function LoginForm() {
         throw new Error("Invalid response: missing token");
       }
 
-      persistSessionAndRedirect(
-        token,
-        router,
-        safePostLoginRedirect(searchParams.get("redirect")),
-      );
+      const sessionUser =
+        typeof body === "object" &&
+        body !== null &&
+        "user" in body &&
+        typeof (body as { user?: unknown }).user === "object" &&
+        (body as { user: LoginSuccessBody["user"] }).user !== null
+          ? {
+              id: (body as LoginSuccessBody).user.id,
+              email: (body as LoginSuccessBody).user.email,
+              name: (body as LoginSuccessBody).user.name,
+              role: (body as LoginSuccessBody).user.role,
+            }
+          : null;
+
+      persistSessionAndRedirect(token, sessionUser, setSession, router, redirectTo);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Verification failed");
     } finally {

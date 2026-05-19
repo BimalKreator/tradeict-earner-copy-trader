@@ -15,7 +15,8 @@ import {
   PlayCircle,
   Wallet,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -63,10 +64,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toggleBusy, setToggleBusy] = useState(false);
-  const token = useMemo(
-    () => (typeof window !== "undefined" ? localStorage.getItem("token") : null),
-    [],
-  );
+  const { token } = useAuth();
 
   const loadOverview = useCallback(async () => {
     const res = await fetch(`${API_BASE}/user/dashboard-overview`, {
