@@ -26,15 +26,14 @@ for (const p of [exchangeSvc, serverJs]) {
 }
 
 const exBody = fs.readFileSync(exchangeSvc, "utf8");
-if (!exBody.includes("resolveDeltaIndiaSwapUnifiedSymbol")) {
+if (!exBody.includes("resolveDeltaPositionUpnl")) {
   fatal(
-    "FATAL: dist/services/exchangeService.js is stale (no Delta India market resolver).\n" +
-      "Your live API is running old compiled code — tickers will keep using …/USDT:USDT.\n" +
+    "FATAL: dist/services/exchangeService.js is stale (no Delta UPNL resolver).\n" +
+      "Live PnL will be wrong until you rebuild.\n" +
       "Fix:\n" +
       `  cd ${__dirname}\n` +
       "  rm -rf dist && npm ci && npm run build\n" +
-      "  cd .. && pm2 delete tradeict-bot 2>/dev/null; pm2 start ecosystem.config.cjs && pm2 save\n" +
-      "Verify: curl -s http://127.0.0.1:5000/api/health/build",
+      "  cd .. && pm2 delete tradeict-bot 2>/dev/null; pm2 start ecosystem.config.cjs && pm2 save\n",
   );
 }
 

@@ -85,7 +85,7 @@ async function resolveMarkForLiveRow(
   return rest.markPrice;
 }
 
-/** Mark for display; keep exchange UPNL, or derive from signed BTC size if API omitted it. */
+/** Mark for display only — never recalculate UPNL (exchangeService owns PnL). */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
@@ -93,22 +93,10 @@ async function enrichPositionLiveRow(
   const mark = await resolveMarkForLiveRow(pos);
   const base = deltaToRow(pos);
 
-  let livePnl = base.livePnl;
-  if (
-    livePnl == null &&
-    mark != null &&
-    base.entryPrice != null &&
-    Number.isFinite(base.entryPrice) &&
-    pos.realBaseSize > 0
-  ) {
-    const signedSize = pos.side === "SELL" ? -pos.realBaseSize : pos.realBaseSize;
-    livePnl = signedSize * (mark - base.entryPrice);
-  }
-
   return {
     ...base,
-    markPrice: mark ?? base.markPrice,
-    livePnl,
+    markPrice: pos.markPrice ?? mark ?? base.markPrice,
+    livePnl: base.livePnl,
   };
 }
 

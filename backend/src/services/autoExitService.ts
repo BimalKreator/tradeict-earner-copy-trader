@@ -44,20 +44,21 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   return null;
 }
 
-function legPnlUsd(pos: DeltaLivePosition, mark: number | null): number {
+function legPnlUsd(pos: DeltaLivePosition): number {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }
   if (
-    mark == null ||
     pos.entryPrice == null ||
+    pos.markPrice == null ||
     !Number.isFinite(pos.entryPrice) ||
+    !Number.isFinite(pos.markPrice) ||
     pos.realBaseSize <= 0
   ) {
     return 0;
   }
-  const sign = pos.side === "SELL" ? -1 : 1;
-  return sign * pos.realBaseSize * (mark - pos.entryPrice);
+  const signedBtc = pos.side === "SELL" ? -pos.realBaseSize : pos.realBaseSize;
+  return signedBtc * (pos.markPrice - pos.entryPrice);
 }
 
 export type MasterLegCloseTarget = {
@@ -80,8 +81,7 @@ export async function fetchMasterLegsWithTotalLivePnl(
     const contracts = Math.abs(pos.contracts);
     if (!Number.isFinite(contracts) || contracts < 1e-12) continue;
 
-    const mark = resolveMarkForPosition(pos);
-    totalPnlUsd += legPnlUsd(pos, mark);
+    totalPnlUsd += legPnlUsd(pos);
 
     legs.push({
       symbolKey: pos.symbolKey,
