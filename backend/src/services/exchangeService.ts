@@ -140,6 +140,70 @@ function extractDeltaMarkPrice(position: Record<string, unknown>): number | null
   );
 }
 
+/** Bid/offer from margined position or nested product (matches Delta UPNL@Bid / UPNL@Offer). */
+function extractDeltaBidOffer(position: Record<string, unknown>): {
+  bid: number | null;
+  offer: number | null;
+} {
+  const product =
+    position.product != null && typeof position.product === "object"
+      ? (position.product as Record<string, unknown>)
+      : null;
+
+  const bid =
+    numberOrNull(position.best_bid) ??
+    numberOrNull(position.bid_price) ??
+    numberOrNull(position.bid) ??
+    numberOrNull(product?.best_bid) ??
+    numberOrNull(product?.bid_price);
+
+  const offer =
+    numberOrNull(position.best_ask) ??
+    numberOrNull(position.best_offer) ??
+    numberOrNull(position.offer_price) ??
+    numberOrNull(position.ask_price) ??
+    numberOrNull(position.ask) ??
+    numberOrNull(product?.best_ask) ??
+    numberOrNull(product?.offer_price);
+
+  return { bid, offer };
+}
+
+/**
+ * Delta terminal options UPNL: longs mark at **bid**, shorts at **offer** (not mid mark).
+ */
+async function resolveOptionUpnlPrice(
+  exchange: InstanceType<typeof ccxt.delta>,
+  unified: string,
+  position: Record<string, unknown>,
+  side: TradeSide,
+  displayMark: number | null,
+): Promise<{ price: number | null; source: string }> {
+  const { bid, offer } = extractDeltaBidOffer(position);
+
+  if (side === "BUY" && bid != null && bid > 0) {
+    return { price: bid, source: "bid" };
+  }
+  if (side === "SELL" && offer != null && offer > 0) {
+    return { price: offer, source: "offer" };
+  }
+
+  try {
+    const ticker = await exchange.fetchTicker(unified);
+    if (side === "BUY") {
+      const tbid = numberOrNull(ticker.bid);
+      if (tbid != null && tbid > 0) return { price: tbid, source: "ticker_bid" };
+    } else {
+      const task = numberOrNull(ticker.ask);
+      if (task != null && task > 0) return { price: task, source: "ticker_ask" };
+    }
+  } catch {
+    /* use display mark */
+  }
+
+  return { price: displayMark, source: "mark_fallback" };
+}
+
 function deltaContractValueFromMarket(
   market: { contractSize?: unknown },
   position: Record<string, unknown>,
@@ -678,11 +742,24 @@ export async function fetchDeltaOpenPositions(
     let unrealizedPnl: number | null = null;
     const apiUpnlRaw = position.unrealized_pnl;
 
-    if (entryPrice !== null && markPrice !== null) {
-      // Options: Delta `unrealized_pnl` ≈ notional (mark×size), not terminal UPNL — always math.
-      // Perps: same formula; API field kept for debug only.
+    let upnlPrice: number | null = markPrice;
+    let upnlPriceSource = "mark";
+
+    if (isOption) {
+      const resolved = await resolveOptionUpnlPrice(
+        exchange,
+        unified,
+        position,
+        side,
+        markPrice,
+      );
+      upnlPrice = resolved.price;
+      upnlPriceSource = resolved.source;
+    }
+
+    if (entryPrice !== null && upnlPrice !== null) {
       const sign = side === "SELL" ? -1 : 1;
-      unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+      unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
 
       const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
       if (!Number.isNaN(funding)) unrealizedPnl += funding;
@@ -694,16 +771,22 @@ export async function fetchDeltaOpenPositions(
 
     if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
+    const { bid, offer } = extractDeltaBidOffer(position);
+
     console.log(`\n[PNL_TRACKER] -------------------------`);
     console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side} | option=${isOption}`);
     console.log(
       `[PNL_TRACKER] Contract lots: ${contractLots} × contractSize=${contractSize} → RealBaseSize(BTC)=${realBaseSize}`,
     );
-    console.log(`[PNL_TRACKER] Entry Price: ${entryPrice} | Mark Price: ${markPrice}`);
+    console.log(
+      `[PNL_TRACKER] Entry: ${entryPrice} | Mark(display): ${markPrice} | Bid: ${bid ?? "n/a"} | Offer: ${offer ?? "n/a"}`,
+    );
+    console.log(
+      `[PNL_TRACKER] UPNL price (${upnlPriceSource}): ${upnlPrice} → PnL: ${unrealizedPnl}`,
+    );
     console.log(
       `[PNL_TRACKER] API unrealized_pnl (ignored for options): ${apiUpnlRaw ?? "n/a"}`,
     );
-    console.log(`[PNL_TRACKER] FINAL LIVE PNL SENT TO UI (math): ${unrealizedPnl}`);
     console.log(`[PNL_TRACKER] -------------------------\n`);
 
     let stopLoss: number | null = null;
