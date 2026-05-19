@@ -660,22 +660,30 @@ export async function fetchDeltaOpenPositions(
       }
     }
 
-    // Delta native UPNL from margined position (authoritative); math fallback only if absent.
     let unrealizedPnl: number | null = null;
     const info = position;
-    const rawUpnl = info.unrealized_pnl ?? info.upnl;
+
+    // STRICT RULE: NEVER fallback to `info.upnl` or `info.pnl`. They contain invalid metrics.
+    const rawUpnl = info.unrealized_pnl;
 
     if (rawUpnl !== undefined && rawUpnl !== null) {
       unrealizedPnl = parseFloat(String(rawUpnl));
       const funding = parseFloat(String(info.unrealized_funding_pnl ?? "0"));
       if (!Number.isNaN(funding)) unrealizedPnl += funding;
+    } else if (
+      position.unrealizedPnl !== undefined &&
+      position.unrealizedPnl !== null
+    ) {
+      unrealizedPnl = parseFloat(String(position.unrealizedPnl));
     } else if (entryPrice !== null && markPrice !== null) {
+      // Correct mathematical fallback for options & perps
       const sign = side === "SELL" ? -1 : 1;
       unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
       console.warn(
         `[exchangeService] Live UPNL fallback product=${productSymbol} realBaseSize=${realBaseSize} side=${side} entry=${entryPrice} mark=${markPrice} computed=${unrealizedPnl}`,
       );
     }
+
     if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
     const contractLots = rawSize;
@@ -689,9 +697,9 @@ export async function fetchDeltaOpenPositions(
     console.log(`[PNL_TRACKER] Entry Price: ${entryPrice} | Mark Price: ${markPrice}`);
     console.log(`[PNL_TRACKER] CCXT Parsed PnL: null`);
     console.log(
-      `[PNL_TRACKER] Raw API PnL (info.unrealized_pnl): ${
-        pInfo.unrealized_pnl ?? pInfo.upnl ?? "MISSING INFO"
-      }`,
+      `[PNL_TRACKER] Raw API PnL (unrealized_pnl only): ${
+        pInfo.unrealized_pnl ?? "MISSING — math fallback"
+      } | ignored upnl=${String(pInfo.upnl ?? "n/a")}`,
     );
     console.log(`[PNL_TRACKER] FINAL LIVE PNL SENT TO UI: ${unrealizedPnl}`);
     console.log(`[PNL_TRACKER] -------------------------\n`);
