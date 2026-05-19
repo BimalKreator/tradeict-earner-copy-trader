@@ -1,6 +1,22 @@
 "use client";
 
-import { Loader2, Play, Pause, Pencil, Trash2, Sparkles, Layers } from "lucide-react";
+import { StrategySparkline } from "@/components/strategies/StrategySparkline";
+import {
+  mockSubscriberCount,
+  resolvePerformanceMetrics,
+} from "@/lib/strategyPerformance";
+import {
+  Layers,
+  Loader2,
+  Pause,
+  Pencil,
+  Play,
+  Sparkles,
+  Trash2,
+  TrendingUp,
+  Users,
+} from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const ENV_API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -17,6 +33,7 @@ type Strategy = {
   monthlyFee: number;
   minCapital: number;
   profitShare: number;
+  performanceMetrics?: unknown;
 };
 type ExchangeAccountOption = { id: string; nickname: string; exchange: string };
 type SubscriptionRow = {
@@ -277,29 +294,66 @@ export default function StrategySubscriptionLifecyclePage() {
         <div className="grid gap-4 md:grid-cols-2">
           {strategies.map((s) => {
             const existing = subsByStrategy.get(s.id);
+            const metrics = resolvePerformanceMetrics(s.performanceMetrics);
+            const sparkValues = metrics.pnlChart.values;
+            const subscribers = mockSubscriberCount(s.id);
+            const lastPnl =
+              sparkValues.length > 0
+                ? sparkValues[sparkValues.length - 1]!
+                : null;
+
             return (
-              <article key={s.id} className="glass-card border border-glassBorder p-5">
-                <h3 className="text-lg font-semibold text-white">{s.title}</h3>
-                <p className="mt-2 text-sm text-white/60">{s.description}</p>
-                <div className="mt-4 text-xs text-white/50">
+              <article
+                key={s.id}
+                className="flex flex-col rounded-xl border border-gray-800 bg-gray-950 p-5 text-gray-100 shadow-lg shadow-black/20"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
+                  <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gray-800 bg-gray-900 px-2.5 py-1 text-xs text-gray-300">
+                    <Users className="h-3.5 w-3.5 text-primary" aria-hidden />
+                    <span className="tabular-nums">{subscribers.toLocaleString("en-IN")}</span>
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm text-gray-400">{s.description}</p>
+                <div className="mt-4 text-xs text-gray-500">
                   ₹{s.monthlyFee.toLocaleString("en-IN")} / month · Profit share {s.profitShare}% · Min capital ₹
                   {s.minCapital.toLocaleString("en-IN")}
                 </div>
-                <div className="mt-5">
+                <div className="mt-4 rounded-lg border border-gray-800 bg-gray-900/50 p-2">
+                  <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-500">
+                    <span className="inline-flex items-center gap-1">
+                      <TrendingUp className="h-3 w-3" aria-hidden />
+                      12M curve
+                    </span>
+                    {lastPnl !== null ? (
+                      <span className="tabular-nums text-emerald-400">
+                        {lastPnl.toFixed(1)}%
+                      </span>
+                    ) : null}
+                  </div>
+                  <StrategySparkline values={sparkValues} chartId={`mkt-${s.id}`} />
+                </div>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <Link
+                    href={`/dashboard/strategies/${s.id}`}
+                    className="inline-flex flex-1 items-center justify-center rounded-lg border border-gray-700 bg-gray-900 px-4 py-2.5 text-sm font-medium text-gray-100 transition hover:border-gray-600 hover:bg-gray-800"
+                  >
+                    View Performance
+                  </Link>
                   {existing ? (
                     <button
                       type="button"
                       onClick={() => setTab("my")}
-                      className="rounded-lg bg-white/10 px-4 py-2 text-sm font-medium text-white/80"
+                      className="inline-flex flex-1 items-center justify-center rounded-lg border border-gray-700 bg-gray-800/80 px-4 py-2.5 text-sm font-medium text-gray-300"
                     >
-                      Already in My Strategies
+                      In My Strategies
                     </button>
                   ) : (
                     <button
                       type="button"
                       disabled={submitting}
                       onClick={() => void addToMyStrategies(s.id)}
-                      className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                      className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
                     >
                       Subscribe
                     </button>

@@ -4,49 +4,43 @@ import {
   ArrowLeft,
   BarChart3,
   Calendar,
-  LayoutDashboard,
+  Flame,
   LineChart as LineChartIcon,
   Loader2,
+  Percent,
+  TrendingDown,
+  TrendingUp,
+  Trophy,
+  Users,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import CalendarHeatmap from "react-calendar-heatmap";
 import {
+  Area,
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 
+import {
+  formatPercent,
+  mockSubscriberCount,
+  resolvePerformanceMetrics,
+  type StrategyPerformanceMetrics,
+} from "@/lib/strategyPerformance";
+
 import "../../analytics/analytics-heatmap.css";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
-
-type PerformanceMetrics = {
-  pnlChart?: { labels?: string[]; values?: number[] };
-  backtestSummary?: {
-    tradingDays?: number;
-    winLossPercent?: number;
-    streak?: number;
-    avgPerDay?: number;
-    maxDrawdown?: number;
-  };
-  maxProfitLoss?: {
-    labels?: string[];
-    profit?: number[];
-    loss?: number[];
-  };
-  daywiseBreakdown?: {
-    heatmap?: { date: string; value: number }[];
-  };
-};
 
 type StrategyDetail = {
   id: string;
@@ -55,34 +49,21 @@ type StrategyDetail = {
   monthlyFee: number;
   minCapital: number;
   profitShare: number;
-  slippage: number;
-  performanceMetrics: PerformanceMetrics | unknown;
-  createdAt: string;
+  performanceMetrics: unknown;
 };
 
-type SubscriptionMineRow = {
-  id: string;
-  status: string;
-  strategyId: string;
+const tooltipStyles = {
+  contentStyle: {
+    backgroundColor: "rgb(3 7 18)",
+    border: "1px solid rgb(31 41 55)",
+    borderRadius: "8px",
+    fontSize: "12px",
+    color: "#f3f4f6",
+  },
+  labelStyle: { color: "#9ca3af" },
 };
 
-function parseMetrics(raw: unknown): PerformanceMetrics | null {
-  if (!raw || typeof raw !== "object") return null;
-  return raw as PerformanceMetrics;
-}
-
-function fmtNum(n: number | null | undefined, digits = 2): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return n.toLocaleString("en-IN", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: 0,
-  });
-}
-
-function heatmapDateRange(rows: { date: string }[]): {
-  start: Date;
-  end: Date;
-} {
+function heatmapDateRange(rows: { date: string }[]): { start: Date; end: Date } {
   if (rows.length === 0) {
     const now = new Date();
     return {
@@ -93,31 +74,43 @@ function heatmapDateRange(rows: { date: string }[]): {
   const ts = rows.map((r) =>
     Date.parse(r.date.includes("T") ? r.date : `${r.date}T12:00:00Z`),
   );
-  const minT = Math.min(...ts);
-  const maxT = Math.max(...ts);
-  const minD = new Date(minT);
-  const maxD = new Date(maxT);
+  const minD = new Date(Math.min(...ts));
+  const maxD = new Date(Math.max(...ts));
   return {
-    start: new Date(
-      Date.UTC(minD.getUTCFullYear(), minD.getUTCMonth(), 1),
-    ),
+    start: new Date(Date.UTC(minD.getUTCFullYear(), minD.getUTCMonth(), 1)),
     end: new Date(Date.UTC(maxD.getUTCFullYear(), maxD.getUTCMonth() + 1, 0)),
   };
 }
 
-const tooltipStyles = {
-  contentStyle: {
-    backgroundColor: "rgba(15, 23, 42, 0.95)",
-    border: "1px solid rgba(56, 189, 248, 0.25)",
-    borderRadius: "8px",
-    fontSize: "12px",
-    color: "#e2e8f0",
-  },
-  labelStyle: { color: "#94a3b8" },
-};
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  sub,
+  accent = "text-gray-100",
+}: {
+  icon: typeof Calendar;
+  label: string;
+  value: string;
+  sub?: string;
+  accent?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-950 p-4">
+      <div className="flex items-center gap-2 text-gray-500">
+        <Icon className="h-4 w-4 shrink-0 text-primary" aria-hidden />
+        <span className="text-[10px] font-semibold uppercase tracking-wider">{label}</span>
+      </div>
+      <p className={`mt-3 text-2xl font-semibold tabular-nums ${accent}`}>{value}</p>
+      {sub ? <p className="mt-1 text-xs text-gray-500">{sub}</p> : null}
+    </div>
+  );
+}
 
 export default function StrategyPerformancePage() {
   const params = useParams();
+  const router = useRouter();
+  const chartUid = useId().replace(/:/g, "");
   const idParam = params.id;
   const id = typeof idParam === "string" ? idParam : idParam?.[0];
 
@@ -125,15 +118,13 @@ export default function StrategyPerformancePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
-  const [isSubscribed, setIsSubscribed] = useState(false);
-  const [unsubscribeBusy, setUnsubscribeBusy] = useState(false);
-  const [unsubscribeError, setUnsubscribeError] = useState<string | null>(null);
+  const [inMyStrategies, setInMyStrategies] = useState(false);
+  const [subscribeBusy, setSubscribeBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError(null);
-    setUnsubscribeError(null);
     setUnauthorized(false);
     const token =
       typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -146,9 +137,7 @@ export default function StrategyPerformancePage() {
     try {
       const res = await fetch(
         `${API_BASE}/subscriptions/strategies/${encodeURIComponent(id)}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
+        { headers: { Authorization: `Bearer ${token}` } },
       );
       if (res.status === 401) {
         setUnauthorized(true);
@@ -161,115 +150,55 @@ export default function StrategyPerformancePage() {
         return;
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const data: unknown = await res.json();
-      setStrategy(data as StrategyDetail);
+      setStrategy((await res.json()) as StrategyDetail);
 
       const mineRes = await fetch(`${API_BASE}/subscriptions/mine`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (mineRes.ok) {
-        const mineData: unknown = await mineRes.json();
-        const subs =
-          typeof mineData === "object" &&
-          mineData !== null &&
-          "subscriptions" in mineData &&
-          Array.isArray((mineData as { subscriptions: unknown }).subscriptions)
-            ? ((mineData as { subscriptions: SubscriptionMineRow[] }).subscriptions)
-            : [];
-        const active = subs.some(
-          (s) => s.strategyId === id && String(s.status).toUpperCase() === "ACTIVE",
-        );
-        setIsSubscribed(active);
-      } else {
-        setIsSubscribed(false);
+        const mineData = (await mineRes.json()) as {
+          subscriptions?: { strategyId: string }[];
+        };
+        const subs = mineData.subscriptions ?? [];
+        setInMyStrategies(subs.some((s) => s.strategyId === id));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load strategy");
       setStrategy(null);
-      setIsSubscribed(false);
     } finally {
       setLoading(false);
     }
   }, [id]);
 
-  const handleUnsubscribe = useCallback(async () => {
-    if (!id || unsubscribeBusy) return;
-    setUnsubscribeBusy(true);
-    setUnsubscribeError(null);
-    try {
-      const token =
-        typeof window !== "undefined" ? localStorage.getItem("token") : null;
-      if (!token) {
-        setUnauthorized(true);
-        return;
-      }
-      const res = await fetch(
-        `${API_BASE}/subscriptions/${encodeURIComponent(id)}`,
-        {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
-      if (!res.ok && res.status !== 204) {
-        const body: unknown = await res.json().catch(() => ({}));
-        const msg =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
-            ? (body as { error: string }).error
-            : `Unsubscribe failed (${res.status})`;
-        setUnsubscribeError(msg);
-        return;
-      }
-      await load();
-    } catch (e) {
-      setUnsubscribeError(
-        e instanceof Error ? e.message : "Unsubscribe request failed",
-      );
-    } finally {
-      setUnsubscribeBusy(false);
-    }
-  }, [id, load, unsubscribeBusy]);
-
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void load();
   }, [load]);
 
-  const pm = useMemo(
-    () => parseMetrics(strategy?.performanceMetrics),
+  const metrics: StrategyPerformanceMetrics = useMemo(
+    () => resolvePerformanceMetrics(strategy?.performanceMetrics),
     [strategy?.performanceMetrics],
   );
 
-  const lineData = useMemo(() => {
-    const labels = pm?.pnlChart?.labels ?? [];
-    const values = pm?.pnlChart?.values ?? [];
-    if (!values.length) return [];
-    return values.map((v, i) => ({
-      name: labels[i] ?? String(i + 1),
-      pnl: v,
-    }));
-  }, [pm]);
+  const lineData = useMemo(
+    () =>
+      metrics.pnlChart.values.map((v, i) => ({
+        name: metrics.pnlChart.labels[i] ?? String(i + 1),
+        pnl: v,
+      })),
+    [metrics],
+  );
 
   const barData = useMemo(() => {
-    const labels = pm?.maxProfitLoss?.labels ?? [];
-    const profit = pm?.maxProfitLoss?.profit ?? [];
-    const loss = pm?.maxProfitLoss?.loss ?? [];
-    if (!labels.length && !profit.length && !loss.length) return [];
+    const { labels, profit, loss } = metrics.maxProfitLoss;
     const len = Math.max(labels.length, profit.length, loss.length);
-    const rows: { name: string; profit: number; loss: number }[] = [];
-    for (let i = 0; i < len; i++) {
-      rows.push({
-        name: labels[i] ?? `S${i + 1}`,
-        profit: profit[i] ?? 0,
-        loss: loss[i] ?? 0,
-      });
-    }
-    return rows;
-  }, [pm]);
+    return Array.from({ length: len }, (_, i) => ({
+      name: labels[i] ?? `M${i + 1}`,
+      profit: profit[i] ?? 0,
+      loss: Math.abs(loss[i] ?? 0),
+    }));
+  }, [metrics]);
 
-  const heatmapRows = pm?.daywiseBreakdown?.heatmap ?? [];
+  const heatmapRows = metrics.daywiseBreakdown.heatmap;
   const heatmapValues = useMemo(
     () =>
       heatmapRows.map((h) => ({
@@ -278,48 +207,57 @@ export default function StrategyPerformancePage() {
       })),
     [heatmapRows],
   );
+  const heatmapRange = useMemo(() => heatmapDateRange(heatmapRows), [heatmapRows]);
 
-  const range = useMemo(
-    () => heatmapDateRange(heatmapRows),
-    [heatmapRows],
-  );
+  const bs = metrics.backtestSummary;
+  const subscribers = id ? mockSubscriberCount(id) : 0;
 
-  const bs = pm?.backtestSummary;
+  const yDomain = useMemo((): [number, number] => {
+    const vals = metrics.pnlChart.values;
+    if (vals.length === 0) return [16.5, 185];
+    const pad = 8;
+    return [Math.floor(Math.min(...vals) - pad), Math.ceil(Math.max(...vals) + pad)];
+  }, [metrics.pnlChart.values]);
 
-  const totalTradesEstimate = useMemo(() => {
-    const n = pm?.pnlChart?.values?.length ?? 0;
-    const h = heatmapRows.length;
-    if (n > 0) return n;
-    if (h > 0) return h;
-    return null;
-  }, [pm?.pnlChart?.values?.length, heatmapRows.length]);
-
-  const maxProfitFromBars = useMemo(() => {
-    const p = pm?.maxProfitLoss?.profit;
-    if (!p?.length) return null;
-    return Math.max(...p);
-  }, [pm?.maxProfitLoss?.profit]);
-
-  const maxLossFromBars = useMemo(() => {
-    const losses = pm?.maxProfitLoss?.loss;
-    if (!losses?.length) return null;
-    const hasNeg = losses.some((x) => x < 0);
-    return hasNeg ? Math.min(...losses) : -Math.max(...losses.map(Math.abs));
-  }, [pm?.maxProfitLoss?.loss]);
+  async function handleSubscribe() {
+    if (!id || subscribeBusy || inMyStrategies) return;
+    setSubscribeBusy(true);
+    try {
+      const token = localStorage.getItem("token");
+      if (!token) {
+        setUnauthorized(true);
+        return;
+      }
+      const res = await fetch(`${API_BASE}/subscriptions/subscribe`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ strategyId: id }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(body.error ?? "Subscribe failed");
+      setInMyStrategies(true);
+      router.push("/dashboard/strategies");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Subscribe failed");
+    } finally {
+      setSubscribeBusy(false);
+    }
+  }
 
   if (!id) {
-    return (
-      <p className="text-sm text-white/55">Invalid strategy link.</p>
-    );
+    return <p className="text-sm text-gray-400">Invalid strategy link.</p>;
   }
 
   if (unauthorized) {
     return (
       <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-6 py-10 text-center">
-        <p className="text-sm text-white/70">Sign in to view this strategy.</p>
+        <p className="text-sm text-gray-200">Sign in to view this strategy.</p>
         <Link
           href="/login"
-          className="mt-4 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white hover:bg-primary/90"
+          className="mt-4 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white"
         >
           Go to login
         </Link>
@@ -345,249 +283,216 @@ export default function StrategyPerformancePage() {
           <ArrowLeft className="h-4 w-4" aria-hidden />
           Back to marketplace
         </Link>
-        <p className="text-sm text-red-200">{error ?? "Not found."}</p>
+        <p className="text-sm text-red-300">{error ?? "Not found."}</p>
       </div>
     );
   }
 
-  const hasMetrics = pm !== null && (
-    lineData.length > 0 ||
-    barData.length > 0 ||
-    heatmapValues.length > 0 ||
-    bs !== undefined
-  );
+  const strokeGrad = `stroke-${chartUid}`;
+  const fillGrad = `fill-${chartUid}`;
 
   return (
-    <div className="space-y-10">
-      <div>
-        <Link
-          href="/dashboard/strategies"
-          className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden />
-          Back to marketplace
-        </Link>
-        <header className="mt-6 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="rounded-xl border border-glassBorder bg-primary/10 p-3">
-              <LayoutDashboard className="h-6 w-6 text-primary" aria-hidden />
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
-                {strategy.title}
-              </h1>
-              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-white/55">
-                {strategy.description}
-              </p>
-              <dl className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-xs text-white/45">
-                <div>
-                  <span className="text-white/35">Monthly fee </span>
-                  <span className="tabular-nums text-white/70">
-                    ₹{strategy.monthlyFee.toLocaleString("en-IN")}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-white/35">Min capital </span>
-                  <span className="tabular-nums text-white/70">
-                    ₹{strategy.minCapital.toLocaleString("en-IN")}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-white/35">Profit share </span>
-                  <span className="tabular-nums text-emerald-300/90">
-                    {strategy.profitShare}%
-                  </span>
-                </div>
-              </dl>
+    <div className="mx-auto max-w-6xl space-y-8 text-gray-100">
+      <Link
+        href="/dashboard/strategies"
+        className="inline-flex items-center gap-2 text-sm text-gray-400 transition hover:text-gray-200"
+      >
+        <ArrowLeft className="h-4 w-4" aria-hidden />
+        Back to marketplace
+      </Link>
+
+      {/* Hero */}
+      <section className="rounded-2xl border border-gray-800 bg-gray-950 p-6 md:p-8">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-100 md:text-3xl">
+              {strategy.title}
+            </h1>
+            <p className="mt-3 max-w-3xl text-sm leading-relaxed text-gray-400">
+              {strategy.description}
+            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-4 text-sm text-gray-500">
+              <span className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900 px-3 py-1.5">
+                <Users className="h-4 w-4 text-primary" aria-hidden />
+                <span>
+                  <span className="font-semibold tabular-nums text-gray-200">
+                    {subscribers.toLocaleString("en-IN")}
+                  </span>{" "}
+                  active subscribers
+                </span>
+              </span>
+              <span>
+                ₹{strategy.monthlyFee.toLocaleString("en-IN")}/mo · Min ₹
+                {strategy.minCapital.toLocaleString("en-IN")} · {strategy.profitShare}% profit
+                share
+              </span>
             </div>
           </div>
-          {isSubscribed ? (
-            <button
-              type="button"
-              onClick={() => void handleUnsubscribe()}
-              disabled={unsubscribeBusy}
-              className="inline-flex items-center justify-center rounded-lg border border-red-500/35 bg-red-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-red-100 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {unsubscribeBusy ? "Unsubscribing..." : "Unsubscribe"}
-            </button>
-          ) : null}
-        </header>
-        {unsubscribeError ? (
-          <p className="mt-3 text-sm text-red-200">{unsubscribeError}</p>
-        ) : null}
-      </div>
-
-      {!hasMetrics && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          No performance metrics uploaded for this strategy yet. Charts will appear when
-          admin adds performance data.
+          <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col">
+            {inMyStrategies ? (
+              <Link
+                href="/dashboard/strategies"
+                className="inline-flex items-center justify-center rounded-lg border border-gray-700 bg-gray-900 px-6 py-3 text-sm font-medium text-gray-200"
+              >
+                Manage in My Strategies
+              </Link>
+            ) : (
+              <button
+                type="button"
+                disabled={subscribeBusy}
+                onClick={() => void handleSubscribe()}
+                className="inline-flex items-center justify-center rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-white transition hover:bg-primary/90 disabled:opacity-60"
+              >
+                {subscribeBusy ? "Subscribing…" : "Subscribe"}
+              </button>
+            )}
+          </div>
         </div>
-      )}
-
-      {/* 1 — Main P&L line chart */}
-      <section className="glass-card border border-glassBorder p-6 md:p-8">
-        <div className="flex items-center gap-2">
-          <LineChartIcon className="h-5 w-5 text-primary/80" aria-hidden />
-          <h2 className="text-lg font-semibold text-white">P&amp;L performance</h2>
-        </div>
-        <p className="mt-1 text-xs text-white/45">
-          Cumulative or period P&amp;L series from strategy backtest metrics.
+        <p className="mt-4 text-[11px] text-gray-600">
+          Performance charts use demo backtest data when admin metrics are not uploaded yet.
         </p>
+      </section>
+
+      {/* Backtest summary grid */}
+      <section>
+        <h2 className="text-lg font-semibold text-gray-100">Backtest summary</h2>
+        <p className="mt-1 text-xs text-gray-500">Historical simulation — not a guarantee of future results.</p>
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <StatCard icon={Calendar} label="Trading days" value={String(bs.tradingDays)} />
+          <StatCard
+            icon={Trophy}
+            label="Win %"
+            value={`${bs.winPercent}%`}
+            accent="text-emerald-400"
+          />
+          <StatCard
+            icon={Percent}
+            label="Loss %"
+            value={`${bs.lossPercent}%`}
+            accent="text-rose-400"
+          />
+          <StatCard
+            icon={Flame}
+            label="Streak"
+            value={`${bs.streakWins} wins`}
+            sub="Longest win streak"
+          />
+          <StatCard
+            icon={TrendingUp}
+            label="Avg / day"
+            value={formatPercent(bs.avgPerDay)}
+            accent="text-emerald-400"
+          />
+          <StatCard
+            icon={TrendingDown}
+            label="Max drawdown"
+            value={formatPercent(bs.maxDrawdown)}
+            accent="text-amber-400"
+          />
+        </div>
+      </section>
+
+      {/* Cumulative P&L line */}
+      <section className="rounded-2xl border border-gray-800 bg-gray-950 p-6 md:p-8">
+        <div className="flex items-center gap-2">
+          <LineChartIcon className="h-5 w-5 text-primary" aria-hidden />
+          <h2 className="text-lg font-semibold text-gray-100">Cumulative P&amp;L</h2>
+        </div>
+        <p className="mt-1 text-xs text-gray-500">12-month growth (cumulative %)</p>
         <div className="mt-6 h-[320px] w-full min-w-0">
-          {lineData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={lineData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
-                <XAxis dataKey="name" tick={{ fill: "#64748b", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#64748b", fontSize: 11 }} />
-                <Tooltip {...tooltipStyles} />
-                <Line
-                  type="monotone"
-                  dataKey="pnl"
-                  name="PnL"
-                  stroke="#0A84FF"
-                  strokeWidth={2}
-                  dot={{ fill: "#0A84FF", r: 3 }}
-                  activeDot={{ r: 5 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 text-sm text-white/40">
-              No P&amp;L series available
-            </div>
-          )}
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={lineData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id={strokeGrad} x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stopColor="#22c55e" />
+                  <stop offset="100%" stopColor="#3b82f6" />
+                </linearGradient>
+                <linearGradient id={fillGrad} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#22c55e" stopOpacity={0.28} />
+                  <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
+              <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+              <YAxis
+                domain={yDomain}
+                tick={{ fill: "#6b7280", fontSize: 11 }}
+                tickFormatter={(v) => `${v}%`}
+              />
+              <Tooltip
+                {...tooltipStyles}
+                formatter={(v: number) => [`${v.toFixed(1)}%`, "Cumulative"]}
+              />
+              <Area
+                type="monotone"
+                dataKey="pnl"
+                stroke={`url(#${strokeGrad})`}
+                strokeWidth={2.5}
+                fill={`url(#${fillGrad})`}
+                dot={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="pnl"
+                stroke={`url(#${strokeGrad})`}
+                strokeWidth={2.5}
+                dot={{ r: 3, fill: "#3b82f6", strokeWidth: 0 }}
+                activeDot={{ r: 5 }}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
         </div>
       </section>
 
-      {/* 2 — Backtest summary: 4 columns */}
-      <section className="glass-card border border-glassBorder p-6 md:p-8">
-        <h2 className="text-lg font-semibold text-white">Backtest summary</h2>
-        <p className="mt-1 text-xs text-white/45">
-          Key statistics derived from uploaded performance metrics.
-        </p>
-        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-4">
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 p-4">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-              Trading days / Win–Loss
-            </p>
-            <p className="mt-3 text-2xl font-semibold tabular-nums text-white">
-              {fmtNum(bs?.tradingDays, 0)}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Trading days</p>
-            <p className="mt-4 text-xl font-semibold tabular-nums text-emerald-300/90">
-              {fmtNum(bs?.winLossPercent, 1)}%
-            </p>
-            <p className="mt-1 text-xs text-white/45">Win / Loss rate</p>
-          </div>
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 p-4">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-              Total trades
-            </p>
-            <p className="mt-3 text-2xl font-semibold tabular-nums text-white">
-              {totalTradesEstimate !== null ? totalTradesEstimate : "—"}
-            </p>
-            <p className="mt-1 text-xs text-white/45">
-              Estimated from P&amp;L points or heatmap days
-            </p>
-          </div>
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 p-4">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-              Streaks / Max P&amp;L
-            </p>
-            <p className="mt-3 text-xl font-semibold tabular-nums text-white">
-              {fmtNum(bs?.streak, 1)}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Streak</p>
-            <p className="mt-4 text-lg font-semibold tabular-nums text-emerald-300">
-              {maxProfitFromBars !== null ? fmtNum(maxProfitFromBars, 2) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Max profit (bars)</p>
-            <p className="mt-3 text-lg font-semibold tabular-nums text-rose-300">
-              {maxLossFromBars !== null ? fmtNum(maxLossFromBars, 2) : "—"}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Max loss (bars)</p>
-          </div>
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 p-4">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-              Averages / Drawdown
-            </p>
-            <p className="mt-3 text-xl font-semibold tabular-nums text-white">
-              {fmtNum(bs?.avgPerDay, 2)}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Avg per day</p>
-            <p className="mt-4 text-xl font-semibold tabular-nums text-amber-200/90">
-              {fmtNum(bs?.maxDrawdown, 2)}
-            </p>
-            <p className="mt-1 text-xs text-white/45">Max drawdown</p>
-          </div>
-        </div>
-      </section>
-
-      {/* 3 — Max profit & loss bar chart */}
-      <section className="glass-card border border-glassBorder p-6 md:p-8">
+      {/* Monthly P&L bars */}
+      <section className="rounded-2xl border border-gray-800 bg-gray-950 p-6 md:p-8">
         <div className="flex items-center gap-2">
-          <BarChart3 className="h-5 w-5 text-primary/80" aria-hidden />
-          <h2 className="text-lg font-semibold text-white">Max profit &amp; loss</h2>
+          <BarChart3 className="h-5 w-5 text-primary" aria-hidden />
+          <h2 className="text-lg font-semibold text-gray-100">Monthly profit &amp; loss</h2>
         </div>
-        <p className="mt-1 text-xs text-white/45">
-          Per-category profit vs loss from strategy metrics.
-        </p>
+        <p className="mt-1 text-xs text-gray-500">Gross profit vs gross loss by month</p>
         <div className="mt-6 h-[300px] w-full min-w-0">
-          {barData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
-                <XAxis dataKey="name" tick={{ fill: "#64748b", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#64748b", fontSize: 11 }} />
-                <Tooltip {...tooltipStyles} />
-                <Legend wrapperStyle={{ fontSize: "12px", color: "#94a3b8" }} />
-                <Bar dataKey="profit" name="Profit" fill="#22c55e" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="loss" name="Loss" fill="#ef4444" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 text-sm text-white/40">
-              No bar series available
-            </div>
-          )}
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
+              <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+              <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
+              <Tooltip {...tooltipStyles} />
+              <Legend wrapperStyle={{ fontSize: "12px", color: "#9ca3af" }} />
+              <Bar dataKey="profit" name="Gross profit" fill="#22c55e" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="loss" name="Gross loss" fill="#ef4444" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
       </section>
 
-      {/* 4 — Daywise heatmap */}
-      <section className="glass-card border border-glassBorder p-6 md:p-8">
+      {/* Daywise heatmap */}
+      <section className="rounded-2xl border border-gray-800 bg-gray-950 p-6 md:p-8">
         <div className="flex items-center gap-2">
-          <Calendar className="h-5 w-5 text-primary/80" aria-hidden />
-          <h2 className="text-lg font-semibold text-white">Daywise breakdown</h2>
+          <Calendar className="h-5 w-5 text-primary" aria-hidden />
+          <h2 className="text-lg font-semibold text-gray-100">Daywise breakdown</h2>
         </div>
-        <p className="mt-1 text-xs text-white/45">
-          Calendar heatmap — green positive, red negative, gray flat.
-        </p>
-        <div className="scroll-table mt-6 overflow-x-auto">
-          {heatmapValues.length > 0 ? (
-            <CalendarHeatmap
-              startDate={range.start}
-              endDate={range.end}
-              values={heatmapValues}
-              classForValue={(v) => {
-                if (!v || v.count === 0) return "color-neutral";
-                return v.count > 0 ? "color-profit" : "color-loss";
-              }}
-              titleForValue={(v) =>
-                v
-                  ? `${v.date}: ${Number(v.count).toLocaleString("en-IN", {
-                      maximumFractionDigits: 2,
-                    })}`
-                  : "No data"
-              }
-              showWeekdayLabels
-              gutterSize={3}
-            />
-          ) : (
-            <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 text-sm text-white/40">
-              No heatmap data available
-            </div>
-          )}
+        <p className="mt-1 text-xs text-gray-500">Daily returns — green positive, red negative</p>
+        <div className="analytics-calendar-wrap scroll-table mt-6 overflow-x-auto">
+          <CalendarHeatmap
+            startDate={heatmapRange.start}
+            endDate={heatmapRange.end}
+            values={heatmapValues}
+            classForValue={(v) => {
+              if (!v || v.count === 0) return "color-neutral";
+              return v.count > 0 ? "color-profit" : "color-loss";
+            }}
+            titleForValue={(v) =>
+              v
+                ? `${v.date}: ${Number(v.count).toLocaleString("en-IN", {
+                    maximumFractionDigits: 2,
+                    signDisplay: "exceptZero",
+                  })}%`
+                : "No data"
+            }
+            showWeekdayLabels
+            gutterSize={3}
+          />
         </div>
       </section>
     </div>
