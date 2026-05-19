@@ -7,23 +7,42 @@ type BrandLogoProps = {
   height?: number;
   className?: string;
   priority?: boolean;
+  /** Header nav: 150% of default logo dimensions */
+  variant?: "default" | "header";
 };
+
+const LOGO_SIZES = {
+  default: {
+    width: 150,
+    height: 40,
+    imageClass:
+      "h-8 w-auto max-w-[min(150px,42vw)] object-contain object-left sm:h-10 sm:max-w-[150px]",
+  },
+  header: {
+    width: 225,
+    height: 60,
+    imageClass:
+      "h-12 w-auto max-w-[min(225px,63vw)] object-contain object-left sm:h-[60px] sm:max-w-[225px]",
+  },
+} as const;
 
 export function BrandLogo({
   href = "/",
-  width = 150,
-  height = 40,
+  width,
+  height,
   className = "",
   priority = false,
+  variant = "default",
 }: BrandLogoProps) {
+  const preset = LOGO_SIZES[variant];
   const image = (
     <Image
       src="/logo.png"
       alt="TradeICT Earner"
-      width={width}
-      height={height}
+      width={width ?? preset.width}
+      height={height ?? preset.height}
       priority={priority}
-      className={`h-8 w-auto max-w-[min(150px,42vw)] object-contain object-left sm:h-10 sm:max-w-[150px] ${className}`}
+      className={`${preset.imageClass} ${className}`}
     />
   );
 

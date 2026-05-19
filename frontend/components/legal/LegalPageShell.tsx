@@ -11,7 +11,7 @@ export function LegalPageShell({
     <div className="flex min-h-full flex-col bg-background">
       <header className="border-b border-white/10 bg-slate-950/80">
         <nav className="mx-auto flex max-w-4xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
-          <BrandLogo href="/" width={150} height={40} />
+          <BrandLogo href="/" variant="header" />
           <Link href="/contact" className="text-sm text-white/60 hover:text-white">
             Contact
           </Link>

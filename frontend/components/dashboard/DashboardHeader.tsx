@@ -32,7 +32,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
           >
             <Menu className="h-5 w-5" strokeWidth={2} />
           </button>
-          <BrandLogo href="/dashboard" width={150} height={40} />
+          <BrandLogo href="/dashboard" variant="header" />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <NotificationBell />
