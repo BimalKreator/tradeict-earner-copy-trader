@@ -99,9 +99,22 @@ export type TradeSide = "BUY" | "SELL";
 export interface ExecuteTradeResult {
   success: boolean;
   orderId?: string;
+  /** Actual average fill from CCXT order (preferred over LTP for PnL). */
+  fillPrice?: number;
   feeCost?: number;
   raw?: unknown;
   error?: string;
+}
+
+function extractFillPriceFromOrder(raw: unknown): number | null {
+  if (raw == null || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  return (
+    numberOrNull(o.average) ??
+    numberOrNull(o.price) ??
+    numberOrNull(o.last) ??
+    null
+  );
 }
 
 function numberOrNull(v: unknown): number | null {
@@ -138,6 +151,30 @@ function extractDeltaTradingUpnl(info: Record<string, unknown>): number | null {
     const n = numberOrNull(raw);
     if (n !== null) return n;
   }
+
+  const scanObject = (obj: Record<string, unknown>): number | null => {
+    for (const [key, value] of Object.entries(obj)) {
+      const k = key.toLowerCase().replace(/-/g, "_");
+      if (k.includes("realized") && !k.includes("unreal")) continue;
+      if (k.includes("funding") && !k.includes("unreal")) continue;
+      const isUpnl =
+        (k.includes("unreal") && k.includes("pnl")) ||
+        k === "upnl" ||
+        k === "upl";
+      if (!isUpnl) continue;
+      const n = numberOrNull(value);
+      if (n !== null) return n;
+    }
+    return null;
+  };
+
+  const fromRoot = scanObject(info);
+  if (fromRoot !== null) return fromRoot;
+  if (product) {
+    const fromProduct = scanObject(product);
+    if (fromProduct !== null) return fromProduct;
+  }
+
   return null;
 }
 
@@ -466,9 +503,12 @@ export async function executeTrade(
       }
     }
 
+    const fillPrice = extractFillPriceFromOrder(order);
+
     return {
       success: true,
       orderId: order.id ?? undefined,
+      ...(fillPrice != null ? { fillPrice } : {}),
       feeCost,
       raw: order,
     };
@@ -675,13 +715,16 @@ export async function fetchDeltaOpenPositions(
     // 1) Exchange terminal UPNL (authoritative)
     let unrealizedPnl = extractDeltaTradingUpnl(position);
 
-    // 2) Fallback: signed BTC × (mark − entry) — options only when API omits UPNL
+    // 2) Fallback only when Delta omits UPNL (should be rare on /positions/margined)
     if (
       unrealizedPnl === null &&
       entryPrice !== null &&
       markPrice !== null
     ) {
       unrealizedPnl = signedBtc * (markPrice - entryPrice);
+      console.warn(
+        `[exchangeService] Live UPNL fallback product=${productSymbol} signedBtc=${signedBtc} entry=${entryPrice} mark=${markPrice} computed=${unrealizedPnl} keys=${Object.keys(position).join(",")}`,
+      );
     }
 
     let stopLoss: number | null = null;

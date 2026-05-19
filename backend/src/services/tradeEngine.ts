@@ -9,6 +9,7 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
+  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   normalizeDeltaPerpSymbolForCcxt,
@@ -333,7 +334,12 @@ async function realizedPnlUsd(args: {
   exitPrice: number;
   contracts: number;
 }): Promise<number> {
-  const contractFactor = deltaContractSizeFallback(args.symbol);
+  let contractFactor = deltaContractSizeFallback(args.symbol);
+  try {
+    contractFactor = await fetchDeltaSwapContractSize(args.symbol);
+  } catch {
+    /* keep fallback */
+  }
   const realBaseSize = Math.abs(args.contracts) * contractFactor;
   const diff = args.exitPrice - args.entryPrice;
   return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
@@ -401,7 +407,7 @@ async function closeFollowerTradeAndRecordPnl(
   const grossPnl = await realizedPnlUsd({
     symbol: args.symbol,
     side: args.side,
-    entryPrice: args.masterEntryPrice,
+    entryPrice: open.entryPrice,
     exitPrice: args.exitPrice,
     contracts: args.sizedPosition,
   });
@@ -1010,20 +1016,6 @@ async function notifyMasterFlat(
   );
 
   try {
-  const tick = await fetchDeltaTicker(snap.symbol);
-  // Don't bail on missing ticker — sending the close order is more important
-  // than recording a perfect PnL row. We use the master entry as fallback
-  // for the DB row, and the actual fill price will come back from CCXT.
-  const exitPrice =
-    tick.last != null && Number.isFinite(tick.last)
-      ? tick.last
-      : Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
-        ? snap.masterEntryPrice
-        : 0;
-  console.log(
-    `[EXECUTION] notifyMasterFlat exitPrice=${exitPrice} (tickerLast=${tick.last ?? "null"}) for ${snap.symbol}`,
-  );
-
   const subs = await prisma.userSubscription.findMany({
     where: {
       strategyId,
@@ -1101,6 +1093,27 @@ async function notifyMasterFlat(
         );
         return;
       }
+
+      let exitPrice = closeResult.fillPrice ?? null;
+      if (exitPrice == null || !Number.isFinite(exitPrice)) {
+        try {
+          const tick = await fetchDeltaTicker(snap.symbol);
+          if (tick.last != null && Number.isFinite(tick.last)) {
+            exitPrice = tick.last;
+          }
+        } catch {
+          /* use master entry fallback below */
+        }
+      }
+      if (exitPrice == null || !Number.isFinite(exitPrice)) {
+        exitPrice =
+          Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
+            ? snap.masterEntryPrice
+            : 0;
+      }
+      console.log(
+        `[EXECUTION] notifyMasterFlat exitPrice=${exitPrice} fill=${closeResult.fillPrice ?? "null"} for ${snap.symbol}`,
+      );
 
       await closeFollowerTradeAndRecordPnl(prisma, {
         userId: sub.userId,
