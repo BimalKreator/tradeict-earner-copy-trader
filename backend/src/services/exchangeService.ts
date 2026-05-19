@@ -139,38 +139,28 @@ function extractDeltaTerminalUpnl(info: Record<string, unknown>): number | null 
 }
 
 /**
- * Signed position size in BTC (Delta `info.size` is authoritative for options).
- * CCXT stores signed size in `contracts` for Delta; do not multiply by contractSize again
- * when size is already fractional BTC (e.g. 0.1).
+ * Reject bogus UPNL (e.g. mark−entry without × size) when size×Δprice is much smaller.
  */
-function resolveSignedDeltaSize(
-  info: Record<string, unknown>,
-  rawContracts: number,
-  side: TradeSide,
-  contractSize: number,
+function reconcileDeltaUpnl(
+  reported: number,
+  signedSize: number,
+  entryPrice: number,
+  markPrice: number,
 ): number {
-  const fromInfo = numberOrNull(info.size);
-  if (fromInfo !== null && Math.abs(fromInfo) > 1e-12) {
-    return fromInfo;
+  const expected = signedSize * (markPrice - entryPrice);
+  if (!Number.isFinite(expected)) return reported;
+
+  const reportAbs = Math.abs(reported);
+  const expectAbs = Math.abs(expected);
+
+  if (expectAbs < 1e-9 && reportAbs < 1e-9) return reported;
+
+  // Typical failure: ~$400 when terminal shows ~$40 (size not applied to price delta)
+  if (reportAbs > expectAbs * 3 + 25 && reportAbs > 75) {
+    return expected;
   }
 
-  if (!Number.isFinite(rawContracts) || Math.abs(rawContracts) < 1e-12) {
-    return 0;
-  }
-
-  if (rawContracts < 0) {
-    return rawContracts;
-  }
-
-  const abs = Math.abs(rawContracts);
-  const isFractionalBtc = abs > 0 && abs < 10 && !Number.isInteger(abs);
-
-  if (isFractionalBtc) {
-    return side === "SELL" ? -abs : abs;
-  }
-
-  const signedLots = side === "SELL" ? -abs : abs;
-  return signedLots * contractSize;
+  return reported;
 }
 
 function extractFeeCostFromOrder(order: unknown): number | null {
@@ -571,9 +561,8 @@ export async function fetchDeltaTicker(
 }
 
 /**
- * Authenticated open swap positions via **CCXT** `ccxt.delta` on **Delta Exchange India**
- * (`api.india.delta.exchange`, see {@link initializeDeltaClient}). Use strategy
- * `masterApiKey` / `masterApiSecret` (or any subscriber keys) after {@link decryptDeltaSecretOrPlain}.
+ * Authenticated open positions via Delta India **`GET /v2/positions/margined`** (raw API).
+ * Avoids CCXT `fetchPositions` / `parsePosition`, which drops `mark_price` and `unrealized_pnl`.
  */
 export async function fetchDeltaOpenPositions(
   apiKeyStored: string,
@@ -583,127 +572,101 @@ export async function fetchDeltaOpenPositions(
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
 
   const exchange = await getAuthClient(apiKey, secret);
-  const positions = await exchange.fetchPositions();
+
+  type MarginedResponse = { result?: unknown[] };
+  const response = (await (
+    exchange as InstanceType<typeof ccxt.delta> & {
+      privateGetPositionsMargined: (params?: object) => Promise<MarginedResponse>;
+    }
+  ).privateGetPositionsMargined()) as MarginedResponse;
+
+  const rawList = Array.isArray(response?.result) ? response.result : [];
 
   const out: DeltaLivePosition[] = [];
-  for (const p of positions) {
-    const unified = typeof p.symbol === "string" ? p.symbol : "";
-    if (!unified) continue;
+  for (const row of rawList) {
+    if (!row || typeof row !== "object") continue;
+    const position = row as Record<string, unknown>;
+
+    const signedSize = numberOrNull(position.size);
+    if (signedSize === null || Math.abs(signedSize) < 1e-12) continue;
+
+    const productSymbol = String(position.product_symbol ?? "").trim();
+    if (!productSymbol) continue;
 
     let market: ReturnType<typeof exchange.market>;
+    let unified: string;
     try {
-      market = exchange.market(unified);
+      market = exchange.market(productSymbol);
+      unified = market.symbol;
     } catch {
       console.warn(
-        `[exchangeService] fetchDeltaOpenPositions: no market for symbol=${unified}`,
+        `[exchangeService] fetchDeltaOpenPositions: no market for product_symbol=${productSymbol}`,
       );
       continue;
     }
 
-    const fromContracts =
-      p.contracts != null ? Number(p.contracts) : NaN;
-    const amtRaw = (p as { amount?: unknown }).amount;
-    const fromAmount =
-      typeof amtRaw === "number"
-        ? amtRaw
-        : typeof amtRaw === "string"
-          ? Number(amtRaw)
-          : NaN;
-    const rawContracts = Number.isFinite(fromContracts)
-      ? fromContracts
-      : Number.isFinite(fromAmount)
-        ? fromAmount
-        : NaN;
-    if (!Number.isFinite(rawContracts) || Math.abs(rawContracts) < 1e-12)
-      continue;
-
-    const info = (
-      p.info != null && typeof p.info === "object"
-        ? p.info
-        : {}
-    ) as Record<string, unknown>;
-
-    const csRaw = Number(market.contractSize ?? 1);
-    const contractSize =
-      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : 1;
-
     const symbolKey = symbolKeyFromCcxtMarket(unified, market);
-    const side = ccxtSideToTradeSide(
-      typeof p.side === "string"
-        ? p.side
-        : typeof info.side === "string"
-          ? info.side
-          : undefined,
-    );
-
-    const signedSize = resolveSignedDeltaSize(
-      info,
-      rawContracts,
-      side,
-      contractSize,
-    );
-    const contractLots = Math.abs(signedSize) || Math.abs(rawContracts);
+    const side: TradeSide = signedSize < 0 ? "SELL" : "BUY";
     const realBaseSize = Math.abs(signedSize);
 
     const entryPrice =
-      numberOrNull(info.entry_price) ??
-      numberOrNull(info.average_price) ??
-      numberOrNull(p.entryPrice);
-    const markPrice =
-      numberOrNull(info.mark_price) ??
-      numberOrNull(p.markPrice);
+      numberOrNull(position.entry_price) ??
+      numberOrNull(position.average_price);
+    const markPrice = numberOrNull(position.mark_price);
 
-    // 1. Delta terminal UPNL from raw `info` (CCXT does not populate unrealizedPnl)
-    let unrealizedPnl = extractDeltaTerminalUpnl(info);
+    let unrealizedPnl = extractDeltaTerminalUpnl(position);
 
-    // 2. Signed BTC size × price change (matches Delta options: size × (mark − entry))
     if (
       unrealizedPnl === null &&
       entryPrice !== null &&
-      markPrice !== null &&
-      Math.abs(signedSize) > 1e-12
+      markPrice !== null
     ) {
       unrealizedPnl = signedSize * (markPrice - entryPrice);
+    } else if (
+      unrealizedPnl !== null &&
+      entryPrice !== null &&
+      markPrice !== null
+    ) {
+      unrealizedPnl = reconcileDeltaUpnl(
+        unrealizedPnl,
+        signedSize,
+        entryPrice,
+        markPrice,
+      );
     }
 
     let stopLoss: number | null = null;
     let takeProfit: number | null = null;
-    if (Object.keys(info).length > 0) {
-      const sl =
-        typeof info.stop_loss_order_price === "number"
-          ? info.stop_loss_order_price
-          : typeof info.stop_loss_price === "number"
-            ? info.stop_loss_price
-            : typeof info.stopLossPrice === "number"
-              ? info.stopLossPrice
-              : null;
-      const tp =
-        typeof info.take_profit_order_price === "number"
-          ? info.take_profit_order_price
-          : typeof info.take_profit_price === "number"
-            ? info.take_profit_price
-            : typeof info.takeProfitPrice === "number"
-              ? info.takeProfitPrice
-              : null;
-      if (sl !== null && Number.isFinite(sl)) stopLoss = sl;
-      if (tp !== null && Number.isFinite(tp)) takeProfit = tp;
-    }
+    const sl =
+      numberOrNull(position.stop_loss_order_price) ??
+      numberOrNull(position.stop_loss_price) ??
+      numberOrNull(position.stopLossPrice);
+    const tp =
+      numberOrNull(position.take_profit_order_price) ??
+      numberOrNull(position.take_profit_price) ??
+      numberOrNull(position.takeProfitPrice);
+    if (sl !== null) stopLoss = sl;
+    if (tp !== null) takeProfit = tp;
 
     let entryTime: string | null = null;
-    if (typeof p.datetime === "string" && p.datetime) {
-      entryTime = p.datetime;
-    } else if (p.timestamp != null && Number.isFinite(p.timestamp)) {
-      entryTime = new Date(p.timestamp).toISOString();
+    const createdAt = position.created_at;
+    if (typeof createdAt === "string" && createdAt) {
+      entryTime = createdAt;
+    } else if (position.timestamp != null) {
+      const ts = Number(position.timestamp);
+      if (Number.isFinite(ts)) {
+        entryTime = new Date(ts).toISOString();
+      }
     }
 
     out.push({
       symbol: unified,
       symbolKey,
       side,
-      contracts: contractLots,
+      contracts: realBaseSize,
       realBaseSize,
-      entryPrice: Number.isFinite(entryPrice ?? NaN) ? entryPrice : null,
-      markPrice: Number.isFinite(markPrice ?? NaN) ? markPrice : null,
+      entryPrice,
+      markPrice,
       unrealizedPnl:
         unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
           ? unrealizedPnl
