@@ -113,6 +113,66 @@ function numberOrNull(v: unknown): number | null {
   return null;
 }
 
+/**
+ * Terminal UPNL from Delta `info` (CCXT `parsePosition` leaves `unrealizedPnl` undefined).
+ * Adds separated funding PnL when Delta reports it alongside trading UPNL.
+ */
+function extractDeltaTerminalUpnl(info: Record<string, unknown>): number | null {
+  const trading =
+    numberOrNull(info.unrealized_pnl) ??
+    numberOrNull(info.unrealised_pnl) ??
+    numberOrNull(info.unrealizedPnl) ??
+    numberOrNull(info.unrealisedPnl) ??
+    numberOrNull(info.upnl) ??
+    numberOrNull(info.upl);
+
+  if (trading === null) return null;
+
+  const funding =
+    numberOrNull(info.unrealized_funding_pnl) ??
+    numberOrNull(info.unrealised_funding_pnl) ??
+    numberOrNull(info.unrealized_funding) ??
+    numberOrNull(info.unrealised_funding) ??
+    0;
+
+  return trading + (funding ?? 0);
+}
+
+/**
+ * Signed position size in BTC (Delta `info.size` is authoritative for options).
+ * CCXT stores signed size in `contracts` for Delta; do not multiply by contractSize again
+ * when size is already fractional BTC (e.g. 0.1).
+ */
+function resolveSignedDeltaSize(
+  info: Record<string, unknown>,
+  rawContracts: number,
+  side: TradeSide,
+  contractSize: number,
+): number {
+  const fromInfo = numberOrNull(info.size);
+  if (fromInfo !== null && Math.abs(fromInfo) > 1e-12) {
+    return fromInfo;
+  }
+
+  if (!Number.isFinite(rawContracts) || Math.abs(rawContracts) < 1e-12) {
+    return 0;
+  }
+
+  if (rawContracts < 0) {
+    return rawContracts;
+  }
+
+  const abs = Math.abs(rawContracts);
+  const isFractionalBtc = abs > 0 && abs < 10 && !Number.isInteger(abs);
+
+  if (isFractionalBtc) {
+    return side === "SELL" ? -abs : abs;
+  }
+
+  const signedLots = side === "SELL" ? -abs : abs;
+  return signedLots * contractSize;
+}
+
 function extractFeeCostFromOrder(order: unknown): number | null {
   if (order == null || typeof order !== "object") return null;
   const o = order as {
@@ -557,65 +617,53 @@ export async function fetchDeltaOpenPositions(
     if (!Number.isFinite(rawContracts) || Math.abs(rawContracts) < 1e-12)
       continue;
 
-    const contractLots = Math.abs(rawContracts);
-    const csRaw = Number(market.contractSize ?? 1);
-    const contractSize =
-      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : 1;
-    const realBaseSize = contractLots * contractSize;
-
-    const symbolKey = symbolKeyFromCcxtMarket(unified, market);
-    const side = ccxtSideToTradeSide(p.side);
-
-    const entryPrice =
-      p.entryPrice !== undefined && p.entryPrice !== null
-        ? Number(p.entryPrice)
-        : null;
-    const markPrice =
-      p.markPrice !== undefined && p.markPrice !== null
-        ? Number(p.markPrice)
-        : null;
-
     const info = (
       p.info != null && typeof p.info === "object"
         ? p.info
         : {}
     ) as Record<string, unknown>;
 
-    let unrealizedPnl: number | null = null;
+    const csRaw = Number(market.contractSize ?? 1);
+    const contractSize =
+      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : 1;
 
-    // 1. Direct from Delta's raw API response (matches terminal)
-    const rawUpnl = info.unrealized_pnl ?? info.upnl ?? info.unrealizedPnl;
-    if (rawUpnl !== undefined && rawUpnl !== null) {
-      const parsed = Number.parseFloat(String(rawUpnl));
-      if (!Number.isNaN(parsed)) {
-        unrealizedPnl = parsed;
-        const funding = Number.parseFloat(String(info.unrealized_funding_pnl ?? "0"));
-        if (!Number.isNaN(funding)) {
-          unrealizedPnl += funding;
-        }
-      }
-    }
+    const symbolKey = symbolKeyFromCcxtMarket(unified, market);
+    const side = ccxtSideToTradeSide(
+      typeof p.side === "string"
+        ? p.side
+        : typeof info.side === "string"
+          ? info.side
+          : undefined,
+    );
 
-    // 2. Fallback to CCXT's parsed value if raw is missing
-    if (
-      unrealizedPnl === null &&
-      p.unrealizedPnl !== undefined &&
-      p.unrealizedPnl !== null
-    ) {
-      const parsed = Number.parseFloat(String(p.unrealizedPnl));
-      if (!Number.isNaN(parsed)) unrealizedPnl = parsed;
-    }
+    const signedSize = resolveSignedDeltaSize(
+      info,
+      rawContracts,
+      side,
+      contractSize,
+    );
+    const contractLots = Math.abs(signedSize) || Math.abs(rawContracts);
+    const realBaseSize = Math.abs(signedSize);
 
-    // 3. Mathematical fallback using correctly scaled realBaseSize
+    const entryPrice =
+      numberOrNull(info.entry_price) ??
+      numberOrNull(info.average_price) ??
+      numberOrNull(p.entryPrice);
+    const markPrice =
+      numberOrNull(info.mark_price) ??
+      numberOrNull(p.markPrice);
+
+    // 1. Delta terminal UPNL from raw `info` (CCXT does not populate unrealizedPnl)
+    let unrealizedPnl = extractDeltaTerminalUpnl(info);
+
+    // 2. Signed BTC size × price change (matches Delta options: size × (mark − entry))
     if (
       unrealizedPnl === null &&
       entryPrice !== null &&
       markPrice !== null &&
-      Number.isFinite(entryPrice) &&
-      Number.isFinite(markPrice)
+      Math.abs(signedSize) > 1e-12
     ) {
-      const sign = side === "SELL" ? -1 : 1;
-      unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+      unrealizedPnl = signedSize * (markPrice - entryPrice);
     }
 
     let stopLoss: number | null = null;

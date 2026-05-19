@@ -10,11 +10,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
-import {
-  deltaContractSizeFallback,
-  estimateLivePnlUsd,
-  resolveLiveMarkPrice,
-} from "./liveMarkPriceCache.js";
+import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 const AUTO_EXIT_COOLDOWN_MS = 60_000;
@@ -52,23 +48,16 @@ function legPnlUsd(pos: DeltaLivePosition, mark: number | null): number {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }
-  if (mark == null) return 0;
-  const entry =
-    pos.entryPrice != null && Number.isFinite(pos.entryPrice)
-      ? pos.entryPrice
-      : mark;
-  const cs =
-    pos.realBaseSize > 0 && pos.contracts > 0
-      ? pos.realBaseSize / Math.abs(pos.contracts)
-      : deltaContractSizeFallback(pos.symbolKey);
-  return estimateLivePnlUsd({
-    symbolKey: pos.symbolKey,
-    side: pos.side,
-    entryPrice: entry,
-    contracts: Math.abs(pos.contracts),
-    markPrice: mark,
-    contractSize: cs,
-  });
+  if (
+    mark == null ||
+    pos.entryPrice == null ||
+    !Number.isFinite(pos.entryPrice) ||
+    pos.realBaseSize <= 0
+  ) {
+    return 0;
+  }
+  const sign = pos.side === "SELL" ? -1 : 1;
+  return sign * pos.realBaseSize * (mark - pos.entryPrice);
 }
 
 export type MasterLegCloseTarget = {
