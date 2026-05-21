@@ -56,6 +56,8 @@ const ROSTER_SYNC_MS = 15_000;
 const SAFETY_RECONCILE_MS = 30_000;
 /** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
 const AUTO_EXIT_CHECK_MS = 1_000;
+/** Align follower contract counts with master × multiplier (REST safety net). */
+const POSITION_QTY_RECONCILE_MS = 60_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -115,6 +117,66 @@ function symbolAliasSet(raw: string): Set<string> {
   if (u.endsWith("USDT")) out.add(`${u.slice(0, -4)}USD`);
   if (u.endsWith("USD") && !u.endsWith("USDT")) out.add(`${u.slice(0, -3)}USDT`);
   return out;
+}
+
+function compactSymbolKey(s: string): string {
+  return s.replace(/[/:]/g, "").toUpperCase();
+}
+
+function deltaPairBase(compactNoSlash: string): string | null {
+  const u = compactNoSlash.toUpperCase();
+  if (u.endsWith("USDT")) return u.slice(0, -4);
+  if (u.endsWith("USD") && !u.endsWith("USDT")) return u.slice(0, -3);
+  return null;
+}
+
+function positionSymbolsAlign(tradeSymbol: string, positionKey: string): boolean {
+  const a = compactSymbolKey(tradeSymbol);
+  const b = compactSymbolKey(positionKey);
+  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
+  const ba = deltaPairBase(a);
+  const bb = deltaPairBase(b);
+  return ba != null && bb != null && ba === bb;
+}
+
+function findFollowerLeg(
+  positions: DeltaLivePosition[],
+  masterSymbol: string,
+  side: TradeSide,
+): DeltaLivePosition | undefined {
+  return positions.find(
+    (p) => positionSymbolsAlign(masterSymbol, p.symbolKey) && p.side === side,
+  );
+}
+
+type SubscriberCreds = { apiKey: string; apiSecret: string };
+
+function resolveSubscriptionCreds(sub: {
+  exchangeAccount: { apiKey: string; apiSecret: string } | null;
+  user: {
+    exchangeAccounts: { apiKey: string; apiSecret: string }[];
+    deltaApiKeys: { apiKey: string; apiSecret: string }[];
+  };
+}): SubscriberCreds | null {
+  if (sub.exchangeAccount != null) {
+    return {
+      apiKey: sub.exchangeAccount.apiKey,
+      apiSecret: sub.exchangeAccount.apiSecret,
+    };
+  }
+  if (sub.user.exchangeAccounts[0] != null) {
+    return {
+      apiKey: sub.user.exchangeAccounts[0]!.apiKey,
+      apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
+    };
+  }
+  if (sub.user.deltaApiKeys[0] != null) {
+    return {
+      apiKey: sub.user.deltaApiKeys[0]!.apiKey,
+      apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
+    };
+  }
+  return null;
 }
 
 /** Flatten nested payload objects from Delta WS messages. */
@@ -1679,6 +1741,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   const sockets = new Map<string, StrategyMasterSocket>();
   let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconcileTimeout: ReturnType<typeof setTimeout> | null = null;
+  let qtyReconcileTimeout: ReturnType<typeof setTimeout> | null = null;
   let autoExitTimeout: ReturnType<typeof setTimeout> | null = null;
 
   async function syncRoster(): Promise<void> {
@@ -1910,12 +1973,168 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     }
   }
 
+  /**
+   * Every {@link POSITION_QTY_RECONCILE_MS}, compare each follower's live Delta
+   * leg size to `masterContracts × multiplier` and market-adjust the difference.
+   */
+  async function reconcilePositionQuantities(): Promise<void> {
+    if (cancelled.value) return;
+    try {
+      const strategies = await prisma.strategy.findMany({
+        where: {
+          subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
+        },
+        select: {
+          id: true,
+          masterApiKey: true,
+          masterApiSecret: true,
+        },
+      });
+
+      for (const strat of strategies) {
+        if (cancelled.value) return;
+        if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
+          continue;
+        }
+
+        let masterLegs: MasterLedTrade[];
+        try {
+          masterLegs = await fetchMasterOpenPositions(
+            strat.masterApiKey,
+            strat.masterApiSecret,
+          );
+        } catch (err) {
+          console.warn(
+            `[RECONCILE] master REST failed strategyId=${strat.id}:`,
+            err instanceof Error ? err.message : err,
+          );
+          continue;
+        }
+
+        const subs = await prisma.userSubscription.findMany({
+          where: {
+            strategyId: strat.id,
+            status: SubscriptionStatus.ACTIVE,
+            user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
+          },
+          include: {
+            exchangeAccount: true,
+            user: {
+              include: {
+                deltaApiKeys: true,
+                exchangeAccounts: {
+                  orderBy: { createdAt: "desc" },
+                  take: 1,
+                },
+              },
+            },
+          },
+        });
+
+        for (const sub of subs) {
+          if (cancelled.value) return;
+
+          const creds = resolveSubscriptionCreds(sub);
+          if (!creds) {
+            console.warn(
+              `[RECONCILE] skip userId=${sub.userId} strategyId=${strat.id} — no API credentials`,
+            );
+            continue;
+          }
+
+          let followerPositions: DeltaLivePosition[];
+          try {
+            followerPositions = await fetchDeltaOpenPositions(
+              creds.apiKey,
+              creds.apiSecret,
+            );
+          } catch (err) {
+            console.warn(
+              `[RECONCILE] follower REST failed userId=${sub.userId} strategyId=${strat.id}:`,
+              err instanceof Error ? err.message : err,
+            );
+            continue;
+          }
+
+          for (const master of masterLegs) {
+            if (cancelled.value) return;
+
+            const expectedContracts = followerContractsFromMaster(
+              master.masterContracts,
+              sub.multiplier,
+            );
+            const leg = findFollowerLeg(
+              followerPositions,
+              master.deltaSymbol,
+              master.side,
+            );
+            const actualContracts = leg
+              ? Math.max(0, Math.floor(Math.abs(leg.contracts)))
+              : 0;
+
+            if (actualContracts === expectedContracts) continue;
+
+            if (actualContracts < expectedContracts) {
+              const diff = expectedContracts - actualContracts;
+              console.log(
+                `[RECONCILE] Adjusting position for user ${sub.userId} on ${master.deltaSymbol}: expected ${expectedContracts}, actual ${actualContracts}. Diff: +${diff} (${master.side})`,
+              );
+              const result = await executeTrade(
+                creds.apiKey,
+                creds.apiSecret,
+                master.deltaSymbol,
+                master.side,
+                diff,
+              );
+              if (!result.success) {
+                console.error(
+                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
+                );
+              }
+              continue;
+            }
+
+            const diff = actualContracts - expectedContracts;
+            const trimSide: TradeSide =
+              master.side === "BUY" ? "SELL" : "BUY";
+            console.log(
+              `[RECONCILE] Adjusting position for user ${sub.userId} on ${master.deltaSymbol}: expected ${expectedContracts}, actual ${actualContracts}. Diff: -${diff} (${trimSide} reduceOnly)`,
+            );
+            const result = await executeTrade(
+              creds.apiKey,
+              creds.apiSecret,
+              master.deltaSymbol,
+              trimSide,
+              diff,
+              { reduceOnly: true },
+            );
+            if (!result.success) {
+              console.error(
+                `[RECONCILE] trim failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
+              );
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[RECONCILE] position quantity pass failed:", err);
+    }
+  }
+
   function scheduleReconcile(): void {
     reconcileTimeout = setTimeout(() => {
       void reconcileGhostExits().finally(() => {
         if (!cancelled.value) scheduleReconcile();
       });
     }, SAFETY_RECONCILE_MS);
+  }
+
+  function scheduleQtyReconcile(): void {
+    qtyReconcileTimeout = setTimeout(() => {
+      void reconcilePositionQuantities().finally(() => {
+        if (!cancelled.value) scheduleQtyReconcile();
+      });
+    }, POSITION_QTY_RECONCILE_MS);
   }
 
   async function runAutoExitPass(): Promise<void> {
@@ -1941,6 +2160,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   void reconcileGhostExits().finally(() => {
     if (!cancelled.value) scheduleReconcile();
   });
+  void reconcilePositionQuantities().finally(() => {
+    if (!cancelled.value) scheduleQtyReconcile();
+  });
   void runAutoExitPass().finally(() => {
     if (!cancelled.value) scheduleAutoExit();
   });
@@ -1959,6 +2181,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     if (autoExitTimeout != null) {
       clearTimeout(autoExitTimeout);
       autoExitTimeout = null;
+    }
+    if (qtyReconcileTimeout != null) {
+      clearTimeout(qtyReconcileTimeout);
+      qtyReconcileTimeout = null;
     }
     for (const s of sockets.values()) {
       s.destroy();

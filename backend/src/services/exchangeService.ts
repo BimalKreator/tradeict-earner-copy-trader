@@ -249,6 +249,35 @@ function deltaSignedBtcSize(rawSize: number, contractValue: number): number {
   return rawSize;
 }
 
+/**
+ * Absolute contract/lot count for CCXT `createOrder` amount and copy-trade sizing.
+ * Delta margined API `size` is usually integer lots; {@link deltaSignedBtcSize} converts to base for PnL only.
+ */
+function deltaContractLotCount(
+  rawSize: number,
+  contractSize: number,
+  signedBaseSize: number,
+): number {
+  const absRaw = Math.abs(rawSize);
+  if (absRaw < 1e-12) return 0;
+
+  const cs = contractSize > 0 ? contractSize : 1;
+
+  if (Number.isInteger(absRaw) && absRaw >= 1) {
+    return absRaw;
+  }
+
+  const absBase = Math.abs(signedBaseSize);
+  if (cs > 0 && cs < 1 && absBase > 1e-12) {
+    const lots = absBase / cs;
+    if (Number.isFinite(lots) && lots >= 1) {
+      return Math.max(1, Math.round(lots));
+    }
+  }
+
+  return absRaw;
+}
+
 function extractFeeCostFromOrder(order: unknown): number | null {
   if (order == null || typeof order !== "object") return null;
   const o = order as {
@@ -715,6 +744,9 @@ export async function fetchDeltaOpenPositions(
     const symbolKey = symbolKeyFromCcxtMarket(unified, market);
     const side: TradeSide = signedBtc < 0 ? "SELL" : "BUY";
     const realBaseSize = Math.abs(signedBtc);
+    const contractLotCount = isOption
+      ? Math.abs(contractLots)
+      : deltaContractLotCount(contractLots, contractSize, signedBtc);
 
     const entryPrice =
       numberOrNull(position.entry_price) ??
@@ -776,7 +808,7 @@ export async function fetchDeltaOpenPositions(
     console.log(`\n[PNL_TRACKER] -------------------------`);
     console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side} | option=${isOption}`);
     console.log(
-      `[PNL_TRACKER] Contract lots: ${contractLots} × contractSize=${contractSize} → RealBaseSize(BTC)=${realBaseSize}`,
+      `[PNL_TRACKER] Contract lots: ${contractLotCount} (raw=${contractLots}) × contractSize=${contractSize} → RealBaseSize(BTC)=${realBaseSize}`,
     );
     console.log(
       `[PNL_TRACKER] Entry: ${entryPrice} | Mark(display): ${markPrice} | Bid: ${bid ?? "n/a"} | Offer: ${offer ?? "n/a"}`,
@@ -817,7 +849,7 @@ export async function fetchDeltaOpenPositions(
       symbol: unified,
       symbolKey,
       side,
-      contracts: realBaseSize,
+      contracts: contractLotCount,
       realBaseSize,
       entryPrice,
       markPrice,

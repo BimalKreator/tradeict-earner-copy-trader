@@ -7,8 +7,8 @@ import {
 } from "./exchangeService.js";
 import { logUserActivity } from "./userActivityService.js";
 
-const VERIFY_DELAY_MS = 1_000;
-const RETRY_COOLDOWN_MS = 1_500;
+/** Wait after each successful order before re-checking positions. */
+const POST_ORDER_VERIFY_WAIT_MS = 3_000;
 const MAX_RETRIES = 3;
 
 const HARD_ERROR_PATTERNS = [
@@ -57,6 +57,7 @@ function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
   return ba != null && bb != null && ba === bb;
 }
 
+/** Open leg size in exchange **contract lots** (must match {@link executeTrade} amount). */
 async function followerLegContracts(
   apiKeyStored: string,
   apiSecretStored: string,
@@ -96,7 +97,7 @@ export type FollowerExecuteResult = ExecuteTradeResult & {
 };
 
 /**
- * Place a follower market order, verify the open leg on Delta, and retry up to 3 times.
+ * Execute → wait 3s → verify → retry (up to {@link MAX_RETRIES}).
  * Skips verification for reduce-only closes (caller should use {@link executeTrade}).
  */
 export async function executeFollowerTradeWithVerification(
@@ -121,6 +122,7 @@ export async function executeFollowerTradeWithVerification(
     return { ...single, attempts: 1, verified: single.success };
   }
 
+  const minFilled = targetContracts * 0.9;
   let totalFee = 0;
   let lastResult: ExecuteTradeResult = {
     success: false,
@@ -128,34 +130,37 @@ export async function executeFollowerTradeWithVerification(
   };
   let attempts = 0;
 
-  for (let retry = 0; retry <= MAX_RETRIES; retry += 1) {
-    if (retry > 0) {
+  for (let retry = 0; retry < MAX_RETRIES; retry += 1) {
+    const existingBefore = await followerLegContracts(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+    );
+    if (existingBefore >= minFilled) {
       console.log(
-        `[RETRY_LOOP] Trade not found. Attempting retry ${retry}/${MAX_RETRIES} for user ${userId} on ${symbol}...`,
-      );
-      await sleep(RETRY_COOLDOWN_MS);
-    }
-
-    const existing = await followerLegContracts(apiKey, apiSecret, symbol, side);
-    const minFilled = targetContracts * 0.9;
-    if (existing >= minFilled) {
-      console.log(
-        `[RETRY_LOOP] Trade successfully verified on attempt ${retry + 1} (existing ${existing} contracts).`,
+        `[RETRY_LOOP] Already filled (${existingBefore}/${targetContracts} contracts) before attempt ${retry + 1}.`,
       );
       return {
         success: true,
+        ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
         feeCost: totalFee,
-        attempts: retry + 1,
+        ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+        attempts: Math.max(attempts, 1),
         verified: true,
       };
     }
 
-    const orderSize =
-      existing > 0 && existing < targetContracts
-        ? Math.max(1, targetContracts - Math.floor(existing))
-        : targetContracts;
+    const orderSize = Math.max(
+      1,
+      targetContracts - Math.floor(existingBefore),
+    );
 
     attempts += 1;
+    console.log(
+      `[RETRY_LOOP] Execute attempt ${retry + 1}/${MAX_RETRIES} user ${userId} ${symbol} — orderSize=${orderSize} (existing=${existingBefore}, target=${targetContracts})`,
+    );
+
     lastResult = await executeTrade(apiKey, apiSecret, symbol, side, orderSize);
 
     if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
@@ -164,6 +169,9 @@ export async function executeFollowerTradeWithVerification(
 
     if (!lastResult.success) {
       const err = lastResult.error ?? "unknown";
+      console.warn(
+        `[RETRY_LOOP] executeTrade failed attempt ${retry + 1}/${MAX_RETRIES}: ${err}`,
+      );
       if (isHardExecutionError(err)) {
         await notifyFollowerHardFailure(prisma, userId, symbol, err);
         return {
@@ -177,18 +185,20 @@ export async function executeFollowerTradeWithVerification(
     }
 
     console.log(
-      `[RETRY_LOOP] Verifying trade for user ${userId} on ${symbol}...`,
+      `[RETRY_LOOP] Order accepted; waiting ${POST_ORDER_VERIFY_WAIT_MS}ms before verify (user ${userId}, ${symbol})`,
     );
-    await sleep(VERIFY_DELAY_MS);
+    await sleep(POST_ORDER_VERIFY_WAIT_MS);
 
-    const filled = await followerLegContracts(apiKey, apiSecret, symbol, side);
-    if (filled >= minFilled) {
-      const attemptLabel = retry > 0 ? retry + 1 : 1;
-      if (retry > 0) {
-        console.log(
-          `[RETRY_LOOP] Trade successfully verified on attempt ${attemptLabel}.`,
-        );
-      }
+    const existingAfter = await followerLegContracts(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+    );
+    if (existingAfter >= minFilled) {
+      console.log(
+        `[RETRY_LOOP] Verified after wait (${existingAfter}/${targetContracts} contracts) on attempt ${retry + 1}.`,
+      );
       return {
         success: true,
         ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
@@ -198,6 +208,10 @@ export async function executeFollowerTradeWithVerification(
         verified: true,
       };
     }
+
+    console.log(
+      `[RETRY_LOOP] Position not visible yet (${existingAfter}/${targetContracts} contracts) after ${POST_ORDER_VERIFY_WAIT_MS}ms — will retry if attempts remain.`,
+    );
   }
 
   const finalContracts = await followerLegContracts(
@@ -206,10 +220,12 @@ export async function executeFollowerTradeWithVerification(
     symbol,
     side,
   );
-  if (finalContracts >= targetContracts * 0.9) {
+  if (finalContracts >= minFilled) {
     return {
       success: true,
+      ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
       feeCost: totalFee,
+      ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
       attempts,
       verified: true,
     };
@@ -217,7 +233,7 @@ export async function executeFollowerTradeWithVerification(
 
   const failMsg =
     lastResult.error ??
-    `Position not verified after ${MAX_RETRIES} retries (${finalContracts}/${targetContracts} contracts)`;
+    `Position not verified after ${MAX_RETRIES} execute→wait→verify cycles (${finalContracts}/${targetContracts} contracts)`;
   console.error(
     `[RETRY_LOOP] Exhausted retries for user ${userId} on ${symbol}: ${failMsg}`,
   );
