@@ -16,6 +16,7 @@ import {
   Tag,
   Users,
   Wallet,
+  X,
 } from "lucide-react";
 
 const links = [
@@ -32,23 +33,43 @@ const links = [
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 
-export function AdminSidebar() {
+type AdminSidebarProps = {
+  isMobileOpen: boolean;
+  onClose: () => void;
+};
+
+export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { logout } = useAuth();
 
   async function handleLogout() {
+    onClose();
     await logout();
     router.replace("/login");
   }
 
   return (
-    <aside className="glass-card flex h-screen w-64 shrink-0 flex-col border border-glassBorder p-6 md:sticky md:top-0">
-      <div className="mb-8">
-        <BrandLogo href="/admin" width={150} height={40} />
-        <p className="mt-2 text-xs font-medium text-white/50">Admin Panel</p>
+    <aside
+      className={`glass-card fixed inset-y-0 left-0 z-50 flex h-screen w-64 max-w-[85vw] shrink-0 flex-col border border-glassBorder p-6 shadow-2xl transition-transform duration-200 ease-out md:sticky md:top-0 md:z-auto md:max-w-none md:translate-x-0 md:shadow-none md:transition-none ${
+        isMobileOpen ? "translate-x-0" : "-translate-x-full"
+      }`}
+    >
+      <div className="mb-8 flex items-start justify-between gap-2">
+        <div>
+          <BrandLogo href="/admin" width={150} height={40} />
+          <p className="mt-2 text-xs font-medium text-white/50">Admin Panel</p>
+        </div>
+        <button
+          type="button"
+          aria-label="Close menu"
+          onClick={onClose}
+          className="rounded-lg border border-white/10 p-2 text-white/70 transition hover:bg-white/10 hover:text-white md:hidden"
+        >
+          <X className="h-5 w-5" aria-hidden />
+        </button>
       </div>
-      <nav className="flex flex-1 flex-col gap-1">
+      <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
         {links.map(({ href, label, icon: Icon }) => {
           const active =
             href === "/admin"
@@ -58,6 +79,7 @@ export function AdminSidebar() {
             <Link
               key={href}
               href={href}
+              onClick={onClose}
               className={`rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                 active
                   ? "bg-primary/15 text-primary ring-1 ring-primary/40"
@@ -75,7 +97,7 @@ export function AdminSidebar() {
       <div className="mt-auto space-y-3 pt-6">
         <button
           type="button"
-          onClick={handleLogout}
+          onClick={() => void handleLogout()}
           className="w-full rounded-lg border border-white/15 bg-white/[0.04] px-3 py-2.5 text-sm font-medium text-white/80 transition hover:bg-white/10 hover:text-white"
         >
           Logout
