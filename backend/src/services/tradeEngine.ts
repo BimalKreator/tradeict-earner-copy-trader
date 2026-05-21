@@ -1195,6 +1195,33 @@ async function notifyMasterFlat(
   }
 }
 
+/** Close all follower books after REST master auto-exit (WS may lag). */
+export async function fanOutMasterFlatCloses(
+  prisma: PrismaClient,
+  strategyId: string,
+  legs: Array<{
+    symbolKey: string;
+    side: TradeSide;
+    contracts: number;
+    entryPrice: number;
+  }>,
+  exitReason: ExitReasonValue,
+): Promise<void> {
+  for (const leg of legs) {
+    await notifyMasterFlat(
+      prisma,
+      strategyId,
+      {
+        symbol: leg.symbolKey,
+        side: leg.side,
+        masterContracts: leg.contracts,
+        masterEntryPrice: leg.entryPrice,
+      },
+      { exitReason },
+    );
+  }
+}
+
 type LastOpenMeta = {
   symbol: string;
   side: TradeSide;

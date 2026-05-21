@@ -508,17 +508,20 @@ function SubscriberUserCard({
         </div>
         <div>
           <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-            Est. target
+            Scaled target (display)
           </p>
           <p className="mt-0.5 text-sm font-semibold tabular-nums text-emerald-300/90">
             {estTarget != null
               ? usdPnlFmt.format(estTarget).replace(/^\+/, "")
               : "—"}
           </p>
+          <p className="mt-0.5 text-[10px] text-white/35">
+            Auto-exit uses master basket PnL above
+          </p>
         </div>
         <div>
           <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-            Est. stop loss
+            Scaled stop (display)
           </p>
           <p className="mt-0.5 text-sm font-semibold tabular-nums text-red-300/90">
             {estStop != null

@@ -10,14 +10,18 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
-import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
+import {
+  estimateLivePnlUsd,
+  resolveLiveMarkPrice,
+} from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
-const AUTO_EXIT_COOLDOWN_MS = 60_000;
-/** Consecutive 1s poll ticks the threshold must stay breached before closing. */
-const SUSTAINED_BREACH_TICKS = 3;
-/** Ignore auto-exit right after new legs appear (basket / partial fills settling). */
-const POSITION_SETTLE_GRACE_MS = 5_000;
+/** After a successful auto-exit close burst, ignore re-triggers briefly. */
+const AUTO_EXIT_COOLDOWN_MS = 15_000;
+/** Consecutive poll ticks above/below threshold before closing (1 = immediate). */
+const SUSTAINED_BREACH_TICKS = 1;
+/** Brief pause after new master legs appear (do not reset breach counter). */
+const POSITION_SETTLE_GRACE_MS = 3_000;
 
 /** strategyId → timestamp when auto-exit last fired (prevents duplicate close bursts). */
 const lastAutoExitAt = new Map<string, number>();
@@ -44,27 +48,43 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   return null;
 }
 
+function contractSizeFromPosition(pos: DeltaLivePosition): number | undefined {
+  const lots = Math.abs(pos.contracts);
+  if (lots < 1e-12) return undefined;
+  const cs = pos.realBaseSize / lots;
+  return Number.isFinite(cs) && cs > 0 ? cs : undefined;
+}
+
+/** Same PnL basis as admin live-trades (`unrealizedPnl` from margined API, else mark math). */
 function legPnlUsd(pos: DeltaLivePosition): number {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }
+  const mark = resolveMarkForPosition(pos);
   if (
     pos.entryPrice == null ||
-    pos.markPrice == null ||
     !Number.isFinite(pos.entryPrice) ||
-    !Number.isFinite(pos.markPrice) ||
-    pos.realBaseSize <= 0
+    mark == null ||
+    !(mark > 0)
   ) {
     return 0;
   }
-  const signedBtc = pos.side === "SELL" ? -pos.realBaseSize : pos.realBaseSize;
-  return signedBtc * (pos.markPrice - pos.entryPrice);
+  const cs = contractSizeFromPosition(pos);
+  return estimateLivePnlUsd({
+    symbolKey: pos.symbolKey,
+    side: pos.side,
+    entryPrice: pos.entryPrice,
+    contracts: pos.contracts,
+    markPrice: mark,
+    ...(cs != null ? { contractSize: cs } : {}),
+  });
 }
 
 export type MasterLegCloseTarget = {
   symbolKey: string;
   side: TradeSide;
   contracts: number;
+  entryPrice: number;
 };
 
 export async function fetchMasterLegsWithTotalLivePnl(
@@ -83,10 +103,19 @@ export async function fetchMasterLegsWithTotalLivePnl(
 
     totalPnlUsd += legPnlUsd(pos);
 
+    const entryPrice =
+      pos.entryPrice != null && Number.isFinite(pos.entryPrice)
+        ? pos.entryPrice
+        : (() => {
+            const m = resolveMarkForPosition(pos);
+            return m != null && Number.isFinite(m) ? m : 0;
+          })();
+
     legs.push({
       symbolKey: pos.symbolKey,
       side: pos.side,
       contracts,
+      entryPrice,
     });
   }
 
@@ -181,9 +210,6 @@ export async function runStrategyAutoExitCheck(
   const secret = strategy.masterApiSecret?.trim() ?? "";
   if (!key || !secret) return;
 
-  const last = lastAutoExitAt.get(strategy.id) ?? 0;
-  if (Date.now() - last < AUTO_EXIT_COOLDOWN_MS) return;
-
   let totalPnlUsd: number;
   let legs: MasterLegCloseTarget[];
   try {
@@ -213,7 +239,6 @@ export async function runStrategyAutoExitCheck(
 
   if (legs.length > prevLegCount) {
     positionSettleUntil.set(strategyId, Date.now() + POSITION_SETTLE_GRACE_MS);
-    breachCounters.set(strategyId, 0);
     console.log(
       `[auto-exit] New/changed legs detected strategyId=${strategyId} ` +
         `(${prevLegCount} → ${legs.length}) — ${POSITION_SETTLE_GRACE_MS / 1000}s settle grace`,
@@ -249,6 +274,11 @@ export async function runStrategyAutoExitCheck(
     return;
   }
 
+  const lastExit = lastAutoExitAt.get(strategyId) ?? 0;
+  if (Date.now() - lastExit < AUTO_EXIT_COOLDOWN_MS) {
+    return;
+  }
+
   breachCounters.set(strategyId, 0);
 
   const exitReason =
@@ -262,12 +292,10 @@ export async function runStrategyAutoExitCheck(
   setPendingStrategyExitReason(strategyId, exitReason);
 
   console.warn(
-    `[auto-exit] SUSTAINED THRESHOLD CONFIRMED strategy="${strategy.title}" (${strategyId}) ` +
+    `[auto-exit] THRESHOLD HIT strategy="${strategy.title}" (${strategyId}) ` +
       `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
       `threshold=${breach.thresholdUsd} openLegs=${legs.length} — closing ALL master positions`,
   );
-
-  lastAutoExitAt.set(strategyId, Date.now());
 
   const { closed, errors } = await closeAllMasterPositionsMarket(
     strategy.masterApiKey,
@@ -275,14 +303,30 @@ export async function runStrategyAutoExitCheck(
     legs,
   );
 
+  if (closed > 0 || errors.length === 0) {
+    lastAutoExitAt.set(strategyId, Date.now());
+  }
+
   if (errors.length > 0) {
     console.error(
       `[auto-exit] partial close strategyId=${strategy.id} closed=${closed}/${legs.length} errors=${errors.join("; ")}`,
     );
   } else {
     console.log(
-      `[auto-exit] master flat complete strategyId=${strategy.id} closed=${closed} leg(s); WS will fan out to followers`,
+      `[auto-exit] master flat complete strategyId=${strategy.id} closed=${closed} leg(s)`,
     );
+  }
+
+  if (closed > 0) {
+    try {
+      const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
+      await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);
+    } catch (err) {
+      console.error(
+        `[auto-exit] follower fan-out failed strategyId=${strategyId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 }
 
