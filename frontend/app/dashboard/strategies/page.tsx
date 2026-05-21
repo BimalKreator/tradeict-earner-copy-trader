@@ -5,6 +5,7 @@ import {
   mockSubscriberCount,
   resolvePerformanceMetrics,
 } from "@/lib/strategyPerformance";
+import { clampMultiplier } from "@/lib/subscription";
 import {
   Layers,
   Loader2,
@@ -60,9 +61,6 @@ function badge(status: string): string {
 }
 function statusLabel(status: string): string {
   return pausedLike(status) ? "Inactive" : "Deployed";
-}
-function clampMultiplier(v: number): number {
-  return Math.min(10, Math.max(0.1, Math.round(v * 10) / 10));
 }
 
 function dedupeSubscriptions(rows: SubscriptionRow[]): SubscriptionRow[] {
@@ -444,7 +442,7 @@ export default function StrategySubscriptionLifecyclePage() {
               <input
                 type="number"
                 min={0.1}
-                max={10}
+                max={10000}
                 step={0.1}
                 value={multiplier}
                 onChange={(e) => setMultiplier(clampMultiplier(Number(e.target.value)))}

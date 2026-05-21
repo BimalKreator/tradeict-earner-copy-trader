@@ -1,11 +1,20 @@
 import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import { TransactionStatus, type PrismaClient } from "@prisma/client";
+import {
+  SubscriptionStatus,
+  TransactionStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import Razorpay from "razorpay";
 import {
   creditWalletAfterGateway,
   settleInvoiceAfterGateway,
 } from "../services/billingService.js";
+import {
+  consumeCouponUse,
+  validateCouponForFee,
+} from "../services/couponService.js";
+import { logUserActivity } from "../services/userActivityService.js";
 import {
   calculateFeeBreakdown,
   inrToUsd,
@@ -132,18 +141,102 @@ export function createPaymentController(prisma: PrismaClient) {
         typeof body.invoiceId === "string" ? body.invoiceId.trim() : "";
       const purposeRaw =
         typeof body.purpose === "string" ? body.purpose.trim() : "";
+      const strategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      const couponCode =
+        typeof body.couponCode === "string" ? body.couponCode : "";
       const purpose =
-        purposeRaw === "invoice" || purposeRaw === "wallet"
+        purposeRaw === "invoice" ||
+        purposeRaw === "wallet" ||
+        purposeRaw === "strategy_subscription"
           ? purposeRaw
-          : invoiceId
-            ? "invoice"
-            : "wallet";
+          : strategyId
+            ? "strategy_subscription"
+            : invoiceId
+              ? "invoice"
+              : "wallet";
 
       const pgFeePercent = await getPgFeePercent(prisma);
       let breakdown;
       let notes: Record<string, string>;
 
-      if (purpose === "invoice") {
+      if (purpose === "strategy_subscription") {
+        if (!strategyId) {
+          res.status(400).json({ error: "strategyId is required" });
+          return;
+        }
+        const strategy = await prisma.strategy.findUnique({
+          where: { id: strategyId },
+          select: { id: true, title: true, monthlyFee: true },
+        });
+        if (!strategy) {
+          res.status(404).json({ error: "Strategy not found" });
+          return;
+        }
+
+        const existing = await prisma.userSubscription.findFirst({
+          where: {
+            userId,
+            strategyId,
+            status: {
+              in: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+              ],
+            },
+          },
+        });
+        if (existing) {
+          res.status(409).json({
+            error: "You already have this strategy in My Strategies",
+          });
+          return;
+        }
+
+        let finalFeeInr = Math.max(0, strategy.monthlyFee);
+        let couponId: string | undefined;
+        let discountPct: number | undefined;
+
+        if (couponCode.trim()) {
+          const validated = await validateCouponForFee(
+            prisma,
+            couponCode,
+            finalFeeInr,
+          );
+          if (!validated.ok) {
+            res.status(400).json({ error: validated.error });
+            return;
+          }
+          finalFeeInr = validated.finalFeeInr;
+          couponId = validated.coupon.id;
+          discountPct = validated.discountPercentage;
+        }
+
+        if (finalFeeInr <= 0) {
+          res.status(400).json({
+            error:
+              "No payment required for this strategy. Subscribe directly without checkout.",
+          });
+          return;
+        }
+
+        breakdown = calculateFeeBreakdown(finalFeeInr, pgFeePercent, "RAZORPAY");
+        notes = {
+          userId,
+          purpose: "strategy_subscription",
+          strategyId,
+          strategyTitle: strategy.title,
+          originalFeeInr: String(strategy.monthlyFee),
+          finalFeeInr: String(finalFeeInr),
+          baseAmountInr: String(breakdown.baseAmountInr),
+          feeAmountInr: String(breakdown.feeAmountInr),
+          totalAmountInr: String(breakdown.totalAmountInr),
+          ...(couponId ? { couponId, couponCode: couponCode.trim().toUpperCase() } : {}),
+          ...(discountPct != null
+            ? { discountPercentage: String(discountPct) }
+            : {}),
+        };
+      } else if (purpose === "invoice") {
         if (!invoiceId) {
           res.status(400).json({ error: "invoiceId is required for invoice payments" });
           return;
@@ -299,6 +392,85 @@ export function createPaymentController(prisma: PrismaClient) {
       });
       if (!user) {
         res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      if (purpose === "strategy_subscription") {
+        const sid = notes.strategyId?.trim();
+        if (!sid) {
+          res.status(400).json({ error: "Strategy reference missing on order" });
+          return;
+        }
+
+        const existing = await prisma.userSubscription.findFirst({
+          where: {
+            userId,
+            strategyId: sid,
+            status: {
+              in: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+              ],
+            },
+          },
+        });
+
+        if (!existing) {
+          await prisma.$transaction(async (tx) => {
+            await tx.userSubscription.create({
+              data: {
+                userId,
+                strategyId: sid,
+                multiplier: 1,
+                status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+              },
+            });
+
+            const couponId = notes.couponId?.trim();
+            if (couponId) {
+              await consumeCouponUse(tx, couponId);
+            }
+          });
+
+          void logUserActivity(prisma, {
+            userId,
+            kind: "SUBSCRIPTION_CREATED",
+            message: `Subscribed to strategy after payment (${notes.strategyTitle ?? sid})`,
+          });
+        }
+
+        await prisma.paymentTransaction.create({
+          data: {
+            userId,
+            method: "RAZORPAY",
+            baseAmountInr,
+            feeAmountInr,
+            totalAmountInr,
+            netCreditUsd: 0,
+            referenceId: paymentId,
+            razorpayOrderId: orderId,
+            razorpayPaymentId: paymentId,
+            status: TransactionStatus.APPROVED,
+          },
+        });
+
+        void sendPaymentReceiptEmails({
+          userName: user.name ?? user.email,
+          userEmail: user.email,
+          method: "RAZORPAY (Strategy subscription)",
+          baseAmountInr,
+          feeAmountInr,
+          totalAmountInr,
+          netCreditUsd: 0,
+          referenceId: paymentId,
+        }).catch(() => {});
+
+        res.status(200).json({
+          ok: true,
+          purpose: "strategy_subscription",
+          strategyId: sid,
+          subscribed: true,
+        });
         return;
       }
 

@@ -31,6 +31,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { StrategySubscriptionCheckout } from "@/components/strategies/StrategySubscriptionCheckout";
 import {
   formatPercent,
   mockSubscriberCount,
@@ -119,7 +120,6 @@ export default function StrategyPerformancePage() {
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
   const [inMyStrategies, setInMyStrategies] = useState(false);
-  const [subscribeBusy, setSubscribeBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -219,34 +219,6 @@ export default function StrategyPerformancePage() {
     return [Math.floor(Math.min(...vals) - pad), Math.ceil(Math.max(...vals) + pad)];
   }, [metrics.pnlChart.values]);
 
-  async function handleSubscribe() {
-    if (!id || subscribeBusy || inMyStrategies) return;
-    setSubscribeBusy(true);
-    try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        setUnauthorized(true);
-        return;
-      }
-      const res = await fetch(`${API_BASE}/subscriptions/subscribe`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ strategyId: id }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(body.error ?? "Subscribe failed");
-      setInMyStrategies(true);
-      router.push("/dashboard/strategies");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Subscribe failed");
-    } finally {
-      setSubscribeBusy(false);
-    }
-  }
-
   if (!id) {
     return <p className="text-sm text-gray-400">Invalid strategy link.</p>;
   }
@@ -328,30 +300,31 @@ export default function StrategyPerformancePage() {
               </span>
             </div>
           </div>
-          <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col">
-            {inMyStrategies ? (
-              <Link
-                href="/dashboard/strategies"
-                className="inline-flex items-center justify-center rounded-lg border border-gray-700 bg-gray-900 px-6 py-3 text-sm font-medium text-gray-200"
-              >
-                Manage in My Strategies
-              </Link>
-            ) : (
-              <button
-                type="button"
-                disabled={subscribeBusy}
-                onClick={() => void handleSubscribe()}
-                className="inline-flex items-center justify-center rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-white transition hover:bg-primary/90 disabled:opacity-60"
-              >
-                {subscribeBusy ? "Subscribing…" : "Subscribe"}
-              </button>
-            )}
-          </div>
+          {inMyStrategies ? (
+            <Link
+              href="/dashboard/strategies"
+              className="inline-flex shrink-0 items-center justify-center rounded-lg border border-gray-700 bg-gray-900 px-6 py-3 text-sm font-medium text-gray-200"
+            >
+              Manage in My Strategies
+            </Link>
+          ) : null}
         </div>
         <p className="mt-4 text-[11px] text-gray-600">
           Performance charts use demo backtest data when admin metrics are not uploaded yet.
         </p>
       </section>
+
+      {!inMyStrategies ? (
+        <StrategySubscriptionCheckout
+          strategyId={strategy.id}
+          strategyTitle={strategy.title}
+          monthlyFeeInr={strategy.monthlyFee}
+          onSubscribed={() => {
+            setInMyStrategies(true);
+            router.push("/dashboard/strategies");
+          }}
+        />
+      ) : null}
 
       {/* Backtest summary grid */}
       <section>

@@ -376,3 +376,14 @@ model ArbitrageTrade {
 
   @@index([userId, createdAt])
 }
+
+model DiscountCoupon {
+  id                 String   @id @default(uuid())
+  code               String   @unique
+  discountPercentage Int
+  maxUses            Int
+  usedCount          Int      @default(0)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

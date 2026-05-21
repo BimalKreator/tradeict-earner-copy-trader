@@ -3,7 +3,12 @@ import {
   type PrismaClient,
   SubscriptionStatus,
 } from "@prisma/client";
+import {
+  MAX_SUBSCRIPTION_MULTIPLIER,
+  MIN_SUBSCRIPTION_MULTIPLIER,
+} from "../constants/subscription.js";
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
+import { validateCouponForFee } from "../services/couponService.js";
 import { logUserActivity } from "../services/userActivityService.js";
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
@@ -78,8 +83,143 @@ export function createSubscriptionController(prisma: PrismaClient) {
         : typeof v === "string"
           ? Number(v)
           : NaN;
-    if (!Number.isFinite(n) || n <= 0) return null;
-    return n;
+    if (!Number.isFinite(n) || n < MIN_SUBSCRIPTION_MULTIPLIER) return null;
+    if (n > MAX_SUBSCRIPTION_MULTIPLIER) return null;
+    return Math.round(n * 10) / 10;
+  }
+
+  async function resolveStrategyFeeQuote(
+    strategyId: string,
+    couponCode?: string,
+  ): Promise<
+    | {
+        ok: true;
+        originalFeeInr: number;
+        discountAmountInr: number;
+        finalFeeInr: number;
+        discountPercentage: number | null;
+        couponId: string | null;
+        couponCode: string | null;
+      }
+    | { ok: false; error: string }
+  > {
+    const strategy = await prisma.strategy.findUnique({
+      where: { id: strategyId },
+      select: { monthlyFee: true },
+    });
+    if (!strategy) return { ok: false, error: "Strategy not found" };
+
+    const originalFeeInr = Math.max(0, strategy.monthlyFee);
+    if (!couponCode?.trim()) {
+      return {
+        ok: true,
+        originalFeeInr,
+        discountAmountInr: 0,
+        finalFeeInr: originalFeeInr,
+        discountPercentage: null,
+        couponId: null,
+        couponCode: null,
+      };
+    }
+
+    const validated = await validateCouponForFee(
+      prisma,
+      couponCode,
+      originalFeeInr,
+    );
+    if (!validated.ok) return validated;
+
+    return {
+      ok: true,
+      originalFeeInr: validated.originalFeeInr,
+      discountAmountInr: validated.discountAmountInr,
+      finalFeeInr: validated.finalFeeInr,
+      discountPercentage: validated.discountPercentage,
+      couponId: validated.coupon.id,
+      couponCode: validated.coupon.code,
+    };
+  }
+
+  async function validateCoupon(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { strategyId?: unknown; couponCode?: unknown };
+      const strategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      const couponCode =
+        typeof body.couponCode === "string" ? body.couponCode : "";
+
+      if (!strategyId) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+      if (!couponCode.trim()) {
+        res.status(400).json({ error: "couponCode is required" });
+        return;
+      }
+
+      const quote = await resolveStrategyFeeQuote(strategyId, couponCode);
+      if (!quote.ok) {
+        res.status(400).json({ error: quote.error });
+        return;
+      }
+
+      res.json({
+        valid: true,
+        strategyId,
+        couponCode: quote.couponCode,
+        originalFeeInr: quote.originalFeeInr,
+        discountAmountInr: quote.discountAmountInr,
+        finalFeeInr: quote.finalFeeInr,
+        discountPercentage: quote.discountPercentage,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getCheckoutQuote(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { strategyId?: unknown; couponCode?: unknown };
+      const strategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      const couponCode =
+        typeof body.couponCode === "string" ? body.couponCode : undefined;
+
+      if (!strategyId) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+
+      const quote = await resolveStrategyFeeQuote(strategyId, couponCode);
+      if (!quote.ok) {
+        res.status(400).json({ error: quote.error });
+        return;
+      }
+
+      res.json(quote);
+    } catch (err) {
+      next(err);
+    }
   }
 
   async function subscribe(
@@ -96,10 +236,13 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       const body = req.body as {
         strategyId?: unknown;
+        couponCode?: unknown;
       };
 
       const strategyId =
         typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      const couponCode =
+        typeof body.couponCode === "string" ? body.couponCode : undefined;
 
       if (!strategyId) {
         res.status(400).json({ error: "strategyId is required" });
@@ -112,6 +255,23 @@ export function createSubscriptionController(prisma: PrismaClient) {
       });
       if (!strategy) {
         res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      const feeQuote = await resolveStrategyFeeQuote(strategyId, couponCode);
+      if (!feeQuote.ok) {
+        res.status(400).json({ error: feeQuote.error });
+        return;
+      }
+
+      if (feeQuote.finalFeeInr > 0) {
+        res.status(402).json({
+          error:
+            "This strategy requires payment. Use checkout (Razorpay) before subscribing.",
+          requiresPayment: true,
+          originalFeeInr: feeQuote.originalFeeInr,
+          finalFeeInr: feeQuote.finalFeeInr,
+        });
         return;
       }
 
@@ -316,7 +476,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
       const body = req.body as { multiplier?: unknown; exchangeAccountId?: unknown };
       const multiplier = parsePositiveMultiplier(body.multiplier);
       if (multiplier == null) {
-        return void res.status(400).json({ error: "multiplier must be a positive number" });
+        return void res.status(400).json({
+          error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
+        });
       }
       const ex = await validateExchangeAccountOwnership(userId, body.exchangeAccountId);
       if (!ex.ok) return void res.status(400).json({ error: ex.error });
@@ -370,7 +532,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
       const body = req.body as { multiplier?: unknown };
       const multiplier = parsePositiveMultiplier(body.multiplier);
       if (multiplier == null) {
-        return void res.status(400).json({ error: "multiplier must be a positive number" });
+        return void res.status(400).json({
+          error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
+        });
       }
 
       const sub = await prisma.userSubscription.findFirst({
@@ -470,5 +634,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     listStrategies,
     listMySubscriptions,
     getStrategy,
+    validateCoupon,
+    getCheckoutQuote,
   };
 }

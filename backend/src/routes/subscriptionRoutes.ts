@@ -12,6 +12,8 @@ export function createSubscriptionRoutes(prisma: PrismaClient): Router {
   const jwtAuth = authenticateJwt();
   const subscription = createSubscriptionController(prisma);
 
+  router.post("/coupons/validate", jwtAuth, subscription.validateCoupon);
+  router.post("/checkout/quote", jwtAuth, subscription.getCheckoutQuote);
   router.post("/subscribe", jwtAuth, subscription.subscribe);
   router.post("/:strategyId/deploy", jwtAuth, subscription.deploy);
   router.patch("/:strategyId/modify", jwtAuth, subscription.modify);

@@ -13,6 +13,7 @@ import {
   LineChart,
   Radio,
   Settings,
+  Tag,
   Users,
   Wallet,
 } from "lucide-react";
@@ -22,6 +23,7 @@ const links = [
   { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/strategies", label: "Strategies", icon: LineChart },
+  { href: "/admin/coupons", label: "Coupons", icon: Tag },
   { href: "/admin/live-trades", label: "Live trades", icon: Radio },
   { href: "/admin/dex-arbitrage", label: "Dex Arbitrage", icon: GitCompare },
   { href: "/admin/funds", label: "Funds", icon: Wallet },
