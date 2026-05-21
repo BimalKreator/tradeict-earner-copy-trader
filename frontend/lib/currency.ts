@@ -1,20 +1,19 @@
-const DEFAULT_RATE = Number.parseFloat(
-  process.env.NEXT_PUBLIC_RAZORPAY_USD_INR_RATE ?? "83",
-);
+/** Last-resort fallback when API rate is unavailable (admin-configured rate preferred). */
+export const FALLBACK_USD_INR_RATE = 83;
 
-export function getUsdInrRate(fallback?: number): number {
-  if (typeof fallback === "number" && Number.isFinite(fallback) && fallback > 0) {
-    return fallback;
+export function getUsdInrRate(apiRate?: number | null): number {
+  if (typeof apiRate === "number" && Number.isFinite(apiRate) && apiRate > 0) {
+    return apiRate;
   }
-  return Number.isFinite(DEFAULT_RATE) && DEFAULT_RATE > 0 ? DEFAULT_RATE : 83;
+  return FALLBACK_USD_INR_RATE;
 }
 
 export function usdToInr(usd: number, rate: number): number {
-  return usd * rate;
+  return usd * getUsdInrRate(rate);
 }
 
 export function inrToUsdDisplay(inr: number, rate: number): number {
-  return inr / rate;
+  return inr / getUsdInrRate(rate);
 }
 
 const usdFmt = new Intl.NumberFormat("en-US", {

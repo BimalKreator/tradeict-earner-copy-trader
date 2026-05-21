@@ -3,8 +3,10 @@ import type { PrismaClient } from "@prisma/client";
 import {
   getAllowedEmailDomains,
   getPgFeePercent,
+  getUsdInrRate,
   setAllowedEmailDomains,
   setPgFeePercent,
+  setUsdInrRate,
 } from "../services/settingsService.js";
 
 export function createSettingsController(prisma: PrismaClient) {
@@ -14,11 +16,12 @@ export function createSettingsController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const [pgFeePercent, allowedEmailDomains] = await Promise.all([
+      const [pgFeePercent, allowedEmailDomains, usdInrRate] = await Promise.all([
         getPgFeePercent(prisma),
         getAllowedEmailDomains(prisma),
+        getUsdInrRate(prisma),
       ]);
-      res.json({ pgFeePercent, allowedEmailDomains });
+      res.json({ pgFeePercent, allowedEmailDomains, usdInrRate });
     } catch (err) {
       next(err);
     }
@@ -33,9 +36,15 @@ export function createSettingsController(prisma: PrismaClient) {
       const body = req.body as {
         pgFeePercent?: unknown;
         allowedEmailDomains?: unknown;
+        usdInrRate?: unknown;
       };
 
-      const out: { ok: true; pgFeePercent?: number; allowedEmailDomains?: string } = {
+      const out: {
+        ok: true;
+        pgFeePercent?: number;
+        allowedEmailDomains?: string;
+        usdInrRate?: number;
+      } = {
         ok: true,
       };
 
@@ -52,6 +61,29 @@ export function createSettingsController(prisma: PrismaClient) {
           return;
         }
         out.pgFeePercent = await setPgFeePercent(prisma, pgFeePercent);
+      }
+
+      if (body.usdInrRate !== undefined) {
+        const usdInrRate =
+          typeof body.usdInrRate === "number"
+            ? body.usdInrRate
+            : typeof body.usdInrRate === "string"
+              ? Number.parseFloat(body.usdInrRate)
+              : NaN;
+
+        if (!Number.isFinite(usdInrRate)) {
+          res.status(400).json({ error: "usdInrRate must be a number" });
+          return;
+        }
+        try {
+          out.usdInrRate = await setUsdInrRate(prisma, usdInrRate);
+        } catch (err) {
+          if (err instanceof Error && err.message.includes("usdInrRate")) {
+            res.status(400).json({ error: err.message });
+            return;
+          }
+          throw err;
+        }
       }
 
       if (body.allowedEmailDomains !== undefined) {
@@ -73,9 +105,14 @@ export function createSettingsController(prisma: PrismaClient) {
         }
       }
 
-      if (out.pgFeePercent === undefined && out.allowedEmailDomains === undefined) {
+      if (
+        out.pgFeePercent === undefined &&
+        out.allowedEmailDomains === undefined &&
+        out.usdInrRate === undefined
+      ) {
         res.status(400).json({
-          error: "Provide at least one of pgFeePercent or allowedEmailDomains",
+          error:
+            "Provide at least one of pgFeePercent, usdInrRate, or allowedEmailDomains",
         });
         return;
       }

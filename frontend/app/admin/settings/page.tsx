@@ -8,6 +8,7 @@ const API_BASE =
 
 export default function AdminSettingsPage() {
   const [pgFeePercent, setPgFeePercent] = useState("2.36");
+  const [usdInrRate, setUsdInrRate] = useState("83");
   const [allowedEmailDomains, setAllowedEmailDomains] = useState(
     "gmail.com,yahoo.com,hotmail.com,outlook.com",
   );
@@ -28,10 +29,14 @@ export default function AdminSettingsPage() {
       if (!res.ok) throw new Error(`Failed to load settings (${res.status})`);
       const data = (await res.json()) as {
         pgFeePercent?: number;
+        usdInrRate?: number;
         allowedEmailDomains?: string;
       };
       if (typeof data.pgFeePercent === "number") {
         setPgFeePercent(String(data.pgFeePercent));
+      }
+      if (typeof data.usdInrRate === "number") {
+        setUsdInrRate(String(data.usdInrRate));
       }
       if (typeof data.allowedEmailDomains === "string") {
         setAllowedEmailDomains(data.allowedEmailDomains);
@@ -48,7 +53,11 @@ export default function AdminSettingsPage() {
   }, [load]);
 
   async function saveSettings(
-    payload: { pgFeePercent?: number; allowedEmailDomains?: string },
+    payload: {
+      pgFeePercent?: number;
+      usdInrRate?: number;
+      allowedEmailDomains?: string;
+    },
     kind: "payment" | "security",
   ): Promise<void> {
     setError(null);
@@ -74,7 +83,9 @@ export default function AdminSettingsPage() {
         );
       }
       if (kind === "payment") {
-        setSuccess("Payment gateway fee updated. All payment flows will use the new rate.");
+        setSuccess(
+          "Payment settings updated. Razorpay, wallet INR display, and invoice conversion will use the new values.",
+        );
       } else {
         setSuccess("Allowed email domains updated. Sign-up and login now use the new list.");
       }
@@ -88,12 +99,17 @@ export default function AdminSettingsPage() {
 
   async function handleSavePayment(e: React.FormEvent) {
     e.preventDefault();
-    const value = Number.parseFloat(pgFeePercent);
-    if (!Number.isFinite(value) || value < 0 || value > 100) {
-      setError("Enter a valid percentage between 0 and 100.");
+    const fee = Number.parseFloat(pgFeePercent);
+    const fx = Number.parseFloat(usdInrRate);
+    if (!Number.isFinite(fee) || fee < 0 || fee > 100) {
+      setError("Enter a valid fee percentage between 0 and 100.");
       return;
     }
-    await saveSettings({ pgFeePercent: value }, "payment");
+    if (!Number.isFinite(fx) || fx <= 0) {
+      setError("Enter a valid USD to INR rate (positive number).");
+      return;
+    }
+    await saveSettings({ pgFeePercent: fee, usdInrRate: fx }, "payment");
   }
 
   async function handleSaveSecurity(e: React.FormEvent) {
@@ -155,9 +171,26 @@ export default function AdminSettingsPage() {
                   className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                 />
               </label>
+              <label className="block text-sm text-white/70">
+                USD to INR Conversion Rate
+                <input
+                  type="number"
+                  min={0.01}
+                  step={0.01}
+                  required
+                  value={usdInrRate}
+                  onChange={(e) => setUsdInrRate(e.target.value)}
+                  disabled={savingPayment}
+                  placeholder="e.g. 83.5"
+                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                />
+              </label>
               <p className="text-xs text-white/45">
-                Default: 2.36%. Changes apply immediately for new orders and manual deposit
-                calculations.
+                Used for Razorpay checkout, wallet INR display, and invoice USD→INR conversion.
+                No longer read from environment variables.
+              </p>
+              <p className="text-xs text-white/45">
+                Default fee: 2.36%. Changes apply immediately for new orders and deposits.
               </p>
               <button
                 type="submit"

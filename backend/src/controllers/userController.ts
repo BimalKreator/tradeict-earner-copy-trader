@@ -7,8 +7,8 @@ import {
   monthlyWinRate,
   pnlPercentOfCapital,
   resolveUserDeltaCreds,
-  startOfUtcDay,
   startOfUtcMonth,
+  computeTodaysPnl,
   sumClosedTradePnlSince,
   userTotalDue,
 } from "../services/dashboardMetricsService.js";
@@ -172,7 +172,6 @@ export function createUserController(prisma: PrismaClient) {
         return;
       }
 
-      const dayStart = startOfUtcDay();
       const monthStart = startOfUtcMonth();
 
       const [
@@ -189,7 +188,7 @@ export function createUserController(prisma: PrismaClient) {
           where: { id: userId },
           select: { copyTradingPaused: true },
         }),
-        sumClosedTradePnlSince(prisma, userId, dayStart),
+        computeTodaysPnl(prisma, userId),
         sumClosedTradePnlSince(prisma, userId, monthStart),
         fetchUserCapitalBreakdown(prisma, userId),
         userTotalDue(prisma, userId),

@@ -7,14 +7,14 @@ export type FeeBreakdown = {
   netBaseInr: number;
 };
 
-export function usdInrRate(): number {
-  const raw = process.env.RAZORPAY_USD_INR_RATE ?? "83";
-  const n = Number.parseFloat(raw);
-  return Number.isFinite(n) && n > 0 ? n : 83;
+export function inrToUsd(inr: number, usdInrRate: number): number {
+  const rate = Number.isFinite(usdInrRate) && usdInrRate > 0 ? usdInrRate : 83;
+  return inr / rate;
 }
 
-export function inrToUsd(inr: number): number {
-  return inr / usdInrRate();
+export function usdToInr(usd: number, usdInrRate: number): number {
+  const rate = Number.isFinite(usdInrRate) && usdInrRate > 0 ? usdInrRate : 83;
+  return usd * rate;
 }
 
 export function roundInr(n: number): number {

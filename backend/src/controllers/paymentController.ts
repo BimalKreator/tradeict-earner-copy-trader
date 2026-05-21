@@ -19,10 +19,9 @@ import {
   calculateFeeBreakdown,
   inrToUsd,
   roundInr,
-  usdInrRate,
   type PaymentMethodKind,
 } from "../services/paymentFeeService.js";
-import { getPgFeePercent } from "../services/settingsService.js";
+import { getPgFeePercent, getUsdInrRate } from "../services/settingsService.js";
 import { sendPaymentReceiptEmails } from "../utils/emailService.js";
 
 const DEFAULT_CURRENCY = "INR";
@@ -112,8 +111,11 @@ export function createPaymentController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const pgFeePercent = await getPgFeePercent(prisma);
-      res.json({ pgFeePercent });
+      const [pgFeePercent, usdInrRate] = await Promise.all([
+        getPgFeePercent(prisma),
+        getUsdInrRate(prisma),
+      ]);
+      res.json({ pgFeePercent, usdInrRate });
     } catch (err) {
       next(err);
     }
@@ -156,7 +158,10 @@ export function createPaymentController(prisma: PrismaClient) {
               ? "invoice"
               : "wallet";
 
-      const pgFeePercent = await getPgFeePercent(prisma);
+      const [pgFeePercent, usdInrRate] = await Promise.all([
+        getPgFeePercent(prisma),
+        getUsdInrRate(prisma),
+      ]);
       let breakdown;
       let notes: Record<string, string>;
 
@@ -252,7 +257,7 @@ export function createPaymentController(prisma: PrismaClient) {
           res.status(409).json({ error: "Invoice already paid" });
           return;
         }
-        const baseInr = Math.ceil(invoice.amountDue * (Number(process.env.RAZORPAY_USD_INR_RATE) || 83));
+        const baseInr = Math.ceil(invoice.amountDue * usdInrRate);
         breakdown = calculateFeeBreakdown(baseInr, pgFeePercent, "RAZORPAY");
         notes = {
           userId,
@@ -383,7 +388,8 @@ export function createPaymentController(prisma: PrismaClient) {
         Number.parseFloat(notes.totalAmountInr ?? "0") ||
           Number(order.amount) / 100,
       );
-      const netCreditUsd = inrToUsd(baseAmountInr);
+      const fxRate = await getUsdInrRate(prisma);
+      const netCreditUsd = inrToUsd(baseAmountInr, fxRate);
       const purpose = notes.purpose ?? "wallet";
 
       const user = await prisma.user.findUnique({
@@ -605,9 +611,12 @@ export function createPaymentController(prisma: PrismaClient) {
       }
 
       const method = methodRaw as PaymentMethodKind;
-      const pgFeePercent = await getPgFeePercent(prisma);
+      const [pgFeePercent, fxRate] = await Promise.all([
+        getPgFeePercent(prisma),
+        getUsdInrRate(prisma),
+      ]);
       const breakdown = calculateFeeBreakdown(amount, pgFeePercent, method);
-      const netCreditUsd = inrToUsd(breakdown.netBaseInr);
+      const netCreditUsd = inrToUsd(breakdown.netBaseInr, fxRate);
 
       const file = req.file as { filename?: string } | undefined;
       const screenshotUrl = file?.filename ? `/uploads/${file.filename}` : null;
@@ -695,10 +704,14 @@ export function createPaymentController(prisma: PrismaClient) {
         orderBy: { createdAt: "desc" },
       });
 
+      const [pgFeePercent, rate] = await Promise.all([
+        getPgFeePercent(prisma),
+        getUsdInrRate(prisma),
+      ]);
       res.json({
         transactions: rows.map(serializePayment),
-        pgFeePercent: await getPgFeePercent(prisma),
-        usdInrRate: usdInrRate(),
+        pgFeePercent,
+        usdInrRate: rate,
       });
     } catch (err) {
       next(err);

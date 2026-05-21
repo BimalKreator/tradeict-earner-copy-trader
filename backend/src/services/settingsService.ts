@@ -4,6 +4,7 @@ const SETTINGS_ID = "global";
 const DEFAULT_PG_FEE_PERCENT = 2.36;
 const DEFAULT_ALLOWED_EMAIL_DOMAINS =
   "gmail.com,yahoo.com,hotmail.com,outlook.com";
+export const DEFAULT_USD_INR_RATE = 83;
 
 export const EMAIL_DOMAIN_BLOCKED_MESSAGE =
   "Registration from this email domain is not permitted. Please use an allowed provider.";
@@ -22,6 +23,7 @@ async function ensureSystemSettings(prisma: PrismaClient) {
       id: SETTINGS_ID,
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
+      usdInrRate: DEFAULT_USD_INR_RATE,
     },
     update: {},
   });
@@ -45,10 +47,37 @@ export async function setPgFeePercent(
       id: SETTINGS_ID,
       pgFeePercent,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
+      usdInrRate: DEFAULT_USD_INR_RATE,
     },
     update: { pgFeePercent },
   });
   return row.pgFeePercent;
+}
+
+export async function getUsdInrRate(prisma: PrismaClient): Promise<number> {
+  const row = await ensureSystemSettings(prisma);
+  const n = row.usdInrRate;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_USD_INR_RATE;
+}
+
+export async function setUsdInrRate(
+  prisma: PrismaClient,
+  usdInrRate: number,
+): Promise<number> {
+  if (!Number.isFinite(usdInrRate) || usdInrRate <= 0 || usdInrRate > 500) {
+    throw new Error("usdInrRate must be a positive number (max 500)");
+  }
+  const row = await prisma.systemSettings.upsert({
+    where: { id: SETTINGS_ID },
+    create: {
+      id: SETTINGS_ID,
+      pgFeePercent: DEFAULT_PG_FEE_PERCENT,
+      allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
+      usdInrRate,
+    },
+    update: { usdInrRate },
+  });
+  return row.usdInrRate;
 }
 
 export async function getAllowedEmailDomains(
@@ -73,6 +102,7 @@ export async function setAllowedEmailDomains(
       id: SETTINGS_ID,
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: domains.join(","),
+      usdInrRate: DEFAULT_USD_INR_RATE,
     },
     update: { allowedEmailDomains: domains.join(",") },
   });

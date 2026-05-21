@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { Prisma, type PrismaClient, TransactionStatus } from "@prisma/client";
-import { usdInrRate } from "../services/paymentFeeService.js";
+import { getUsdInrRate } from "../services/settingsService.js";
 
 export function createWalletController(prisma: PrismaClient) {
   async function topUp(
@@ -202,7 +202,7 @@ export function createWalletController(prisma: PrismaClient) {
         where: { userId },
         select: { balance: true, pendingFees: true, overdueDays: true },
       });
-      const rate = usdInrRate();
+      const rate = await getUsdInrRate(prisma);
       const balanceUsd = wallet?.balance ?? 0;
       res.json({
         exists: wallet !== null,

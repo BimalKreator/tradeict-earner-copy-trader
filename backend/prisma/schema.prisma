@@ -188,6 +188,7 @@ model Trade {
   /** Why the trade was closed or marked failed (set by trade engine / admin). */
   exitReason      String?
   createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @default(now()) @updatedAt
 
   user       User        @relation(fields: [userId], references: [id])
   strategy   Strategy    @relation(fields: [strategyId], references: [id])
@@ -246,6 +247,8 @@ model SystemSettings {
   id                  String   @id @default("global")
   pgFeePercent        Float    @default(2.36)
   allowedEmailDomains String   @default("gmail.com,yahoo.com,hotmail.com,outlook.com")
+  /** USD → INR rate for Razorpay and wallet INR display. */
+  usdInrRate          Float    @default(83)
   updatedAt           DateTime @updatedAt
 }
 

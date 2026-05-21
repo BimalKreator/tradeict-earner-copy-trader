@@ -2,6 +2,7 @@ import {
   InvoiceStatus,
   SubscriptionStatus,
   TradeStatus,
+  UserStatus,
   type PrismaClient,
 } from "@prisma/client";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
@@ -9,7 +10,16 @@ import {
   type DeltaBalanceBreakdown,
   fetchDeltaAvailableBalanceUsd,
   fetchDeltaBalanceBreakdownUsd,
+  fetchDeltaSwapContractSize,
+  fetchDeltaTicker,
+  type TradeSide,
 } from "./exchangeService.js";
+import {
+  deltaContractSizeFallback,
+  estimateLivePnlUsd,
+  resolveLiveMarkPrice,
+} from "./liveMarkPriceCache.js";
+import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 export type { DeltaBalanceBreakdown };
 
@@ -252,21 +262,129 @@ export async function activeStrategiesForUser(
   };
 }
 
-/** Sum Delta USD balance across users with linked credentials (deduped per user). */
+/**
+ * Total AUM: sum of capital for ACTIVE users only.
+ * Prefer Delta total balance when API keys are linked; otherwise platform wallet balance.
+ */
 export async function aggregateUsersAum(prisma: PrismaClient): Promise<number> {
-  const users = await prisma.user.findMany({
-    select: { id: true },
+  const activeUsers = await prisma.user.findMany({
+    where: { status: UserStatus.ACTIVE },
+    select: {
+      id: true,
+      wallet: { select: { balance: true } },
+    },
   });
 
   let total = 0;
-  for (const u of users) {
+  for (const user of activeUsers) {
+    let userAum = 0;
+
     try {
-      total += await fetchUserAvailableCapital(prisma, u.id);
+      const breakdown = await fetchUserCapitalBreakdown(prisma, user.id);
+      if (
+        Number.isFinite(breakdown.totalBalance) &&
+        breakdown.totalBalance > 0
+      ) {
+        userAum = breakdown.totalBalance;
+      } else if (
+        Number.isFinite(breakdown.availableBalance) &&
+        breakdown.availableBalance > 0
+      ) {
+        userAum = breakdown.availableBalance;
+      }
     } catch {
-      /* skip user */
+      /* no Delta credentials or fetch failed */
     }
+
+    if (userAum <= 0) {
+      const walletUsd = user.wallet?.balance ?? 0;
+      if (Number.isFinite(walletUsd) && walletUsd > 0) {
+        userAum = walletUsd;
+      }
+    }
+
+    total += userAum;
   }
+
   return total;
+}
+
+async function resolveMarkForOpenTrade(symbol: string): Promise<number | null> {
+  registerSymbolsForLivePrices([symbol]);
+  const cached = resolveLiveMarkPrice(symbol);
+  if (cached != null && cached > 0) return cached;
+  try {
+    const tick = await fetchDeltaTicker(symbol);
+    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+      return tick.last;
+    }
+  } catch {
+    /* fallback below */
+  }
+  return null;
+}
+
+/** Realized (closed today) + unrealized on OPEN copy trades using live marks. */
+export async function computeTodaysPnl(
+  prisma: PrismaClient,
+  userId: string,
+  ref = new Date(),
+): Promise<number> {
+  const dayStart = startOfUtcDay(ref);
+
+  const closedToday = await prisma.trade.findMany({
+    where: {
+      userId,
+      status: TradeStatus.CLOSED,
+      updatedAt: { gte: dayStart },
+    },
+    select: { tradePnl: true, pnl: true },
+  });
+  const realizedToday = closedToday.reduce(
+    (sum, t) => sum + realizedTradePnl(t),
+    0,
+  );
+
+  const openTrades = await prisma.trade.findMany({
+    where: { userId, status: TradeStatus.OPEN },
+    select: {
+      symbol: true,
+      side: true,
+      entryPrice: true,
+      size: true,
+    },
+  });
+
+  let unrealizedLive = 0;
+  for (const trade of openTrades) {
+    if (!Number.isFinite(trade.entryPrice) || trade.entryPrice <= 0) continue;
+
+    const mark = await resolveMarkForOpenTrade(trade.symbol);
+    if (mark == null) continue;
+
+    const side: TradeSide =
+      String(trade.side).toUpperCase() === "SELL" ? "SELL" : "BUY";
+    const contracts = Math.abs(trade.size);
+    if (contracts < 1e-12) continue;
+
+    let contractSize = deltaContractSizeFallback(trade.symbol);
+    try {
+      contractSize = await fetchDeltaSwapContractSize(trade.symbol);
+    } catch {
+      /* keep fallback */
+    }
+
+    unrealizedLive += estimateLivePnlUsd({
+      symbolKey: trade.symbol,
+      side,
+      entryPrice: trade.entryPrice,
+      contracts,
+      markPrice: mark,
+      contractSize,
+    });
+  }
+
+  return realizedToday + unrealizedLive;
 }
 
 export async function systemClosedPnlSince(
