@@ -39,6 +39,16 @@ export function NotificationBell() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!token) return;
+    const id = window.setInterval(() => void load(), 60_000);
+    return () => window.clearInterval(id);
+  }, [token, load]);
+
+  useEffect(() => {
+    if (open && token) void load();
+  }, [open, token, load]);
+
   const unread = items.filter((n) => !n.isRead).length;
 
   async function markRead(id: string) {
@@ -54,7 +64,9 @@ export function NotificationBell() {
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOpen((v) => !v);
+        }}
         className="relative rounded-lg border border-glassBorder bg-white/[0.04] p-2 text-white/90 transition hover:bg-white/10"
         aria-label="Notifications"
       >
@@ -87,7 +99,9 @@ export function NotificationBell() {
                   }`}
                 >
                   <p className="text-sm font-medium text-white">{n.title}</p>
-                  <p className="mt-0.5 text-xs text-white/65">{n.message}</p>
+                  <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-xs text-white/65">
+                    {n.message}
+                  </p>
                   <p className="mt-1 text-[11px] text-white/40">
                     {new Date(n.createdAt).toLocaleString()}
                   </p>

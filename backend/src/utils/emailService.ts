@@ -390,6 +390,66 @@ export async function sendPaymentReceiptEmails(
   ]);
 }
 
+export type BroadcastEmailRecipient = {
+  email: string;
+  name: string | null;
+};
+
+function messageToHtml(message: string): string {
+  return escapeHtml(message).replace(/\r\n/g, "\n").replace(/\n/g, "<br/>");
+}
+
+/**
+ * HTML broadcast notice to a single user (called in parallel from the broadcast service).
+ */
+export async function sendBroadcastNotificationEmail(
+  recipient: BroadcastEmailRecipient,
+  title: string,
+  message: string,
+): Promise<void> {
+  const transport = createMailTransport();
+  const from = getFromAddress();
+  const safeTitle = escapeHtml(title);
+  const bodyHtml = messageToHtml(message);
+  const greeting = recipient.name?.trim()
+    ? escapeHtml(recipient.name.trim())
+    : "there";
+
+  const text = [
+    "TradeICT Earner",
+    "",
+    title,
+    "",
+    message,
+    "",
+    "— Tradeict AI Private Limited",
+  ].join("\n");
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0f172a;color:#e2e8f0;">
+  <div style="max-width:560px;margin:0 auto;">
+    <p style="margin:0 0 16px;font-size:13px;color:#38bdf8;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;">TradeICT Earner</p>
+    <h1 style="margin:0 0 12px;font-size:22px;color:#f8fafc;">${safeTitle}</h1>
+    <p style="margin:0 0 20px;color:#cbd5e1;">Hi ${greeting},</p>
+    <div style="padding:18px 20px;border-radius:12px;background:#1e293b;border:1px solid rgba(56,189,248,0.2);color:#e2e8f0;font-size:15px;line-height:1.65;">
+      ${bodyHtml}
+    </div>
+    <p style="margin:24px 0 0;font-size:12px;color:#64748b;">You can also read this in your dashboard notification bell.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:#475569;">Tradeict AI Private Limited</p>
+  </div>
+</body>
+</html>`;
+
+  await transport.sendMail({
+    from,
+    to: recipient.email,
+    subject: `${title} — TradeICT Earner`,
+    text,
+    html,
+  });
+}
+
 export async function sendPasswordResetLinkEmail(
   to: string,
   resetLink: string,

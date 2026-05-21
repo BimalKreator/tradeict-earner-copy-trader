@@ -5,6 +5,13 @@ const DEFAULT_PG_FEE_PERCENT = 2.36;
 const DEFAULT_ALLOWED_EMAIL_DOMAINS =
   "gmail.com,yahoo.com,hotmail.com,outlook.com";
 export const DEFAULT_USD_INR_RATE = 83;
+export const DEFAULT_MAINTENANCE_MESSAGE =
+  "The platform is temporarily under maintenance. Please check back shortly.";
+
+export type PublicPlatformConfig = {
+  maintenanceMode: boolean;
+  maintenanceMessage: string | null;
+};
 
 export const EMAIL_DOMAIN_BLOCKED_MESSAGE =
   "Registration from this email domain is not permitted. Please use an allowed provider.";
@@ -24,9 +31,51 @@ async function ensureSystemSettings(prisma: PrismaClient) {
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
       usdInrRate: DEFAULT_USD_INR_RATE,
+      maintenanceMode: false,
+      maintenanceMessage: null,
     },
     update: {},
   });
+}
+
+export async function getPublicPlatformConfig(
+  prisma: PrismaClient,
+): Promise<PublicPlatformConfig> {
+  const row = await ensureSystemSettings(prisma);
+  return {
+    maintenanceMode: row.maintenanceMode === true,
+    maintenanceMessage: row.maintenanceMessage?.trim() || null,
+  };
+}
+
+export async function setMaintenanceSettings(
+  prisma: PrismaClient,
+  args: { maintenanceMode: boolean; maintenanceMessage: string | null },
+): Promise<PublicPlatformConfig> {
+  const message =
+    args.maintenanceMessage?.trim() ||
+    (args.maintenanceMode ? DEFAULT_MAINTENANCE_MESSAGE : null);
+
+  const row = await prisma.systemSettings.upsert({
+    where: { id: SETTINGS_ID },
+    create: {
+      id: SETTINGS_ID,
+      pgFeePercent: DEFAULT_PG_FEE_PERCENT,
+      allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
+      usdInrRate: DEFAULT_USD_INR_RATE,
+      maintenanceMode: args.maintenanceMode,
+      maintenanceMessage: message,
+    },
+    update: {
+      maintenanceMode: args.maintenanceMode,
+      maintenanceMessage: message,
+    },
+  });
+
+  return {
+    maintenanceMode: row.maintenanceMode === true,
+    maintenanceMessage: row.maintenanceMessage?.trim() || null,
+  };
 }
 
 export async function getPgFeePercent(prisma: PrismaClient): Promise<number> {

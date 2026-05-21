@@ -28,6 +28,7 @@ import {
 } from "../controllers/adminController.js";
 import { createSettingsController } from "../controllers/settingsController.js";
 import { createCouponController } from "../controllers/couponController.js";
+import { createAdminNotificationController } from "../controllers/adminNotificationController.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -52,8 +53,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const adminController = createAdminController(prisma);
   const settings = createSettingsController(prisma);
   const coupons = createCouponController(prisma);
+  const adminNotifications = createAdminNotificationController(prisma);
 
   router.use(authenticateToken(), isAdmin(prisma));
+
+  router.post("/notifications/broadcast", adminNotifications.broadcast);
 
   router.get("/coupons", coupons.list);
   router.post("/coupons", coupons.create);

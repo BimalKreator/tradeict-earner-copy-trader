@@ -3,8 +3,10 @@ import type { PrismaClient } from "@prisma/client";
 import {
   getAllowedEmailDomains,
   getPgFeePercent,
+  getPublicPlatformConfig,
   getUsdInrRate,
   setAllowedEmailDomains,
+  setMaintenanceSettings,
   setPgFeePercent,
   setUsdInrRate,
 } from "../services/settingsService.js";
@@ -16,12 +18,33 @@ export function createSettingsController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const [pgFeePercent, allowedEmailDomains, usdInrRate] = await Promise.all([
-        getPgFeePercent(prisma),
-        getAllowedEmailDomains(prisma),
-        getUsdInrRate(prisma),
-      ]);
-      res.json({ pgFeePercent, allowedEmailDomains, usdInrRate });
+      const [pgFeePercent, allowedEmailDomains, usdInrRate, platform] =
+        await Promise.all([
+          getPgFeePercent(prisma),
+          getAllowedEmailDomains(prisma),
+          getUsdInrRate(prisma),
+          getPublicPlatformConfig(prisma),
+        ]);
+      res.json({
+        pgFeePercent,
+        allowedEmailDomains,
+        usdInrRate,
+        maintenanceMode: platform.maintenanceMode,
+        maintenanceMessage: platform.maintenanceMessage,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getPublicPlatform(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const config = await getPublicPlatformConfig(prisma);
+      res.json(config);
     } catch (err) {
       next(err);
     }
@@ -37,6 +60,8 @@ export function createSettingsController(prisma: PrismaClient) {
         pgFeePercent?: unknown;
         allowedEmailDomains?: unknown;
         usdInrRate?: unknown;
+        maintenanceMode?: unknown;
+        maintenanceMessage?: unknown;
       };
 
       const out: {
@@ -44,6 +69,8 @@ export function createSettingsController(prisma: PrismaClient) {
         pgFeePercent?: number;
         allowedEmailDomains?: string;
         usdInrRate?: number;
+        maintenanceMode?: boolean;
+        maintenanceMessage?: string | null;
       } = {
         ok: true,
       };
@@ -106,13 +133,46 @@ export function createSettingsController(prisma: PrismaClient) {
       }
 
       if (
+        body.maintenanceMode !== undefined ||
+        body.maintenanceMessage !== undefined
+      ) {
+        if (body.maintenanceMode !== undefined && typeof body.maintenanceMode !== "boolean") {
+          res.status(400).json({ error: "maintenanceMode must be a boolean" });
+          return;
+        }
+        const current = await getPublicPlatformConfig(prisma);
+        const maintenanceMode =
+          typeof body.maintenanceMode === "boolean"
+            ? body.maintenanceMode
+            : current.maintenanceMode;
+        let maintenanceMessage: string | null = current.maintenanceMessage;
+        if (body.maintenanceMessage !== undefined) {
+          if (body.maintenanceMessage === null) {
+            maintenanceMessage = null;
+          } else if (typeof body.maintenanceMessage === "string") {
+            maintenanceMessage = body.maintenanceMessage.trim() || null;
+          } else {
+            res.status(400).json({ error: "maintenanceMessage must be a string or null" });
+            return;
+          }
+        }
+        const saved = await setMaintenanceSettings(prisma, {
+          maintenanceMode,
+          maintenanceMessage,
+        });
+        out.maintenanceMode = saved.maintenanceMode;
+        out.maintenanceMessage = saved.maintenanceMessage;
+      }
+
+      if (
         out.pgFeePercent === undefined &&
         out.allowedEmailDomains === undefined &&
-        out.usdInrRate === undefined
+        out.usdInrRate === undefined &&
+        out.maintenanceMode === undefined
       ) {
         res.status(400).json({
           error:
-            "Provide at least one of pgFeePercent, usdInrRate, or allowedEmailDomains",
+            "Provide at least one of pgFeePercent, usdInrRate, allowedEmailDomains, or maintenance fields",
         });
         return;
       }
@@ -127,5 +187,5 @@ export function createSettingsController(prisma: PrismaClient) {
     }
   }
 
-  return { getPaymentSettings, updatePaymentSettings };
+  return { getPaymentSettings, updatePaymentSettings, getPublicPlatform };
 }

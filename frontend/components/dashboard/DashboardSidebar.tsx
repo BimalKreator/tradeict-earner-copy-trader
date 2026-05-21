@@ -16,6 +16,7 @@ const links = [
   { href: "/dashboard/trades", label: "Trades" },
   { href: "/dashboard/payments", label: "Payments" },
   { href: "/dashboard/wallet", label: "Wallet" },
+  { href: "/dashboard/support", label: "Support" },
   { href: "/dashboard/settings", label: "Settings" },
 ];
 

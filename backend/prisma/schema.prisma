@@ -54,6 +54,11 @@ enum InvoiceStatus {
   OVERDUE
 }
 
+enum TicketStatus {
+  OPEN
+  CLOSED
+}
+
 model User {
   id            String              @id @default(uuid())
   email         String              @unique
@@ -94,6 +99,8 @@ model User {
   paymentTransactions  PaymentTransaction[]
   notifications        Notification[]
   arbitrageTrades      ArbitrageTrade[]
+  tickets              Ticket[]
+  ticketMessages       TicketMessage[]
 }
 
 model OtpRecord {
@@ -249,6 +256,8 @@ model SystemSettings {
   allowedEmailDomains String   @default("gmail.com,yahoo.com,hotmail.com,outlook.com")
   /** USD → INR rate for Razorpay and wallet INR display. */
   usdInrRate          Float    @default(83)
+  maintenanceMode     Boolean  @default(false)
+  maintenanceMessage  String?
   updatedAt           DateTime @updatedAt
 }
 
@@ -389,4 +398,33 @@ model DiscountCoupon {
   isActive           Boolean  @default(true)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+model Ticket {
+  id        String       @id @default(uuid())
+  userId    String
+  subject   String
+  status    TicketStatus @default(OPEN)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages TicketMessage[]
+
+  @@index([userId, status])
+  @@index([status, updatedAt])
+}
+
+model TicketMessage {
+  id        String   @id @default(uuid())
+  ticketId  String
+  senderId  String
+  isAdmin   Boolean  @default(false)
+  message   String
+  createdAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender User   @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
 }
