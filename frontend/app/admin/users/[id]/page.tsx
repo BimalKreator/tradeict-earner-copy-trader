@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
-import { Loader2 } from "lucide-react";
+import { Loader2, Pencil, X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -120,6 +120,13 @@ export default function AdminUserDetails({
   const [cryptoAllocationDraft, setCryptoAllocationDraft] = useState("10");
   const [savingArbitrage, setSavingArbitrage] = useState(false);
   const [flushingArbitrage, setFlushingArbitrage] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editFirstName, setEditFirstName] = useState("");
+  const [editLastName, setEditLastName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editStatus, setEditStatus] = useState<"ACTIVE" | "SUSPENDED">("ACTIVE");
+  const [savingProfile, setSavingProfile] = useState(false);
 
   const authHeaders = useMemo(() => {
     const token =
@@ -534,6 +541,80 @@ export default function AdminUserDetails({
     }
   }
 
+  function splitDisplayName(name: string | null): {
+    firstName: string;
+    lastName: string;
+  } {
+    if (!name?.trim()) return { firstName: "", lastName: "" };
+    const parts = name.trim().split(/\s+/);
+    if (parts.length === 1) return { firstName: parts[0], lastName: "" };
+    return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+  }
+
+  function openEditProfile(): void {
+    if (!user) return;
+    const { firstName, lastName } = splitDisplayName(user.name);
+    setEditFirstName(firstName);
+    setEditLastName(lastName);
+    setEditEmail(user.email);
+    setEditPhone(user.mobile ?? "");
+    setEditStatus(user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
+    setEditOpen(true);
+  }
+
+  async function saveProfile(): Promise<void> {
+    setSavingProfile(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+        method: "PUT",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          firstName: editFirstName.trim(),
+          lastName: editLastName.trim(),
+          email: editEmail.trim(),
+          phone: editPhone.trim() || null,
+          status: editStatus,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        user?: UserState & {
+          firstName?: string | null;
+          lastName?: string | null;
+          phone?: string | null;
+        };
+      };
+      if (!res.ok) throw new Error(body.error ?? "Failed to update profile.");
+
+      if (body.user) {
+        const fullName = [body.user.firstName, body.user.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        setUser({
+          ...user!,
+          email: body.user.email,
+          name: fullName || body.user.name || null,
+          mobile: body.user.phone ?? body.user.mobile ?? null,
+          status: body.user.status,
+        });
+        setStatusDraft(
+          body.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE",
+        );
+      }
+
+      setEditOpen(false);
+      setNotice("Profile updated successfully.");
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update profile.");
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
   async function decideRequest(
     requestId: string,
     action: "approve" | "reject",
@@ -608,7 +689,15 @@ export default function AdminUserDetails({
                 }
               />
             </div>
-            <div className="mt-4">
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={openEditProfile}
+                className="inline-flex items-center gap-2 rounded-lg border border-primary/45 bg-primary/15 px-3 py-2 text-xs font-medium text-primary hover:bg-primary/25"
+              >
+                <Pencil className="h-3.5 w-3.5" aria-hidden />
+                Edit profile
+              </button>
               <button
                 type="button"
                 onClick={() => void sendResetLink()}
@@ -619,6 +708,111 @@ export default function AdminUserDetails({
               </button>
             </div>
           </div>
+
+          {editOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+              <div
+                className="glass-card w-full max-w-md border border-glassBorder p-6 shadow-2xl"
+                role="dialog"
+                aria-labelledby="edit-profile-title"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <h2
+                    id="edit-profile-title"
+                    className="text-lg font-semibold text-white"
+                  >
+                    Edit profile
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setEditOpen(false)}
+                    className="rounded-lg p-1 text-white/60 hover:bg-white/10"
+                    aria-label="Close"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+                <form
+                  className="mt-5 space-y-4"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void saveProfile();
+                  }}
+                >
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-sm text-white/70">
+                      First name
+                      <input
+                        value={editFirstName}
+                        onChange={(e) => setEditFirstName(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
+                      />
+                    </label>
+                    <label className="block text-sm text-white/70">
+                      Last name
+                      <input
+                        value={editLastName}
+                        onChange={(e) => setEditLastName(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
+                      />
+                    </label>
+                  </div>
+                  <label className="block text-sm text-white/70">
+                    Email
+                    <input
+                      type="email"
+                      required
+                      value={editEmail}
+                      onChange={(e) => setEditEmail(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
+                    />
+                  </label>
+                  <label className="block text-sm text-white/70">
+                    Phone
+                    <input
+                      type="tel"
+                      value={editPhone}
+                      onChange={(e) => setEditPhone(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
+                      placeholder="Optional"
+                    />
+                  </label>
+                  <label className="block text-sm text-white/70">
+                    Status
+                    <select
+                      value={editStatus}
+                      onChange={(e) =>
+                        setEditStatus(e.target.value as "ACTIVE" | "SUSPENDED")
+                      }
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
+                    >
+                      <option value="ACTIVE">Active</option>
+                      <option value="SUSPENDED">Suspended</option>
+                    </select>
+                  </label>
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditOpen(false)}
+                      className="rounded-lg border border-white/15 px-4 py-2 text-sm text-white/80"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={savingProfile}
+                      className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                    >
+                      {savingProfile ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : null}
+                      Save changes
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
 
           <div className="inline-flex rounded-lg border border-glassBorder bg-white/[0.03] p-1 text-sm">
             <TabButton active={tab === "management"} onClick={() => setTab("management")}>

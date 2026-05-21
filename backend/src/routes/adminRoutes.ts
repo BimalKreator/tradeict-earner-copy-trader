@@ -78,6 +78,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.put("/deposits/:id", adminController.updateDepositStatus);
 
   router.get("/users/list", adminController.listUsersMinimal);
+  router.get("/users/search", adminController.searchUsers);
 
   router.get("/users", async (_req, res, next) => {
     try {
@@ -568,54 +569,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.put("/users/:id", async (req, res, next) => {
-    try {
-      const { id } = req.params;
-      const { status, role } = req.body as {
-        status?: unknown;
-        role?: unknown;
-      };
-
-      if (role !== undefined) {
-        if (typeof role !== "string" || !roleValues.has(role)) {
-          res.status(400).json({ error: "role must be ADMIN or USER" });
-          return;
-        }
-      }
-
-      if (status !== undefined) {
-        if (typeof status !== "string" || !statusValues.has(status)) {
-          res.status(400).json({ error: "status must be ACTIVE or SUSPENDED" });
-          return;
-        }
-      }
-
-      if (role === undefined && status === undefined) {
-        res.status(400).json({ error: "Provide at least one of status or role" });
-        return;
-      }
-
-      const data: { role?: Role; status?: UserStatus } = {};
-      if (role !== undefined) data.role = role as Role;
-      if (status !== undefined) data.status = status as UserStatus;
-
-      const user = await prisma.user.update({
-        where: { id },
-        data,
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          status: true,
-          createdAt: true,
-        },
-      });
-
-      res.json(user);
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.put("/users/:id", adminController.updateUserProfile);
 
   router.delete("/users/:id", async (req, res, next) => {
     try {

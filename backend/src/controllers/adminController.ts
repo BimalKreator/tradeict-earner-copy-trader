@@ -1,5 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
-import { InvoiceStatus, SubscriptionStatus, TradeStatus, type PrismaClient } from "@prisma/client";
+import {
+  InvoiceStatus,
+  Role,
+  SubscriptionStatus,
+  TradeStatus,
+  UserStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import {
   aggregateUsersAum,
   fetchUserAvailableCapital,
@@ -430,6 +437,219 @@ export function createAdminController(prisma: PrismaClient) {
         orderBy: { email: "asc" },
       });
       res.json(users);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** Split stored `name` into first/last for admin UI (schema uses single `name` field). */
+  function splitUserName(name: string | null): {
+    firstName: string | null;
+    lastName: string | null;
+  } {
+    if (!name?.trim()) {
+      return { firstName: null, lastName: null };
+    }
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 1) {
+      return { firstName: parts[0] ?? null, lastName: null };
+    }
+    return {
+      firstName: parts[0] ?? null,
+      lastName: parts.slice(1).join(" ") || null,
+    };
+  }
+
+  function formatSearchUser(user: {
+    id: string;
+    email: string;
+    name: string | null;
+    mobile: string | null;
+  }) {
+    const { firstName, lastName } = splitUserName(user.name);
+    const label = [firstName, lastName].filter(Boolean).join(" ") || user.email;
+    return {
+      id: user.id,
+      email: user.email,
+      firstName,
+      lastName,
+      phone: user.mobile,
+      label,
+    };
+  }
+
+  /**
+   * GET /api/admin/users/search?q=
+   * Case-insensitive search on name, email, and mobile (phone). Max 20 results.
+   */
+  async function searchUsers(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const q = String(req.query.q ?? "").trim();
+      if (q.length < 3) {
+        res.json({ users: [] });
+        return;
+      }
+
+      const users = await prisma.user.findMany({
+        where: {
+          role: Role.USER,
+          OR: [
+            { email: { contains: q, mode: "insensitive" } },
+            { name: { contains: q, mode: "insensitive" } },
+            { mobile: { contains: q, mode: "insensitive" } },
+          ],
+        },
+        select: { id: true, email: true, name: true, mobile: true },
+        orderBy: { email: "asc" },
+        take: 20,
+      });
+
+      res.json({ users: users.map(formatSearchUser) });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * PUT /api/admin/users/:id
+   * Profile fields: firstName, lastName, email, phone (mobile), status; optional role.
+   */
+  async function updateUserProfile(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      if (!id) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const body = req.body as {
+        firstName?: unknown;
+        lastName?: unknown;
+        email?: unknown;
+        phone?: unknown;
+        status?: unknown;
+        role?: unknown;
+      };
+
+      const existing = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, email: true, name: true, mobile: true, status: true, role: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const data: {
+        name?: string | null;
+        email?: string;
+        mobile?: string | null;
+        status?: UserStatus;
+        role?: Role;
+      } = {};
+
+      if (body.firstName !== undefined || body.lastName !== undefined) {
+        const first =
+          typeof body.firstName === "string" ? body.firstName.trim() : "";
+        const last =
+          typeof body.lastName === "string" ? body.lastName.trim() : "";
+        const combined = [first, last].filter(Boolean).join(" ").trim();
+        data.name = combined.length > 0 ? combined : null;
+      }
+
+      if (body.email !== undefined) {
+        if (typeof body.email !== "string" || !body.email.trim()) {
+          res.status(400).json({ error: "email must be a non-empty string" });
+          return;
+        }
+        const email = body.email.trim().toLowerCase();
+        if (email !== existing.email) {
+          const clash = await prisma.user.findUnique({
+            where: { email },
+            select: { id: true },
+          });
+          if (clash && clash.id !== id) {
+            res.status(409).json({ error: "Email is already in use" });
+            return;
+          }
+        }
+        data.email = email;
+      }
+
+      if (body.phone !== undefined) {
+        if (body.phone === null || body.phone === "") {
+          data.mobile = null;
+        } else if (typeof body.phone === "string") {
+          data.mobile = body.phone.trim() || null;
+        } else {
+          res.status(400).json({ error: "phone must be a string or null" });
+          return;
+        }
+      }
+
+      if (body.status !== undefined) {
+        const status = String(body.status).toUpperCase();
+        if (status !== UserStatus.ACTIVE && status !== UserStatus.SUSPENDED) {
+          res.status(400).json({ error: "status must be ACTIVE or SUSPENDED" });
+          return;
+        }
+        data.status = status as UserStatus;
+      }
+
+      if (body.role !== undefined) {
+        const role = String(body.role).toUpperCase();
+        if (role !== Role.ADMIN && role !== Role.USER) {
+          res.status(400).json({ error: "role must be ADMIN or USER" });
+          return;
+        }
+        data.role = role as Role;
+      }
+
+      if (Object.keys(data).length === 0) {
+        res.status(400).json({
+          error:
+            "Provide at least one of firstName, lastName, email, phone, status, or role",
+        });
+        return;
+      }
+
+      const user = await prisma.user.update({
+        where: { id },
+        data,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          mobile: true,
+          status: true,
+          role: true,
+          createdAt: true,
+        },
+      });
+
+      const { firstName, lastName } = splitUserName(user.name);
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName,
+          lastName,
+          name: user.name,
+          phone: user.mobile,
+          mobile: user.mobile,
+          status: user.status,
+          role: user.role,
+          createdAt: user.createdAt,
+        },
+      });
     } catch (err) {
       next(err);
     }
@@ -1507,6 +1727,8 @@ export function createAdminController(prisma: PrismaClient) {
     getUserTradesBilling,
     listAllTrades,
     listUsersMinimal,
+    searchUsers,
+    updateUserProfile,
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
