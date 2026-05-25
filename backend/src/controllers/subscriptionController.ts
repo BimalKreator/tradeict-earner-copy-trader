@@ -275,7 +275,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const existing = await prisma.userSubscription.findFirst({
+      const existing = await prisma.userStrategySubscription.findFirst({
         where: {
           userId,
           strategyId,
@@ -292,11 +292,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const subscription = await prisma.userSubscription.create({
+      const subscription = await prisma.userStrategySubscription.create({
         data: {
           userId,
           strategyId,
           multiplier: 1,
+          isActive: false,
           status: USER_PAUSED_STATUS,
         },
       });
@@ -364,7 +365,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      const rows = await prisma.userSubscription.findMany({
+      const rows = await prisma.userStrategySubscription.findMany({
         where: { userId },
         orderBy: { joinedDate: "desc" },
         include: {
@@ -430,7 +431,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const sub = await prisma.userSubscription.findFirst({
+      const sub = await prisma.userStrategySubscription.findFirst({
         where: {
           userId,
           strategyId: strategyId.trim(),
@@ -446,7 +447,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      await prisma.userSubscription.delete({
+      await prisma.userStrategySubscription.delete({
         where: { id: sub.id },
       });
 
@@ -483,17 +484,18 @@ export function createSubscriptionController(prisma: PrismaClient) {
       const ex = await validateExchangeAccountOwnership(userId, body.exchangeAccountId);
       if (!ex.ok) return void res.status(400).json({ error: ex.error });
 
-      const sub = await prisma.userSubscription.findFirst({
+      const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
         include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
       });
       if (!sub) return void res.status(404).json({ error: "Subscription not found" });
 
-      const updated = await prisma.userSubscription.update({
+      const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
         data: {
           multiplier,
           exchangeAccountId: ex.id,
+          isActive: true,
           status: SubscriptionStatus.ACTIVE,
         },
         include: {
@@ -537,13 +539,13 @@ export function createSubscriptionController(prisma: PrismaClient) {
         });
       }
 
-      const sub = await prisma.userSubscription.findFirst({
+      const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
         select: { id: true },
       });
       if (!sub) return void res.status(404).json({ error: "Subscription not found" });
 
-      const updated = await prisma.userSubscription.update({
+      const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
         data: { multiplier },
         include: {
@@ -563,14 +565,14 @@ export function createSubscriptionController(prisma: PrismaClient) {
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
       const strategyId = String(req.params.strategyId ?? "").trim();
       if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
-      const sub = await prisma.userSubscription.findFirst({
+      const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: SubscriptionStatus.ACTIVE },
         select: { id: true },
       });
       if (!sub) return void res.status(404).json({ error: "Active subscription not found" });
-      const updated = await prisma.userSubscription.update({
+      const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
-        data: { status: USER_PAUSED_STATUS },
+        data: { isActive: false, status: USER_PAUSED_STATUS },
         include: {
           strategy: { select: strategySelectPublic },
           exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
@@ -588,7 +590,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
       const strategyId = String(req.params.strategyId ?? "").trim();
       if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
-      const sub = await prisma.userSubscription.findFirst({
+      const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: USER_PAUSED_STATUS },
         include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
       });
@@ -597,9 +599,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return void res.status(400).json({ error: "Deploy this strategy first (missing exchange account)." });
       }
 
-      const updated = await prisma.userSubscription.update({
+      const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
-        data: { status: SubscriptionStatus.ACTIVE },
+        data: { isActive: true, status: SubscriptionStatus.ACTIVE },
         include: {
           strategy: { select: strategySelectPublic },
           exchangeAccount: { select: { id: true, nickname: true, exchange: true } },

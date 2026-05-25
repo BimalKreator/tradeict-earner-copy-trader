@@ -179,7 +179,7 @@ export function createPaymentController(prisma: PrismaClient) {
           return;
         }
 
-        const existing = await prisma.userSubscription.findFirst({
+        const existing = await prisma.userStrategySubscription.findFirst({
           where: {
             userId,
             strategyId,
@@ -408,7 +408,7 @@ export function createPaymentController(prisma: PrismaClient) {
           return;
         }
 
-        const existing = await prisma.userSubscription.findFirst({
+        const existing = await prisma.userStrategySubscription.findFirst({
           where: {
             userId,
             strategyId: sid,
@@ -423,11 +423,12 @@ export function createPaymentController(prisma: PrismaClient) {
 
         if (!existing) {
           await prisma.$transaction(async (tx) => {
-            await tx.userSubscription.create({
+            await tx.userStrategySubscription.create({
               data: {
                 userId,
                 strategyId: sid,
                 multiplier: 1,
+                isActive: false,
                 status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
               },
             });

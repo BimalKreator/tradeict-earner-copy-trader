@@ -92,7 +92,7 @@ model User {
 
   deltaApiKeys     DeltaApiKey[]
   exchangeAccounts ExchangeAccount[]
-  subscriptions    UserSubscription[]
+  subscriptions    UserStrategySubscription[]
   trades        Trade[]
   wallet        Wallet?
   transactions  Transaction[]
@@ -150,7 +150,7 @@ model Strategy {
   autoExitStopLoss   Float?
   createdAt          DateTime @default(now())
 
-  subscriptions      UserSubscription[]
+  subscriptions      UserStrategySubscription[]
   trades             Trade[]
   pnlRecords         PnLRecord[]
   invoices           Invoice[]
@@ -201,18 +201,25 @@ model FutureHedgeExecution {
   @@index([configId, batchId])
 }
 
-model UserSubscription {
+/// Per-user subscription to a single copy-trading strategy (table: `UserSubscription`).
+model UserStrategySubscription {
   id                 String              @id @default(uuid())
   userId             String
   strategyId         String
   exchangeAccountId  String?
+  /** Scales master contract size for this user on this strategy only. */
   multiplier         Float               @default(1.0)
+  /** When true, copy engine may open/adjust trades for this user on this strategy. */
+  isActive           Boolean             @default(true)
   status             SubscriptionStatus  @default(ACTIVE)
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])
   strategy         Strategy         @relation(fields: [strategyId], references: [id])
   exchangeAccount  ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, strategyId])
+  @@map("UserSubscription")
 }
 
 model ExchangeAccount {
@@ -225,7 +232,7 @@ model ExchangeAccount {
   createdAt DateTime @default(now())
 
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  subscriptions  UserSubscription[]
+  subscriptions  UserStrategySubscription[]
 
   @@index([userId])
 }

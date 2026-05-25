@@ -144,7 +144,7 @@ export async function getCurrentMonthBillingForUser(
   prisma: PrismaClient,
   userId: string,
 ): Promise<CurrentMonthBillingForUser> {
-  const subs = await prisma.userSubscription.findMany({
+  const subs = await prisma.userStrategySubscription.findMany({
     where: { userId, status: SubscriptionStatus.ACTIVE },
     select: {
       strategyId: true,
@@ -238,7 +238,7 @@ export async function getPlatformRevenueStats(
     perPair.set(key, (perPair.get(key) ?? 0) + realized);
   }
 
-  const subs = await prisma.userSubscription.findMany({
+  const subs = await prisma.userStrategySubscription.findMany({
     where: { status: SubscriptionStatus.ACTIVE },
     select: {
       userId: true,
@@ -320,7 +320,7 @@ export async function generateMonthlyInvoices(
 
   const { start, end } = getMonthRange(month, year);
 
-  const subscriptionWhere: Prisma.UserSubscriptionWhereInput = {
+  const subscriptionWhere: Prisma.UserStrategySubscriptionWhereInput = {
     status: SubscriptionStatus.ACTIVE,
   };
   if (opts.scope?.userIds && opts.scope.userIds.length > 0) {
@@ -330,7 +330,7 @@ export async function generateMonthlyInvoices(
     subscriptionWhere.id = { in: opts.scope.subscriptionIds };
   }
 
-  const subscriptions = await prisma.userSubscription.findMany({
+  const subscriptions = await prisma.userStrategySubscription.findMany({
     where: subscriptionWhere,
     select: {
       userId: true,
@@ -499,13 +499,13 @@ export async function settleInvoiceAfterGateway(
       data: { status: InvoiceStatus.PAID },
     });
 
-    await tx.userSubscription.updateMany({
+    await tx.userStrategySubscription.updateMany({
       where: {
         userId: args.userId,
         strategyId: invoice.strategyId,
         status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
       },
-      data: { status: SubscriptionStatus.ACTIVE },
+      data: { status: SubscriptionStatus.ACTIVE, isActive: true },
     });
 
     const wallet = await tx.wallet.findUnique({
@@ -641,13 +641,13 @@ export async function payInvoiceFromWallet(
 
     // Re-activate the subscription if it was paused for funds — paying the
     // outstanding invoice clears the dunning state.
-    await tx.userSubscription.updateMany({
+    await tx.userStrategySubscription.updateMany({
       where: {
         userId: args.userId,
         strategyId: invoice.strategyId,
         status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
       },
-      data: { status: SubscriptionStatus.ACTIVE },
+      data: { status: SubscriptionStatus.ACTIVE, isActive: true },
     });
 
     return {
@@ -703,13 +703,13 @@ export async function runOverdueCheck(
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const result = await prisma.userSubscription.updateMany({
+    const result = await prisma.userStrategySubscription.updateMany({
       where: {
         userId: inv.userId,
         strategyId: inv.strategyId,
         status: SubscriptionStatus.ACTIVE,
       },
-      data: { status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS },
+      data: { status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS, isActive: false },
     });
     subscriptionsPaused += result.count;
   }

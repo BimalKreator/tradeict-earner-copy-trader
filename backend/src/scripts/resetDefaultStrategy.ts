@@ -23,7 +23,7 @@ async function main(): Promise<void> {
     await prisma.invoice.deleteMany({});
     await prisma.trade.deleteMany({});
     await prisma.pnLRecord.deleteMany({});
-    await prisma.userSubscription.deleteMany({});
+    await prisma.userStrategySubscription.deleteMany({});
     await prisma.strategy.deleteMany({});
 
     await prisma.strategy.create({

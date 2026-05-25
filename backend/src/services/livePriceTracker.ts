@@ -160,7 +160,11 @@ async function refreshSymbolsFromMasterAccounts(
       OR: [
         { autoExitTarget: { not: null } },
         { autoExitStopLoss: { not: null } },
-        { subscriptions: { some: { status: SubscriptionStatus.ACTIVE } } },
+        {
+          subscriptions: {
+            some: { isActive: true, status: SubscriptionStatus.ACTIVE },
+          },
+        },
         { NOT: { masterApiKey: "" } },
       ],
     },

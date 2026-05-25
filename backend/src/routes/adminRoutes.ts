@@ -306,7 +306,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const subscriptions = await prisma.userSubscription.findMany({
+      const subscriptions = await prisma.userStrategySubscription.findMany({
         where: { userId: id },
         orderBy: { joinedDate: "desc" },
         select: {
@@ -682,6 +682,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  router.get(
+    "/strategies/:id/subscribers",
+    adminController.listStrategySubscribers,
+  );
+  router.put(
+    "/strategies/:strategyId/subscribers/:userId",
+    adminController.updateStrategySubscriber,
+  );
 
   router.put("/strategies/:id", async (req, res, next) => {
     try {

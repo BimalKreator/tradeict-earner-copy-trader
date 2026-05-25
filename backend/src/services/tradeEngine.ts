@@ -1,11 +1,6 @@
 import { createHmac } from "node:crypto";
 import WebSocket from "ws";
-import {
-  type PrismaClient,
-  SubscriptionStatus,
-  TradeStatus,
-  UserStatus,
-} from "@prisma/client";
+import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
   executeTrade,
   fetchDeltaOpenPositions,
@@ -37,6 +32,12 @@ import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
 import { executeFollowerTradeWithVerification } from "./followerTradeExecution.js";
+import {
+  findActiveCopySubscriptionForUser,
+  findActiveCopySubscribersForStrategy,
+  STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
+  subscriptionMultiplier,
+} from "./strategySubscriptionService.js";
 import {
   registerSymbolsForLivePrices,
   startLivePriceTracker,
@@ -665,30 +666,11 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
   if (!strategy.isActive) return;
   if (!args.force && !strategy.syncActiveTrades) return;
 
-  const sub = await prisma.userSubscription.findFirst({
-    where: {
-      strategyId: args.strategyId,
-      userId: args.userId,
-      status: SubscriptionStatus.ACTIVE,
-    },
-    include: {
-      exchangeAccount: true,
-      user: {
-        include: {
-          deltaApiKeys: true,
-          exchangeAccounts: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-          },
-        },
-      },
-    },
+  const sub = await findActiveCopySubscriptionForUser(prisma, {
+    strategyId: args.strategyId,
+    userId: args.userId,
   });
-  if (
-    !sub ||
-    sub.user.status !== UserStatus.ACTIVE ||
-    sub.user.copyTradingPaused
-  ) {
+  if (!sub) {
     return;
   }
 
@@ -712,7 +694,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
 
     const followerContracts = followerContractsFromMaster(
       leader.masterContracts,
-      sub.multiplier,
+      subscriptionMultiplier(sub),
     );
 
     if (
@@ -776,7 +758,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     }
 
     console.log(
-      `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${leader.masterContracts} × ${sub.multiplier}) — ${leader.deltaSymbol} ${leader.side}`,
+      `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${leader.masterContracts} × ${subscriptionMultiplier(sub)}) — ${leader.deltaSymbol} ${leader.side}`,
     );
 
     const result = await executeFollowerTradeWithVerification(prisma, {
@@ -824,14 +806,7 @@ export async function lateJoinMirrorForAllActiveSubscribers(
   });
   if (!strategy?.isActive || !strategy.syncActiveTrades) return;
 
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      strategyId,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-    },
-    select: { userId: true },
-  });
+  const subs = await findActiveCopySubscribersForStrategy(prisma, strategyId);
 
   for (const row of subs) {
     try {
@@ -893,14 +868,7 @@ export async function forceMirrorOpenPositionsForAllSubscribers(
     throw new Error(`Failed to fetch master open positions: ${msg}`);
   }
 
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      strategyId,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-    },
-    select: { userId: true },
-  });
+  const subs = await findActiveCopySubscribersForStrategy(prisma, strategyId);
 
   for (const row of subs) {
     try {
@@ -951,27 +919,10 @@ async function copyMasterFillToSubscribers(
   const marketPrice =
     tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
 
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      strategyId,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-    },
-    include: {
-      exchangeAccount: true,
-      user: {
-        include: {
-          deltaApiKeys: true,
-          exchangeAccounts: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-          },
-        },
-      },
-    },
-  });
-
-  const uniqueSubs = Array.from(new Map(subs.map((s) => [s.userId, s])).values());
+  const uniqueSubs = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
+  );
 
   const skipAll =
     marketPrice !== undefined &&
@@ -990,7 +941,7 @@ async function copyMasterFillToSubscribers(
       uniqueSubs.map(async (sub) => {
         const followerContracts = followerContractsFromMaster(
           args.masterContracts,
-          sub.multiplier,
+          subscriptionMultiplier(sub),
         );
         console.log(
           `[EXECUTION] WS copy skip (slippage) user ${sub.userId} — ${args.symbol} ${args.side} — would place ${followerContracts} contracts`,
@@ -1014,7 +965,7 @@ async function copyMasterFillToSubscribers(
     uniqueSubs.map(async (sub) => {
       const followerContracts = followerContractsFromMaster(
         args.masterContracts,
-        sub.multiplier,
+        subscriptionMultiplier(sub),
       );
       const creds =
         sub.exchangeAccount != null
@@ -1052,7 +1003,7 @@ async function copyMasterFillToSubscribers(
       }
 
       console.log(
-        `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${args.masterContracts} × ${sub.multiplier}) — ${args.symbol} ${args.side}`,
+        `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${args.masterContracts} × ${subscriptionMultiplier(sub)}) — ${args.symbol} ${args.side}`,
       );
 
       const result = await executeFollowerTradeWithVerification(prisma, {
@@ -1116,36 +1067,19 @@ async function notifyMasterFlat(
   );
 
   try {
-  const subs = await prisma.userSubscription.findMany({
-    where: {
-      strategyId,
-      status: SubscriptionStatus.ACTIVE,
-      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-    },
-    include: {
-      exchangeAccount: true,
-      user: {
-        include: {
-          deltaApiKeys: true,
-          exchangeAccounts: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-          },
-        },
-      },
-    },
-  });
-  console.log(
-    `[EXECUTION] notifyMasterFlat fanout strategyId=${strategyId} symbol=${snap.symbol} activeSubs=${subs.length}`,
+  const uniqueSubs = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
   );
-
-  const uniqueSubs = Array.from(new Map(subs.map((s) => [s.userId, s])).values());
+  console.log(
+    `[EXECUTION] notifyMasterFlat fanout strategyId=${strategyId} symbol=${snap.symbol} activeSubs=${uniqueSubs.length}`,
+  );
 
   await Promise.all(
     uniqueSubs.map(async (sub) => {
       const followerContracts = followerContractsFromMaster(
         snap.masterContracts,
-        sub.multiplier,
+        subscriptionMultiplier(sub),
       );
       const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
       const creds =
@@ -1174,7 +1108,7 @@ async function notifyMasterFlat(
       }
 
       console.log(
-        `[EXECUTION] Master flat — closing follower book user ${sub.userId} — ${snap.symbol} ${snap.side} — ${followerContracts} contracts (master ${snap.masterContracts} × ${sub.multiplier})`,
+        `[EXECUTION] Master flat — closing follower book user ${sub.userId} — ${snap.symbol} ${snap.side} — ${followerContracts} contracts (master ${snap.masterContracts} × ${subscriptionMultiplier(sub)})`,
       );
       console.log(
         `[EXECUTION] Closing order for user ${sub.userId} - Size: ${followerContracts} contracts - ${snap.symbol} ${oppositeSide}`,
@@ -1819,7 +1753,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       const strategies = await prisma.strategy.findMany({
         where: {
           ...STRATEGY_WHERE_COPY_ENABLED,
-          subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
+          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
         },
         select: { id: true, masterApiKey: true, masterApiSecret: true },
       });
@@ -1882,7 +1816,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       const strategies = await prisma.strategy.findMany({
         where: {
           ...STRATEGY_WHERE_COPY_ENABLED,
-          subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
+          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
         },
         select: {
           id: true,
@@ -1896,6 +1830,12 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
           continue;
         }
+
+        const activeSubs = await findActiveCopySubscribersForStrategy(
+          prisma,
+          strat.id,
+        );
+        const activeUserIds = new Set(activeSubs.map((s) => s.userId));
 
         let masterAliases: Set<string>;
         try {
@@ -1938,20 +1878,16 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
         for (const trade of openTrades) {
           if (cancelled.value) return;
+          if (!activeUserIds.has(trade.userId)) {
+            continue;
+          }
           const tradeAliases = symbolAliasSet(trade.symbol);
           const stillOpen = Array.from(tradeAliases).some((a) =>
             masterAliases.has(a),
           );
           if (stillOpen) continue;
 
-          const sub = await prisma.userSubscription.findFirst({
-            where: {
-              strategyId: trade.strategyId,
-              userId: trade.userId,
-              status: SubscriptionStatus.ACTIVE,
-            },
-            include: { exchangeAccount: true },
-          });
+          const sub = activeSubs.find((s) => s.userId === trade.userId);
 
           const creds =
             sub?.exchangeAccount != null
@@ -2054,7 +1990,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       const strategies = await prisma.strategy.findMany({
         where: {
           ...STRATEGY_WHERE_COPY_ENABLED,
-          subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
+          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
         },
         select: {
           id: true,
@@ -2083,25 +2019,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           continue;
         }
 
-        const subs = await prisma.userSubscription.findMany({
-          where: {
-            strategyId: strat.id,
-            status: SubscriptionStatus.ACTIVE,
-            user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-          },
-          include: {
-            exchangeAccount: true,
-            user: {
-              include: {
-                deltaApiKeys: true,
-                exchangeAccounts: {
-                  orderBy: { createdAt: "desc" },
-                  take: 1,
-                },
-              },
-            },
-          },
-        });
+        const subs = await findActiveCopySubscribersForStrategy(
+          prisma,
+          strat.id,
+        );
 
         for (const sub of subs) {
           if (cancelled.value) return;
@@ -2133,7 +2054,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
             const expectedContracts = followerContractsFromMaster(
               master.masterContracts,
-              sub.multiplier,
+              subscriptionMultiplier(sub),
             );
             const leg = findFollowerLeg(
               followerPositions,

@@ -392,9 +392,10 @@ export async function getAdminGroupedLiveTrades(
       ...(fetchException !== undefined ? { fetchException } : {}),
     };
 
-    const subs = await prisma.userSubscription.findMany({
+    const subs = await prisma.userStrategySubscription.findMany({
       where: {
         strategyId: strat.id,
+        isActive: true,
         status: SubscriptionStatus.ACTIVE,
         user: { status: UserStatus.ACTIVE },
       },

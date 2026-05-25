@@ -251,7 +251,7 @@ export async function activeStrategiesForUser(
   prisma: PrismaClient,
   userId: string,
 ): Promise<{ count: number; names: string[] }> {
-  const subs = await prisma.userSubscription.findMany({
+  const subs = await prisma.userStrategySubscription.findMany({
     where: { userId, status: SubscriptionStatus.ACTIVE },
     include: { strategy: { select: { title: true } } },
     orderBy: { joinedDate: "desc" },

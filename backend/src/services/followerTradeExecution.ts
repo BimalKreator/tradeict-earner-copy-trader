@@ -6,6 +6,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { STRATEGY_SELECT_IS_ACTIVE } from "../prisma/strategySelect.js";
+import { findActiveCopySubscriptionForUser } from "./strategySubscriptionService.js";
 import { logUserActivity } from "./userActivityService.js";
 
 /** Wait after each successful order before re-checking positions. */
@@ -126,6 +127,19 @@ export async function executeFollowerTradeWithVerification(
       return {
         success: false,
         error: "Strategy is paused",
+        attempts: 0,
+        verified: false,
+      };
+    }
+
+    const sub = await findActiveCopySubscriptionForUser(prisma, {
+      strategyId: args.strategyId,
+      userId: args.userId,
+    });
+    if (!sub) {
+      return {
+        success: false,
+        error: "No active subscription for this strategy",
         attempts: 0,
         verified: false,
       };

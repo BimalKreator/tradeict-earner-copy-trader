@@ -51,6 +51,19 @@ const DEFAULT_FUTURE_HEDGE: FutureHedgeConfig = {
   targetProfitUsd: 10,
 };
 
+type StrategySubscriber = {
+  subscriptionId: string;
+  userId: string;
+  name: string | null;
+  email: string;
+  multiplier: number;
+  isActive: boolean;
+  status: string;
+  joinedDate: string;
+};
+
+type ModalTab = "details" | "subscribers";
+
 /** Stored in `performanceMetrics` — drives charts / heatmap on the product UI. */
 type PerformanceMetricsPayload = {
   pnlChart: {
@@ -355,6 +368,16 @@ export default function AdminStrategiesPage() {
     text: string;
   } | null>(null);
   const [forceSyncingId, setForceSyncingId] = useState<string | null>(null);
+  const [modalTab, setModalTab] = useState<ModalTab>("details");
+  const [subscribers, setSubscribers] = useState<StrategySubscriber[]>([]);
+  const [subscribersLoading, setSubscribersLoading] = useState(false);
+  const [subscribersError, setSubscribersError] = useState<string | null>(null);
+  const [multiplierDrafts, setMultiplierDrafts] = useState<Record<string, string>>(
+    {},
+  );
+  const [savingSubscriberId, setSavingSubscriberId] = useState<string | null>(
+    null,
+  );
 
   const loadStrategies = useCallback(async () => {
     setLoading(true);
@@ -387,8 +410,150 @@ export default function AdminStrategiesPage() {
     return () => window.clearTimeout(t);
   }, [syncToast]);
 
+  const loadSubscribers = useCallback(async (strategyId: string) => {
+    setSubscribersLoading(true);
+    setSubscribersError(null);
+    try {
+      const base = resolveAdminApiBase();
+      const res = await fetch(
+        `${base}/admin/strategies/${encodeURIComponent(strategyId)}/subscribers`,
+        { headers: authHeaders() },
+      );
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Failed to load subscribers (${res.status})`;
+        throw new Error(msg);
+      }
+      const data = body as { subscribers?: StrategySubscriber[] };
+      const rows = Array.isArray(data.subscribers) ? data.subscribers : [];
+      setSubscribers(rows);
+      setMultiplierDrafts(
+        Object.fromEntries(rows.map((r) => [r.userId, String(r.multiplier)])),
+      );
+    } catch (e) {
+      setSubscribers([]);
+      setMultiplierDrafts({});
+      setSubscribersError(
+        e instanceof Error ? e.message : "Failed to load subscribers",
+      );
+    } finally {
+      setSubscribersLoading(false);
+    }
+  }, []);
+
+  async function saveSubscriberMultiplier(
+    strategyId: string,
+    userId: string,
+  ): Promise<void> {
+    const raw = multiplierDrafts[userId] ?? "";
+    const multiplier = Number.parseFloat(raw);
+    if (!Number.isFinite(multiplier) || multiplier <= 0) {
+      setSubscribersError("Multiplier must be a positive number.");
+      return;
+    }
+    setSavingSubscriberId(userId);
+    setSubscribersError(null);
+    try {
+      const base = resolveAdminApiBase();
+      const res = await fetch(
+        `${base}/admin/strategies/${encodeURIComponent(strategyId)}/subscribers/${encodeURIComponent(userId)}`,
+        {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({ multiplier }),
+        },
+      );
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Update failed (${res.status})`;
+        throw new Error(msg);
+      }
+      const updated = body as StrategySubscriber;
+      setSubscribers((prev) =>
+        prev.map((r) =>
+          r.userId === userId
+            ? {
+                ...r,
+                multiplier: updated.multiplier,
+                isActive: updated.isActive,
+                status: updated.status,
+              }
+            : r,
+        ),
+      );
+      setMultiplierDrafts((prev) => ({
+        ...prev,
+        [userId]: String(updated.multiplier),
+      }));
+    } catch (e) {
+      setSubscribersError(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setSavingSubscriberId(null);
+    }
+  }
+
+  async function toggleSubscriberActive(
+    strategyId: string,
+    userId: string,
+    nextActive: boolean,
+  ): Promise<void> {
+    setSavingSubscriberId(userId);
+    setSubscribersError(null);
+    try {
+      const base = resolveAdminApiBase();
+      const res = await fetch(
+        `${base}/admin/strategies/${encodeURIComponent(strategyId)}/subscribers/${encodeURIComponent(userId)}`,
+        {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({ isActive: nextActive }),
+        },
+      );
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Update failed (${res.status})`;
+        throw new Error(msg);
+      }
+      const updated = body as StrategySubscriber;
+      setSubscribers((prev) =>
+        prev.map((r) =>
+          r.userId === userId
+            ? { ...r, isActive: updated.isActive, status: updated.status }
+            : r,
+        ),
+      );
+    } catch (e) {
+      setSubscribersError(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setSavingSubscriberId(null);
+    }
+  }
+
   function resetForm() {
     setEditingId(null);
+    setModalTab("details");
+    setSubscribers([]);
+    setSubscribersError(null);
+    setMultiplierDrafts({});
+    setSavingSubscriberId(null);
     setSavedMasterApiSecret(false);
     setTitle("");
     setDescription("");
@@ -426,6 +591,7 @@ export default function AdminStrategiesPage() {
   }
 
   function openEditModal(s: Strategy) {
+    setModalTab("details");
     setEditingId(s.id);
     setFormError(null);
     setSavedMasterApiSecret(Boolean(s.hasMasterApiSecret));
@@ -470,7 +636,13 @@ export default function AdminStrategiesPage() {
     }
 
     setModalOpen(true);
+    void loadSubscribers(s.id);
   }
+
+  useEffect(() => {
+    if (!modalOpen || !editingId || modalTab !== "subscribers") return;
+    void loadSubscribers(editingId);
+  }, [modalOpen, editingId, modalTab, loadSubscribers]);
 
   async function handleForceSync(s: Strategy) {
     setForceSyncingId(s.id);
@@ -781,7 +953,11 @@ export default function AdminStrategiesPage() {
           aria-modal="true"
           aria-labelledby="strategy-modal-title"
         >
-          <div className="glass-card my-8 w-full max-w-2xl border border-glassBorder p-6 shadow-2xl">
+          <div
+            className={`glass-card my-8 w-full border border-glassBorder p-6 shadow-2xl ${
+              editingId ? "max-w-4xl" : "max-w-2xl"
+            }`}
+          >
             <h2
               id="strategy-modal-title"
               className="text-lg font-semibold text-white"
@@ -789,11 +965,195 @@ export default function AdminStrategiesPage() {
               {editingId ? "Edit strategy" : "Add strategy"}
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              Leader credentials use <span className="text-white/70">masterApiKey</span> /{" "}
-              <span className="text-white/70">masterApiSecret</span> against the Delta India API. Performance
-              metrics below power product charts.
+              {editingId && modalTab === "subscribers"
+                ? "Manage copy-trading multipliers and per-user pause for this strategy."
+                : (
+                  <>
+                    Leader credentials use <span className="text-white/70">masterApiKey</span> /{" "}
+                    <span className="text-white/70">masterApiSecret</span> against the Delta India API.
+                    Performance metrics below power product charts.
+                  </>
+                )}
             </p>
 
+            {editingId ? (
+              <div className="mt-4 flex gap-2 border-b border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setModalTab("details")}
+                  className={`border-b-2 px-3 py-2 text-sm font-medium transition ${
+                    modalTab === "details"
+                      ? "border-primary text-primary"
+                      : "border-transparent text-white/55 hover:text-white"
+                  }`}
+                >
+                  Details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModalTab("subscribers")}
+                  className={`border-b-2 px-3 py-2 text-sm font-medium transition ${
+                    modalTab === "subscribers"
+                      ? "border-primary text-primary"
+                      : "border-transparent text-white/55 hover:text-white"
+                  }`}
+                >
+                  Subscribers
+                  {subscribers.length > 0 ? (
+                    <span className="ml-1.5 rounded-full bg-white/10 px-1.5 py-0.5 text-xs tabular-nums">
+                      {subscribers.length}
+                    </span>
+                  ) : null}
+                </button>
+              </div>
+            ) : null}
+
+            {editingId && modalTab === "subscribers" ? (
+              <div className="mt-6 max-h-[calc(100vh-10rem)] space-y-4 overflow-y-auto pr-1">
+                {subscribersError ? (
+                  <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                    {subscribersError}
+                  </p>
+                ) : null}
+                <div className="overflow-x-auto rounded-xl border border-glassBorder">
+                  <table className="w-full min-w-[640px] text-left text-sm">
+                    <thead className="border-b border-glassBorder bg-white/[0.03]">
+                      <tr>
+                        <th className="px-3 py-2.5 font-medium text-white/70">Name</th>
+                        <th className="px-3 py-2.5 font-medium text-white/70">Email</th>
+                        <th className="px-3 py-2.5 font-medium text-white/70">Multiplier</th>
+                        <th className="px-3 py-2.5 font-medium text-white/70">Status</th>
+                        <th className="px-3 py-2.5 font-medium text-white/70">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {subscribersLoading ? (
+                        <tr>
+                          <td
+                            colSpan={5}
+                            className="px-3 py-8 text-center text-white/45"
+                          >
+                            Loading subscribers…
+                          </td>
+                        </tr>
+                      ) : subscribers.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={5}
+                            className="px-3 py-8 text-center text-white/45"
+                          >
+                            No subscribers for this strategy yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        subscribers.map((sub) => {
+                          const busy = savingSubscriberId === sub.userId;
+                          return (
+                            <tr
+                              key={sub.subscriptionId}
+                              className="border-b border-white/[0.06] last:border-0"
+                            >
+                              <td className="px-3 py-3 text-white">
+                                {sub.name?.trim() || "—"}
+                              </td>
+                              <td className="max-w-[180px] truncate px-3 py-3 text-white/75">
+                                {sub.email}
+                              </td>
+                              <td className="px-3 py-3">
+                                <input
+                                  type="number"
+                                  min={0.1}
+                                  step="any"
+                                  disabled={busy}
+                                  value={multiplierDrafts[sub.userId] ?? String(sub.multiplier)}
+                                  onChange={(e) =>
+                                    setMultiplierDrafts((prev) => ({
+                                      ...prev,
+                                      [sub.userId]: e.target.value,
+                                    }))
+                                  }
+                                  className="w-24 rounded-lg border border-glassBorder bg-black/40 px-2 py-1.5 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+                                />
+                              </td>
+                              <td className="px-3 py-3">
+                                <span
+                                  className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ${
+                                    sub.isActive
+                                      ? "bg-emerald-500/15 text-emerald-200 ring-emerald-500/35"
+                                      : "bg-amber-500/15 text-amber-100 ring-amber-500/35"
+                                  }`}
+                                >
+                                  {sub.isActive ? "Active" : "Paused"}
+                                </span>
+                                <span className="mt-1 block text-[10px] text-white/40">
+                                  {sub.status.replace(/_/g, " ")}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void saveSubscriberMultiplier(
+                                        editingId,
+                                        sub.userId,
+                                      )
+                                    }
+                                    className="rounded-lg border border-glassBorder bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-white/10 disabled:opacity-50"
+                                  >
+                                    {busy ? "Saving…" : "Save mult."}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={sub.isActive}
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void toggleSubscriberActive(
+                                        editingId,
+                                        sub.userId,
+                                        !sub.isActive,
+                                      )
+                                    }
+                                    title={
+                                      sub.isActive
+                                        ? "Pause copy for this user"
+                                        : "Resume copy for this user"
+                                    }
+                                    className={`relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
+                                      sub.isActive ? "bg-emerald-500/80" : "bg-white/20"
+                                    }`}
+                                  >
+                                    <span
+                                      className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                        sub.isActive ? "translate-x-4" : "translate-x-0"
+                                      }`}
+                                    />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex justify-end gap-3 border-t border-white/10 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setModalOpen(false);
+                      resetForm();
+                    }}
+                    className="rounded-lg px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/10"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : (
             <form onSubmit={handleSubmitStrategy} className="mt-6 max-h-[calc(100vh-8rem)] space-y-6 overflow-y-auto pr-1">
               {formError && (
                 <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
@@ -1234,6 +1594,7 @@ export default function AdminStrategiesPage() {
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}

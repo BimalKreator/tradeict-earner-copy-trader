@@ -62,7 +62,7 @@ export function createAnalyticsRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const subs = await prisma.userSubscription.findMany({
+      const subs = await prisma.userStrategySubscription.findMany({
         where: {
           userId,
           status: {

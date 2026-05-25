@@ -42,6 +42,10 @@ import {
   rowsToCsv,
   writeCsvToDownloads,
 } from "../utils/exportService.js";
+import {
+  MAX_SUBSCRIPTION_MULTIPLIER,
+  MIN_SUBSCRIPTION_MULTIPLIER,
+} from "../constants/subscription.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -704,7 +708,7 @@ export function createAdminController(prisma: PrismaClient) {
         apiKey = strategy.masterApiKey?.trim() ?? "";
         apiSecret = strategy.masterApiSecret?.trim() ?? "";
       } else {
-        const sub = await prisma.userSubscription.findFirst({
+        const sub = await prisma.userStrategySubscription.findFirst({
           where: { userId, strategyId },
           orderBy: { joinedDate: "desc" },
           select: { exchangeAccountId: true },
@@ -1249,7 +1253,7 @@ export function createAdminController(prisma: PrismaClient) {
       ] =
         await Promise.all([
           prisma.user.count({ where: { role: "USER" } }),
-          prisma.userSubscription.count({
+          prisma.userStrategySubscription.count({
             where: { status: SubscriptionStatus.ACTIVE },
           }),
           aggregateUsersAum(prisma),
@@ -1683,6 +1687,162 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  function parseSubscriptionMultiplier(v: unknown): number | null {
+    const n =
+      typeof v === "number"
+        ? v
+        : typeof v === "string"
+          ? Number(v)
+          : NaN;
+    if (!Number.isFinite(n) || n < MIN_SUBSCRIPTION_MULTIPLIER) return null;
+    if (n > MAX_SUBSCRIPTION_MULTIPLIER) return null;
+    return Math.round(n * 10) / 10;
+  }
+
+  /** All users subscribed to a strategy (admin subscribers table). */
+  async function listStrategySubscribers(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const strategyId = String(req.params.id ?? "").trim();
+      if (!strategyId) {
+        res.status(400).json({ error: "strategy id is required" });
+        return;
+      }
+
+      const strategy = await prisma.strategy.findUnique({
+        where: { id: strategyId },
+        select: { id: true, title: true },
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      const rows = await prisma.userStrategySubscription.findMany({
+        where: { strategyId },
+        orderBy: { joinedDate: "desc" },
+        select: {
+          id: true,
+          userId: true,
+          multiplier: true,
+          isActive: true,
+          status: true,
+          joinedDate: true,
+          user: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              status: true,
+              copyTradingPaused: true,
+            },
+          },
+        },
+      });
+
+      res.json({
+        strategyId: strategy.id,
+        strategyTitle: strategy.title,
+        subscribers: rows.map((row) => ({
+          subscriptionId: row.id,
+          userId: row.user.id,
+          name: row.user.name,
+          email: row.user.email,
+          userStatus: row.user.status,
+          copyTradingPaused: row.user.copyTradingPaused,
+          multiplier: row.multiplier,
+          isActive: row.isActive,
+          status: row.status,
+          joinedDate: row.joinedDate.toISOString(),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** Update per-user multiplier and/or copy-trading isActive for one strategy. */
+  async function updateStrategySubscriber(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      const userId = String(req.params.userId ?? "").trim();
+      if (!strategyId || !userId) {
+        res.status(400).json({ error: "strategyId and userId are required" });
+        return;
+      }
+
+      const body = req.body as { multiplier?: unknown; isActive?: unknown };
+      const data: { multiplier?: number; isActive?: boolean } = {};
+
+      if (body.multiplier !== undefined) {
+        const multiplier = parseSubscriptionMultiplier(body.multiplier);
+        if (multiplier == null) {
+          res.status(400).json({
+            error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
+          });
+          return;
+        }
+        data.multiplier = multiplier;
+      }
+      if (body.isActive !== undefined) {
+        if (typeof body.isActive !== "boolean") {
+          res.status(400).json({ error: "isActive must be a boolean" });
+          return;
+        }
+        data.isActive = body.isActive;
+      }
+      if (Object.keys(data).length === 0) {
+        res.status(400).json({ error: "multiplier and/or isActive is required" });
+        return;
+      }
+
+      const existing = await prisma.userStrategySubscription.findUnique({
+        where: { userId_strategyId: { userId, strategyId } },
+        select: { id: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "Subscription not found for this user" });
+        return;
+      }
+
+      const updated = await prisma.userStrategySubscription.update({
+        where: { id: existing.id },
+        data,
+        select: {
+          id: true,
+          userId: true,
+          strategyId: true,
+          multiplier: true,
+          isActive: true,
+          status: true,
+          joinedDate: true,
+          user: { select: { id: true, email: true, name: true } },
+        },
+      });
+
+      res.json({
+        subscriptionId: updated.id,
+        userId: updated.userId,
+        strategyId: updated.strategyId,
+        name: updated.user.name,
+        email: updated.user.email,
+        multiplier: updated.multiplier,
+        isActive: updated.isActive,
+        status: updated.status,
+        joinedDate: updated.joinedDate.toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function patchUserCryptoArbitrageAllocation(
     req: Request,
     res: Response,
@@ -1746,6 +1906,8 @@ export function createAdminController(prisma: PrismaClient) {
     patchUserCryptoArbitrageEnabled,
     patchUserCryptoArbitrageBalance,
     patchUserCryptoArbitrageAllocation,
+    listStrategySubscribers,
+    updateStrategySubscriber,
   };
 }
 
