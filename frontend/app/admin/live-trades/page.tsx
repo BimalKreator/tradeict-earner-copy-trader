@@ -2,12 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  ChevronDown,
+  ChevronRight,
   Layers,
   Loader2,
+  Radio,
+  RefreshCw,
   Shield,
   Target,
   TrendingDown,
   Users,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -39,19 +45,28 @@ type FollowerRow = LiveRow & { userId: string; userEmail: string };
 type SubscriberUser = {
   userId: string;
   userEmail: string;
+  userName?: string | null;
   multiplier: number;
   positions: LiveRow[];
+};
+
+type MasterMeta = {
+  credentialsPresent: boolean;
+  fetchException?: string;
 };
 
 type StrategySection = {
   strategyId: string;
   strategyTitle: string;
+  strategyIsActive: boolean;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
-  /** CCXT open positions on the strategy master Delta (India) account. */
   masterPositions: LiveRow[];
   subscribers: SubscriberUser[];
+  masterMeta: MasterMeta;
 };
+
+const LIVE_TRADES_REFRESH_MS = 8_000;
 
 interface AutoExitPayload {
   autoExitTarget?: number | null;
@@ -110,6 +125,397 @@ function formatMultiplier(m: number): string {
   if (!Number.isFinite(m) || m <= 0) return "1x";
   const rounded = Math.round(m * 100) / 100;
   return Number.isInteger(rounded) ? `${rounded}x` : `${rounded}x`;
+}
+
+function parseStrategyGroups(data: unknown): StrategySection[] {
+  const rawList = Array.isArray(data)
+    ? data
+    : typeof data === "object" &&
+        data !== null &&
+        "strategies" in data &&
+        Array.isArray((data as { strategies: unknown }).strategies)
+      ? (data as { strategies: unknown[] }).strategies
+      : [];
+
+  return rawList.map((item) => {
+    const row = item as Record<string, unknown>;
+    const strat =
+      typeof row.strategy === "object" && row.strategy !== null
+        ? (row.strategy as Record<string, unknown>)
+        : row;
+    const metaRaw =
+      typeof row.masterMeta === "object" && row.masterMeta !== null
+        ? (row.masterMeta as Record<string, unknown>)
+        : {};
+
+    return {
+      strategyId: String(strat.id ?? row.strategyId ?? ""),
+      strategyTitle: String(strat.title ?? row.strategyTitle ?? "Strategy"),
+      strategyIsActive: strat.isActive !== false,
+      autoExitTarget:
+        typeof strat.autoExitTarget === "number"
+          ? strat.autoExitTarget
+          : typeof row.autoExitTarget === "number"
+            ? row.autoExitTarget
+            : null,
+      autoExitStopLoss:
+        typeof strat.autoExitStopLoss === "number"
+          ? strat.autoExitStopLoss
+          : typeof row.autoExitStopLoss === "number"
+            ? row.autoExitStopLoss
+            : null,
+      masterPositions: Array.isArray(row.masterPositions)
+        ? (row.masterPositions as LiveRow[])
+        : [],
+      subscribers: Array.isArray(row.subscribers)
+        ? (row.subscribers as SubscriberUser[]).map((sub) => {
+            const s = sub as Record<string, unknown>;
+            return {
+              userId: String(s.userId ?? ""),
+              userEmail: String(s.userEmail ?? ""),
+              userName:
+                typeof s.userName === "string" ? s.userName : null,
+              multiplier:
+                typeof s.multiplier === "number" ? s.multiplier : 1,
+              positions: Array.isArray(s.positions)
+                ? (s.positions as LiveRow[])
+                : [],
+            };
+          })
+        : [],
+      masterMeta: {
+        credentialsPresent: Boolean(metaRaw.credentialsPresent),
+        fetchException:
+          typeof metaRaw.fetchException === "string"
+            ? metaRaw.fetchException
+            : undefined,
+      },
+    };
+  });
+}
+
+function MasterApiStatusBadge({ meta }: { meta: MasterMeta }) {
+  if (!meta.credentialsPresent) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-100 ring-1 ring-amber-500/35">
+        <WifiOff className="h-3.5 w-3.5" aria-hidden />
+        Keys missing
+      </span>
+    );
+  }
+  if (meta.fetchException) {
+    return (
+      <span
+        className="inline-flex max-w-md items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 ring-1 ring-red-500/35"
+        title={meta.fetchException}
+      >
+        <WifiOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        API error
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-200 ring-1 ring-emerald-500/35">
+      <Wifi className="h-3.5 w-3.5" aria-hidden />
+      Master connected
+    </span>
+  );
+}
+
+function MasterLegsTable({
+  rows,
+  strategyId,
+  onCloseTrade,
+  closingKey,
+}: {
+  rows: LiveRow[];
+  strategyId: string;
+  onCloseTrade: (args: {
+    strategyId: string;
+    symbol: string;
+    side: string;
+    size: number;
+    isMaster: boolean;
+  }) => Promise<void>;
+  closingKey: string | null;
+}) {
+  if (rows.length === 0) {
+    return (
+      <p className="px-4 py-8 text-center text-sm text-white/50">
+        No open positions on this strategy&apos;s master Delta account.
+      </p>
+    );
+  }
+
+  return (
+    <div className="scroll-table overflow-x-auto">
+      <table className="w-full min-w-[720px] text-left text-sm">
+        <thead className="border-b border-primary/30 bg-primary/10">
+          <tr>
+            <th className="px-4 py-3 font-medium text-white/80">Token</th>
+            <th className="px-4 py-3 font-medium text-white/80">Side</th>
+            <th className="px-4 py-3 font-medium text-white/80">Entry price</th>
+            <th className="px-4 py-3 font-medium text-white/80">Live PnL</th>
+            <th className="px-4 py-3 font-medium text-white/80">Mark price</th>
+            <th className="px-4 py-3 font-medium text-white/80">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, idx) => (
+            <tr
+              key={`${r.token}-${r.side}-${idx}`}
+              className="border-b border-white/[0.05] transition-colors last:border-0 hover:bg-white/[0.02]"
+            >
+              <td className="px-4 py-3 font-medium text-white">{r.token}</td>
+              <td className="px-4 py-3 text-white/70">{r.side}</td>
+              <td className="px-4 py-3 tabular-nums text-white/85">
+                {fmtPrice(r.entryPrice)}
+              </td>
+              <td
+                className={`px-4 py-3 tabular-nums font-semibold ${
+                  r.livePnl != null && r.livePnl >= 0
+                    ? "text-emerald-400"
+                    : r.livePnl != null
+                      ? "text-red-300"
+                      : "text-white/50"
+                }`}
+              >
+                {fmtPnl(r.livePnl)}
+              </td>
+              <td className="px-4 py-3 tabular-nums text-white/85">
+                {fmtPrice(r.markPrice)}
+              </td>
+              <td className="px-4 py-3">
+                {r.size != null && r.size > 0 ? (
+                  <button
+                    type="button"
+                    disabled={
+                      closingKey ===
+                      `${strategyId}:${r.token}:${r.side}:master`
+                    }
+                    onClick={() =>
+                      void onCloseTrade({
+                        strategyId,
+                        symbol: r.token,
+                        side: r.side,
+                        size: r.size ?? 0,
+                        isMaster: true,
+                      })
+                    }
+                    className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:opacity-50"
+                  >
+                    Close
+                  </button>
+                ) : (
+                  <span className="text-white/35">—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SubscriberAccordionItem({
+  user,
+  strategyId,
+  expanded,
+  onToggle,
+  onCloseTrade,
+  closingKey,
+}: {
+  user: SubscriberUser;
+  strategyId: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onCloseTrade: (args: {
+    strategyId: string;
+    userId?: string;
+    symbol: string;
+    side: string;
+    size: number;
+    isMaster: boolean;
+  }) => Promise<void>;
+  closingKey: string | null;
+}) {
+  const totalPnl = sumLivePnl(user.positions);
+  const pnlPositive = totalPnl > 0;
+  const pnlNegative = totalPnl < 0;
+  const displayName = user.userName?.trim() || user.userEmail;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-white/10 bg-black/25">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]"
+        aria-expanded={expanded}
+      >
+        {expanded ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-white/50" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-white/50" />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-white">{displayName}</p>
+          <p className="text-xs text-white/45">
+            {user.userEmail} · Multiplier{" "}
+            <span className="font-semibold text-violet-300">
+              {formatMultiplier(user.multiplier)}
+            </span>
+            · {user.positions.length} leg
+            {user.positions.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        <p
+          className={`shrink-0 text-sm font-bold tabular-nums ${
+            pnlPositive
+              ? "text-emerald-400"
+              : pnlNegative
+                ? "text-red-400"
+                : "text-white/60"
+          }`}
+        >
+          {fmtPnl(totalPnl)}
+        </p>
+      </button>
+      {expanded ? (
+        <div className="border-t border-white/[0.06]">
+          {user.positions.length > 0 ? (
+            <PositionTable
+              rows={user.positions}
+              variant="subscriber"
+              strategyId={strategyId}
+              followerUserId={user.userId}
+              onCloseTrade={onCloseTrade}
+              closingKey={closingKey}
+            />
+          ) : (
+            <p className="px-4 py-6 text-sm text-white/45">
+              No open positions on this follower&apos;s Delta account.
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StrategyLivePanel({
+  strategy,
+  isActiveTab,
+  expandedSubs,
+  onToggleSubscriber,
+  onCloseTrade,
+  closingKey,
+  onAutoExitSaved,
+}: {
+  strategy: StrategySection;
+  isActiveTab: boolean;
+  expandedSubs: Set<string>;
+  onToggleSubscriber: (userId: string) => void;
+  onCloseTrade: (args: {
+    strategyId: string;
+    userId?: string;
+    symbol: string;
+    side: string;
+    size: number;
+    isMaster: boolean;
+  }) => Promise<void>;
+  closingKey: string | null;
+  onAutoExitSaved: (message: string, updated?: AutoExitSaved) => void;
+}) {
+  const masterPnl = sumLivePnl(strategy.masterPositions);
+
+  return (
+    <div
+      className="space-y-6"
+      aria-hidden={!isActiveTab}
+    >
+      <div className="flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-semibold tracking-tight text-white">
+              {strategy.strategyTitle}
+            </h2>
+            {!strategy.strategyIsActive ? (
+              <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-100 ring-1 ring-amber-500/30">
+                Strategy paused
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 font-mono text-xs text-white/45">
+            ID {strategy.strategyId}
+          </p>
+        </div>
+        <MasterApiStatusBadge meta={strategy.masterMeta} />
+      </div>
+
+      <RiskManagementPanel
+        strategy={strategy}
+        totalLivePnl={masterPnl}
+        onSaved={onAutoExitSaved}
+      />
+
+      <section className="overflow-hidden rounded-xl border border-primary/25 bg-black/20">
+        <div className="flex items-center justify-between border-b border-primary/25 bg-primary/5 px-4 py-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+              Master Delta
+            </p>
+            <p className="mt-0.5 text-xs text-white/45">
+              Leader open legs (CCXT / Delta India)
+            </p>
+          </div>
+          <span className="rounded-md bg-white/5 px-2 py-1 text-xs tabular-nums text-white/60">
+            {strategy.masterPositions.length} open
+          </span>
+        </div>
+        <MasterLegsTable
+          rows={strategy.masterPositions}
+          strategyId={strategy.strategyId}
+          onCloseTrade={onCloseTrade}
+          closingKey={closingKey}
+        />
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Subscribers</h3>
+            <p className="text-xs text-white/45">
+              Active copy subscriptions for this strategy only
+            </p>
+          </div>
+          <span className="inline-flex items-center gap-1 rounded-md bg-violet-500/10 px-2 py-1 text-xs text-violet-200 ring-1 ring-violet-500/25">
+            <Users className="h-3.5 w-3.5" aria-hidden />
+            {strategy.subscribers.length}
+          </span>
+        </div>
+        {strategy.subscribers.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-white/45">
+            No active subscribers with open positions for this strategy.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {strategy.subscribers.map((user) => (
+              <SubscriberAccordionItem
+                key={user.userId}
+                user={user}
+                strategyId={strategy.strategyId}
+                expanded={expandedSubs.has(user.userId)}
+                onToggle={() => onToggleSubscriber(user.userId)}
+                onCloseTrade={onCloseTrade}
+                closingKey={closingKey}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
 }
 
 function RiskManagementPanel({
@@ -431,130 +837,47 @@ function PositionTable({
   );
 }
 
-function SubscriberUserCard({
-  user,
-  strategy,
-  strategyId,
-  onCloseTrade,
-  closingKey,
-}: {
-  user: SubscriberUser;
-  strategy: StrategySection;
-  strategyId: string;
-  onCloseTrade: (args: {
-    strategyId: string;
-    userId?: string;
-    symbol: string;
-    side: string;
-    size: number;
-    isMaster: boolean;
-  }) => Promise<void>;
-  closingKey: string | null;
-}) {
-  const totalPnl = sumLivePnl(user.positions);
-  const pnlPositive = totalPnl > 0;
-  const pnlNegative = totalPnl < 0;
-  const mult =
-    Number.isFinite(user.multiplier) && user.multiplier > 0
-      ? user.multiplier
-      : 1;
-
-  const estTarget =
-    strategy.autoExitTarget != null && Number.isFinite(strategy.autoExitTarget)
-      ? strategy.autoExitTarget * mult
-      : null;
-  const estStop =
-    strategy.autoExitStopLoss != null &&
-    Number.isFinite(strategy.autoExitStopLoss)
-      ? strategy.autoExitStopLoss * mult
-      : null;
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-violet-500/20 bg-gradient-to-br from-violet-500/[0.06] via-black/25 to-black/30">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-violet-500/15 bg-violet-500/[0.06] px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="rounded-lg border border-violet-500/25 bg-violet-500/10 p-2">
-            <Users className="h-4 w-4 text-violet-300" aria-hidden />
-          </div>
-          <div>
-            <p className="text-sm font-medium text-white">{user.userEmail}</p>
-            <p className="text-xs text-white/45">
-              Multiplier:{" "}
-              <span className="font-semibold text-violet-300">
-                {formatMultiplier(mult)}
-              </span>
-            </p>
-          </div>
-        </div>
-        <p className="font-mono text-[10px] text-white/35">{user.userId}</p>
-      </div>
-
-      <div className="grid gap-3 border-b border-white/[0.06] bg-black/20 px-4 py-3 sm:grid-cols-3">
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-            Total live PnL
-          </p>
-          <p
-            className={`mt-0.5 text-lg font-bold tabular-nums ${
-              pnlPositive
-                ? "text-emerald-400"
-                : pnlNegative
-                  ? "text-red-400"
-                  : "text-white/70"
-            }`}
-          >
-            {fmtPnl(totalPnl)}
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-            Scaled target (display)
-          </p>
-          <p className="mt-0.5 text-sm font-semibold tabular-nums text-emerald-300/90">
-            {estTarget != null
-              ? usdPnlFmt.format(estTarget).replace(/^\+/, "")
-              : "—"}
-          </p>
-          <p className="mt-0.5 text-[10px] text-white/35">
-            Auto-exit uses master basket PnL above
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-            Scaled stop (display)
-          </p>
-          <p className="mt-0.5 text-sm font-semibold tabular-nums text-red-300/90">
-            {estStop != null
-              ? `−${usdPnlFmt.format(estStop).replace(/^\+/, "")}`
-              : "—"}
-          </p>
-        </div>
-      </div>
-
-      {user.positions.length > 0 ? (
-        <PositionTable
-          rows={user.positions}
-          variant="subscriber"
-          strategyId={strategyId}
-          followerUserId={user.userId}
-          onCloseTrade={onCloseTrade}
-          closingKey={closingKey}
-        />
-      ) : (
-        <p className="px-4 py-6 text-sm text-white/45">No open positions.</p>
-      )}
-    </div>
-  );
-}
-
 export default function AdminLiveTradesPage() {
   const [strategies, setStrategies] = useState<StrategySection[]>([]);
+  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [closingKey, setClosingKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
+    Record<string, Set<string>>
+  >({});
+
+  const toggleSubscriberExpanded = useCallback(
+    (strategyId: string, userId: string) => {
+      setExpandedSubsByStrategy((prev) => {
+        const next = { ...prev };
+        const current = new Set(next[strategyId] ?? []);
+        if (current.has(userId)) current.delete(userId);
+        else current.add(userId);
+        next[strategyId] = current;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const ensureExpandedDefaults = useCallback((list: StrategySection[]) => {
+    setExpandedSubsByStrategy((prev) => {
+      const next = { ...prev };
+      for (const s of list) {
+        if (!next[s.strategyId]) {
+          next[s.strategyId] = new Set(
+            s.subscribers.map((u) => u.userId),
+          );
+        }
+      }
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = Boolean(opts?.silent);
@@ -562,6 +885,8 @@ export default function AdminLiveTradesPage() {
       setLoading(true);
       setError(null);
       setForbidden(false);
+    } else {
+      setIsRefreshing(true);
     }
     const base = resolveAdminApiBase();
     if (!base) {
@@ -595,52 +920,23 @@ export default function AdminLiveTradesPage() {
       }
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
-      const rawList =
-        typeof data === "object" &&
-        data !== null &&
-        "strategies" in data &&
-        Array.isArray((data as { strategies: unknown }).strategies)
-          ? (data as { strategies: unknown[] }).strategies
-          : [];
-      const list: StrategySection[] = rawList.map((item) => {
-        const row = item as Record<string, unknown>;
-        return {
-          strategyId: String(row.strategyId ?? ""),
-          strategyTitle: String(row.strategyTitle ?? ""),
-          autoExitTarget:
-            typeof row.autoExitTarget === "number" ? row.autoExitTarget : null,
-          autoExitStopLoss:
-            typeof row.autoExitStopLoss === "number"
-              ? row.autoExitStopLoss
-              : null,
-          masterPositions: Array.isArray(row.masterPositions)
-            ? (row.masterPositions as LiveRow[])
-            : [],
-          subscribers: Array.isArray(row.subscribers)
-            ? (row.subscribers as SubscriberUser[]).map((sub) => ({
-                userId: String((sub as SubscriberUser).userId ?? ""),
-                userEmail: String((sub as SubscriberUser).userEmail ?? ""),
-                multiplier:
-                  typeof (sub as SubscriberUser).multiplier === "number"
-                    ? (sub as SubscriberUser).multiplier
-                    : 1,
-                positions: Array.isArray((sub as SubscriberUser).positions)
-                  ? ((sub as SubscriberUser).positions as LiveRow[])
-                  : [],
-              }))
-            : [],
-        };
-      });
+      const list = parseStrategyGroups(data);
       setStrategies(list);
+      ensureExpandedDefaults(list);
+      setActiveStrategyId((prev) => {
+        if (prev && list.some((s) => s.strategyId === prev)) return prev;
+        return list[0]?.strategyId ?? null;
+      });
       setLastRefreshed(new Date());
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : "Failed to load");
       }
     } finally {
-      if (!silent) setLoading(false);
+      if (silent) setIsRefreshing(false);
+      else setLoading(false);
     }
-  }, []);
+  }, [ensureExpandedDefaults]);
 
   const closeTrade = useCallback(
     async (args: {
@@ -692,7 +988,7 @@ export default function AdminLiveTradesPage() {
   useEffect(() => {
     const id = window.setInterval(() => {
       void load({ silent: true });
-    }, 500);
+    }, LIVE_TRADES_REFRESH_MS);
     return () => window.clearInterval(id);
   }, [load]);
 
@@ -725,15 +1021,23 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Data comes from CCXT + live WebSocket marks. PnL and mark prices refresh about every 0.5 seconds
-              while this page is open. New master fills are copied to subscribers by the backend trade
-              engine (WebSocket to Delta); restart the API if copy ever stops.
+              Strategy tabs group master and follower positions. Data refreshes
+              every {LIVE_TRADES_REFRESH_MS / 1000}s without reloading the page.
             </p>
-            {lastRefreshed && !loading && (
-              <p className="mt-0.5 text-xs text-white/40">
-                Last refresh: {lastRefreshed.toLocaleTimeString()}
+            {lastRefreshed && !loading ? (
+              <p className="mt-1 flex items-center gap-2 text-xs text-white/40">
+                {isRefreshing ? (
+                  <RefreshCw
+                    className="h-3 w-3 animate-spin text-primary"
+                    aria-hidden
+                  />
+                ) : (
+                  <Radio className="h-3 w-3 text-emerald-400/80" aria-hidden />
+                )}
+                Last updated {lastRefreshed.toLocaleTimeString()}
+                {isRefreshing ? " · updating…" : ""}
               </p>
-            )}
+            ) : null}
           </div>
         </div>
       </header>
@@ -754,94 +1058,100 @@ export default function AdminLiveTradesPage() {
         <div className="flex justify-center py-20">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
         </div>
+      ) : strategies.length === 0 ? (
+        <p className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center text-sm text-white/50">
+          No strategies configured.
+        </p>
       ) : (
-        <div className="space-y-10">
-          {strategies.map((s) => (
-            <section
-              key={s.strategyId}
-              className="glass-card border border-glassBorder p-5 md:p-6"
-            >
-              <h2 className="text-lg font-semibold text-white">
-                {s.strategyTitle}
-              </h2>
-              <p className="mt-1 text-xs text-white/45">
-                Strategy ID:{" "}
-                <span className="font-mono text-white/55">{s.strategyId}</span>
-              </p>
+        <div className="space-y-4">
+          <div
+            className="sticky top-0 z-10 -mx-1 rounded-xl border border-white/10 bg-[#08080c]/90 px-2 py-2 shadow-lg shadow-black/40 backdrop-blur-md"
+            role="tablist"
+            aria-label="Strategies"
+          >
+            <div className="flex gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin]">
+              {strategies.map((s) => {
+                const selected = activeStrategyId === s.strategyId;
+                const legCount =
+                  s.masterPositions.length +
+                  s.subscribers.reduce((n, u) => n + u.positions.length, 0);
+                return (
+                  <button
+                    key={s.strategyId}
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    aria-controls={`panel-${s.strategyId}`}
+                    id={`tab-${s.strategyId}`}
+                    onClick={() => setActiveStrategyId(s.strategyId)}
+                    className={`shrink-0 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
+                      selected
+                        ? "bg-primary text-white shadow-md shadow-primary/25"
+                        : "text-white/55 hover:bg-white/5 hover:text-white"
+                    }`}
+                  >
+                    <span className="block max-w-[200px] truncate">
+                      {s.strategyTitle}
+                    </span>
+                    <span
+                      className={`mt-0.5 block text-[10px] tabular-nums ${
+                        selected ? "text-white/70" : "text-white/35"
+                      }`}
+                    >
+                      {legCount} leg{legCount === 1 ? "" : "s"} ·{" "}
+                      {s.subscribers.length} sub
+                      {s.subscribers.length === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-              <RiskManagementPanel
-                strategy={s}
-                totalLivePnl={sumLivePnl(s.masterPositions)}
-                onSaved={(message, updated) => {
-                  setToast(message);
-                  if (updated) {
-                    setStrategies((prev) =>
-                      prev.map((row) =>
-                        row.strategyId === s.strategyId
-                          ? { ...row, ...updated }
-                          : row,
-                      ),
-                    );
-                  }
-                  if (message.includes("saved")) {
-                    void load({ silent: true });
-                  }
-                }}
-              />
-
-              <div className="mt-6 overflow-hidden rounded-xl border border-primary/25 bg-black/20">
-                <div className="border-b border-primary/25 bg-primary/5 px-4 py-2">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-primary/90">
-                    ADMIN · MASTER DELTA
-                  </p>
-                  <p className="mt-0.5 text-[11px] font-normal normal-case tracking-normal text-white/45">
-                    Open positions from CCXT (<code className="text-white/55">fetchPositions</code>, Delta India)
-                  </p>
-                </div>
-                {s.masterPositions.length > 0 ? (
-                  <PositionTable
-                    rows={s.masterPositions}
-                    variant="master"
-                    strategyId={s.strategyId}
+          <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
+            {strategies.map((s) => {
+              const selected = activeStrategyId === s.strategyId;
+              const expanded =
+                expandedSubsByStrategy[s.strategyId] ??
+                new Set(s.subscribers.map((u) => u.userId));
+              return (
+                <div
+                  key={s.strategyId}
+                  id={`panel-${s.strategyId}`}
+                  role="tabpanel"
+                  aria-labelledby={`tab-${s.strategyId}`}
+                  hidden={!selected}
+                  className={selected ? "block" : "hidden"}
+                >
+                  <StrategyLivePanel
+                    strategy={s}
+                    isActiveTab={selected}
+                    expandedSubs={expanded}
+                    onToggleSubscriber={(userId) =>
+                      toggleSubscriberExpanded(s.strategyId, userId)
+                    }
                     onCloseTrade={closeTrade}
                     closingKey={closingKey}
+                    onAutoExitSaved={(message, updated) => {
+                      setToast(message);
+                      if (updated) {
+                        setStrategies((prev) =>
+                          prev.map((row) =>
+                            row.strategyId === s.strategyId
+                              ? { ...row, ...updated }
+                              : row,
+                          ),
+                        );
+                      }
+                      if (message.includes("saved")) {
+                        void load({ silent: true });
+                      }
+                    }}
                   />
-                ) : (
-                  <p className="px-4 py-6 text-sm text-white/50">
-                    No open positions reported for this strategy&apos;s master Delta account.
-                  </p>
-                )}
-              </div>
-
-              <div className="mt-8">
-                <h3 className="text-sm font-medium text-white/80">
-                  Subscribers
-                </h3>
-                <p className="mt-1 text-xs text-white/45">
-                  One card per user — all matched open legs on Delta India.
-                </p>
-                {s.subscribers.length === 0 ? (
-                  <p className="mt-3 text-sm text-white/45">
-                    No subscriber positions — either the master has no open legs or no active
-                    subscribers with matching Delta positions.
-                  </p>
-                ) : (
-                  <div className="mt-4 space-y-6">
-                    {s.subscribers.map((user) => (
-                      <SubscriberUserCard
-                        key={`${s.strategyId}-${user.userId}`}
-                        user={user}
-                        strategy={s}
-                        strategyId={s.strategyId}
-                        onCloseTrade={closeTrade}
-                        closingKey={closingKey}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </section>
-          ))}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

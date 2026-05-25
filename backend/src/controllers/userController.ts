@@ -20,6 +20,8 @@ import {
   buildTimestampTag,
   rowsToCsv,
 } from "../utils/exportService.js";
+import { applyNoStoreCacheHeaders } from "./adminController.js";
+import { getUserLiveTradesByStrategy } from "../services/liveTradesService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -42,6 +44,25 @@ export function createUserController(prisma: PrismaClient) {
       out.endDate = endDate;
     }
     return out;
+  }
+
+  async function getLiveTradesByStrategy(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const groups = await getUserLiveTradesByStrategy(prisma, userId);
+      applyNoStoreCacheHeaders(res);
+      res.json(groups);
+    } catch (err) {
+      next(err);
+    }
   }
 
   async function createDeposit(
@@ -785,5 +806,6 @@ export function createUserController(prisma: PrismaClient) {
     listDeposits,
     exportTrades,
     exportTransactions,
+    getLiveTradesByStrategy,
   };
 }

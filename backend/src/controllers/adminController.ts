@@ -46,6 +46,7 @@ import {
   MAX_SUBSCRIPTION_MULTIPLIER,
   MIN_SUBSCRIPTION_MULTIPLIER,
 } from "../constants/subscription.js";
+import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -1699,6 +1700,21 @@ export function createAdminController(prisma: PrismaClient) {
     return Math.round(n * 10) / 10;
   }
 
+  /** Live trades grouped by strategy (master + subscribers per strategy). */
+  async function getGroupedLiveTrades(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const groups = await getAdminLiveTradesByStrategy(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json(groups);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   /** All users subscribed to a strategy (admin subscribers table). */
   async function listStrategySubscribers(
     req: Request,
@@ -1908,6 +1924,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchUserCryptoArbitrageAllocation,
     listStrategySubscribers,
     updateStrategySubscriber,
+    getGroupedLiveTrades,
   };
 }
 

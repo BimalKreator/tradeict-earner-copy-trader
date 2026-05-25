@@ -1,7 +1,6 @@
 import {
   type PrismaClient,
   SubscriptionStatus,
-  TradeStatus,
   UserStatus,
 } from "@prisma/client";
 import {
@@ -13,6 +12,7 @@ import {
 } from "./exchangeService.js";
 import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
+import { COPY_SUBSCRIPTION_INCLUDE } from "./strategySubscriptionService.js";
 
 export type LiveTradeRow = {
   entryTime: string | null;
@@ -37,22 +37,53 @@ export type AdminFollowerRow = LiveTradeRow & {
   multiplier: number;
 };
 
-/** Active subscriber with all matched open legs on Delta (grouped by user). */
-export type AdminSubscriberUserSection = {
+export type LiveStrategySummary = {
+  id: string;
+  title: string;
+  isActive: boolean;
+  autoExitTarget: number | null;
+  autoExitStopLoss: number | null;
+};
+
+/** Active subscriber with all open legs on Delta for this strategy mapping. */
+export type AdminLiveTradesSubscriber = {
   userId: string;
   userEmail: string;
+  userName: string | null;
   multiplier: number;
   positions: LiveTradeRow[];
 };
 
+/** Admin live-trades payload: one tab per strategy. */
+export type AdminLiveTradesGroup = {
+  strategy: LiveStrategySummary;
+  masterPositions: LiveTradeRow[];
+  subscribers: AdminLiveTradesSubscriber[];
+  masterMeta: {
+    credentialsPresent: boolean;
+    fetchException?: string;
+  };
+};
+
+/** User live-trades payload: one tab per subscribed strategy. */
+export type UserLiveTradesGroup = {
+  strategy: LiveStrategySummary & { multiplier: number };
+  userPositions: LiveTradeRow[];
+  /** Master account open leg count (for empty-state when leader is flat). */
+  masterOpenCount: number;
+};
+
+/** @deprecated Use {@link AdminLiveTradesGroup} — flat shape for legacy callers. */
+export type AdminSubscriberUserSection = AdminLiveTradesSubscriber;
+
+/** @deprecated Use {@link AdminLiveTradesGroup}. */
 export type AdminStrategyLiveSection = {
   strategyId: string;
   strategyTitle: string;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
-  /** Open positions on the master Delta (India) account from {@link fetchDeltaOpenPositions} (CCXT). */
   masterPositions: LiveTradeRow[];
-  subscribers: AdminSubscriberUserSection[];
+  subscribers: AdminLiveTradesSubscriber[];
   masterMeta: {
     credentialsPresent: boolean;
     fetchException?: string;
@@ -107,68 +138,6 @@ async function enrichPositionLiveRow(
     markPrice: pos.markPrice ?? base.markPrice,
     livePnl: base.livePnl,
   };
-}
-
-type UserDeltaCreds = {
-  cacheKey: string;
-  apiKey: string;
-  apiSecret: string;
-};
-
-async function resolveUserDeltaCredentialSets(
-  prisma: PrismaClient,
-  userId: string,
-): Promise<UserDeltaCreds[]> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: {
-      exchangeAccounts: { orderBy: { createdAt: "desc" } },
-      deltaApiKeys: { orderBy: { id: "desc" } },
-    },
-  });
-  if (!user) return [];
-
-  const out: UserDeltaCreds[] = [];
-  const seen = new Set<string>();
-
-  for (const ex of user.exchangeAccounts) {
-    const key = ex.apiKey?.trim() ?? "";
-    const secret = ex.apiSecret?.trim() ?? "";
-    if (!key || !secret) continue;
-    const cacheKey = `ex:${ex.id}`;
-    if (seen.has(cacheKey)) continue;
-    seen.add(cacheKey);
-    out.push({ cacheKey, apiKey: ex.apiKey, apiSecret: ex.apiSecret });
-  }
-
-  for (const dk of user.deltaApiKeys) {
-    const key = dk.apiKey?.trim() ?? "";
-    const secret = dk.apiSecret?.trim() ?? "";
-    if (!key || !secret) continue;
-    const cacheKey = `dk:${dk.id}`;
-    if (seen.has(cacheKey)) continue;
-    seen.add(cacheKey);
-    out.push({ cacheKey, apiKey: dk.apiKey, apiSecret: dk.apiSecret });
-  }
-
-  return out;
-}
-
-function matchOpenTradeStrategy(
-  openTrades: Array<{
-    symbol: string;
-    side: string;
-    strategy: { id: string; title: string };
-  }>,
-  symbolKey: string,
-  side: TradeSide,
-): { id: string; title: string } | null {
-  for (const t of openTrades) {
-    if (!symbolsAlign(t.symbol, symbolKey)) continue;
-    if (!sidesAlign(t.side, side)) continue;
-    return { id: t.strategy.id, title: t.strategy.title };
-  }
-  return null;
 }
 
 /**
@@ -229,43 +198,6 @@ export async function getAdminMasterPositionSnapshots(
   return out;
 }
 
-function compactSymbolKey(s: string): string {
-  return s.replace(/[/:]/g, "").toUpperCase();
-}
-
-/** ETHUSDT vs ETHUSD — same underlying on Delta India. */
-function deltaPairBase(compactNoSlash: string): string | null {
-  const u = compactNoSlash.toUpperCase();
-  if (u.endsWith("USDT")) return u.slice(0, -4);
-  if (u.endsWith("USD") && !u.endsWith("USDT")) return u.slice(0, -3);
-  return null;
-}
-
-function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
-  const a = compactSymbolKey(tradeSymbol);
-  const b = compactSymbolKey(positionKey);
-  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
-  const ba = deltaPairBase(a);
-  const bb = deltaPairBase(b);
-  return ba != null && bb != null && ba === bb;
-}
-
-function sidesAlign(tradeSide: string, posSide: TradeSide): boolean {
-  const t = tradeSide.toUpperCase();
-  return t === posSide;
-}
-
-function matchDeltaPosition(
-  positions: DeltaLivePosition[],
-  tradeSymbol: string,
-  tradeSide: string,
-): DeltaLivePosition | undefined {
-  return positions.find(
-    (p) =>
-      symbolsAlign(tradeSymbol, p.symbolKey) && sidesAlign(tradeSide, p.side),
-  );
-}
-
 function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   return {
     entryTime: p.entryTime,
@@ -280,78 +212,181 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
   };
 }
 
+type SubscriberCreds = {
+  cacheKey: string;
+  apiKey: string;
+  apiSecret: string;
+};
+
+function resolveSubscriberCreds(sub: {
+  userId: string;
+  exchangeAccount: { id: string; apiKey: string; apiSecret: string } | null;
+  user: {
+    deltaApiKeys: { id: string; apiKey: string; apiSecret: string }[];
+    exchangeAccounts: { id: string; apiKey: string; apiSecret: string }[];
+  };
+}): SubscriberCreds | null {
+  if (sub.exchangeAccount != null) {
+    const key = sub.exchangeAccount.apiKey?.trim() ?? "";
+    const secret = sub.exchangeAccount.apiSecret?.trim() ?? "";
+    if (!key || !secret) return null;
+    return {
+      cacheKey: `ex:${sub.exchangeAccount.id}`,
+      apiKey: sub.exchangeAccount.apiKey,
+      apiSecret: sub.exchangeAccount.apiSecret,
+    };
+  }
+  const ex = sub.user.exchangeAccounts[0];
+  if (ex != null) {
+    const key = ex.apiKey?.trim() ?? "";
+    const secret = ex.apiSecret?.trim() ?? "";
+    if (!key || !secret) return null;
+    return {
+      cacheKey: `ex:${ex.id}`,
+      apiKey: ex.apiKey,
+      apiSecret: ex.apiSecret,
+    };
+  }
+  const dk = sub.user.deltaApiKeys[0];
+  if (dk != null) {
+    const key = dk.apiKey?.trim() ?? "";
+    const secret = dk.apiSecret?.trim() ?? "";
+    if (!key || !secret) return null;
+    return {
+      cacheKey: `dk:${dk.id}`,
+      apiKey: dk.apiKey,
+      apiSecret: dk.apiSecret,
+    };
+  }
+  return null;
+}
+
 /**
- * All open Delta positions for the user via CCXT (includes manual trades not in DB).
- * Optional strategy label when an OPEN copy-trade row matches symbol + side.
+ * Live trades grouped by strategy for the current user (active subscriptions only).
+ */
+export async function getUserLiveTradesByStrategy(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<UserLiveTradesGroup[]> {
+  const subs = await prisma.userStrategySubscription.findMany({
+    where: {
+      userId,
+      isActive: true,
+      status: SubscriptionStatus.ACTIVE,
+      strategy: { isActive: true },
+      user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
+    },
+    orderBy: { joinedDate: "desc" },
+    include: {
+      strategy: {
+        select: {
+          id: true,
+          title: true,
+          isActive: true,
+          autoExitTarget: true,
+          autoExitStopLoss: true,
+          masterApiKey: true,
+          masterApiSecret: true,
+        },
+      },
+      ...COPY_SUBSCRIPTION_INCLUDE,
+    },
+  });
+
+  const out: UserLiveTradesGroup[] = [];
+
+  for (const sub of subs) {
+    const creds = resolveSubscriberCreds(sub);
+    const userPositions: LiveTradeRow[] = [];
+
+    if (creds) {
+      try {
+        const positions = await fetchDeltaOpenPositions(
+          creds.apiKey,
+          creds.apiSecret,
+        );
+        for (const pos of positions) {
+          userPositions.push(await enrichPositionLiveRow(pos));
+        }
+        userPositions.sort((a, b) =>
+          (b.entryTime ?? "").localeCompare(a.entryTime ?? ""),
+        );
+      } catch (err) {
+        console.warn(
+          `[live-trades] user strategy fetch failed userId=${userId} strategyId=${sub.strategyId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    let masterOpenCount = 0;
+    const masterKey = sub.strategy.masterApiKey?.trim() ?? "";
+    const masterSecret = sub.strategy.masterApiSecret?.trim() ?? "";
+    if (masterKey && masterSecret) {
+      try {
+        const masterList = await fetchDeltaOpenPositions(
+          sub.strategy.masterApiKey!,
+          sub.strategy.masterApiSecret!,
+        );
+        masterOpenCount = masterList.length;
+      } catch (err) {
+        console.warn(
+          `[live-trades] master snapshot failed strategyId=${sub.strategyId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    out.push({
+      strategy: {
+        id: sub.strategy.id,
+        title: sub.strategy.title,
+        isActive: sub.strategy.isActive,
+        autoExitTarget: sub.strategy.autoExitTarget,
+        autoExitStopLoss: sub.strategy.autoExitStopLoss,
+        multiplier: sub.multiplier,
+      },
+      userPositions,
+      masterOpenCount,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Flat list derived from {@link getUserLiveTradesByStrategy} (legacy `/live-trades/me` shape).
  */
 export async function getUserLiveTradeRows(
   prisma: PrismaClient,
   userId: string,
 ): Promise<UserLiveTradeRow[]> {
-  const credsList = await resolveUserDeltaCredentialSets(prisma, userId);
-  if (credsList.length === 0) return [];
-
-  const openTrades = await prisma.trade.findMany({
-    where: { userId, status: TradeStatus.OPEN },
-    include: { strategy: { select: { id: true, title: true } } },
-  });
-
+  const groups = await getUserLiveTradesByStrategy(prisma, userId);
   const rows: UserLiveTradeRow[] = [];
-  const seenLegs = new Set<string>();
-
-  for (const creds of credsList) {
-    let positions: DeltaLivePosition[];
-    try {
-      positions = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret);
-    } catch (err) {
-      console.warn(
-        `[live-trades] user CCXT fetch failed userId=${userId}:`,
-        err instanceof Error ? err.message : err,
-      );
-      continue;
-    }
-
-    for (const pos of positions) {
-      const legKey = `${creds.cacheKey}:${pos.symbolKey}:${pos.side}`;
-      if (seenLegs.has(legKey)) continue;
-      seenLegs.add(legKey);
-
-      const strat = matchOpenTradeStrategy(openTrades, pos.symbolKey, pos.side);
-      const enriched = await enrichPositionLiveRow(pos);
-
+  for (const g of groups) {
+    for (const pos of g.userPositions) {
       rows.push({
-        strategyId: strat?.id ?? null,
-        strategyTitle: strat?.title ?? "Manual on Delta",
-        entryTime: enriched.entryTime,
-        token: enriched.token,
-        size: enriched.size,
-        entryPrice: enriched.entryPrice,
-        stopLoss: null,
-        target: null,
-        livePnl: enriched.livePnl,
-        markPrice: enriched.markPrice,
-        side: enriched.side,
+        ...pos,
+        strategyId: g.strategy.id,
+        strategyTitle: g.strategy.title,
       });
     }
   }
-
-  rows.sort((a, b) => {
-    const ta = a.entryTime ?? "";
-    const tb = b.entryTime ?? "";
-    return tb.localeCompare(ta);
-  });
-
   return rows;
 }
 
-export async function getAdminGroupedLiveTrades(
+/**
+ * Admin live trades: every strategy with master legs and per-subscriber open positions.
+ */
+export async function getAdminLiveTradesByStrategy(
   prisma: PrismaClient,
-): Promise<AdminStrategyLiveSection[]> {
+): Promise<AdminLiveTradesGroup[]> {
   const strategies = await prisma.strategy.findMany({
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
       title: true,
+      isActive: true,
       masterApiKey: true,
       masterApiSecret: true,
       autoExitTarget: true,
@@ -359,11 +394,33 @@ export async function getAdminGroupedLiveTrades(
     },
   });
 
-  const out: AdminStrategyLiveSection[] = [];
-
+  const out: AdminLiveTradesGroup[] = [];
   const followerPositionsCache = new Map<string, DeltaLivePosition[]>();
 
+  async function cachedFollowerPositions(
+    creds: SubscriberCreds,
+  ): Promise<DeltaLivePosition[]> {
+    const hit = followerPositionsCache.get(creds.cacheKey);
+    if (hit) return hit;
+    try {
+      const list = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret);
+      followerPositionsCache.set(creds.cacheKey, list);
+      return list;
+    } catch {
+      followerPositionsCache.set(creds.cacheKey, []);
+      return [];
+    }
+  }
+
   for (const strat of strategies) {
+    const strategy: LiveStrategySummary = {
+      id: strat.id,
+      title: strat.title,
+      isActive: strat.isActive,
+      autoExitTarget: strat.autoExitTarget,
+      autoExitStopLoss: strat.autoExitStopLoss,
+    };
+
     const credentialsPresent = Boolean(
       strat.masterApiKey?.trim() && strat.masterApiSecret?.trim(),
     );
@@ -387,10 +444,15 @@ export async function getAdminGroupedLiveTrades(
       }
     }
 
-    const metaBase = {
+    const masterMeta = {
       credentialsPresent,
       ...(fetchException !== undefined ? { fetchException } : {}),
     };
+
+    const masterPositions: LiveTradeRow[] = [];
+    for (const pos of masterList) {
+      masterPositions.push(await enrichPositionLiveRow(pos));
+    }
 
     const subs = await prisma.userStrategySubscription.findMany({
       where: {
@@ -400,115 +462,78 @@ export async function getAdminGroupedLiveTrades(
         user: { status: UserStatus.ACTIVE },
       },
       include: {
-        user: { select: { email: true, deltaApiKeys: true } },
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            deltaApiKeys: true,
+            exchangeAccounts: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+            },
+          },
+        },
         exchangeAccount: true,
       },
     });
 
-    async function followerPositions(
-      cacheKey: string,
-      apiKey: string,
-      apiSecret: string,
-    ): Promise<DeltaLivePosition[]> {
-      const hit = followerPositionsCache.get(cacheKey);
-      if (hit) return hit;
-      try {
-        const list = await fetchDeltaOpenPositions(apiKey, apiSecret);
-        followerPositionsCache.set(cacheKey, list);
-        return list;
-      } catch {
-        followerPositionsCache.set(cacheKey, []);
-        return [];
-      }
-    }
+    const subscribers: AdminLiveTradesSubscriber[] = [];
 
-    const masterPositions: LiveTradeRow[] = [];
-    const subscriberMap = new Map<string, AdminSubscriberUserSection>();
-
-    const upsertSubscriberPosition = async (
-      sub: (typeof subs)[number],
-      deltaPos: DeltaLivePosition,
-    ): Promise<void> => {
-      const legKey = `${deltaPos.symbolKey}:${deltaPos.side}`;
-      let section = subscriberMap.get(sub.userId);
-      if (!section) {
-        section = {
-          userId: sub.userId,
-          userEmail: sub.user.email,
-          multiplier: sub.multiplier,
-          positions: [],
-        };
-        subscriberMap.set(sub.userId, section);
-      }
-      if (
-        section.positions.some(
-          (p) => `${p.token}:${p.side}` === legKey,
-        )
-      ) {
-        return;
-      }
-      section.positions.push(await enrichPositionLiveRow(deltaPos));
-    };
-
-    if (masterList.length === 0) {
-      out.push({
-        strategyId: strat.id,
-        strategyTitle: strat.title,
-        autoExitTarget: strat.autoExitTarget,
-        autoExitStopLoss: strat.autoExitStopLoss,
-        masterPositions,
-        subscribers: [],
-        masterMeta: metaBase,
-      });
-      continue;
-    }
-
-    for (const pos of masterList) {
-      const masterRow = await enrichPositionLiveRow(pos);
-      masterPositions.push(masterRow);
-
-      for (const sub of subs) {
-        const creds =
-          sub.exchangeAccount != null
-            ? {
-                cacheKey: `ex:${sub.exchangeAccount.id}`,
-                apiKey: sub.exchangeAccount.apiKey,
-                apiSecret: sub.exchangeAccount.apiSecret,
-              }
-            : sub.user.deltaApiKeys[0] != null
-              ? {
-                  cacheKey: `legacy:${sub.userId}:${sub.user.deltaApiKeys[0]!.id}`,
-                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
-                }
-              : null;
-        if (!creds) continue;
-
-        const positions = await followerPositions(
-          creds.cacheKey,
-          creds.apiKey,
-          creds.apiSecret,
+    for (const sub of subs) {
+      const creds = resolveSubscriberCreds(sub);
+      const positions: LiveTradeRow[] = [];
+      if (creds) {
+        const deltaList = await cachedFollowerPositions(creds);
+        for (const pos of deltaList) {
+          positions.push(await enrichPositionLiveRow(pos));
+        }
+        positions.sort((a, b) =>
+          (b.entryTime ?? "").localeCompare(a.entryTime ?? ""),
         );
-        const m = matchDeltaPosition(positions, pos.symbolKey, pos.side);
-        if (!m) continue;
-        await upsertSubscriberPosition(sub, m);
       }
+
+      subscribers.push({
+        userId: sub.userId,
+        userEmail: sub.user.email,
+        userName: sub.user.name,
+        multiplier: sub.multiplier,
+        positions,
+      });
     }
 
-    const subscribers = Array.from(subscriberMap.values()).sort((a, b) =>
-      a.userEmail.localeCompare(b.userEmail),
-    );
+    subscribers.sort((a, b) => a.userEmail.localeCompare(b.userEmail));
 
     out.push({
-      strategyId: strat.id,
-      strategyTitle: strat.title,
-      autoExitTarget: strat.autoExitTarget,
-      autoExitStopLoss: strat.autoExitStopLoss,
+      strategy,
       masterPositions,
       subscribers,
-      masterMeta: metaBase,
+      masterMeta,
     });
   }
 
   return out;
+}
+
+/** @deprecated Alias — returns nested {@link AdminLiveTradesGroup} list. */
+export async function getAdminGroupedLiveTrades(
+  prisma: PrismaClient,
+): Promise<AdminLiveTradesGroup[]> {
+  return getAdminLiveTradesByStrategy(prisma);
+}
+
+/** Flat legacy sections (strategyId/strategyTitle at top level). */
+export async function getAdminGroupedLiveTradesLegacy(
+  prisma: PrismaClient,
+): Promise<AdminStrategyLiveSection[]> {
+  const groups = await getAdminLiveTradesByStrategy(prisma);
+  return groups.map((g) => ({
+    strategyId: g.strategy.id,
+    strategyTitle: g.strategy.title,
+    autoExitTarget: g.strategy.autoExitTarget,
+    autoExitStopLoss: g.strategy.autoExitStopLoss,
+    masterPositions: g.masterPositions,
+    subscribers: g.subscribers,
+    masterMeta: g.masterMeta,
+  }));
 }

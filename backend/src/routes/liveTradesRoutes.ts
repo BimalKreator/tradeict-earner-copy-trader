@@ -4,41 +4,19 @@ import {
   authenticateToken,
   isAdmin,
 } from "../middleware/authMiddleware.js";
-import { applyNoStoreCacheHeaders } from "../controllers/adminController.js";
-import {
-  getAdminGroupedLiveTrades,
-  getUserLiveTradeRows,
-} from "../services/liveTradesService.js";
+import { createAdminController } from "../controllers/adminController.js";
+import { createUserController } from "../controllers/userController.js";
 
 export function createLiveTradesRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const jwtAuth = authenticateToken();
   const adminOnly = [jwtAuth, isAdmin(prisma)];
+  const admin = createAdminController(prisma);
+  const user = createUserController(prisma);
 
-  router.get("/me", jwtAuth, async (req, res, next) => {
-    try {
-      const userId = req.userId;
-      if (!userId) {
-        res.status(401).json({ error: "Unauthorized" });
-        return;
-      }
-      const positions = await getUserLiveTradeRows(prisma, userId);
-      applyNoStoreCacheHeaders(res);
-      res.json({ positions });
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get("/me", jwtAuth, user.getLiveTradesByStrategy);
 
-  router.get("/admin/grouped", ...adminOnly, async (_req, res, next) => {
-    try {
-      const strategies = await getAdminGroupedLiveTrades(prisma);
-      applyNoStoreCacheHeaders(res);
-      res.json({ strategies });
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get("/admin/grouped", ...adminOnly, admin.getGroupedLiveTrades);
 
   return router;
 }

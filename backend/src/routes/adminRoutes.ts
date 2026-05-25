@@ -9,10 +9,7 @@ import {
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
-import {
-  getAdminGroupedLiveTrades,
-  getAdminMasterPositionSnapshots,
-} from "../services/liveTradesService.js";
+import { getAdminMasterPositionSnapshots } from "../services/liveTradesService.js";
 import {
   generateMonthlyInvoices,
   getPlatformRevenueStats,
@@ -1178,16 +1175,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  /** Same payload as `GET /api/live-trades/admin/grouped` — lives under `/api/admin/*` for proxies that only forward admin API paths. */
-  router.get("/live-trades/grouped", async (_req, res, next) => {
-    try {
-      const strategies = await getAdminGroupedLiveTrades(prisma);
-      applyNoStoreCacheHeaders(res);
-      res.json({ strategies });
-    } catch (err) {
-      next(err);
-    }
-  });
+  /** Live trades grouped by strategy — `[{ strategy, masterPositions, subscribers }]`. */
+  router.get("/live-trades/grouped", adminController.getGroupedLiveTrades);
 
   /**
    * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
