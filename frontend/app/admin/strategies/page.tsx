@@ -1,8 +1,6 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { GitBranch } from "lucide-react";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -16,6 +14,14 @@ function resolveAdminApiBase(): string {
   return "";
 }
 
+type FutureHedgeConfig = {
+  isAutoEnabled: boolean;
+  baseLots: number;
+  emaPeriod: number;
+  adjustmentPct: number;
+  targetProfitUsd: number;
+};
+
 type Strategy = {
   id: string;
   title: string;
@@ -27,8 +33,22 @@ type Strategy = {
   monthlyFee: number;
   profitShare: number;
   minCapital: number;
+  isActive?: boolean;
+  futureHedgeConfig?: FutureHedgeConfig | null;
   syncActiveTrades?: boolean;
   createdAt: string;
+};
+
+function isFutureHedgeStrategy(strategyTitle: string): boolean {
+  return strategyTitle.toLowerCase().includes("future hedge");
+}
+
+const DEFAULT_FUTURE_HEDGE: FutureHedgeConfig = {
+  isAutoEnabled: false,
+  baseLots: 1,
+  emaPeriod: 200,
+  adjustmentPct: 0.5,
+  targetProfitUsd: 10,
 };
 
 /** Stored in `performanceMetrics` — drives charts / heatmap on the product UI. */
@@ -314,6 +334,22 @@ export default function AdminStrategiesPage() {
   const [barLoss, setBarLoss] = useState("");
   const [heatmapText, setHeatmapText] = useState("");
   const [syncActiveTrades, setSyncActiveTrades] = useState(false);
+  const [isActive, setIsActive] = useState(true);
+  const [hedgeAutoEnabled, setHedgeAutoEnabled] = useState(
+    DEFAULT_FUTURE_HEDGE.isAutoEnabled,
+  );
+  const [hedgeBaseLots, setHedgeBaseLots] = useState(
+    String(DEFAULT_FUTURE_HEDGE.baseLots),
+  );
+  const [hedgeEmaPeriod, setHedgeEmaPeriod] = useState(
+    String(DEFAULT_FUTURE_HEDGE.emaPeriod),
+  );
+  const [hedgeAdjustmentPct, setHedgeAdjustmentPct] = useState(
+    String(DEFAULT_FUTURE_HEDGE.adjustmentPct),
+  );
+  const [hedgeTargetProfitUsd, setHedgeTargetProfitUsd] = useState(
+    String(DEFAULT_FUTURE_HEDGE.targetProfitUsd),
+  );
   const [syncToast, setSyncToast] = useState<{
     kind: "ok" | "err";
     text: string;
@@ -375,6 +411,12 @@ export default function AdminStrategiesPage() {
     setBarLoss("");
     setHeatmapText("");
     setSyncActiveTrades(false);
+    setIsActive(true);
+    setHedgeAutoEnabled(DEFAULT_FUTURE_HEDGE.isAutoEnabled);
+    setHedgeBaseLots(String(DEFAULT_FUTURE_HEDGE.baseLots));
+    setHedgeEmaPeriod(String(DEFAULT_FUTURE_HEDGE.emaPeriod));
+    setHedgeAdjustmentPct(String(DEFAULT_FUTURE_HEDGE.adjustmentPct));
+    setHedgeTargetProfitUsd(String(DEFAULT_FUTURE_HEDGE.targetProfitUsd));
   }
 
   function openCreateModal() {
@@ -410,6 +452,22 @@ export default function AdminStrategiesPage() {
     setBarLoss(h.barLoss);
     setHeatmapText(h.heatmapText);
     setSyncActiveTrades(Boolean(s.syncActiveTrades));
+    setIsActive(s.isActive !== false);
+
+    const cfg = s.futureHedgeConfig;
+    if (cfg) {
+      setHedgeAutoEnabled(Boolean(cfg.isAutoEnabled));
+      setHedgeBaseLots(String(cfg.baseLots));
+      setHedgeEmaPeriod(String(cfg.emaPeriod));
+      setHedgeAdjustmentPct(String(cfg.adjustmentPct));
+      setHedgeTargetProfitUsd(String(cfg.targetProfitUsd));
+    } else {
+      setHedgeAutoEnabled(DEFAULT_FUTURE_HEDGE.isAutoEnabled);
+      setHedgeBaseLots(String(DEFAULT_FUTURE_HEDGE.baseLots));
+      setHedgeEmaPeriod(String(DEFAULT_FUTURE_HEDGE.emaPeriod));
+      setHedgeAdjustmentPct(String(DEFAULT_FUTURE_HEDGE.adjustmentPct));
+      setHedgeTargetProfitUsd(String(DEFAULT_FUTURE_HEDGE.targetProfitUsd));
+    }
 
     setModalOpen(true);
   }
@@ -516,6 +574,40 @@ export default function AdminStrategiesPage() {
     if (isEdit) {
       if (masterApiSecret.trim())
         payload.masterApiSecret = masterApiSecret.trim();
+      payload.isActive = isActive;
+
+      if (isFutureHedgeStrategy(title)) {
+        const baseLots = Number.parseInt(hedgeBaseLots, 10);
+        const emaPeriod = Number.parseInt(hedgeEmaPeriod, 10);
+        const adjustmentPct = Number.parseFloat(hedgeAdjustmentPct);
+        const targetProfitUsd = Number.parseFloat(hedgeTargetProfitUsd);
+
+        if (
+          !Number.isInteger(baseLots) ||
+          baseLots < 1 ||
+          !Number.isInteger(emaPeriod) ||
+          emaPeriod < 1 ||
+          !Number.isFinite(adjustmentPct) ||
+          adjustmentPct <= 0 ||
+          adjustmentPct > 100 ||
+          !Number.isFinite(targetProfitUsd) ||
+          targetProfitUsd <= 0
+        ) {
+          setFormError(
+            "Future Hedge: base lots and EMA period must be integers ≥ 1; adjustment % must be 0–100; target profit must be positive.",
+          );
+          setSubmitting(false);
+          return;
+        }
+
+        payload.futureHedgeConfig = {
+          isAutoEnabled: hedgeAutoEnabled,
+          baseLots,
+          emaPeriod,
+          adjustmentPct,
+          targetProfitUsd,
+        };
+      }
     } else {
       payload.masterApiSecret = masterApiSecret;
     }
@@ -568,22 +660,13 @@ export default function AdminStrategiesPage() {
             Subscribers mirror fills using their own linked Delta accounts.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Link
-            href="/admin/strategies/future-hedge"
-            className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2.5 text-sm font-medium text-cyan-200 transition hover:bg-cyan-500/20"
-          >
-            <GitBranch className="h-4 w-4" aria-hidden />
-            Future Hedge
-          </Link>
-          <button
-            type="button"
-            onClick={openCreateModal}
-            className="rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
-          >
-            Add strategy
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={openCreateModal}
+          className="rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
+        >
+          Add strategy
+        </button>
       </header>
 
       {error && (
@@ -607,10 +690,11 @@ export default function AdminStrategiesPage() {
 
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1020px] text-left text-sm">
+          <table className="w-full min-w-[1100px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Title</th>
+                <th className="px-4 py-3 font-medium text-white/70">Status</th>
                 <th className="px-4 py-3 font-medium text-white/70">Description</th>
                 <th className="px-4 py-3 font-medium text-white/70">Slippage</th>
                 <th className="px-4 py-3 font-medium text-white/70">Monthly fee</th>
@@ -623,13 +707,13 @@ export default function AdminStrategiesPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
                     Loading strategies…
                   </td>
                 </tr>
               ) : strategies.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={9} className="px-4 py-10 text-center text-white/45">
                     No strategies found.
                   </td>
                 </tr>
@@ -641,6 +725,17 @@ export default function AdminStrategiesPage() {
                   >
                     <td className="max-w-[140px] truncate px-4 py-3 font-medium text-white">
                       {s.title}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ${
+                          s.isActive !== false
+                            ? "bg-emerald-500/15 text-emerald-200 ring-emerald-500/35"
+                            : "bg-amber-500/15 text-amber-100 ring-amber-500/35"
+                        }`}
+                      >
+                        {s.isActive !== false ? "Active" : "Paused"}
+                      </span>
                     </td>
                     <td className="max-w-[200px] truncate px-4 py-3 text-white/70">
                       {s.description}
@@ -729,6 +824,37 @@ export default function AdminStrategiesPage() {
                   />
                 </label>
               </div>
+
+              {editingId ? (
+                <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-sm font-semibold text-white">Strategy status</h3>
+                  <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-black/20 px-4 py-3">
+                    <span>
+                      <span className="text-sm font-medium text-white">
+                        {isActive ? "Active" : "Paused"}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-white/50">
+                        Paused strategies skip copy-trading and automated hedge runs.
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isActive}
+                      onClick={() => setIsActive((v) => !v)}
+                      className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+                        isActive ? "bg-emerald-500/80" : "bg-white/20"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${
+                          isActive ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </label>
+                </div>
+              ) : null}
 
               <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
                 <h3 className="text-sm font-semibold text-primary">Master Delta API</h3>
@@ -837,6 +963,85 @@ export default function AdminStrategiesPage() {
                   />
                 </label>
               </div>
+
+              {isFutureHedgeStrategy(title) ? (
+                <div className="space-y-4 rounded-xl border border-cyan-500/30 bg-cyan-500/[0.06] p-4">
+                  <h3 className="text-sm font-semibold text-cyan-200">
+                    Future Hedge settings
+                  </h3>
+                  <p className="text-xs text-white/55">
+                    Saved with this strategy via the admin API. Shown when the title contains
+                    &quot;Future Hedge&quot;.
+                  </p>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={hedgeAutoEnabled}
+                      onChange={(e) => setHedgeAutoEnabled(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-glassBorder text-cyan-400 focus:ring-cyan-500/40"
+                    />
+                    <span>
+                      <span className="text-sm font-medium text-white">Auto enable</span>
+                      <span className="mt-0.5 block text-xs text-white/50">
+                        When on, the hedge engine may enter and adjust positions automatically.
+                      </span>
+                    </span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Base lots</span>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        required
+                        value={hedgeBaseLots}
+                        onChange={(e) => setHedgeBaseLots(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-cyan-500/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">EMA period</span>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        required
+                        value={hedgeEmaPeriod}
+                        onChange={(e) => setHedgeEmaPeriod(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-cyan-500/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">Adjustment %</span>
+                      <input
+                        type="number"
+                        min={0.01}
+                        max={100}
+                        step="any"
+                        required
+                        value={hedgeAdjustmentPct}
+                        onChange={(e) => setHedgeAdjustmentPct(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-cyan-500/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">
+                        Target profit (USD)
+                      </span>
+                      <input
+                        type="number"
+                        min={0.01}
+                        step="any"
+                        required
+                        value={hedgeTargetProfitUsd}
+                        onChange={(e) => setHedgeTargetProfitUsd(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-cyan-500/40"
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.03] p-4">
                 <h3 className="text-sm font-semibold text-white">Performance data</h3>

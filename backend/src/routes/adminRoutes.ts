@@ -23,6 +23,10 @@ import {
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
 import {
+  parseFutureHedgeConfigBody,
+  upsertFutureHedgeConfigForStrategy,
+} from "../services/futureHedgeService.js";
+import {
   applyNoStoreCacheHeaders,
   createAdminController,
 } from "../controllers/adminController.js";
@@ -694,8 +698,27 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         monthlyFee?: number;
         profitShare?: number;
         minCapital?: number;
+        isActive?: boolean;
         syncActiveTrades?: boolean;
       } = {};
+
+      let futureHedgeInput: ReturnType<typeof parseFutureHedgeConfigBody> = null;
+      if (body.futureHedgeConfig !== undefined) {
+        futureHedgeInput = parseFutureHedgeConfigBody(body.futureHedgeConfig);
+        if (futureHedgeInput == null) {
+          res.status(400).json({
+            error: "futureHedgeConfig must be an object",
+          });
+          return;
+        }
+        if (Object.keys(futureHedgeInput).length === 0) {
+          res.status(400).json({
+            error:
+              "futureHedgeConfig must include at least one of: isAutoEnabled, baseLots, emaPeriod, adjustmentPct, targetProfitUsd",
+          });
+          return;
+        }
+      }
 
       if (body.title !== undefined) {
         if (typeof body.title !== "string") {
@@ -776,7 +799,17 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.syncActiveTrades = body.syncActiveTrades;
       }
-      if (Object.keys(data).length === 0) {
+      if (body.isActive !== undefined) {
+        if (typeof body.isActive !== "boolean") {
+          res.status(400).json({ error: "isActive must be a boolean" });
+          return;
+        }
+        data.isActive = body.isActive;
+      }
+      if (
+        Object.keys(data).length === 0 &&
+        (futureHedgeInput == null || Object.keys(futureHedgeInput).length === 0)
+      ) {
         res.status(400).json({ error: "No valid fields to update" });
         return;
       }
@@ -806,17 +839,36 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           updateData.minCapital = data.minCapital;
         if (data.syncActiveTrades !== undefined)
           updateData.syncActiveTrades = data.syncActiveTrades;
+        if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
-        const strategy = await prisma.strategy.update({
-          where: { id },
-          data: updateData,
-          select: STRATEGY_SELECT_ADMIN_SAFE,
-        });
+        if (futureHedgeInput != null && Object.keys(futureHedgeInput).length > 0) {
+          try {
+            await upsertFutureHedgeConfigForStrategy(prisma, id, futureHedgeInput);
+          } catch (hedgeErr) {
+            const msg =
+              hedgeErr instanceof Error ? hedgeErr.message : String(hedgeErr);
+            res.status(400).json({ error: msg });
+            return;
+          }
+        }
+
+        const strategy =
+          Object.keys(updateData).length > 0
+            ? await prisma.strategy.update({
+                where: { id },
+                data: updateData,
+                select: STRATEGY_SELECT_ADMIN_SAFE,
+              })
+            : await prisma.strategy.findUniqueOrThrow({
+                where: { id },
+                select: STRATEGY_SELECT_ADMIN_SAFE,
+              });
 
         if (
           existingSync &&
           !existingSync.syncActiveTrades &&
-          strategy.syncActiveTrades
+          strategy.syncActiveTrades &&
+          strategy.isActive
         ) {
           const strategyId = id;
           void import("../services/tradeEngine.js")

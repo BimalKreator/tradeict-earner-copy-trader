@@ -1,4 +1,4 @@
-import type { FutureHedgeConfig, PrismaClient, Strategy } from "@prisma/client";
+import type { FutureHedgeConfig, Prisma, PrismaClient, Strategy } from "@prisma/client";
 
 export const FUTURE_HEDGE_STRATEGY_TITLE = "Future Hedge Strategy";
 
@@ -119,6 +119,62 @@ export function validateFutureHedgeUpdate(
     }
   }
   return null;
+}
+
+/** Admin strategy PUT: nested `futureHedgeConfig` object (subset of hedge fields). */
+export function parseFutureHedgeConfigBody(
+  body: unknown,
+): FutureHedgeConfigUpdateInput | null {
+  if (body == null || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  return parseFutureHedgeBody(body as Record<string, unknown>);
+}
+
+export async function upsertFutureHedgeConfigForStrategy(
+  prisma: PrismaClient,
+  strategyId: string,
+  input: FutureHedgeConfigUpdateInput,
+): Promise<FutureHedgeConfig> {
+  const validationError = validateFutureHedgeUpdate(input);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+  if (Object.keys(input).length === 0) {
+    throw new Error("No future hedge config fields to update");
+  }
+
+  const updateData: Prisma.FutureHedgeConfigUpdateInput = {};
+  if (input.isAutoEnabled !== undefined) {
+    updateData.isAutoEnabled = input.isAutoEnabled;
+  }
+  if (input.baseLots !== undefined) updateData.baseLots = input.baseLots;
+  if (input.emaPeriod !== undefined) updateData.emaPeriod = input.emaPeriod;
+  if (input.adjustmentPct !== undefined) {
+    updateData.adjustmentPct = input.adjustmentPct;
+  }
+  if (input.targetProfitUsd !== undefined) {
+    updateData.targetProfitUsd = input.targetProfitUsd;
+  }
+  if (input.currentBatchId !== undefined) {
+    updateData.currentBatchId = input.currentBatchId;
+  }
+
+  return prisma.futureHedgeConfig.upsert({
+    where: { strategyId },
+    create: {
+      strategyId,
+      isAutoEnabled: input.isAutoEnabled ?? false,
+      baseLots: input.baseLots ?? 1,
+      emaPeriod: input.emaPeriod ?? 200,
+      adjustmentPct: input.adjustmentPct ?? 0.5,
+      targetProfitUsd: input.targetProfitUsd ?? 10,
+      ...(input.currentBatchId !== undefined
+        ? { currentBatchId: input.currentBatchId }
+        : {}),
+    },
+    update: updateData,
+  });
 }
 
 export function parseFutureHedgeBody(body: Record<string, unknown>): FutureHedgeConfigUpdateInput {

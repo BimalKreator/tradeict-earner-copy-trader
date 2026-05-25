@@ -140,6 +140,8 @@ model Strategy {
   monthlyFee         Float
   profitShare        Float   @default(20.0)
   minCapital         Float
+  /** When false, copy-trading and hedge automation skip this strategy. */
+  isActive             Boolean @default(true)
   /** When true, new subscribers mirror the strategy's currently open master (leader) positions on Delta (late-join). */
   syncActiveTrades   Boolean @default(false)
   /** Total master unrealized PnL (USD) at or above this value triggers auto-exit (close all master legs). */

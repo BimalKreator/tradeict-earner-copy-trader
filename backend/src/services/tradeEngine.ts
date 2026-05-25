@@ -27,9 +27,11 @@ import {
 } from "../constants/exitReasons.js";
 import { isHardExecutionError } from "./followerTradeExecution.js";
 import {
+  STRATEGY_SELECT_IS_ACTIVE,
   STRATEGY_SELECT_LATE_JOIN,
   STRATEGY_SELECT_SLIPPAGE,
   STRATEGY_SELECT_WS_CREDS,
+  STRATEGY_WHERE_COPY_ENABLED,
 } from "../prisma/strategySelect.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
@@ -42,6 +44,17 @@ import {
 
 /** Re-exported live mark cache (updated by {@link startLivePriceTracker} + public WS). */
 export { liveMarkPrices } from "./liveMarkPriceCache.js";
+
+async function isStrategyCopyEnabled(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<boolean> {
+  const row = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: STRATEGY_SELECT_IS_ACTIVE,
+  });
+  return row?.isActive !== false;
+}
 
 /** Delta Exchange India private WebSocket (see Delta WebSocket docs). */
 const DELTA_INDIA_PRIVATE_WS = "wss://socket.india.delta.exchange";
@@ -649,6 +662,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     select: STRATEGY_SELECT_LATE_JOIN,
   });
   if (!strategy) return;
+  if (!strategy.isActive) return;
   if (!args.force && !strategy.syncActiveTrades) return;
 
   const sub = await prisma.userSubscription.findFirst({
@@ -766,6 +780,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
     );
 
     const result = await executeFollowerTradeWithVerification(prisma, {
+      strategyId: strategy.id,
       userId: sub.userId,
       apiKey: creds.apiKey,
       apiSecret: creds.apiSecret,
@@ -805,9 +820,9 @@ export async function lateJoinMirrorForAllActiveSubscribers(
 ): Promise<void> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: strategyId },
-    select: { syncActiveTrades: true },
+    select: { syncActiveTrades: true, isActive: true },
   });
-  if (!strategy?.syncActiveTrades) return;
+  if (!strategy?.isActive || !strategy.syncActiveTrades) return;
 
   const subs = await prisma.userSubscription.findMany({
     where: {
@@ -847,8 +862,16 @@ export async function forceMirrorOpenPositionsForAllSubscribers(
 }> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: strategyId },
-    select: { masterApiKey: true, masterApiSecret: true },
+    select: {
+      masterApiKey: true,
+      masterApiSecret: true,
+      isActive: true,
+    },
   });
+
+  if (!strategy?.isActive) {
+    throw new Error("Strategy is paused (isActive is false).");
+  }
 
   const keyOk = Boolean(strategy?.masterApiKey?.trim());
   const secretOk = Boolean(strategy?.masterApiSecret?.trim());
@@ -911,6 +934,13 @@ async function copyMasterFillToSubscribers(
     avgPrice: number;
   },
 ): Promise<void> {
+  if (!(await isStrategyCopyEnabled(prisma, strategyId))) {
+    console.log(
+      `[tradeEngine] Skipping copy fill — strategy paused strategyId=${strategyId}`,
+    );
+    return;
+  }
+
   const strategy = await prisma.strategy.findUnique({
     where: { id: strategyId },
     select: STRATEGY_SELECT_SLIPPAGE,
@@ -1026,6 +1056,7 @@ async function copyMasterFillToSubscribers(
       );
 
       const result = await executeFollowerTradeWithVerification(prisma, {
+        strategyId,
         userId: sub.userId,
         apiKey: creds.apiKey,
         apiSecret: creds.apiSecret,
@@ -1067,6 +1098,13 @@ async function notifyMasterFlat(
   },
   options?: { exitReason?: ExitReasonValue },
 ): Promise<void> {
+  if (!(await isStrategyCopyEnabled(prisma, strategyId))) {
+    console.log(
+      `[tradeEngine] Skipping master-flat fanout — strategy paused strategyId=${strategyId}`,
+    );
+    return;
+  }
+
   const closureOrigin = resolveClosureOrigin(
     strategyId,
     snap.symbol,
@@ -1346,6 +1384,10 @@ class StrategyMasterSocket {
         if (this.destroyed) return;
         if (!s) {
           this.scheduleReconnect();
+          return;
+        }
+        if (!s.isActive) {
+          this.destroy();
           return;
         }
         const key = decryptDeltaSecretOrPlain(s.masterApiKey).trim();
@@ -1776,6 +1818,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     try {
       const strategies = await prisma.strategy.findMany({
         where: {
+          ...STRATEGY_WHERE_COPY_ENABLED,
           subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
         },
         select: { id: true, masterApiKey: true, masterApiSecret: true },
@@ -1838,6 +1881,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     try {
       const strategies = await prisma.strategy.findMany({
         where: {
+          ...STRATEGY_WHERE_COPY_ENABLED,
           subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
         },
         select: {
@@ -2009,6 +2053,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     try {
       const strategies = await prisma.strategy.findMany({
         where: {
+          ...STRATEGY_WHERE_COPY_ENABLED,
           subscriptions: { some: { status: SubscriptionStatus.ACTIVE } },
         },
         select: {

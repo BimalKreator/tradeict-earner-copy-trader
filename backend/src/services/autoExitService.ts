@@ -335,6 +335,7 @@ export async function runAllStrategyAutoExitChecks(
 ): Promise<void> {
   const strategies = await prisma.strategy.findMany({
     where: {
+      isActive: true,
       OR: [
         { autoExitTarget: { not: null } },
         { autoExitStopLoss: { not: null } },

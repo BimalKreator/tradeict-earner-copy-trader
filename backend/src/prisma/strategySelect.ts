@@ -15,10 +15,20 @@ export const STRATEGY_SELECT_ADMIN_LIST: Prisma.StrategySelect = {
   monthlyFee: true,
   profitShare: true,
   minCapital: true,
+  isActive: true,
   syncActiveTrades: true,
   autoExitTarget: true,
   autoExitStopLoss: true,
   createdAt: true,
+  futureHedgeConfig: {
+    select: {
+      isAutoEnabled: true,
+      baseLots: true,
+      emaPeriod: true,
+      adjustmentPct: true,
+      targetProfitUsd: true,
+    },
+  },
 };
 
 /** Admin JSON responses must omit `masterApiSecret`. */
@@ -32,10 +42,25 @@ export const STRATEGY_SELECT_ADMIN_SAFE: Prisma.StrategySelect = {
   monthlyFee: true,
   profitShare: true,
   minCapital: true,
+  isActive: true,
   syncActiveTrades: true,
   autoExitTarget: true,
   autoExitStopLoss: true,
   createdAt: true,
+  futureHedgeConfig: {
+    select: {
+      isAutoEnabled: true,
+      baseLots: true,
+      emaPeriod: true,
+      adjustmentPct: true,
+      targetProfitUsd: true,
+    },
+  },
+};
+
+/** Copy engine only runs for strategies with `isActive === true`. */
+export const STRATEGY_WHERE_COPY_ENABLED: Prisma.StrategyWhereInput = {
+  isActive: true,
 };
 
 export const STRATEGY_SELECT_AUTO_EXIT: Prisma.StrategySelect = {
@@ -49,6 +74,7 @@ export const STRATEGY_SELECT_AUTO_EXIT: Prisma.StrategySelect = {
 
 export const STRATEGY_SELECT_LATE_JOIN: Prisma.StrategySelect = {
   id: true,
+  isActive: true,
   syncActiveTrades: true,
   masterApiKey: true,
   masterApiSecret: true,
@@ -62,6 +88,11 @@ export const STRATEGY_SELECT_SLIPPAGE: Prisma.StrategySelect = {
 export const STRATEGY_SELECT_WS_CREDS: Prisma.StrategySelect = {
   masterApiKey: true,
   masterApiSecret: true,
+  isActive: true,
+};
+
+export const STRATEGY_SELECT_IS_ACTIVE: Prisma.StrategySelect = {
+  isActive: true,
 };
 
 export const STRATEGY_SELECT_SUBSCRIBE_GATE: Prisma.StrategySelect = {

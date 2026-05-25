@@ -5,6 +5,7 @@ import {
   type ExecuteTradeResult,
   type TradeSide,
 } from "./exchangeService.js";
+import { STRATEGY_SELECT_IS_ACTIVE } from "../prisma/strategySelect.js";
 import { logUserActivity } from "./userActivityService.js";
 
 /** Wait after each successful order before re-checking positions. */
@@ -103,6 +104,7 @@ export type FollowerExecuteResult = ExecuteTradeResult & {
 export async function executeFollowerTradeWithVerification(
   prisma: PrismaClient,
   args: {
+    strategyId?: string;
     userId: string;
     apiKey: string;
     apiSecret: string;
@@ -114,6 +116,21 @@ export async function executeFollowerTradeWithVerification(
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
   const targetContracts = Math.max(1, Math.floor(args.size));
+
+  if (args.strategyId) {
+    const strat = await prisma.strategy.findUnique({
+      where: { id: args.strategyId },
+      select: STRATEGY_SELECT_IS_ACTIVE,
+    });
+    if (!strat?.isActive) {
+      return {
+        success: false,
+        error: "Strategy is paused",
+        attempts: 0,
+        verified: false,
+      };
+    }
+  }
 
   if (args.reduceOnly === true) {
     const single = await executeTrade(apiKey, apiSecret, symbol, side, targetContracts, {
