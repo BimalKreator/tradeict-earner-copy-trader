@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { GitBranch } from "lucide-react";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -566,13 +568,22 @@ export default function AdminStrategiesPage() {
             Subscribers mirror fills using their own linked Delta accounts.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={openCreateModal}
-          className="rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
-        >
-          Add strategy
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/admin/strategies/future-hedge"
+            className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2.5 text-sm font-medium text-cyan-200 transition hover:bg-cyan-500/20"
+          >
+            <GitBranch className="h-4 w-4" aria-hidden />
+            Future Hedge
+          </Link>
+          <button
+            type="button"
+            onClick={openCreateModal}
+            className="rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
+          >
+            Add strategy
+          </button>
+        </div>
       </header>
 
       {error && (

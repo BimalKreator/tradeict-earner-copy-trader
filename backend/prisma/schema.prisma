@@ -59,6 +59,11 @@ enum TicketStatus {
   CLOSED
 }
 
+enum FutureHedgeBatchTrend {
+  UPTREND
+  DOWNTREND
+}
+
 model User {
   id            String              @id @default(uuid())
   email         String              @unique
@@ -143,10 +148,55 @@ model Strategy {
   autoExitStopLoss   Float?
   createdAt          DateTime @default(now())
 
-  subscriptions UserSubscription[]
-  trades        Trade[]
-  pnlRecords    PnLRecord[]
-  invoices      Invoice[]
+  subscriptions      UserSubscription[]
+  trades             Trade[]
+  pnlRecords         PnLRecord[]
+  invoices           Invoice[]
+  futureHedgeConfig  FutureHedgeConfig?
+}
+
+/** Automation settings for the "Future Hedge Strategy" leader bot. */
+model FutureHedgeConfig {
+  id              String   @id @default(uuid())
+  strategyId      String   @unique
+  isAutoEnabled   Boolean  @default(false)
+  baseLots        Int      @default(1)
+  emaPeriod       Int      @default(200)
+  adjustmentPct   Float    @default(0.5)
+  targetProfitUsd Float    @default(10.0)
+  /** Groups a run of hedge adjustments; cleared when a batch completes. */
+  currentBatchId  String?
+  /** BTC perp price anchor for the adjustment grid (updated each entry/adjustment). */
+  lastEntryPrice        Float?
+  /** Direction locked when the batch opens. */
+  batchTrend            FutureHedgeBatchTrend?
+  /** Option product id (same expiry for all adjustments in the batch). */
+  batchOptionProductId  String?
+  batchOptionExpiryMs   BigInt?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  strategy    Strategy                 @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  executions  FutureHedgeExecution[]
+}
+
+model FutureHedgeExecution {
+  id        String   @id @default(uuid())
+  batchId   String
+  configId  String
+  kind      String
+  leg       String
+  side      String
+  symbol    String
+  lots      Int
+  price     Float?
+  orderId   String?
+  createdAt DateTime @default(now())
+
+  config FutureHedgeConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  @@index([batchId, createdAt])
+  @@index([configId, batchId])
 }
 
 model UserSubscription {

@@ -1,3 +1,4 @@
+import axios from "axios";
 import ccxt from "ccxt";
 import {
   decryptDeltaSecretOrPlain,
@@ -957,4 +958,182 @@ export async function fetchDeltaTotalBalanceUsd(
   apiSecretStored: string,
 ): Promise<number> {
   return fetchDeltaAvailableBalanceUsd(apiKeyStored, apiSecretStored);
+}
+
+export type BtcOptionType = "call" | "put";
+
+export type AtmBtcOptionMatch = {
+  productId: string;
+  strike: number;
+  expiryMs: number;
+};
+
+type DeltaProductRow = {
+  symbol?: string;
+  strike_price?: unknown;
+  settlement_time?: string;
+  state?: string;
+  contract_type?: string;
+};
+
+/** Parse `C-BTC-90000-310125` / `P-BTC-...` symbology (ddmmyy expiry). */
+export function parseBtcOptionProductId(
+  productId: string,
+): { type: BtcOptionType; strike: number; expiryMs: number } | null {
+  const m = productId.trim().match(/^(C|P)-BTC-(\d+)-(\d{6})$/i);
+  if (!m) return null;
+  const type: BtcOptionType = m[1]!.toUpperCase() === "C" ? "call" : "put";
+  const strike = Number(m[2]);
+  if (!Number.isFinite(strike) || strike <= 0) return null;
+  const ddmmyy = m[3]!;
+  const dd = Number(ddmmyy.slice(0, 2));
+  const mm = Number(ddmmyy.slice(2, 4));
+  const yy = Number(ddmmyy.slice(4, 6));
+  if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) {
+    return null;
+  }
+  const year = yy >= 70 ? 1900 + yy : 2000 + yy;
+  const expiryMs = Date.UTC(year, mm - 1, dd, 12, 0, 0);
+  if (!Number.isFinite(expiryMs)) return null;
+  return { type, strike, expiryMs };
+}
+
+function expiryMsFromSettlement(iso: string | undefined): number | null {
+  if (!iso?.trim()) return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Lists live BTC call or put options from Delta India public products API.
+ */
+export async function listBtcOptionProducts(
+  optionType: BtcOptionType,
+): Promise<AtmBtcOptionMatch[]> {
+  const contractTypes =
+    optionType === "call" ? "call_options" : "put_options";
+  try {
+    const { data } = await axios.get<{ result?: DeltaProductRow[] }>(
+      `${DELTA_INDIA_API_BASE}/v2/products`,
+      {
+        params: {
+          underlying_asset_symbols: "BTC",
+          contract_types: contractTypes,
+        },
+        timeout: 20_000,
+      },
+    );
+    const rows = Array.isArray(data?.result) ? data.result : [];
+    const out: AtmBtcOptionMatch[] = [];
+
+    for (const row of rows) {
+      const symbol = String(row.symbol ?? "").trim();
+      if (!symbol) continue;
+      if (row.state && row.state !== "live") continue;
+
+      const parsed = parseBtcOptionProductId(symbol);
+      const strikeFromApi = numberOrNull(row.strike_price);
+      const strike =
+        strikeFromApi != null && strikeFromApi > 0
+          ? strikeFromApi
+          : parsed?.strike;
+      const expiryMs =
+        expiryMsFromSettlement(row.settlement_time) ?? parsed?.expiryMs ?? null;
+
+      if (strike == null || expiryMs == null) continue;
+      if (parsed && parsed.type !== optionType) continue;
+
+      out.push({ productId: symbol, strike, expiryMs });
+    }
+
+    return out;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[exchangeService] listBtcOptionProducts failed: ${msg}`);
+    return [];
+  }
+}
+
+/**
+ * Nearest live expiry ATM BTC option (product id for {@link executeTrade}).
+ */
+export async function findAtmBtcOptionProductId(
+  optionType: BtcOptionType,
+  spotPrice: number,
+): Promise<AtmBtcOptionMatch | null> {
+  if (!Number.isFinite(spotPrice) || spotPrice <= 0) return null;
+
+  let candidates = await listBtcOptionProducts(optionType);
+
+  if (candidates.length === 0) {
+    try {
+      const exchange = await getPublicClient();
+      for (const market of Object.values(exchange.markets)) {
+        if (market?.option !== true && !isDeltaOptionProductId(String(market?.id ?? ""))) {
+          continue;
+        }
+        const id = String(market.id ?? market.symbol ?? "").trim();
+        const parsed = parseBtcOptionProductId(id);
+        if (!parsed || parsed.type !== optionType) continue;
+        const strike = numberOrNull(market.strike) ?? parsed.strike;
+        const expiryMs =
+          typeof market.expiry === "number" && market.expiry > 0
+            ? market.expiry
+            : parsed.expiryMs;
+        candidates.push({ productId: id, strike, expiryMs });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[exchangeService] markets fallback for options failed: ${msg}`);
+    }
+  }
+
+  const now = Date.now();
+  const minLeadMs = 60_000;
+  const live = candidates.filter((c) => c.expiryMs > now + minLeadMs);
+  if (live.length === 0) return null;
+
+  const nearestExpiry = Math.min(...live.map((c) => c.expiryMs));
+  const onNearest = live.filter((c) => c.expiryMs === nearestExpiry);
+
+  let best = onNearest[0]!;
+  let bestDist = Math.abs(best.strike - spotPrice);
+  for (const c of onNearest) {
+    const d = Math.abs(c.strike - spotPrice);
+    if (d < bestDist) {
+      best = c;
+      bestDist = d;
+    }
+  }
+
+  return best;
+}
+
+/** ATM strike on a fixed expiry (for batch adjustments — same expiry as initial entry). */
+export async function findAtmBtcOptionForExpiry(
+  optionType: BtcOptionType,
+  spotPrice: number,
+  expiryMs: number,
+): Promise<AtmBtcOptionMatch | null> {
+  if (!Number.isFinite(spotPrice) || spotPrice <= 0 || !Number.isFinite(expiryMs)) {
+    return null;
+  }
+
+  const candidates = await listBtcOptionProducts(optionType);
+  const expiryToleranceMs = 86_400_000;
+  const onExpiry = candidates.filter(
+    (c) => Math.abs(c.expiryMs - expiryMs) <= expiryToleranceMs,
+  );
+  if (onExpiry.length === 0) return null;
+
+  let best = onExpiry[0]!;
+  let bestDist = Math.abs(best.strike - spotPrice);
+  for (const c of onExpiry) {
+    const d = Math.abs(c.strike - spotPrice);
+    if (d < bestDist) {
+      best = c;
+      bestDist = d;
+    }
+  }
+  return best;
 }

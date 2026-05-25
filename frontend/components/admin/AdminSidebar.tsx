@@ -9,6 +9,7 @@ import {
   Download,
   FolderOpen,
   GitCompare,
+  GitBranch,
   LayoutDashboard,
   LineChart,
   Bell,
@@ -26,6 +27,11 @@ const links = [
   { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/strategies", label: "Strategies", icon: LineChart },
+  {
+    href: "/admin/strategies/future-hedge",
+    label: "Future Hedge",
+    icon: GitBranch,
+  },
   { href: "/admin/coupons", label: "Coupons", icon: Tag },
   { href: "/admin/notifications", label: "Notifications", icon: Bell },
   { href: "/admin/support", label: "Support", icon: MessageSquare },
@@ -78,7 +84,9 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
           const active =
             href === "/admin"
               ? pathname === "/admin"
-              : pathname.startsWith(href);
+              : href === "/admin/strategies"
+                ? pathname === "/admin/strategies"
+                : pathname.startsWith(href);
           return (
             <Link
               key={href}

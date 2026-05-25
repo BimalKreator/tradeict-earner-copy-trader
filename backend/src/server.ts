@@ -39,6 +39,8 @@ import {
   initTelegramBot,
   initTelegramCronJobs,
 } from "./services/telegramService.js";
+import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js";
+import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
 
 const PORT = 5000;
 const __filename = fileURLToPath(import.meta.url);
@@ -60,15 +62,28 @@ initTelegramCronJobs(prisma);
 
 /** Private WS per strategy (master Delta keys) → copies fills to subscribers. Must run or only late-join / force-sync work. */
 const stopTradeEngine = startTradeEngine(prisma);
-function shutdownTradeEngine(): void {
+const stopFutureHedgeDataEngine = startFutureHedgeDataEngine(prisma);
+const stopFutureHedgeEngine = startFutureHedgeEngine(prisma);
+
+function shutdownBackgroundEngines(): void {
+  try {
+    stopFutureHedgeEngine();
+  } catch {
+    /* ignore */
+  }
+  try {
+    stopFutureHedgeDataEngine();
+  } catch {
+    /* ignore */
+  }
   try {
     stopTradeEngine();
   } catch {
     /* ignore */
   }
 }
-process.once("SIGTERM", shutdownTradeEngine);
-process.once("SIGINT", shutdownTradeEngine);
+process.once("SIGTERM", shutdownBackgroundEngines);
+process.once("SIGINT", shutdownBackgroundEngines);
 
 const app = express();
 
@@ -163,5 +178,9 @@ app.listen(PORT, "0.0.0.0", () => {
     `[BOOT] Admin API http://0.0.0.0:${PORT} deltaEthUSDT→ccxt=${DELTA_INDIA_CCXT_SAMPLE_SYMBOL} | verify: curl -s http://127.0.0.1:${PORT}/api/health/build`,
   );
   console.log("[BOOT] Trade engine (master Delta WebSocket copy) is running.");
+  console.log("[BOOT] Future Hedge market data engine (BTC EMA) is running.");
+  console.log(
+    "[BOOT] Future Hedge engine running (entry, adjustments, 1s MTM target exit).",
+  );
   console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
 });
