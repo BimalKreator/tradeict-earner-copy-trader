@@ -63,7 +63,14 @@ export function createUserController(prisma: PrismaClient) {
       applyNoStoreCacheHeaders(res);
       res.json(groups);
     } catch (err) {
-      next(err);
+      const message =
+        err instanceof Error ? err.message : String(err ?? "Unknown error");
+      console.error("[live-trades] GET /me failed:", message);
+      res.status(500).json({
+        success: false,
+        message: "Error fetching live trades",
+        error: message,
+      });
     }
   }
 

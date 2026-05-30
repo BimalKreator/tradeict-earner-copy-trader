@@ -28,7 +28,14 @@ export function tradePositionSymbolsAlign(
   return ba != null && bb != null && ba === bb;
 }
 
-/** Stable id for DB row — prefer exchange order id when present. */
+/** Delta Exchange client order id max length. */
+export const MAX_DELTA_CLIENT_ORDER_ID_LENGTH = 32;
+
+function hashClientOrderId(raw: string): string {
+  return createHash("md5").update(raw).digest("hex");
+}
+
+/** Stable id for DB row — MD5 hash keeps Delta client order id ≤ 32 chars. */
 export function buildClientOrderId(args: {
   strategyId: string;
   userId?: string | null;
@@ -38,10 +45,15 @@ export function buildClientOrderId(args: {
 }): string {
   const scope = args.isMaster ? "M" : (args.userId ?? "U");
   if (args.exchangeOrderId?.trim()) {
-    return `${args.strategyId}:${scope}:${args.exchangeOrderId.trim()}`;
+    return hashClientOrderId(
+      `${args.strategyId}|${scope}|${args.exchangeOrderId.trim()}`,
+    );
   }
-  const sym = (args.symbol ?? "sym").replace(/:/g, "_").slice(0, 48);
-  return `${args.strategyId}:${scope}:${sym}:${Date.now()}:${randomBytes(4).toString("hex")}`;
+  const sym = compactSymbolKey(args.symbol ?? "sym").slice(0, 24);
+  const nonce = randomBytes(4).toString("hex");
+  return hashClientOrderId(
+    `${args.strategyId}|${scope}|${sym}|${Date.now()}|${nonce}`,
+  );
 }
 
 /**
@@ -66,9 +78,7 @@ export function buildStableCopyClientOrderId(args: {
     sym,
     side,
   ].join("|");
-  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 20);
-  const id = `cp:${args.strategyId.slice(0, 8)}:${args.userId.slice(0, 8)}:${hash}`;
-  return id.slice(0, 64);
+  return hashClientOrderId(raw);
 }
 
 export type RecordTradePositionOpenArgs = {

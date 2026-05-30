@@ -492,7 +492,12 @@ export async function forceSyncMasterOpenToFollowers(
         side: fill.side,
         quantity: fill.masterLots,
         entryPrice: fill.avgPrice,
-        clientOrderId: `m:${strategyId.slice(0, 8)}:${fill.masterFillKey.slice(0, 32)}`,
+        clientOrderId: buildClientOrderId({
+          strategyId,
+          isMaster: true,
+          symbol: fill.symbol,
+          exchangeOrderId: fill.masterFillKey,
+        }),
       });
     } catch (masterLegErr) {
       console.warn(
