@@ -21,6 +21,61 @@ import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 /** Per-account Delta fetch budget — avoids nginx 502 from long sequential CCXT loadMarkets. */
 const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
+/** Hold master legs on the live-trades panel until REST reports flat for this long. */
+const MASTER_LIVE_TRADES_FLAT_CONFIRM_MS = 10_000;
+
+type MasterLiveTradesSticky = {
+  positions: LiveTradeRow[];
+  firstEmptyAt: number | null;
+};
+
+/** In-memory sticky master rows — avoids flicker when Delta REST briefly omits open legs. */
+const masterLiveTradesSticky = new Map<string, MasterLiveTradesSticky>();
+
+function applyMasterLiveTradesSticky(
+  strategyId: string,
+  fetched: LiveTradeRow[],
+  fetchSucceeded: boolean,
+): LiveTradeRow[] {
+  if (!fetchSucceeded) {
+    const prev = masterLiveTradesSticky.get(strategyId);
+    return prev?.positions ?? [];
+  }
+
+  const now = Date.now();
+  if (fetched.length > 0) {
+    masterLiveTradesSticky.set(strategyId, {
+      positions: fetched,
+      firstEmptyAt: null,
+    });
+    return fetched;
+  }
+
+  const prev = masterLiveTradesSticky.get(strategyId);
+  if (!prev || prev.positions.length === 0) {
+    masterLiveTradesSticky.set(strategyId, { positions: [], firstEmptyAt: now });
+    return [];
+  }
+
+  const firstEmpty = prev.firstEmptyAt ?? now;
+  if (now - firstEmpty < MASTER_LIVE_TRADES_FLAT_CONFIRM_MS) {
+    masterLiveTradesSticky.set(strategyId, {
+      positions: prev.positions,
+      firstEmptyAt: firstEmpty,
+    });
+    console.log(
+      `[live-trades] master sticky hold strategyId=${strategyId} ` +
+        `(${prev.positions.length} leg(s), empty ${Math.round((now - firstEmpty) / 1000)}s / ${MASTER_LIVE_TRADES_FLAT_CONFIRM_MS / 1000}s)`,
+    );
+    return prev.positions;
+  }
+
+  masterLiveTradesSticky.set(strategyId, {
+    positions: [],
+    firstEmptyAt: firstEmpty,
+  });
+  return [];
+}
 
 function withDeltaFetchTimeout<T>(
   promise: Promise<T>,
@@ -243,7 +298,11 @@ export async function getAdminMasterPositionSnapshots(
       }
     }
 
-    const positions = await enrichPositionsList(masterList);
+    const positions = applyMasterLiveTradesSticky(
+      strat.id,
+      await enrichPositionsList(masterList),
+      fetchException === undefined,
+    );
 
     out.push({
       strategyId: strat.id,
@@ -342,8 +401,15 @@ export async function getUserLiveTradesByStrategy(
           ),
           `master snapshot strategyId=${sub.strategyId}`,
         );
-        masterOpenCount = masterList.length;
+        const enriched = await enrichPositionsList(masterList);
+        masterOpenCount = applyMasterLiveTradesSticky(
+          sub.strategyId,
+          enriched,
+          true,
+        ).length;
       } catch (err) {
+        const sticky = masterLiveTradesSticky.get(sub.strategyId);
+        masterOpenCount = sticky?.positions.length ?? 0;
         console.warn(
           `[live-trades] master snapshot failed strategyId=${sub.strategyId}:`,
           err instanceof Error ? err.message : err,
@@ -513,7 +579,11 @@ export async function getAdminLiveTradesByStrategy(
           : {}),
       };
 
-      const masterPositions = await enrichPositionsList(masterResult.list);
+      const masterPositions = applyMasterLiveTradesSticky(
+        strat.id,
+        await enrichPositionsList(masterResult.list),
+        masterResult.fetchException === undefined,
+      );
 
       const subscribers = await Promise.all(
         subs.map(async (sub): Promise<AdminLiveTradesSubscriber> => {

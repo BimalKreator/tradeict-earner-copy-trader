@@ -93,6 +93,8 @@ const AUTO_EXIT_CHECK_MS = 1_000;
 const POSITION_QTY_RECONCILE_MS = 60_000;
 /** Poll master REST positions to catch manual UI fills missed by private WS. */
 const MASTER_REST_POLL_MS = 5_000;
+/** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
+const MASTER_FLAT_CONFIRM_MS = 10_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -990,20 +992,31 @@ export type MasterLedTrade = {
   masterContracts: number;
 };
 
+function masterLegOpenOnRest(
+  meta: { symbol: string; side: TradeSide },
+  masters: MasterLedTrade[],
+): boolean {
+  return masters.some(
+    (m) =>
+      m.masterContracts > 0 &&
+      m.side === meta.side &&
+      positionSymbolsAlign(meta.symbol, m.deltaSymbol),
+  );
+}
+
 function deltaPositionsToMasterLed(
   positions: DeltaLivePosition[],
 ): MasterLedTrade[] {
   const out: MasterLedTrade[] = [];
   for (const p of positions) {
+    const masterContracts = Math.abs(p.contracts);
+    if (!Number.isFinite(masterContracts) || masterContracts < 1e-12) continue;
     const entry =
       p.entryPrice != null && Number.isFinite(p.entryPrice)
         ? p.entryPrice
         : p.markPrice != null && Number.isFinite(p.markPrice)
           ? p.markPrice
-          : null;
-    if (entry === null) continue;
-    const masterContracts = Math.abs(p.contracts);
-    if (!Number.isFinite(masterContracts) || masterContracts < 1e-12) continue;
+          : 0;
     // Side comes from signed raw REST size via fetchDeltaOpenPositions — replicate verbatim.
     const side: TradeSide = p.side === "SELL" ? "SELL" : "BUY";
     out.push({
@@ -1607,6 +1620,8 @@ function masterLegKey(symbol: string, side: TradeSide): string {
 class MasterPositionTracker {
   readonly lastPositionContracts = new Map<string, number>();
   readonly lastOpenMeta = new Map<string, LastOpenMeta>();
+  /** legKey → first REST poll time the leg was missing (flat confirmation gate). */
+  readonly pendingFlatSince = new Map<string, number>();
   private restBaselineSeeded = false;
 
   aliasesForSnap(snap: {
@@ -1694,6 +1709,10 @@ class MasterPositionTracker {
     }
   }
 
+  clearPendingFlat(legKey: string): void {
+    this.pendingFlatSince.delete(legKey);
+  }
+
   isRestBaselineSeeded(): boolean {
     return this.restBaselineSeeded;
   }
@@ -1773,15 +1792,11 @@ async function pollMasterPositionsFallback(
       );
     }
 
-    const restOpenByLeg = new Map<string, MasterLedTrade>();
-    for (const m of masters) {
-      if (m.masterContracts <= 0) continue;
-      restOpenByLeg.set(masterLegKey(m.deltaSymbol, m.side), m);
-    }
-
     for (const m of masters) {
       if (cancelled.value) return;
       if (m.masterContracts <= 0) continue;
+
+      tracker.clearPendingFlat(masterLegKey(m.deltaSymbol, m.side));
 
       const missingOnFollowers = await followersMissingOpenLeg(
         prisma,
@@ -1836,7 +1851,11 @@ async function pollMasterPositionsFallback(
 
       for (const [lk, meta] of trackedLegs) {
         if (cancelled.value) return;
-        if (restOpenByLeg.has(lk)) continue;
+
+        if (masterLegOpenOnRest(meta, masters)) {
+          tracker.clearPendingFlat(lk);
+          continue;
+        }
 
         const lastContracts = tracker.maxContractsForSymbolSide(
           meta.symbol,
@@ -1844,10 +1863,25 @@ async function pollMasterPositionsFallback(
         );
         if (lastContracts <= 0) continue;
 
+        const now = Date.now();
+        const firstMissing = tracker.pendingFlatSince.get(lk);
+        if (firstMissing === undefined) {
+          tracker.pendingFlatSince.set(lk, now);
+          console.log(
+            `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
+              `awaiting ${MASTER_FLAT_CONFIRM_MS / 1000}s confirmation before follower close.`,
+          );
+          continue;
+        }
+        if (now - firstMissing < MASTER_FLAT_CONFIRM_MS) {
+          continue;
+        }
+
         console.log(
           `[MASTER-REST-SYNC] Master flat confirmed via REST ${meta.symbol} ${meta.side} ` +
-            `(${lastContracts} contracts) — closing followers.`,
+            `(${lastContracts} contracts, missing ${Math.round((now - firstMissing) / 1000)}s) — closing followers.`,
         );
+        tracker.clearPendingFlat(lk);
 
         try {
           await notifyMasterFlat(prisma, strat.id, {

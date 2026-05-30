@@ -433,6 +433,63 @@ function symbolKeyFromCcxtMarket(
   return unifiedSymbolToKey(unified);
 }
 
+type ResolvedPositionMarket = {
+  market: ReturnType<InstanceType<typeof ccxt.delta>["market"]> | null;
+  unified: string;
+  symbolKey: string;
+  isOption: boolean;
+  contractSize: number;
+};
+
+/** Resolve CCXT market metadata; never drop a row solely because `product_symbol` is unknown. */
+function resolvePositionMarket(
+  exchange: InstanceType<typeof ccxt.delta>,
+  productSymbol: string,
+): ResolvedPositionMarket {
+  const fallbackSize = deltaContractSizeFallback(productSymbol);
+
+  const fromMarket = (
+    market: ReturnType<typeof exchange.market>,
+  ): ResolvedPositionMarket => {
+    const unified = market.symbol;
+    const isOption =
+      market.option === true || isDeltaOptionProductId(productSymbol);
+    const csRaw = Number(market.contractSize ?? fallbackSize);
+    const contractSize =
+      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : fallbackSize;
+    return {
+      market,
+      unified,
+      symbolKey: symbolKeyFromCcxtMarket(unified, market),
+      isOption,
+      contractSize,
+    };
+  };
+
+  try {
+    return fromMarket(exchange.market(productSymbol));
+  } catch {
+    /* fall through */
+  }
+
+  try {
+    const unified = resolveCcxtSymbol(exchange, productSymbol);
+    return fromMarket(exchange.market(unified));
+  } catch {
+    const isOption = isDeltaOptionProductId(productSymbol);
+    console.warn(
+      `[exchangeService] fetchDeltaOpenPositions: market fallback for product_symbol=${productSymbol}`,
+    );
+    return {
+      market: null,
+      unified: productSymbol,
+      symbolKey: isOption ? productSymbol : unifiedSymbolToKey(productSymbol),
+      isOption,
+      contractSize: fallbackSize,
+    };
+  }
+}
+
 /** Compact trading labels (ETHUSDT, ETHUSD, …) → alias keys for {@link unifiedSymbolToKey} on CCXT markets. */
 function compactSymbolAliasKeys(tradingSymbol: string): Set<string> {
   const s = tradingSymbol.trim().toUpperCase();
@@ -725,60 +782,58 @@ export async function fetchDeltaOpenPositions(
 
   const out: DeltaLivePosition[] = [];
   for (const row of rawList) {
-    if (!row || typeof row !== "object") continue;
-    const position = row as Record<string, unknown>;
-    const info =
-      position.info != null && typeof position.info === "object"
-        ? (position.info as Record<string, unknown>)
-        : null;
-
-    const rawSize =
-      numberOrNull(position.size) ??
-      numberOrNull(info?.size) ??
-      numberOrNull(position.contracts);
-    if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
-
-    const productSymbol = String(position.product_symbol ?? "").trim();
-    if (!productSymbol) continue;
-
-    let market: ReturnType<typeof exchange.market>;
-    let unified: string;
     try {
-      market = exchange.market(productSymbol);
-      unified = market.symbol;
-    } catch {
-      console.warn(
-        `[exchangeService] fetchDeltaOpenPositions: no market for product_symbol=${productSymbol}`,
-      );
-      continue;
-    }
+      if (!row || typeof row !== "object") continue;
+      const position = row as Record<string, unknown>;
+      const info =
+        position.info != null && typeof position.info === "object"
+          ? (position.info as Record<string, unknown>)
+          : null;
 
-    const isOption =
-      market.option === true || isDeltaOptionProductId(productSymbol);
+      const rawSize =
+        numberOrNull(position.size) ??
+        numberOrNull(info?.size) ??
+        numberOrNull(position.contracts);
+      if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
 
-    const contractLots = rawSize;
-    const fallbackSize = deltaContractSizeFallback(unified);
-    const csRaw = Number(market.contractSize ?? fallbackSize);
-    const contractSize =
-      Number.isFinite(csRaw) && csRaw > 0 ? csRaw : fallbackSize;
+      const productSymbol = String(
+        position.product_symbol ?? position.product_id ?? "",
+      ).trim();
+      if (!productSymbol) continue;
 
-    // Side MUST follow raw signed size — do not infer from converted base units.
-    const side: TradeSide = tradeSideFromSignedSize(contractLots);
+      const {
+        market,
+        unified,
+        symbolKey,
+        isOption,
+        contractSize,
+      } = resolvePositionMarket(exchange, productSymbol);
 
-    // Options: API `size` is contract count (±100) → scale to BTC (±0.1) via contractSize.
-    const signedBtc = isOption
-      ? contractLots * contractSize
-      : deltaSignedBtcSize(
-          contractLots,
-          deltaContractValueFromMarket(market, position),
-        );
-    if (Math.abs(signedBtc) < 1e-12) continue;
+      const contractLots = rawSize;
 
-    const symbolKey = symbolKeyFromCcxtMarket(unified, market);
-    const realBaseSize = Math.abs(signedBtc);
-    const contractLotCount = isOption
-      ? Math.abs(contractLots)
-      : deltaContractLotCount(contractLots, contractSize, signedBtc);
+      // Side MUST follow raw signed size — do not infer from converted base units.
+      const side: TradeSide = tradeSideFromSignedSize(contractLots);
+
+      // Options: API `size` is contract count (±100) → scale to BTC (±0.1) via contractSize.
+      const signedBtc = isOption
+        ? contractLots * contractSize
+        : market != null
+          ? deltaSignedBtcSize(
+              contractLots,
+              deltaContractValueFromMarket(market, position),
+            )
+          : Number.isInteger(Math.abs(contractLots)) && Math.abs(contractLots) >= 1
+            ? contractLots * contractSize
+            : contractLots;
+
+      const realBaseSize = Math.abs(signedBtc) > 1e-12 ? Math.abs(signedBtc) : Math.abs(contractLots);
+      let contractLotCount = isOption
+        ? Math.abs(contractLots)
+        : deltaContractLotCount(contractLots, contractSize, signedBtc);
+      if (contractLotCount < 1e-12) {
+        contractLotCount = Math.abs(contractLots);
+      }
+      if (contractLotCount < 1e-12) continue;
 
     const entryPrice =
       numberOrNull(position.entry_price) ??
@@ -893,6 +948,12 @@ export async function fetchDeltaOpenPositions(
       takeProfit,
       entryTime,
     });
+    } catch (rowErr) {
+      console.warn(
+        `[exchangeService] fetchDeltaOpenPositions row skipped:`,
+        rowErr instanceof Error ? rowErr.message : rowErr,
+      );
+    }
   }
 
   return out;
