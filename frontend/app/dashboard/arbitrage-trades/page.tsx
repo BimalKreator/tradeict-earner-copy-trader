@@ -22,6 +22,7 @@ type ArbitrageTradeRow = {
 
 type ArbitrageTradesResponse = {
   totalEarnings: number;
+  baseCapital?: number;
   trades: ArbitrageTradeRow[];
 };
 
@@ -33,6 +34,7 @@ type ArbitrageWithdrawalRow = {
 };
 
 type ArbitrageWithdrawalsResponse = {
+  baseCapital?: number;
   withdrawals: ArbitrageWithdrawalRow[];
 };
 
@@ -49,6 +51,13 @@ const usdPnlFmt = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
   signDisplay: "always",
+});
+
+const usdBalanceFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
 });
 
 const pctFmt = new Intl.NumberFormat("en-US", {
@@ -72,6 +81,11 @@ function fmtUsd(n: number): string {
 function fmtPnl(n: number): string {
   if (!Number.isFinite(n)) return "—";
   return usdPnlFmt.format(n);
+}
+
+function fmtBalance(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  return usdBalanceFmt.format(n);
 }
 
 function fmtDate(iso: string): string {
@@ -103,6 +117,7 @@ function pnlClass(n: number): string {
 export default function ArbitrageTradesPage() {
   const [rows, setRows] = useState<ArbitrageTradeRow[]>([]);
   const [grossEarnings, setGrossEarnings] = useState(0);
+  const [baseCapital, setBaseCapital] = useState(0);
   const [withdrawals, setWithdrawals] = useState<ArbitrageWithdrawalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -114,6 +129,7 @@ export default function ArbitrageTradesPage() {
     0,
   );
   const netEarnings = grossEarnings - totalWithdrawn;
+  const currentCapital = baseCapital + netEarnings;
 
   const load = useCallback(async (silent: boolean) => {
     try {
@@ -149,12 +165,24 @@ export default function ArbitrageTradesPage() {
           ? data.totalEarnings
           : 0,
       );
+      setBaseCapital(
+        typeof data.baseCapital === "number" && Number.isFinite(data.baseCapital)
+          ? data.baseCapital
+          : 0,
+      );
 
       if (withdrawalsRes.ok) {
         const wd = (await withdrawalsRes.json()) as ArbitrageWithdrawalsResponse;
         setWithdrawals(
           Array.isArray(wd.withdrawals) ? wd.withdrawals : [],
         );
+        if (
+          (typeof data.baseCapital !== "number" || !Number.isFinite(data.baseCapital)) &&
+          typeof wd.baseCapital === "number" &&
+          Number.isFinite(wd.baseCapital)
+        ) {
+          setBaseCapital(wd.baseCapital);
+        }
       } else {
         setWithdrawals([]);
       }
@@ -228,19 +256,42 @@ export default function ArbitrageTradesPage() {
       )}
 
       <div className="rounded-xl border border-teal-500/30 bg-gradient-to-br from-teal-500/10 to-slate-900/80 p-6 shadow-lg shadow-black/20">
-        <p className="text-xs font-medium uppercase tracking-wider text-teal-300/80">
-          Total Arbitrage Earnings
-        </p>
-        <p
-          className={`mt-2 text-3xl font-semibold tabular-nums md:text-4xl ${pnlClass(netEarnings)}`}
-        >
-          {loading ? "—" : fmtPnl(netEarnings)}
-        </p>
-        <p className="mt-2 text-sm text-white/50">
-          Cumulative net profit from trades minus recorded withdrawals.
-        </p>
-        {!loading && (grossEarnings !== 0 || totalWithdrawn !== 0) ? (
-          <dl className="mt-4 grid gap-2 border-t border-white/10 pt-4 text-sm sm:grid-cols-2">
+        <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wider text-teal-300/80">
+              Total Arbitrage Earnings
+            </p>
+            <p
+              className={`mt-2 text-3xl font-semibold tabular-nums md:text-4xl ${pnlClass(netEarnings)}`}
+            >
+              {loading ? "—" : fmtPnl(netEarnings)}
+            </p>
+            <p className="mt-2 text-sm text-white/50">
+              Cumulative net profit from trades minus recorded withdrawals.
+            </p>
+          </div>
+          <div className="shrink-0 sm:text-right">
+            <p className="text-xs font-medium uppercase tracking-wider text-teal-300/80">
+              Current Capital
+            </p>
+            <p
+              className={`mt-2 text-3xl font-semibold tabular-nums md:text-4xl ${pnlClass(currentCapital)}`}
+            >
+              {loading ? "—" : fmtBalance(currentCapital)}
+            </p>
+            <p className="mt-2 text-sm text-white/50">
+              Base capital plus net trade earnings
+            </p>
+          </div>
+        </div>
+        {!loading && (grossEarnings !== 0 || totalWithdrawn !== 0 || baseCapital !== 0) ? (
+          <dl className="mt-4 grid gap-2 border-t border-white/10 pt-4 text-sm sm:grid-cols-3">
+            <div>
+              <dt className="text-white/45">Base capital</dt>
+              <dd className="mt-0.5 font-medium tabular-nums text-white">
+                {fmtBalance(baseCapital)}
+              </dd>
+            </div>
             <div>
               <dt className="text-white/45">Gross trade profit</dt>
               <dd className={`mt-0.5 font-medium tabular-nums ${pnlClass(grossEarnings)}`}>

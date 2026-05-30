@@ -15,6 +15,20 @@ export async function resolveArbitrageTradesUserId(
   return sourceId && sourceId !== user.id ? sourceId : user.id;
 }
 
+/** `cryptoBalance` for arbitrage UI — follows {@link resolveArbitrageTradesUserId}. */
+export async function getArbitrageBaseCapital(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<number> {
+  const capitalUserId = await resolveArbitrageTradesUserId(prisma, userId);
+  const row = await prisma.user.findUnique({
+    where: { id: capitalUserId },
+    select: { cryptoBalance: true },
+  });
+  const bal = row?.cryptoBalance ?? 0;
+  return Number.isFinite(bal) ? bal : 0;
+}
+
 export async function sumArbitrageNetProfitSince(
   prisma: PrismaClient,
   userId: string,

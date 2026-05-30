@@ -14,6 +14,7 @@ import {
 } from "../services/dashboardMetricsService.js";
 import {
   getUserArbitrageDashboardMetrics,
+  getArbitrageBaseCapital,
   resolveArbitrageTradesUserId,
   sumArbitrageNetProfitAllTime,
 } from "../services/arbitrageMetricsService.js";
@@ -279,8 +280,9 @@ export function createUserController(prisma: PrismaClient) {
 
       const tradesUserId = await resolveArbitrageTradesUserId(prisma, userId);
 
-      const [totalEarnings, trades] = await Promise.all([
+      const [totalEarnings, baseCapital, trades] = await Promise.all([
         sumArbitrageNetProfitAllTime(prisma, tradesUserId),
+        getArbitrageBaseCapital(prisma, userId),
         prisma.arbitrageTrade.findMany({
           where: { userId: tradesUserId },
           orderBy: { createdAt: "desc" },
@@ -303,6 +305,7 @@ export function createUserController(prisma: PrismaClient) {
 
       res.json({
         totalEarnings,
+        baseCapital,
         trades: trades.map((t) => ({
           ...t,
           createdAt: t.createdAt.toISOString(),
@@ -325,18 +328,22 @@ export function createUserController(prisma: PrismaClient) {
         return;
       }
 
-      const rows = await prisma.arbitrageWithdrawal.findMany({
-        where: { userId },
-        orderBy: { date: "desc" },
-        select: {
-          id: true,
-          amount: true,
-          date: true,
-          createdAt: true,
-        },
-      });
+      const [rows, baseCapital] = await Promise.all([
+        prisma.arbitrageWithdrawal.findMany({
+          where: { userId },
+          orderBy: { date: "desc" },
+          select: {
+            id: true,
+            amount: true,
+            date: true,
+            createdAt: true,
+          },
+        }),
+        getArbitrageBaseCapital(prisma, userId),
+      ]);
 
       res.json({
+        baseCapital,
         withdrawals: rows.map((w) => ({
           id: w.id,
           amount: w.amount,
