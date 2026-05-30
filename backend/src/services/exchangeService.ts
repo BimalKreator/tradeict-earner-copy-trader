@@ -234,6 +234,77 @@ function resolveOptionUpnlPriceSync(
   return displayMark;
 }
 
+type OptionTickerQuote = { bid: number | null; ask: number | null };
+
+/** Prefetch bid/ask for open options — Delta terminal UPNL uses bid (long) / offer (short), not mark. */
+async function prefetchOptionTickerQuotes(
+  productSymbols: string[],
+): Promise<Map<string, OptionTickerQuote>> {
+  const cache = new Map<string, OptionTickerQuote>();
+  const unique = [...new Set(productSymbols.map((s) => s.trim()).filter(Boolean))];
+  if (unique.length === 0) return cache;
+
+  const exchange = await getPublicClient();
+  await Promise.all(
+    unique.map(async (sym) => {
+      try {
+        const ccxtSymbol = resolveCcxtSymbol(exchange, sym);
+        const ticker = await exchange.fetchTicker(ccxtSymbol);
+        cache.set(sym, {
+          bid: numberOrNull(ticker.bid),
+          ask: numberOrNull(ticker.ask),
+        });
+      } catch {
+        cache.set(sym, { bid: null, ask: null });
+      }
+    }),
+  );
+  return cache;
+}
+
+function collectOpenOptionProductSymbols(rawList: unknown[]): string[] {
+  const out: string[] = [];
+  for (const row of rawList) {
+    if (!row || typeof row !== "object") continue;
+    const position = row as Record<string, unknown>;
+    const info =
+      position.info != null && typeof position.info === "object"
+        ? (position.info as Record<string, unknown>)
+        : null;
+    const rawSize =
+      numberOrNull(position.size) ??
+      numberOrNull(info?.size) ??
+      numberOrNull(position.contracts);
+    if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
+    const productSymbol = String(
+      position.product_symbol ?? position.product_id ?? "",
+    ).trim();
+    if (productSymbol && isDeltaOptionProductId(productSymbol)) {
+      out.push(productSymbol);
+    }
+  }
+  return out;
+}
+
+/** Lite options UPNL — REST bid/offer first, then prefetched ticker, mark last. */
+function resolveOptionUpnlPriceLite(
+  position: Record<string, unknown>,
+  side: TradeSide,
+  displayMark: number | null,
+  productSymbol: string,
+  tickerCache: Map<string, OptionTickerQuote>,
+): number | null {
+  const fromRest = resolveOptionUpnlPriceSync(position, side, null);
+  if (fromRest != null) return fromRest;
+
+  const cached = tickerCache.get(productSymbol.trim());
+  if (cached) {
+    if (side === "BUY" && cached.bid != null && cached.bid > 0) return cached.bid;
+    if (side === "SELL" && cached.ask != null && cached.ask > 0) return cached.ask;
+  }
+  return displayMark;
+}
+
 function computePositionUnrealizedPnl(args: {
   isOption: boolean;
   side: TradeSide;
@@ -904,6 +975,10 @@ async function fetchDeltaMarginedPositionSnapshotInner(
 
   const rawList = Array.isArray(response?.result) ? response.result : [];
 
+  const optionTickerCache = lite
+    ? await prefetchOptionTickerQuotes(collectOpenOptionProductSymbols(rawList))
+    : new Map<string, OptionTickerQuote>();
+
   const open: DeltaLivePosition[] = [];
   const explicitFlatLegKeys: string[] = [];
 
@@ -1014,15 +1089,35 @@ async function fetchDeltaMarginedPositionSnapshotInner(
 
       if (lite) {
         // Options: never trust raw API unrealized_pnl on Delta India (not USD terminal value).
-        unrealizedPnl = computePositionUnrealizedPnl({
-          isOption,
-          side,
-          entryPrice,
-          markPrice,
-          realBaseSize,
-          position,
-          lite: true,
-        });
+        if (isOption && entryPrice !== null) {
+          const upnlPrice = resolveOptionUpnlPriceLite(
+            position,
+            side,
+            markPrice,
+            productSymbol,
+            optionTickerCache,
+          );
+          if (upnlPrice !== null) {
+            const sign = side === "SELL" ? -1 : 1;
+            unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
+            const funding = parseFloat(
+              String(position.unrealized_funding_pnl ?? "0"),
+            );
+            if (!Number.isNaN(funding) && unrealizedPnl !== null) {
+              unrealizedPnl += funding;
+            }
+          }
+        } else {
+          unrealizedPnl = computePositionUnrealizedPnl({
+            isOption,
+            side,
+            entryPrice,
+            markPrice,
+            realBaseSize,
+            position,
+            lite: true,
+          });
+        }
         if (unrealizedPnl === null && !isOption) {
           unrealizedPnl = parseApiUnrealizedPnl(position);
           if (unrealizedPnl === null && entryPrice !== null && markPrice !== null) {
