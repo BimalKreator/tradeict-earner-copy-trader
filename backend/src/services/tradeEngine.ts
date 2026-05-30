@@ -31,7 +31,7 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
-import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers } from "./followerTradeExecution.js";
+import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers, forceSyncMasterOpenToFollowers } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveCopySubscribersForStrategy,
@@ -1425,6 +1425,7 @@ async function copyMasterFillToSubscribers(
     masterContracts: number;
     avgPrice: number;
     masterFillKey: string;
+    forceRestSync?: boolean;
   },
 ): Promise<void> {
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
@@ -1445,6 +1446,7 @@ async function copyMasterFillToSubscribers(
     masterLots: args.masterContracts,
     avgPrice: args.avgPrice,
     masterFillKey: args.masterFillKey,
+    ...(args.forceRestSync ? { forceRestSync: true } : {}),
   });
 }
 
@@ -1649,8 +1651,8 @@ class MasterPositionTracker {
 }
 
 /**
- * REST fallback: compare exchange master positions to the shared tracker every
- * {@link MASTER_REST_POLL_MS}. Catches manual UI fills that private WS missed.
+ * REST fallback: poll master exchange positions and force-sync follower opens
+ * when bot-managed DB qty is missing. Runs every {@link MASTER_REST_POLL_MS}.
  */
 async function pollMasterPositionsFallback(
   prisma: PrismaClient,
@@ -1714,7 +1716,6 @@ async function pollMasterPositionsFallback(
       console.log(
         `[MASTER-REST-SYNC] baseline seeded ${masters.length} open master leg(s)`,
       );
-      return;
     }
 
     const seenLegs = new Set<string>();
@@ -1725,46 +1726,29 @@ async function pollMasterPositionsFallback(
       const legKey = masterLegKey(m.deltaSymbol, m.side);
       seenLegs.add(legKey);
 
-      const prev = tracker.maxContractsForSymbolSide(m.deltaSymbol, m.side);
-      const next = m.masterContracts;
-
-      if (next > prev) {
-        const increment = next - prev;
-        console.log(
-          "[MASTER-REST-SYNC] Detected missing/new master position, triggering copy for:",
-          m.deltaSymbol,
+      const entryPrice = await resolveMasterCopyEntryPrice(
+        m.deltaSymbol,
+        m.entryPrice,
+      );
+      if (entryPrice == null) {
+        console.warn(
+          `[MASTER-REST-SYNC] skip force sync ${m.deltaSymbol} — no entry/mark price`,
         );
-        const entryPrice = await resolveMasterCopyEntryPrice(
-          m.deltaSymbol,
-          m.entryPrice,
-        );
-        if (entryPrice == null) {
-          console.warn(
-            `[MASTER-REST-SYNC] skip copy ${m.deltaSymbol} +${increment} — no entry/mark price`,
-          );
-          continue;
-        }
-
-        const fillKey = `rest-sync:${buildMasterFillKey([
-          m.deltaSymbol,
-          m.side,
-          String(prev),
-          String(next),
-          String(entryPrice),
-        ])}`;
-        await copyMasterFillToSubscribers(prisma, strat.id, {
+      } else {
+        await forceSyncMasterOpenToFollowers(prisma, {
           symbol: m.deltaSymbol,
           side: m.side,
-          masterContracts: increment,
+          masterLots: m.masterContracts,
           avgPrice: entryPrice,
-          masterFillKey: fillKey,
+          masterFillKey: `force-rest:${legKey}:${m.masterContracts}`,
+          forceRestSync: true,
         });
       }
 
       tracker.applyMasterLeg({
         symbol: m.deltaSymbol,
         side: m.side,
-        contracts: next,
+        contracts: m.masterContracts,
         avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
       });
     }

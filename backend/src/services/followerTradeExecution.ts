@@ -28,6 +28,7 @@ import {
   subscriptionSyncBlocksReconcile,
 } from "./subscriptionSyncService.js";
 import {
+  buildClientOrderId,
   buildStableCopyClientOrderId,
   closeTradePositionsForLeg,
   recordTradePositionOpen,
@@ -209,6 +210,8 @@ export type MasterOpenFillArgs = {
   avgPrice: number;
   /** Master order id or fill fingerprint — one follower leg per key. */
   masterFillKey: string;
+  /** REST force-sync: bypass slippage, syncStatus, and stable dedup gates. */
+  forceRestSync?: boolean;
 };
 
 export type MasterCloseFillArgs = {
@@ -240,6 +243,10 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   prisma: PrismaClient,
   fill: MasterOpenFillArgs,
 ): Promise<{ strategyId: string; fanoutCount: number } | null> {
+  if (fill.forceRestSync) {
+    return forceSyncMasterOpenToFollowers(prisma, fill);
+  }
+
   const strategy = await resolveFutureHedgeStrategy(prisma);
   if (!strategy.isActive) {
     console.log("[copy] Future Hedge paused — skip master open fan-out");
@@ -434,6 +441,170 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
 }
 
 /**
+ * REST force-sync: align followers to master runtime positions using DB bot qty
+ * as source of truth. Bypasses slippage, syncStatus blocks, and stable fill dedup.
+ */
+export async function forceSyncMasterOpenToFollowers(
+  prisma: PrismaClient,
+  fill: MasterOpenFillArgs,
+): Promise<{ strategyId: string; fanoutCount: number } | null> {
+  const strategy = await resolveFutureHedgeStrategy(prisma);
+  if (!strategy.isActive) {
+    console.log("[FORCE-SYNC] Future Hedge paused — skip force open sync");
+    return null;
+  }
+  if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
+    return null;
+  }
+
+  const strategyId = strategy.id;
+  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  if (subscribers.length === 0) {
+    return { strategyId, fanoutCount: 0 };
+  }
+
+  const pending: Array<{
+    sub: (typeof subscribers)[number];
+    expectedLots: number;
+  }> = [];
+
+  for (const sub of subscribers) {
+    const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
+    const actualLots = await sumOpenFollowerBotQuantity(prisma, {
+      strategyId,
+      userId: sub.userId,
+      symbol: fill.symbol,
+      side: fill.side,
+    });
+    if (actualLots <= 0 && expectedLots > 0) {
+      pending.push({ sub, expectedLots });
+    }
+  }
+
+  if (pending.length === 0) {
+    return { strategyId, fanoutCount: 0 };
+  }
+
+  console.log(
+    "[FORCE-SYNC] Forcing market open order synchronization for followers on symbol:",
+    fill.symbol,
+  );
+
+  await recordTradePositionOpen(prisma, {
+    isMaster: true,
+    strategyId,
+    symbol: fill.symbol,
+    side: fill.side,
+    quantity: fill.masterLots,
+    entryPrice: fill.avgPrice,
+  });
+
+  let tickLast: number | undefined;
+  try {
+    const tick = await fetchDeltaTicker(fill.symbol);
+    if (tick.last != null && Number.isFinite(tick.last)) {
+      tickLast = tick.last;
+    }
+  } catch {
+    /* use master entry */
+  }
+  const entryPrice =
+    tickLast != null && tickLast > 0 ? tickLast : fill.avgPrice;
+
+  await Promise.all(
+    pending.map(async ({ sub, expectedLots }) => {
+      const lots = Math.max(1, expectedLots);
+      const creds = resolveCopySubscriptionCreds(sub);
+      const clientOrderId = buildClientOrderId({
+        strategyId,
+        userId: sub.userId,
+        symbol: fill.symbol,
+      });
+
+      if (!creds) {
+        await persistCopyTradeRow(prisma, {
+          userId: sub.userId,
+          strategyId,
+          symbol: fill.symbol,
+          side: fill.side,
+          size: lots,
+          entryPrice,
+          status: TradeStatus.FAILED,
+          exitReason: EXIT_REASON.NO_API_CREDENTIALS,
+          clientOrderId,
+        });
+        return;
+      }
+
+      console.log(
+        `[FORCE-SYNC] market open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+          `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
+      );
+
+      const result = await executeFollowerTradeWithVerification(prisma, {
+        strategyId,
+        userId: sub.userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: fill.symbol,
+        side: fill.side,
+        size: lots,
+        entryPrice,
+        clientOrderId,
+        forceRestSync: true,
+      });
+
+      if (result.success && result.verified) {
+        await markSubscriptionSynced(prisma, {
+          userId: sub.userId,
+          strategyId,
+        });
+        await recordTradePositionOpen(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+          quantity: lots,
+          entryPrice,
+          clientOrderId,
+          ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
+        });
+      } else {
+        await markSubscriptionSyncFailed(prisma, {
+          userId: sub.userId,
+          strategyId,
+          error: result.error ?? "Force-sync open failed",
+        });
+      }
+
+      await persistCopyTradeRow(prisma, {
+        userId: sub.userId,
+        strategyId,
+        symbol: fill.symbol,
+        side: fill.side,
+        size: lots,
+        entryPrice,
+        status:
+          result.success && result.verified
+            ? TradeStatus.OPEN
+            : TradeStatus.FAILED,
+        tradingFee: result.success ? (result.feeCost ?? 0) : 0,
+        clientOrderId,
+        ...(!result.success || !result.verified
+          ? {
+              exitReason: isHardExecutionError(result.error ?? "")
+                ? EXIT_REASON.INSUFFICIENT_MARGIN
+                : EXIT_REASON.EXECUTION_FAILED,
+            }
+          : {}),
+      });
+    }),
+  );
+
+  return { strategyId, fanoutCount: pending.length };
+}
+
+/**
  * Place reduce-only closes for each Future Hedge follower when the master leg flats.
  */
 export async function syncMasterCloseToFutureHedgeFollowers(
@@ -617,6 +788,8 @@ export async function executeFollowerTradeWithVerification(
     entryPrice?: number;
     /** Stable exchange client order id — generated once per master fill leg. */
     clientOrderId?: string;
+    /** REST force-sync: skip subscription syncStatus gate on the open path. */
+    forceRestSync?: boolean;
   },
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
