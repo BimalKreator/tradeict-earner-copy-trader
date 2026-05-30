@@ -1178,13 +1178,21 @@ function metaNetEquityFrom(...sources: unknown[]): number | null {
   for (const src of sources) {
     const rec = asBalanceRecord(src);
     if (!rec) continue;
+
+    // Wallet API passes `response.meta` directly — net_equity lives on the object itself.
+    const direct =
+      numberOrNull(rec.net_equity) ??
+      numberOrNull(rec.netEquity) ??
+      numberOrNull(rec.equity);
+    if (direct !== null && Number.isFinite(direct)) return direct;
+
     const meta = asBalanceRecord(rec.meta);
     if (!meta) continue;
-    const eq =
+    const nested =
       numberOrNull(meta.net_equity) ??
       numberOrNull(meta.netEquity) ??
       numberOrNull(meta.equity);
-    if (eq !== null && Number.isFinite(eq)) return eq;
+    if (nested !== null && Number.isFinite(nested)) return nested;
   }
   return null;
 }
@@ -1201,8 +1209,12 @@ function positiveLockedMarginUsd(row: Record<string, unknown>): number {
     "blocked_balance",
     "cross_position_margin",
     "cross_order_margin",
+    "cross_locked_collateral",
     "cross_initial_margin",
     "initial_margin",
+    "portfolio_margin",
+    "commission",
+    "cross_commission",
     "used_balance",
   ];
   let sum = 0;
@@ -1293,7 +1305,7 @@ function parseDeltaBalanceBreakdown(
 /** Parse a Delta India `/v2/wallet/balances` row (USD wallet). */
 function parseDeltaWalletBalanceRow(
   row: Record<string, unknown>,
-  responseMeta?: Record<string, unknown> | null,
+  ...equitySources: unknown[]
 ): DeltaBalanceBreakdown | null {
   const asset =
     row.asset != null && typeof row.asset === "object"
@@ -1310,7 +1322,7 @@ function parseDeltaWalletBalanceRow(
     numberOrNull(row.available_margin) ??
     0;
 
-  const netEquity = metaNetEquityFrom(row, responseMeta);
+  const netEquity = metaNetEquityFrom(...equitySources, row);
   const cashBalance =
     numberOrNull(row.balance) ??
     numberOrNull(row.wallet_balance) ??
@@ -1335,13 +1347,13 @@ async function fetchDeltaWalletBalanceBreakdownUsd(
       }
     ).privateGetWalletBalances()) as WalletResponse;
 
-    const responseMeta = asBalanceRecord(response.meta);
     const rows = Array.isArray(response?.result) ? response.result : [];
     for (const row of rows) {
       if (!row || typeof row !== "object") continue;
       const parsed = parseDeltaWalletBalanceRow(
         row as Record<string, unknown>,
-        responseMeta,
+        response,
+        response.meta,
       );
       if (parsed) return parsed;
     }
