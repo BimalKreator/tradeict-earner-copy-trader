@@ -124,6 +124,101 @@ function followerContractsFromMaster(
   return followerLotsFromMaster(masterContracts, { multiplier });
 }
 
+/** True when Delta private WS auth succeeded (API key handshake variants). */
+function isDeltaPrivateWsAuthSuccess(msg: Record<string, unknown>): boolean {
+  const type = String(msg.type ?? "").toLowerCase();
+  if (type === "key-auth" || type === "key_auth") {
+    return (
+      msg.success === true ||
+      String(msg.message ?? "").toLowerCase().includes("success")
+    );
+  }
+  if (type === "success" || type === "authenticated" || type === "auth") {
+    const m = String(msg.message ?? "").toLowerCase();
+    return (
+      m.includes("authenticated") ||
+      m.includes("success") ||
+      msg.success === true
+    );
+  }
+  return false;
+}
+
+function classifyMasterWsEvent(msg: Record<string, unknown>): string {
+  const type = String(msg.type ?? "").toLowerCase();
+  if (type === "orders" || type === "order") return "orders";
+  if (type === "positions" || type === "position") return "positions";
+  if (
+    type === "user_trades" ||
+    type === "user_trade" ||
+    type === "fills" ||
+    type === "fill"
+  ) {
+    return "fills";
+  }
+  return type;
+}
+
+function masterWsSubscribePayload(): {
+  type: string;
+  payload: { channels: Array<{ name: string; symbols: string[] }> };
+} {
+  return {
+    type: "subscribe",
+    payload: {
+      channels: [
+        { name: "orders", symbols: ["all"] },
+        { name: "positions", symbols: ["all"] },
+        { name: "user_trades", symbols: ["all"] },
+      ],
+    },
+  };
+}
+
+async function triggerMasterOpenCopy(
+  prisma: PrismaClient,
+  strategyId: string,
+  args: {
+    symbol: string;
+    side: TradeSide;
+    masterContracts: number;
+    avgPrice: number | null;
+    masterFillKey: string;
+    source: "orders" | "positions" | "fills";
+  },
+): Promise<void> {
+  if (args.masterContracts <= 0) return;
+
+  console.log(
+    `[MASTER-WS] Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
+      `(source=${args.source} side=${args.side} qty=${args.masterContracts})`,
+  );
+
+  const entryPrice = await resolveMasterCopyEntryPrice(
+    args.symbol,
+    args.avgPrice,
+  );
+  if (entryPrice == null) {
+    console.warn(
+      `[MASTER-WS] skip copy ${args.symbol} — could not resolve entry/mark price`,
+    );
+    return;
+  }
+
+  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+  console.log(
+    `[MASTER-WS] Future Hedge strategyId=${futureHedgeId ?? "none"} socketStrategyId=${strategyId}`,
+  );
+
+  await copyMasterFillToSubscribers(prisma, strategyId, {
+    symbol: args.symbol,
+    side: args.side,
+    masterContracts: args.masterContracts,
+    avgPrice: entryPrice,
+    masterFillKey: args.masterFillKey,
+  });
+}
+
 function normalizeSide(raw: unknown): TradeSide | null {
   const s = String(raw ?? "").toLowerCase();
   if (s === "buy" || s === "long") return "BUY";
@@ -236,6 +331,7 @@ function mergePayloadLayers(raw: unknown): Record<string, unknown> {
 /** Delta product id from WS / REST payloads (perps and options). */
 function extractDeltaProductSymbol(o: Record<string, unknown>): string {
   const product = asRecord(o.product);
+  const productId = o.product_id ?? product?.id;
   const candidates: unknown[] = [
     o.product_symbol,
     o.symbol,
@@ -244,6 +340,7 @@ function extractDeltaProductSymbol(o: Record<string, unknown>): string {
     o.derivative_symbol,
     product?.symbol,
     product?.product_symbol,
+    productId != null ? String(productId) : null,
   ];
   for (const c of candidates) {
     const s = String(c ?? "").trim();
@@ -322,11 +419,13 @@ function extractOrderFillSignal(
 
   const incrementalFill =
     num(o.fill_qty) ??
+    num(o.filled_size) ??
     num(o.last_fill_qty) ??
     num(o.trade_qty) ??
     num(o.exec_qty);
   const cumulativeFilled =
     num(o.filled_qty) ??
+    num(o.filled_size) ??
     num(o.cum_fill_qty) ??
     num(o.cumulative_fill_qty);
 
@@ -335,8 +434,12 @@ function extractOrderFillSignal(
     contracts = incrementalFill;
   } else if (cumulativeFilled != null && cumulativeFilled > 0) {
     contracts = cumulativeFilled;
-  } else if (orderStateIndicatesFill(state)) {
-    contracts = num(o.size) ?? num(o.order_qty);
+  } else if (orderStateIndicatesFill(state) || state === "closed") {
+    contracts = num(o.size) ?? num(o.order_qty) ?? num(o.quantity);
+  } else if (state === "open" || state === "pending") {
+    const partial =
+      num(o.filled_qty) ?? num(o.filled_size) ?? num(o.cum_fill_qty);
+    if (partial != null && partial > 0) contracts = partial;
   }
 
   if (contracts == null || contracts <= 0) return null;
@@ -365,6 +468,126 @@ function extractOrderFillSignal(
     ]);
 
   return { symbol, side, contracts, avgPrice, reduceOnly, fillKey };
+}
+
+/** `user_trades` / fill stream — common for manual UI market orders. */
+function extractUserTradeFillSignal(
+  raw: unknown,
+): {
+  symbol: string;
+  side: TradeSide;
+  contracts: number;
+  avgPrice: number | null;
+  fillKey: string;
+} | null {
+  const o = mergePayloadLayers(raw);
+  const symbol = extractDeltaProductSymbol(o);
+  if (!symbol) return null;
+
+  const side = normalizeSide(o.side ?? o.order_side ?? o.direction);
+  if (!side) return null;
+
+  const contracts =
+    num(o.size) ??
+    num(o.qty) ??
+    num(o.quantity) ??
+    num(o.fill_qty) ??
+    num(o.trade_qty);
+  if (contracts == null || contracts <= 0) return null;
+
+  const avgPrice =
+    num(o.price) ??
+    num(o.fill_price) ??
+    num(o.average_fill_price) ??
+    num(o.avg_fill_price);
+
+  const tradeIdRaw = o.id ?? o.trade_id ?? o.fill_id ?? o.order_id;
+  const tradeId =
+    tradeIdRaw != null ? String(tradeIdRaw).trim() : "";
+  const fillKey =
+    tradeId ||
+    buildMasterFillKey([
+      "user_trade",
+      symbol,
+      side,
+      String(contracts),
+      String(avgPrice ?? 0),
+    ]);
+
+  return { symbol, side, contracts, avgPrice, fillKey };
+}
+
+async function processMasterOrderFillRecords(
+  prisma: PrismaClient,
+  strategyId: string,
+  records: unknown[],
+): Promise<void> {
+  for (const r of records) {
+    const sig = extractOrderFillSignal(r);
+    if (!sig || sig.reduceOnly) continue;
+    registerSymbolsForLivePrices([sig.symbol]);
+    await triggerMasterOpenCopy(prisma, strategyId, {
+      symbol: sig.symbol,
+      side: sig.side,
+      masterContracts: sig.contracts,
+      avgPrice: sig.avgPrice,
+      masterFillKey: sig.fillKey,
+      source: "orders",
+    });
+  }
+}
+
+async function processMasterUserTradeFillRecords(
+  prisma: PrismaClient,
+  strategyId: string,
+  records: unknown[],
+): Promise<void> {
+  for (const r of records) {
+    const sig = extractUserTradeFillSignal(r);
+    if (!sig) continue;
+    registerSymbolsForLivePrices([sig.symbol]);
+    await triggerMasterOpenCopy(prisma, strategyId, {
+      symbol: sig.symbol,
+      side: sig.side,
+      masterContracts: sig.contracts,
+      avgPrice: sig.avgPrice,
+      masterFillKey: sig.fillKey,
+      source: "fills",
+    });
+  }
+}
+
+/** Collect row objects from Delta WS channel payloads (orders, fills, etc.). */
+function collectWsChannelRecords(
+  msg: Record<string, unknown>,
+  fallback: unknown,
+): unknown[] {
+  const records: unknown[] = [];
+  if (Array.isArray(msg.data)) {
+    records.push(...msg.data);
+  }
+  const data = asRecord(msg.data);
+  if (data) {
+    for (const key of [
+      "open",
+      "closed",
+      "orders",
+      "order",
+      "trades",
+      "user_trades",
+      "fills",
+    ]) {
+      const arr = data[key];
+      if (Array.isArray(arr)) records.push(...arr);
+    }
+    if (records.length === 0) records.push(msg.data);
+  }
+  const payload = asRecord(msg.payload);
+  if (records.length === 0 && payload) {
+    records.push(payload);
+  }
+  if (records.length === 0) records.push(fallback);
+  return records;
 }
 
 /**
@@ -1532,64 +1755,46 @@ class StrategyMasterSocket {
       );
     }
 
-    if (
-      type === "success" &&
-      String(msg.message ?? "").toLowerCase().includes("authenticated")
-    ) {
-      const subPayload = {
-        type: "subscribe",
-        payload: {
-          channels: [
-            { name: "orders", symbols: ["all"] },
-            { name: "positions", symbols: ["all"] },
-          ],
-        },
-      };
-      this.ws?.send(JSON.stringify(subPayload));
+    if (isDeltaPrivateWsAuthSuccess(msg)) {
+      this.ws?.send(JSON.stringify(masterWsSubscribePayload()));
+      console.log(
+        `[tradeEngine WS] authenticated — subscribed orders/positions/user_trades strategyId=${this.strategyId}`,
+      );
       void this.seedPositionMapsFromRest();
       return;
     }
 
-    if (type === "orders") {
+    const eventKind = classifyMasterWsEvent(msg);
+
+    if (eventKind === "orders") {
       if (!(await assertStrategyActiveForCopy(this.prisma, this.strategyId))) {
         return;
       }
 
-      const records: unknown[] = [];
-      const data = asRecord(msg.data);
-      if (data) {
-        const open = Array.isArray(data.open) ? data.open : [];
-        const closed = Array.isArray(data.closed) ? data.closed : [];
-        records.push(...open, ...closed);
-      }
-      if (records.length === 0) records.push(parsed);
-
-      for (const r of records) {
-        const sig = extractOrderFillSignal(r);
-        if (!sig || sig.reduceOnly) continue;
-        registerSymbolsForLivePrices([sig.symbol]);
-        const entryPrice = await resolveMasterCopyEntryPrice(
-          sig.symbol,
-          sig.avgPrice,
-        );
-        if (entryPrice == null) {
-          console.warn(
-            `[tradeEngine WS] orders fill ${sig.symbol} ${sig.side} qty=${sig.contracts} — no entry price, skip copy`,
-          );
-          continue;
-        }
-        await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
-          symbol: sig.symbol,
-          side: sig.side,
-          masterContracts: sig.contracts,
-          avgPrice: entryPrice,
-          masterFillKey: sig.fillKey,
-        });
-      }
+      const records = collectWsChannelRecords(msg, parsed);
+      await processMasterOrderFillRecords(
+        this.prisma,
+        this.strategyId,
+        records,
+      );
       return;
     }
 
-    if (type === "positions") {
+    if (eventKind === "fills") {
+      if (!(await assertStrategyActiveForCopy(this.prisma, this.strategyId))) {
+        return;
+      }
+
+      const records = collectWsChannelRecords(msg, parsed);
+      await processMasterUserTradeFillRecords(
+        this.prisma,
+        this.strategyId,
+        records,
+      );
+      return;
+    }
+
+    if (eventKind === "positions") {
       const merged = mergePayloadLayers(parsed);
       const action = String(msg.action ?? "").toLowerCase();
 
@@ -1859,34 +2064,21 @@ class StrategyMasterSocket {
               snap.avgEntry != null && Number.isFinite(snap.avgEntry)
                 ? snap.avgEntry
                 : meta?.avgEntry;
-            const entryPrice = await resolveMasterCopyEntryPrice(
+            const fillKey = `pos:${buildMasterFillKey([
               snap.symbol,
-              entryFromSnap,
-            );
-            if (entryPrice != null && increment > 0) {
-              const fillKey = `pos:${buildMasterFillKey([
-                snap.symbol,
-                snap.side,
-                String(prev),
-                String(next),
-                String(entryPrice),
-              ])}`;
-              console.log(
-                `[EXECUTION] Master position increase ${snap.symbol} ${snap.side} ` +
-                  `${prev} → ${next} (+${increment}) — copying to Future Hedge followers`,
-              );
-              await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
-                symbol: snap.symbol,
-                side: snap.side,
-                masterContracts: increment,
-                avgPrice: entryPrice,
-                masterFillKey: fillKey,
-              });
-            } else {
-              console.warn(
-                `[tradeEngine WS] position increase ${snap.symbol} +${increment} but no entry price — skip copy`,
-              );
-            }
+              snap.side,
+              String(prev),
+              String(next),
+              String(entryFromSnap ?? 0),
+            ])}`;
+            await triggerMasterOpenCopy(this.prisma, this.strategyId, {
+              symbol: snap.symbol,
+              side: snap.side,
+              masterContracts: increment,
+              avgPrice: entryFromSnap ?? null,
+              masterFillKey: fillKey,
+              source: "positions",
+            });
           }
         }
       }
