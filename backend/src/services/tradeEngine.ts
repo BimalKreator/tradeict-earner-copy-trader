@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, createHash } from "node:crypto";
 import WebSocket from "ws";
 import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
@@ -266,6 +266,8 @@ function extractOrderFillSignal(
   contracts: number;
   avgPrice: number;
   reduceOnly: boolean;
+  /** Stable key for follower dedup (master order id or fill fingerprint). */
+  fillKey: string;
 } | null {
   const o = mergePayloadLayers(raw);
   const state = String(o.state ?? o.order_state ?? o.status ?? "");
@@ -294,7 +296,18 @@ function extractOrderFillSignal(
 
   const reduceOnly = Boolean(o.reduce_only ?? o.reduceOnly);
 
-  return { symbol, side, contracts, avgPrice, reduceOnly };
+  const orderIdRaw =
+    o.id ?? o.order_id ?? o.client_order_id ?? o.clientOrderId;
+  const orderId =
+    orderIdRaw != null ? String(orderIdRaw).trim() : "";
+  const fillKey =
+    orderId ||
+    createHash("sha256")
+      .update(`${symbol}|${side}|${contracts}|${avgPrice}|${state}`)
+      .digest("hex")
+      .slice(0, 32);
+
+  return { symbol, side, contracts, avgPrice, reduceOnly, fillKey };
 }
 
 /**
@@ -1106,6 +1119,7 @@ async function copyMasterFillToSubscribers(
     side: TradeSide;
     masterContracts: number;
     avgPrice: number;
+    masterFillKey: string;
   },
 ): Promise<void> {
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
@@ -1125,6 +1139,7 @@ async function copyMasterFillToSubscribers(
     side: args.side,
     masterLots: args.masterContracts,
     avgPrice: args.avgPrice,
+    masterFillKey: args.masterFillKey,
   });
 }
 
@@ -1230,6 +1245,8 @@ class StrategyMasterSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private destroyed = false;
+  /** Serializes WS handlers so fills/closes for this strategy never overlap. */
+  private messageChain: Promise<void> = Promise.resolve();
   /** Last non-zero position per product (for closed detection). */
   private readonly lastPositionContracts = new Map<string, number>();
   private readonly lastOpenMeta = new Map<string, LastOpenMeta>();
@@ -1238,6 +1255,17 @@ class StrategyMasterSocket {
     private readonly prisma: PrismaClient,
     readonly strategyId: string,
   ) {}
+
+  private enqueueMessage(handler: () => Promise<void>): void {
+    this.messageChain = this.messageChain
+      .then(handler)
+      .catch((err) => {
+        console.error(
+          `[tradeEngine WS] queued handler failed strategyId=${this.strategyId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+  }
 
   start(): void {
     if (this.destroyed) return;
@@ -1386,7 +1414,7 @@ class StrategyMasterSocket {
         });
 
         socket.on("message", (data) => {
-          void this.onMessage(data);
+          this.enqueueMessage(() => this.onMessage(data));
         });
 
         socket.on("error", (err) => {
@@ -1488,6 +1516,7 @@ class StrategyMasterSocket {
           side: sig.side,
           masterContracts: sig.contracts,
           avgPrice: sig.avgPrice,
+          masterFillKey: sig.fillKey,
         });
       }
       return;

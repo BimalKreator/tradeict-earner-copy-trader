@@ -379,8 +379,53 @@ function StrategyTabPanel({ group }: { group: UserStrategyGroup }) {
   );
 }
 
+function LiveTradesStrategyTabs({
+  groups,
+  activeId,
+  onSelect,
+}: {
+  groups: UserStrategyGroup[];
+  activeId: string;
+  onSelect: (id: string) => void;
+}) {
+  if (groups.length <= 1) return null;
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Subscribed strategies"
+      className="flex flex-wrap gap-2 border-b border-glassBorder pb-3"
+    >
+      {groups.map((group) => {
+        const selected = group.strategy.id === activeId;
+        const legCount = group.userPositions.length;
+        return (
+          <button
+            key={group.strategy.id}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            onClick={() => onSelect(group.strategy.id)}
+            className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
+              selected
+                ? "border-primary/50 bg-primary/15 text-white ring-1 ring-primary/30"
+                : "border-white/10 bg-white/[0.03] text-white/65 hover:border-white/20 hover:bg-white/[0.06]"
+            }`}
+          >
+            <span className="font-medium">{group.strategy.title}</span>
+            <span className="mt-0.5 block text-[10px] tabular-nums text-white/40">
+              {legCount} open leg{legCount === 1 ? "" : "s"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function DashboardLiveTradesPage() {
   const [groups, setGroups] = useState<UserStrategyGroup[]>([]);
+  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -437,6 +482,17 @@ export default function DashboardLiveTradesPage() {
   }, [load]);
 
   useEffect(() => {
+    if (groups.length === 0) {
+      setActiveStrategyId(null);
+      return;
+    }
+    setActiveStrategyId((prev) => {
+      if (prev && groups.some((g) => g.strategy.id === prev)) return prev;
+      return groups[0]?.strategy.id ?? null;
+    });
+  }, [groups]);
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       void load(true);
     }, LIVE_TRADES_REFRESH_MS);
@@ -469,7 +525,7 @@ export default function DashboardLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Your live Future Hedge copy positions on Delta India.
+              Live copy positions on Delta India for your subscribed strategies.
             </p>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-white/40">
               {lastRefreshed && !loading ? (
@@ -522,8 +578,24 @@ export default function DashboardLiveTradesPage() {
           </Link>
         </div>
       ) : (
-        <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
-          <StrategyTabPanel group={groups[0]!} />
+        <div className="space-y-4">
+          <LiveTradesStrategyTabs
+            groups={groups}
+            activeId={activeStrategyId ?? groups[0]!.strategy.id}
+            onSelect={setActiveStrategyId}
+          />
+          <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
+            {groups.map((group) => {
+              const isActive =
+                group.strategy.id ===
+                (activeStrategyId ?? groups[0]!.strategy.id);
+              return (
+                <div key={group.strategy.id} hidden={!isActive}>
+                  <StrategyTabPanel group={group} />
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

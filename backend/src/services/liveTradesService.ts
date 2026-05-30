@@ -42,6 +42,7 @@ export type LiveStrategySummary = {
   id: string;
   title: string;
   isActive: boolean;
+  autoExitEnabled: boolean;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
 };
@@ -286,6 +287,7 @@ export async function getUserLiveTradesByStrategy(
           id: true,
           title: true,
           isActive: true,
+          autoExitEnabled: true,
           autoExitTarget: true,
           autoExitStopLoss: true,
           masterApiKey: true,
@@ -345,6 +347,7 @@ export async function getUserLiveTradesByStrategy(
         id: sub.strategy.id,
         title: sub.strategy.title,
         isActive: sub.strategy.isActive,
+        autoExitEnabled: sub.strategy.autoExitEnabled,
         autoExitTarget: sub.strategy.autoExitTarget,
         autoExitStopLoss: sub.strategy.autoExitStopLoss,
         multiplier: sub.multiplier,
@@ -393,6 +396,7 @@ export async function getAdminLiveTradesByStrategy(
       isActive: true,
       masterApiKey: true,
       masterApiSecret: true,
+      autoExitEnabled: true,
       autoExitTarget: true,
       autoExitStopLoss: true,
     },
@@ -423,6 +427,7 @@ export async function getAdminLiveTradesByStrategy(
       id: strat.id,
       title: strat.title,
       isActive: strat.isActive,
+      autoExitEnabled: strat.autoExitEnabled,
       autoExitTarget: strat.autoExitTarget,
       autoExitStopLoss: strat.autoExitStopLoss,
     };

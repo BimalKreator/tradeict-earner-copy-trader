@@ -62,6 +62,7 @@ type StrategySection = {
   strategyId: string;
   strategyTitle: string;
   strategyIsActive: boolean;
+  autoExitEnabled: boolean;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
   masterPositions: LiveRow[];
@@ -72,16 +73,22 @@ type StrategySection = {
 const LIVE_TRADES_REFRESH_MS = 8_000;
 
 interface AutoExitPayload {
+  autoExitEnabled?: boolean;
   autoExitTarget?: number | null;
   autoExitStopLoss?: number | null;
 }
 
-type AutoExitSaved = Pick<StrategySection, "autoExitTarget" | "autoExitStopLoss">;
+type AutoExitSaved = Pick<
+  StrategySection,
+  "autoExitEnabled" | "autoExitTarget" | "autoExitStopLoss"
+>;
 
 function parseAutoExitSaved(payload: unknown): AutoExitSaved | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   const p = payload as AutoExitPayload;
   return {
+    autoExitEnabled:
+      typeof p.autoExitEnabled === "boolean" ? p.autoExitEnabled : false,
     autoExitTarget:
       p.autoExitTarget === null || typeof p.autoExitTarget === "number"
         ? (p.autoExitTarget ?? null)
@@ -208,6 +215,12 @@ function parseStrategyGroups(data: unknown): StrategySection[] {
       strategyId: String(strat.id ?? row.strategyId ?? ""),
       strategyTitle: String(strat.title ?? row.strategyTitle ?? "Strategy"),
       strategyIsActive: strat.isActive !== false,
+      autoExitEnabled:
+        typeof strat.autoExitEnabled === "boolean"
+          ? strat.autoExitEnabled
+          : typeof row.autoExitEnabled === "boolean"
+            ? row.autoExitEnabled
+            : false,
       autoExitTarget:
         typeof strat.autoExitTarget === "number"
           ? strat.autoExitTarget
@@ -646,6 +659,36 @@ function StrategyLivePanel({
   );
 }
 
+function AutoExitToggleSwitch({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label="Enable auto-exit target and stop loss"
+      disabled={disabled}
+      onClick={onChange}
+      className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+        checked ? "bg-emerald-500/80" : "bg-slate-700"
+      } ${disabled ? "opacity-50" : ""}`}
+    >
+      <span
+        className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${
+          checked ? "translate-x-5" : "translate-x-0"
+        }`}
+      />
+    </button>
+  );
+}
+
 function RiskManagementPanel({
   strategy,
   totalLivePnl,
@@ -655,6 +698,7 @@ function RiskManagementPanel({
   totalLivePnl: number;
   onSaved: (message: string, updated?: AutoExitSaved) => void;
 }) {
+  const [autoExitEnabled, setAutoExitEnabled] = useState(strategy.autoExitEnabled);
   const [targetInput, setTargetInput] = useState(
     strategy.autoExitTarget != null ? String(strategy.autoExitTarget) : "",
   );
@@ -664,13 +708,20 @@ function RiskManagementPanel({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    setAutoExitEnabled(strategy.autoExitEnabled);
     setTargetInput(
       strategy.autoExitTarget != null ? String(strategy.autoExitTarget) : "",
     );
     setStopInput(
       strategy.autoExitStopLoss != null ? String(strategy.autoExitStopLoss) : "",
     );
-  }, [strategy.autoExitTarget, strategy.autoExitStopLoss]);
+  }, [
+    strategy.autoExitEnabled,
+    strategy.autoExitTarget,
+    strategy.autoExitStopLoss,
+  ]);
+
+  const inputsDisabled = !autoExitEnabled;
 
   const pnlPositive = totalLivePnl > 0;
   const pnlNegative = totalLivePnl < 0;
@@ -683,9 +734,10 @@ function RiskManagementPanel({
     }
 
     const body: {
+      autoExitEnabled: boolean;
       autoExitTarget?: number | null;
       autoExitStopLoss?: number | null;
-    } = {};
+    } = { autoExitEnabled };
 
     if (targetInput.trim() === "") {
       body.autoExitTarget = null;
@@ -780,8 +832,24 @@ function RiskManagementPanel({
         </div>
       </div>
 
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/25 px-3 py-2.5">
+        <div>
+          <p className="text-sm font-medium text-white">
+            Enable Auto-Exit (Target/SL)
+          </p>
+          <p className="text-xs text-white/45">
+            When off, target and stop loss thresholds are saved but not enforced.
+          </p>
+        </div>
+        <AutoExitToggleSwitch
+          checked={autoExitEnabled}
+          disabled={saving}
+          onChange={() => setAutoExitEnabled((prev) => !prev)}
+        />
+      </div>
+
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-        <label className="block">
+        <label className={`block ${inputsDisabled ? "opacity-45" : ""}`}>
           <span className="flex items-center gap-1.5 text-xs font-medium text-white/55">
             <Target className="h-3.5 w-3.5 text-emerald-400/80" aria-hidden />
             Target profit ($)
@@ -792,11 +860,12 @@ function RiskManagementPanel({
             step="any"
             placeholder="e.g. 500"
             value={targetInput}
+            disabled={inputsDisabled}
             onChange={(e) => setTargetInput(e.target.value)}
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/30 disabled:cursor-not-allowed disabled:bg-black/20"
           />
         </label>
-        <label className="block">
+        <label className={`block ${inputsDisabled ? "opacity-45" : ""}`}>
           <span className="flex items-center gap-1.5 text-xs font-medium text-white/55">
             <TrendingDown className="h-3.5 w-3.5 text-red-400/80" aria-hidden />
             Stop loss ($)
@@ -807,8 +876,9 @@ function RiskManagementPanel({
             step="any"
             placeholder="e.g. 5 (exits at −$5)"
             value={stopInput}
+            disabled={inputsDisabled}
             onChange={(e) => setStopInput(e.target.value)}
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30 disabled:cursor-not-allowed disabled:bg-black/20"
           />
         </label>
         <button
@@ -965,8 +1035,55 @@ function PositionTable({
   );
 }
 
+function AdminLiveTradesStrategyTabs({
+  strategies,
+  activeId,
+  onSelect,
+}: {
+  strategies: StrategySection[];
+  activeId: string;
+  onSelect: (id: string) => void;
+}) {
+  if (strategies.length <= 1) return null;
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Active strategies"
+      className="flex flex-wrap gap-2 border-b border-glassBorder pb-3"
+    >
+      {strategies.map((strategy) => {
+        const selected = strategy.strategyId === activeId;
+        const masterLegs = strategy.masterPositions.length;
+        const followers = strategy.subscribers.length;
+        return (
+          <button
+            key={strategy.strategyId}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            onClick={() => onSelect(strategy.strategyId)}
+            className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
+              selected
+                ? "border-primary/50 bg-primary/15 text-white ring-1 ring-primary/30"
+                : "border-white/10 bg-white/[0.03] text-white/65 hover:border-white/20 hover:bg-white/[0.06]"
+            }`}
+          >
+            <span className="font-medium">{strategy.strategyTitle}</span>
+            <span className="mt-0.5 block text-[10px] tabular-nums text-white/40">
+              {masterLegs} master · {followers} follower
+              {followers === 1 ? "" : "s"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function AdminLiveTradesPage() {
   const [strategies, setStrategies] = useState<StrategySection[]>([]);
+  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1148,6 +1265,17 @@ export default function AdminLiveTradesPage() {
   }, [load]);
 
   useEffect(() => {
+    if (strategies.length === 0) {
+      setActiveStrategyId(null);
+      return;
+    }
+    setActiveStrategyId((prev) => {
+      if (prev && strategies.some((s) => s.strategyId === prev)) return prev;
+      return strategies[0]?.strategyId ?? null;
+    });
+  }, [strategies]);
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       void load({ silent: true });
     }, LIVE_TRADES_REFRESH_MS);
@@ -1183,8 +1311,9 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Future Hedge Strategy — master positions and active follower grid.
-              Refreshes every {LIVE_TRADES_REFRESH_MS / 1000}s without reloading.
+              Master positions and active follower grid for all configured
+              strategies. Refreshes every {LIVE_TRADES_REFRESH_MS / 1000}s
+              without reloading.
             </p>
             {lastRefreshed && !loading ? (
               <p className="mt-1 flex items-center gap-2 text-xs text-white/40">
@@ -1225,44 +1354,54 @@ export default function AdminLiveTradesPage() {
           Future Hedge Strategy is not configured yet.
         </p>
       ) : (
-        (() => {
-          const panel = strategies[0];
-          if (!panel) return null;
-          const expanded =
-            expandedSubsByStrategy[panel.strategyId] ??
-            new Set(panel.subscribers.map((u) => u.userId));
-          return (
-            <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
-              <StrategyLivePanel
-                strategy={panel}
-                isActiveTab
-                expandedSubs={expanded}
-                onToggleSubscriber={(userId) =>
-                  toggleSubscriberExpanded(panel.strategyId, userId)
-                }
-                onCloseTrade={closeTrade}
-                closingKey={closingKey}
-                onSyncUser={syncUser}
-                syncingUserId={syncingUserId}
-                onAutoExitSaved={(message, updated) => {
-                  setToast(message);
-                  if (updated) {
-                    setStrategies((prev) =>
-                      prev.map((row) =>
-                        row.strategyId === panel.strategyId
-                          ? { ...row, ...updated }
-                          : row,
-                      ),
-                    );
-                  }
-                  if (message.includes("saved")) {
-                    void load({ silent: true });
-                  }
-                }}
-              />
-            </div>
-          );
-        })()
+        <div className="space-y-4">
+          <AdminLiveTradesStrategyTabs
+            strategies={strategies}
+            activeId={activeStrategyId ?? strategies[0]!.strategyId}
+            onSelect={setActiveStrategyId}
+          />
+          <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
+            {strategies.map((panel) => {
+              const isActive =
+                panel.strategyId ===
+                (activeStrategyId ?? strategies[0]!.strategyId);
+              const expanded =
+                expandedSubsByStrategy[panel.strategyId] ??
+                new Set(panel.subscribers.map((u) => u.userId));
+              return (
+                <div key={panel.strategyId} hidden={!isActive}>
+                  <StrategyLivePanel
+                    strategy={panel}
+                    isActiveTab={isActive}
+                    expandedSubs={expanded}
+                    onToggleSubscriber={(userId) =>
+                      toggleSubscriberExpanded(panel.strategyId, userId)
+                    }
+                    onCloseTrade={closeTrade}
+                    closingKey={closingKey}
+                    onSyncUser={syncUser}
+                    syncingUserId={syncingUserId}
+                    onAutoExitSaved={(message, updated) => {
+                      setToast(message);
+                      if (updated) {
+                        setStrategies((prev) =>
+                          prev.map((row) =>
+                            row.strategyId === panel.strategyId
+                              ? { ...row, ...updated }
+                              : row,
+                          ),
+                        );
+                      }
+                      if (message.includes("saved")) {
+                        void load({ silent: true });
+                      }
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
       )}
     </div>
   );

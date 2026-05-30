@@ -282,11 +282,13 @@ export function createAdminController(prisma: PrismaClient) {
       const body = req.body as {
         autoExitTarget?: unknown;
         autoExitStopLoss?: unknown;
+        autoExitEnabled?: unknown;
       };
 
       const data: {
         autoExitTarget?: number | null;
         autoExitStopLoss?: number | null;
+        autoExitEnabled?: boolean;
       } = {};
 
       if ("autoExitTarget" in body) {
@@ -323,9 +325,25 @@ export function createAdminController(prisma: PrismaClient) {
         }
       }
 
-      if (!("autoExitTarget" in body) && !("autoExitStopLoss" in body)) {
+      if ("autoExitEnabled" in body) {
+        if (typeof body.autoExitEnabled === "boolean") {
+          data.autoExitEnabled = body.autoExitEnabled;
+        } else {
+          res.status(400).json({
+            error: "autoExitEnabled must be a boolean",
+          });
+          return;
+        }
+      }
+
+      if (
+        !("autoExitTarget" in body) &&
+        !("autoExitStopLoss" in body) &&
+        !("autoExitEnabled" in body)
+      ) {
         res.status(400).json({
-          error: "Provide autoExitTarget and/or autoExitStopLoss",
+          error:
+            "Provide autoExitTarget, autoExitStopLoss, and/or autoExitEnabled",
         });
         return;
       }
@@ -336,6 +354,7 @@ export function createAdminController(prisma: PrismaClient) {
         select: {
           id: true,
           title: true,
+          autoExitEnabled: true,
           autoExitTarget: true,
           autoExitStopLoss: true,
         },

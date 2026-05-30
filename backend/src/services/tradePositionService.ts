@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   type PrismaClient,
   TradePositionStatus,
@@ -42,6 +42,33 @@ export function buildClientOrderId(args: {
   }
   const sym = (args.symbol ?? "sym").replace(/:/g, "_").slice(0, 48);
   return `${args.strategyId}:${scope}:${sym}:${Date.now()}:${randomBytes(4).toString("hex")}`;
+}
+
+/**
+ * Deterministic client order id for one follower leg per master fill/close event.
+ * Reused across exchange retries so duplicate market orders are rejected/idempotent.
+ */
+export function buildStableCopyClientOrderId(args: {
+  strategyId: string;
+  userId: string;
+  masterFillKey: string;
+  symbol: string;
+  side: TradeSide | string;
+  leg: "open" | "close";
+}): string {
+  const sym = compactSymbolKey(args.symbol).slice(0, 24);
+  const side = String(args.side).toUpperCase();
+  const raw = [
+    args.strategyId,
+    args.userId,
+    args.leg,
+    args.masterFillKey.trim(),
+    sym,
+    side,
+  ].join("|");
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 20);
+  const id = `cp:${args.strategyId.slice(0, 8)}:${args.userId.slice(0, 8)}:${hash}`;
+  return id.slice(0, 64);
 }
 
 export type RecordTradePositionOpenArgs = {

@@ -195,10 +195,15 @@ export async function runStrategyAutoExitCheck(
     title: string;
     masterApiKey: string;
     masterApiSecret: string;
+    autoExitEnabled: boolean;
     autoExitTarget: number | null;
     autoExitStopLoss: number | null;
   },
 ): Promise<void> {
+  if (!strategy.autoExitEnabled) {
+    return;
+  }
+
   if (
     strategy.autoExitTarget == null &&
     strategy.autoExitStopLoss == null
@@ -336,6 +341,7 @@ export async function runAllStrategyAutoExitChecks(
   const strategies = await prisma.strategy.findMany({
     where: {
       isActive: true,
+      autoExitEnabled: true,
       OR: [
         { autoExitTarget: { not: null } },
         { autoExitStopLoss: { not: null } },
@@ -346,6 +352,7 @@ export async function runAllStrategyAutoExitChecks(
       title: true,
       masterApiKey: true,
       masterApiSecret: true,
+      autoExitEnabled: true,
       autoExitTarget: true,
       autoExitStopLoss: true,
     },

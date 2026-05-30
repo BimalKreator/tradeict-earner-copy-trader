@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { TradeStatus } from "@prisma/client";
+import { TradePositionStatus, TradeStatus } from "@prisma/client";
 import {
   executeTrade,
   fetchDeltaOpenPositions,
@@ -25,11 +25,12 @@ import {
   markSubscriptionSyncError,
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
+  subscriptionSyncBlocksReconcile,
 } from "./subscriptionSyncService.js";
 import {
-  buildClientOrderId,
-  closeTradePositionsForLeg,
+  buildStableCopyClientOrderId,
   recordTradePositionOpen,
+  closeTradePositionsForLeg,
 } from "./tradePositionService.js";
 
 /** Wait after each successful order before re-checking positions. */
@@ -148,21 +149,56 @@ async function persistCopyTradeRow(
     status: TradeStatus;
     tradingFee?: number;
     exitReason?: ExitReasonValue;
+    clientOrderId?: string;
   },
 ): Promise<void> {
-  await prisma.trade.create({
-    data: {
-      userId: args.userId,
-      strategyId: args.strategyId,
-      symbol: args.symbol,
-      side: args.side,
-      size: args.size,
-      entryPrice: args.entryPrice,
-      status: args.status,
-      ...(args.tradingFee != null ? { tradingFee: args.tradingFee } : {}),
-      ...(args.exitReason ? { exitReason: args.exitReason } : {}),
-    },
+  const data = {
+    userId: args.userId,
+    strategyId: args.strategyId,
+    symbol: args.symbol,
+    side: args.side,
+    size: args.size,
+    entryPrice: args.entryPrice,
+    status: args.status,
+    ...(args.tradingFee != null ? { tradingFee: args.tradingFee } : {}),
+    ...(args.exitReason ? { exitReason: args.exitReason } : {}),
+    ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
+  };
+
+  if (args.clientOrderId) {
+    const existing = await prisma.trade.findUnique({
+      where: { clientOrderId: args.clientOrderId },
+      select: { id: true, status: true },
+    });
+    if (existing) {
+      await prisma.trade.update({
+        where: { id: existing.id },
+        data,
+      });
+      return;
+    }
+  }
+
+  await prisma.trade.create({ data });
+}
+
+async function followerFillAlreadyCopied(
+  prisma: PrismaClient,
+  clientOrderId: string,
+): Promise<boolean> {
+  const trade = await prisma.trade.findUnique({
+    where: { clientOrderId },
+    select: { status: true },
   });
+  if (trade?.status === TradeStatus.OPEN) {
+    return true;
+  }
+
+  const leg = await prisma.tradePosition.findUnique({
+    where: { clientOrderId },
+    select: { status: true },
+  });
+  return leg?.status === TradePositionStatus.OPEN;
 }
 
 export type MasterOpenFillArgs = {
@@ -170,6 +206,8 @@ export type MasterOpenFillArgs = {
   side: TradeSide;
   masterLots: number;
   avgPrice: number;
+  /** Master order id or fill fingerprint — one follower leg per key. */
+  masterFillKey: string;
 };
 
 export type MasterCloseFillArgs = {
@@ -246,6 +284,14 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     await Promise.all(
       subscribers.map(async (sub) => {
         const lots = followerLotsFromMaster(fill.masterLots, sub);
+        const clientOrderId = buildStableCopyClientOrderId({
+          strategyId,
+          userId: sub.userId,
+          masterFillKey: fill.masterFillKey,
+          symbol: fill.symbol,
+          side: fill.side,
+          leg: "open",
+        });
         await markSubscriptionSyncError(prisma, {
           userId: sub.userId,
           strategyId,
@@ -260,6 +306,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           entryPrice: fill.avgPrice,
           status: TradeStatus.FAILED,
           exitReason: EXIT_REASON.SLIPPAGE_EXCEEDED,
+          clientOrderId,
         });
       }),
     );
@@ -269,6 +316,14 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   await Promise.all(
     subscribers.map(async (sub) => {
       const lots = followerLotsFromMaster(fill.masterLots, sub);
+      const clientOrderId = buildStableCopyClientOrderId({
+        strategyId,
+        userId: sub.userId,
+        masterFillKey: fill.masterFillKey,
+        symbol: fill.symbol,
+        side: fill.side,
+        leg: "open",
+      });
       const creds = resolveCopySubscriptionCreds(sub);
 
       if (!creds) {
@@ -286,13 +341,28 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           entryPrice: fill.avgPrice,
           status: TradeStatus.FAILED,
           exitReason: EXIT_REASON.NO_API_CREDENTIALS,
+          clientOrderId,
         });
+        return;
+      }
+
+      if (await followerFillAlreadyCopied(prisma, clientOrderId)) {
+        console.log(
+          `[copy] Skip duplicate master fill user=${sub.userId} ${fill.symbol} clientOrderId=${clientOrderId}`,
+        );
+        return;
+      }
+
+      if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
+        console.log(
+          `[copy] Skip user=${sub.userId} strategyId=${strategyId} — syncStatus=${sub.syncStatus} (admin re-sync required)`,
+        );
         return;
       }
 
       console.log(
         `[copy] Future Hedge open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-          `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
+          `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier}) clientOrderId=${clientOrderId}`,
       );
 
       await markSubscriptionSyncPending(prisma, {
@@ -309,6 +379,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         side: fill.side,
         size: lots,
         entryPrice: fill.avgPrice,
+        clientOrderId,
       });
 
       if (result.success && result.verified) {
@@ -323,8 +394,8 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           side: fill.side,
           quantity: lots,
           entryPrice: fill.avgPrice,
+          clientOrderId,
           ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
-          ...(result.clientOrderId ? { clientOrderId: result.clientOrderId } : {}),
         });
       } else {
         await markSubscriptionSyncFailed(prisma, {
@@ -346,6 +417,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
             ? TradeStatus.OPEN
             : TradeStatus.FAILED,
         tradingFee: result.success ? (result.feeCost ?? 0) : 0,
+        clientOrderId,
         ...(!result.success || !result.verified
           ? {
               exitReason: isHardExecutionError(result.error ?? "")
@@ -519,6 +591,8 @@ export async function executeFollowerTradeWithVerification(
     reduceOnly?: boolean;
     /** Leader fill price for ledger entry (opens). */
     entryPrice?: number;
+    /** Stable exchange client order id — generated once per master fill leg. */
+    clientOrderId?: string;
   },
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
@@ -558,13 +632,18 @@ export async function executeFollowerTradeWithVerification(
   }
 
   if (args.reduceOnly === true) {
-    const closeClientOrderId = args.strategyId
-      ? buildClientOrderId({
-          strategyId: args.strategyId,
-          userId: args.userId,
-          symbol,
-        })
-      : undefined;
+    const closeClientOrderId =
+      args.clientOrderId ??
+      (args.strategyId
+        ? buildStableCopyClientOrderId({
+            strategyId: args.strategyId,
+            userId: args.userId,
+            masterFillKey: `${symbol}:${side}:close`,
+            symbol,
+            side,
+            leg: "close",
+          })
+        : undefined);
     const single = await placeFollowerOrder(
       apiKey,
       apiSecret,
@@ -604,6 +683,19 @@ export async function executeFollowerTradeWithVerification(
   };
   let attempts = 0;
 
+  const openClientOrderId =
+    args.clientOrderId ??
+    (args.strategyId
+      ? buildStableCopyClientOrderId({
+          strategyId: args.strategyId,
+          userId: args.userId,
+          masterFillKey: `${symbol}:${side}:open`,
+          symbol,
+          side,
+          leg: "open",
+        })
+      : undefined);
+
   for (let retry = 0; retry < MAX_RETRIES; retry += 1) {
     const existingBefore = await followerLegContracts(
       apiKey,
@@ -623,15 +715,14 @@ export async function executeFollowerTradeWithVerification(
           side,
           quantity: targetContracts,
           entryPrice: args.entryPrice,
+          ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
           ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
-          ...(lastResult.clientOrderId
-            ? { clientOrderId: lastResult.clientOrderId }
-            : {}),
         });
       }
       return {
         success: true,
         ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
         feeCost: totalFee,
         ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
         attempts: Math.max(attempts, 1),
@@ -646,16 +737,8 @@ export async function executeFollowerTradeWithVerification(
 
     attempts += 1;
     console.log(
-      `[RETRY_LOOP] Execute attempt ${retry + 1}/${MAX_RETRIES} user ${userId} ${symbol} — orderSize=${orderSize} (existing=${existingBefore}, target=${targetContracts})`,
+      `[RETRY_LOOP] Execute attempt ${retry + 1}/${MAX_RETRIES} user ${userId} ${symbol} — orderSize=${orderSize} (existing=${existingBefore}, target=${targetContracts}) clientOrderId=${openClientOrderId ?? "none"}`,
     );
-
-    const openClientOrderId = args.strategyId
-      ? buildClientOrderId({
-          strategyId: args.strategyId,
-          userId: args.userId,
-          symbol,
-        })
-      : undefined;
 
     lastResult = await placeFollowerOrder(
       apiKey,
@@ -715,15 +798,14 @@ export async function executeFollowerTradeWithVerification(
           side,
           quantity: targetContracts,
           entryPrice: args.entryPrice,
+          ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
           ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
-          ...(lastResult.clientOrderId
-            ? { clientOrderId: lastResult.clientOrderId }
-            : {}),
         });
       }
       return {
         success: true,
         ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
         feeCost: totalFee,
         ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
         attempts,
@@ -746,6 +828,7 @@ export async function executeFollowerTradeWithVerification(
     return {
       success: true,
       ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+      ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
       feeCost: totalFee,
       ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
       attempts,

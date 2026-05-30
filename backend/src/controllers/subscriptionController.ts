@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import {
   type PrismaClient,
+  InvoiceStatus,
   SubscriptionStatus,
 } from "@prisma/client";
 import {
@@ -51,6 +52,24 @@ export async function recordTradePnl(
 
 export function createSubscriptionController(prisma: PrismaClient) {
   const USER_PAUSED_STATUS = SubscriptionStatus.PAUSED_DUE_TO_FUNDS;
+
+  const UNPAID_INVOICE_BLOCK_MESSAGE =
+    "Cannot resume or deploy subscription with outstanding unpaid invoices.";
+
+  async function hasUnpaidInvoicesForStrategy(
+    userId: string,
+    strategyId: string,
+  ): Promise<boolean> {
+    const row = await prisma.invoice.findFirst({
+      where: {
+        userId,
+        strategyId,
+        status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+      },
+      select: { id: true },
+    });
+    return row != null;
+  }
 
   async function validateExchangeAccountOwnership(
     userId: string,
@@ -490,6 +509,10 @@ export function createSubscriptionController(prisma: PrismaClient) {
       });
       if (!sub) return void res.status(404).json({ error: "Subscription not found" });
 
+      if (await hasUnpaidInvoicesForStrategy(userId, strategyId)) {
+        return void res.status(403).json({ error: UNPAID_INVOICE_BLOCK_MESSAGE });
+      }
+
       const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
         data: {
@@ -597,6 +620,10 @@ export function createSubscriptionController(prisma: PrismaClient) {
       if (!sub) return void res.status(404).json({ error: "Paused subscription not found" });
       if (!sub.exchangeAccountId) {
         return void res.status(400).json({ error: "Deploy this strategy first (missing exchange account)." });
+      }
+
+      if (await hasUnpaidInvoicesForStrategy(userId, strategyId)) {
+        return void res.status(403).json({ error: UNPAID_INVOICE_BLOCK_MESSAGE });
       }
 
       const updated = await prisma.userStrategySubscription.update({

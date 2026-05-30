@@ -17,6 +17,7 @@ export const STRATEGY_SELECT_ADMIN_LIST: Prisma.StrategySelect = {
   minCapital: true,
   isActive: true,
   syncActiveTrades: true,
+  autoExitEnabled: true,
   autoExitTarget: true,
   autoExitStopLoss: true,
   createdAt: true,
@@ -44,6 +45,7 @@ export const STRATEGY_SELECT_ADMIN_SAFE: Prisma.StrategySelect = {
   minCapital: true,
   isActive: true,
   syncActiveTrades: true,
+  autoExitEnabled: true,
   autoExitTarget: true,
   autoExitStopLoss: true,
   createdAt: true,
@@ -68,6 +70,7 @@ export const STRATEGY_SELECT_AUTO_EXIT: Prisma.StrategySelect = {
   title: true,
   masterApiKey: true,
   masterApiSecret: true,
+  autoExitEnabled: true,
   autoExitTarget: true,
   autoExitStopLoss: true,
 };

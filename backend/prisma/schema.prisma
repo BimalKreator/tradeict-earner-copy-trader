@@ -160,6 +160,8 @@ model Strategy {
   autoExitTarget     Float?
   /** Total master unrealized PnL (USD) at or below negative this value triggers auto-exit (e.g. 5 → exit at -$5). */
   autoExitStopLoss   Float?
+  /** When true, target/stop-loss thresholds may trigger automatic master flat + follower copy. */
+  autoExitEnabled    Boolean @default(false)
   createdAt          DateTime @default(now())
 
   subscriptions      UserStrategySubscription[]
@@ -270,6 +272,8 @@ model Trade {
   status          TradeStatus @default(OPEN)
   /** Why the trade was closed or marked failed (set by trade engine / admin). */
   exitReason      String?
+  /** Stable id for copy dedup (master fill × follower leg). */
+  clientOrderId   String?     @unique
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @default(now()) @updatedAt
 
