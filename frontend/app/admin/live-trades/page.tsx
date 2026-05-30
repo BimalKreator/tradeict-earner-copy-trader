@@ -8,6 +8,7 @@ import {
   Loader2,
   Radio,
   RefreshCw,
+  RotateCcw,
   Shield,
   Target,
   TrendingDown,
@@ -47,6 +48,8 @@ type SubscriberUser = {
   userEmail: string;
   userName?: string | null;
   multiplier: number;
+  syncStatus?: string;
+  syncError?: string | null;
   positions: LiveRow[];
 };
 
@@ -127,6 +130,59 @@ function formatMultiplier(m: number): string {
   return Number.isInteger(rounded) ? `${rounded}x` : `${rounded}x`;
 }
 
+function followerLotsFromMaster(masterLots: number, multiplier: number): number {
+  const scaled = Math.abs(masterLots) * multiplier;
+  return Math.max(1, Math.floor(scaled));
+}
+
+function symbolsRoughMatch(a: string, b: string): boolean {
+  const x = a.replace(/[/:]/g, "").toUpperCase();
+  const y = b.replace(/[/:]/g, "").toUpperCase();
+  return x === y || x.endsWith(y) || y.endsWith(x);
+}
+
+function subscriberSyncFailed(user: SubscriberUser): boolean {
+  const status = (user.syncStatus ?? "SYNCED").toUpperCase();
+  return status === "FAILED" || status === "ERROR";
+}
+
+/** True when follower leg sizes don't match master × multiplier. */
+function subscriberOutOfSync(
+  user: SubscriberUser,
+  masterPositions: LiveRow[],
+): boolean {
+  if (masterPositions.length === 0) return false;
+  for (const master of masterPositions) {
+    const masterLots = master.size ?? 0;
+    if (!Number.isFinite(masterLots) || masterLots <= 0) continue;
+    const expected = followerLotsFromMaster(masterLots, user.multiplier);
+    const leg = user.positions.find(
+      (p) =>
+        symbolsRoughMatch(p.token, master.token) &&
+        p.side.toUpperCase() === master.side.toUpperCase(),
+    );
+    const actual =
+      leg?.size != null && Number.isFinite(leg.size)
+        ? Math.max(0, Math.floor(leg.size))
+        : 0;
+    if (actual !== expected) return true;
+  }
+  return false;
+}
+
+function subscriberNeedsManualSync(
+  user: SubscriberUser,
+  masterPositions: LiveRow[],
+): boolean {
+  return subscriberSyncFailed(user) || subscriberOutOfSync(user, masterPositions);
+}
+
+function syncFailureLabel(user: SubscriberUser): string {
+  const raw = user.syncError?.trim();
+  if (!raw) return "Copy sync failed";
+  return raw.length > 80 ? `${raw.slice(0, 77)}…` : raw;
+}
+
 function parseStrategyGroups(data: unknown): StrategySection[] {
   const rawList = Array.isArray(data)
     ? data
@@ -177,6 +233,14 @@ function parseStrategyGroups(data: unknown): StrategySection[] {
                 typeof s.userName === "string" ? s.userName : null,
               multiplier:
                 typeof s.multiplier === "number" ? s.multiplier : 1,
+              syncStatus:
+                typeof s.syncStatus === "string" ? s.syncStatus : "SYNCED",
+              syncError:
+                typeof s.syncError === "string"
+                  ? s.syncError
+                  : s.syncError === null
+                    ? null
+                    : null,
               positions: Array.isArray(s.positions)
                 ? (s.positions as LiveRow[])
                 : [],
@@ -321,13 +385,17 @@ function MasterLegsTable({
 function SubscriberAccordionItem({
   user,
   strategyId,
+  masterPositions,
   expanded,
   onToggle,
   onCloseTrade,
   closingKey,
+  onSyncUser,
+  syncingUserId,
 }: {
   user: SubscriberUser;
   strategyId: string;
+  masterPositions: LiveRow[];
   expanded: boolean;
   onToggle: () => void;
   onCloseTrade: (args: {
@@ -339,48 +407,101 @@ function SubscriberAccordionItem({
     isMaster: boolean;
   }) => Promise<void>;
   closingKey: string | null;
+  onSyncUser: (strategyId: string, userId: string) => Promise<void>;
+  syncingUserId: string | null;
 }) {
   const totalPnl = sumLivePnl(user.positions);
   const pnlPositive = totalPnl > 0;
   const pnlNegative = totalPnl < 0;
   const displayName = user.userName?.trim() || user.userEmail;
+  const failed = subscriberSyncFailed(user);
+  const outOfSync = subscriberOutOfSync(user, masterPositions);
+  const showSync = subscriberNeedsManualSync(user, masterPositions);
+  const isSyncing = syncingUserId === user.userId;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/10 bg-black/25">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]"
-        aria-expanded={expanded}
-      >
-        {expanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-white/50" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-white/50" />
-        )}
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-white">{displayName}</p>
-          <p className="text-xs text-white/45">
-            {user.userEmail} · Multiplier{" "}
-            <span className="font-semibold text-violet-300">
-              {formatMultiplier(user.multiplier)}
-            </span>
-            · {user.positions.length} leg
-            {user.positions.length === 1 ? "" : "s"}
-          </p>
-        </div>
-        <p
-          className={`shrink-0 text-sm font-bold tabular-nums ${
-            pnlPositive
-              ? "text-emerald-400"
-              : pnlNegative
-                ? "text-red-400"
-                : "text-white/60"
-          }`}
+    <div
+      className={`overflow-hidden rounded-xl border bg-black/25 ${
+        failed
+          ? "border-red-500/45 ring-1 ring-red-500/20"
+          : outOfSync
+            ? "border-amber-500/35 ring-1 ring-amber-500/15"
+            : "border-white/10"
+      }`}
+    >
+      <div className="flex w-full items-stretch gap-0">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]"
+          aria-expanded={expanded}
         >
-          {fmtPnl(totalPnl)}
-        </p>
-      </button>
+          {expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-white/50" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-white/50" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="truncate text-sm font-medium text-white">
+                {displayName}
+              </p>
+              {failed ? (
+                <span
+                  className="inline-flex max-w-full items-center rounded-md bg-red-500/20 px-2 py-0.5 text-xs font-semibold text-red-200 ring-1 ring-red-500/40"
+                  title={syncFailureLabel(user)}
+                >
+                  Failed: {syncFailureLabel(user)}
+                </span>
+              ) : outOfSync ? (
+                <span className="inline-flex items-center rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-100 ring-1 ring-amber-500/35">
+                  Out of sync
+                </span>
+              ) : null}
+            </div>
+            <p className="text-xs text-white/45">
+              {user.userEmail} · Multiplier{" "}
+              <span className="font-semibold text-violet-300">
+                {formatMultiplier(user.multiplier)}
+              </span>
+              · {user.positions.length} leg
+              {user.positions.length === 1 ? "" : "s"}
+            </p>
+          </div>
+          <p
+            className={`shrink-0 text-sm font-bold tabular-nums ${
+              pnlPositive
+                ? "text-emerald-400"
+                : pnlNegative
+                  ? "text-red-400"
+                  : "text-white/60"
+            }`}
+          >
+            {fmtPnl(totalPnl)}
+          </p>
+        </button>
+        {showSync ? (
+          <div className="flex shrink-0 items-center border-l border-white/[0.06] px-3">
+            <button
+              type="button"
+              disabled={isSyncing}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onSyncUser(strategyId, user.userId);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-500/45 bg-violet-500/15 px-2.5 py-1.5 text-xs font-medium text-violet-100 transition hover:bg-violet-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+              title="Mirror master open positions to this follower"
+            >
+              {isSyncing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {isSyncing ? "Syncing…" : "Force Copy / Sync Trade"}
+            </button>
+          </div>
+        ) : null}
+      </div>
       {expanded ? (
         <div className="border-t border-white/[0.06]">
           {user.positions.length > 0 ? (
@@ -411,6 +532,8 @@ function StrategyLivePanel({
   onCloseTrade,
   closingKey,
   onAutoExitSaved,
+  onSyncUser,
+  syncingUserId,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -426,6 +549,8 @@ function StrategyLivePanel({
   }) => Promise<void>;
   closingKey: string | null;
   onAutoExitSaved: (message: string, updated?: AutoExitSaved) => void;
+  onSyncUser: (strategyId: string, userId: string) => Promise<void>;
+  syncingUserId: string | null;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -505,10 +630,13 @@ function StrategyLivePanel({
                 key={user.userId}
                 user={user}
                 strategyId={strategy.strategyId}
+                masterPositions={strategy.masterPositions}
                 expanded={expandedSubs.has(user.userId)}
                 onToggle={() => onToggleSubscriber(user.userId)}
                 onCloseTrade={onCloseTrade}
                 closingKey={closingKey}
+                onSyncUser={onSyncUser}
+                syncingUserId={syncingUserId}
               />
             ))}
           </div>
@@ -845,6 +973,7 @@ export default function AdminLiveTradesPage() {
   const [forbidden, setForbidden] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [closingKey, setClosingKey] = useState<string | null>(null);
+  const [syncingUserId, setSyncingUserId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
@@ -975,6 +1104,44 @@ export default function AdminLiveTradesPage() {
     [load],
   );
 
+  const syncUser = useCallback(
+    async (strategyId: string, userId: string) => {
+      setSyncingUserId(userId);
+      try {
+        const base = resolveAdminApiBase();
+        const res = await fetch(
+          `${base}/admin/strategies/${encodeURIComponent(strategyId)}/sync-user/${encodeURIComponent(userId)}`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            },
+          },
+        );
+        const payload: unknown = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg =
+            typeof payload === "object" && payload !== null
+              ? typeof (payload as { error?: unknown }).error === "string"
+                ? (payload as { error: string }).error
+                : typeof (payload as { syncError?: unknown }).syncError ===
+                    "string"
+                  ? (payload as { syncError: string }).syncError
+                  : `Sync failed (${res.status})`
+              : `Sync failed (${res.status})`;
+          throw new Error(msg);
+        }
+        setToast("Follower synced to master positions.");
+        await load({ silent: true });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to sync follower");
+      } finally {
+        setSyncingUserId(null);
+      }
+    },
+    [load],
+  );
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void load();
@@ -1075,6 +1242,8 @@ export default function AdminLiveTradesPage() {
                 }
                 onCloseTrade={closeTrade}
                 closingKey={closingKey}
+                onSyncUser={syncUser}
+                syncingUserId={syncingUserId}
                 onAutoExitSaved={(message, updated) => {
                   setToast(message);
                   if (updated) {

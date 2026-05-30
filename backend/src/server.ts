@@ -41,7 +41,13 @@ import {
 } from "./services/telegramService.js";
 import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js";
 import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
-import { resolveFutureHedgeStrategy } from "./services/futureHedgeService.js";
+import {
+  hardDeleteStrategyByExactTitle,
+  removeLegacyCryptoOptionsStrategies,
+} from "./services/strategyCleanupService.js";
+
+const CRYPTO_OPTIONS_GHOST_TITLE =
+  "Crypto Options Trading - For Delta Ex India";
 
 const PORT = 5000;
 const __filename = fileURLToPath(import.meta.url);
@@ -56,15 +62,30 @@ const pool = new pg.Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-void resolveFutureHedgeStrategy(prisma)
-  .then((s) => {
-    console.log(
-      `[BOOT] Primary strategy: "${s.title}" (${s.id})`,
+void (async () => {
+  try {
+    const ghost = await hardDeleteStrategyByExactTitle(
+      prisma,
+      CRYPTO_OPTIONS_GHOST_TITLE,
     );
-  })
-  .catch((err) => {
-    console.error("[BOOT] Failed to resolve Future Hedge strategy:", err);
-  });
+    if (ghost) {
+      console.log(
+        `[BOOT] Hard-deleted ghost strategy "${ghost.title}" (${ghost.strategyId})`,
+      );
+    }
+    const legacy = await removeLegacyCryptoOptionsStrategies(prisma);
+    if (legacy.removed.length > 0) {
+      console.log(
+        `[BOOT] Removed ${legacy.removed.length} legacy Crypto Options strateg(ies)`,
+      );
+    }
+    console.log(
+      `[BOOT] Primary strategy: "${legacy.primaryStrategyTitle}" (${legacy.primaryStrategyId})`,
+    );
+  } catch (err) {
+    console.error("[BOOT] Strategy cleanup failed:", err);
+  }
+})();
 
 initBillingCronJobs(prisma);
 initArbitrageEngine(prisma);

@@ -14,6 +14,7 @@ export function activeStrategySubscriptionWhere(
     strategyId,
     isActive: true,
     status: SubscriptionStatus.ACTIVE,
+    strategy: { isActive: true },
     user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
   };
 }
@@ -70,6 +71,22 @@ export async function findActiveCopySubscriptionForUser(
   });
 }
 
+/** Admin manual sync — includes FAILED rows; does not require strategy.isActive. */
+export async function findCopySubscriptionForUser(
+  prisma: PrismaClient,
+  args: { strategyId: string; userId: string },
+): Promise<CopySubscriptionRow | null> {
+  return prisma.userStrategySubscription.findUnique({
+    where: {
+      userId_strategyId: {
+        userId: args.userId,
+        strategyId: args.strategyId,
+      },
+    },
+    include: COPY_SUBSCRIPTION_INCLUDE,
+  });
+}
+
 export function subscriptionMultiplier(sub: { multiplier: number }): number {
   const m = sub.multiplier;
   return Number.isFinite(m) && m > 0 ? m : 1;
@@ -88,10 +105,22 @@ export async function resolveFutureHedgeStrategyId(
   prisma: PrismaClient,
 ): Promise<string | null> {
   const row = await prisma.strategy.findFirst({
-    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE, isActive: true },
     select: { id: true },
   });
   return row?.id ?? null;
+}
+
+/** True only when the strategy row exists and `Strategy.isActive` is true. */
+export async function isStrategyCopyTradingActive(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<boolean> {
+  const row = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { isActive: true },
+  });
+  return row?.isActive === true;
 }
 
 /** Active copy subscribers for Future Hedge only. */

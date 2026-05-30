@@ -688,6 +688,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     "/strategies/:strategyId/subscribers/:userId",
     adminController.updateStrategySubscriber,
   );
+  router.post(
+    "/strategies/:strategyId/sync-user/:userId",
+    adminController.syncStrategyUser,
+  );
 
   router.put("/strategies/:id", async (req, res, next) => {
     try {

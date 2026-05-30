@@ -31,11 +31,12 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
-import { executeFollowerTradeWithVerification, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers } from "./followerTradeExecution.js";
+import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveCopySubscribersForStrategy,
   findActiveFutureHedgeCopySubscribers,
+  findCopySubscriptionForUser,
   followerLotsFromMaster,
   resolveFutureHedgeStrategyId,
   STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
@@ -43,9 +44,16 @@ import {
 } from "./strategySubscriptionService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import {
+  markSubscriptionSyncFailed,
+  markSubscriptionSyncPending,
+  markSubscriptionSynced,
+  subscriptionSyncBlocksReconcile,
+} from "./subscriptionSyncService.js";
+import {
   registerSymbolsForLivePrices,
   startLivePriceTracker,
 } from "./livePriceTracker.js";
+import { buildClientOrderId } from "./tradePositionService.js";
 
 /** Re-exported live mark cache (updated by {@link startLivePriceTracker} + public WS). */
 export { liveMarkPrices } from "./liveMarkPriceCache.js";
@@ -896,6 +904,200 @@ export async function forceMirrorOpenPositionsForAllSubscribers(
   };
 }
 
+export type SyncFollowerUserResult = {
+  ok: boolean;
+  strategyId: string;
+  userId: string;
+  masterLegs: number;
+  adjustmentsMade: number;
+  syncStatus: string;
+  syncError: string | null;
+  error?: string;
+};
+
+/**
+ * Admin: mirror one follower's Delta legs to the master's open book at market,
+ * scaled by subscription multiplier. Resets sync state on full success.
+ */
+export async function syncFollowerUserToMasterPositions(
+  prisma: PrismaClient,
+  strategyId: string,
+  userId: string,
+): Promise<SyncFollowerUserResult> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: {
+      id: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+    },
+  });
+
+  const keyOk = Boolean(strategy?.masterApiKey?.trim());
+  const secretOk = Boolean(strategy?.masterApiSecret?.trim());
+  if (!strategy || !keyOk || !secretOk) {
+    throw new Error(
+      "Master Delta API key and secret must be set on this strategy.",
+    );
+  }
+
+  const sub = await findCopySubscriptionForUser(prisma, { strategyId, userId });
+  if (!sub) {
+    throw new Error("User is not subscribed to this strategy.");
+  }
+  if (!sub.isActive) {
+    throw new Error("User copy subscription is inactive (isActive is false).");
+  }
+
+  const creds = resolveSubscriptionCreds(sub);
+  if (!creds) {
+    throw new Error("Follower has no Delta API credentials configured.");
+  }
+
+  let masterLegs: MasterLedTrade[];
+  try {
+    masterLegs = await fetchMasterOpenPositions(
+      strategy.masterApiKey,
+      strategy.masterApiSecret,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to fetch master open positions: ${msg}`);
+  }
+
+  await markSubscriptionSyncPending(prisma, { userId, strategyId });
+
+  let followerPositions: DeltaLivePosition[];
+  try {
+    followerPositions = await fetchDeltaOpenPositions(
+      creds.apiKey,
+      creds.apiSecret,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await markSubscriptionSyncFailed(prisma, {
+      userId,
+      strategyId,
+      error: `Failed to fetch follower positions: ${msg}`,
+    });
+    return {
+      ok: false,
+      strategyId,
+      userId,
+      masterLegs: masterLegs.length,
+      adjustmentsMade: 0,
+      syncStatus: "FAILED",
+      syncError: msg,
+      error: msg,
+    };
+  }
+
+  let adjustmentsMade = 0;
+  const errors: string[] = [];
+
+  for (const master of masterLegs) {
+    const expectedContracts = followerContractsFromMaster(
+      master.masterContracts,
+      subscriptionMultiplier(sub),
+    );
+    const leg = findFollowerLeg(
+      followerPositions,
+      master.deltaSymbol,
+      master.side,
+    );
+    const actualContracts = leg
+      ? Math.max(0, Math.floor(Math.abs(leg.contracts)))
+      : 0;
+
+    if (actualContracts === expectedContracts) continue;
+
+    if (actualContracts < expectedContracts) {
+      const diff = expectedContracts - actualContracts;
+      console.log(
+        `[manual-sync] user=${userId} ${master.deltaSymbol} catch-up +${diff} (${master.side})`,
+      );
+      const result = await executeFollowerTradeWithVerification(prisma, {
+        strategyId,
+        userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: master.deltaSymbol,
+        side: master.side,
+        size: diff,
+        entryPrice: master.entryPrice,
+      });
+      if (!result.success || !result.verified) {
+        errors.push(
+          `${master.deltaSymbol} open: ${result.error ?? "execution failed"}`,
+        );
+        break;
+      }
+      adjustmentsMade += 1;
+      continue;
+    }
+
+    const diff = actualContracts - expectedContracts;
+    const trimSide: TradeSide = master.side === "BUY" ? "SELL" : "BUY";
+    console.log(
+      `[manual-sync] user=${userId} ${master.deltaSymbol} trim -${diff} (${trimSide})`,
+    );
+    const closeClientOrderId = buildClientOrderId({
+      strategyId,
+      userId,
+      symbol: master.deltaSymbol,
+    });
+    const trimResult = await executeTrade(
+      creds.apiKey,
+      creds.apiSecret,
+      master.deltaSymbol,
+      trimSide,
+      diff,
+      { reduceOnly: true, clientOrderId: closeClientOrderId },
+    );
+    if (!trimResult.success) {
+      errors.push(
+        `${master.deltaSymbol} trim: ${trimResult.error ?? "execution failed"}`,
+      );
+      break;
+    }
+    adjustmentsMade += 1;
+  }
+
+  if (errors.length > 0) {
+    const errorMsg = errors.join("; ");
+    await markSubscriptionSyncFailed(prisma, {
+      userId,
+      strategyId,
+      error: errorMsg,
+    });
+    const row = await prisma.userStrategySubscription.findUnique({
+      where: { userId_strategyId: { userId, strategyId } },
+      select: { syncStatus: true, syncError: true },
+    });
+    return {
+      ok: false,
+      strategyId,
+      userId,
+      masterLegs: masterLegs.length,
+      adjustmentsMade,
+      syncStatus: row?.syncStatus ?? "FAILED",
+      syncError: row?.syncError ?? errorMsg,
+      error: errorMsg,
+    };
+  }
+
+  await markSubscriptionSynced(prisma, { userId, strategyId });
+  return {
+    ok: true,
+    strategyId,
+    userId,
+    masterLegs: masterLegs.length,
+    adjustmentsMade,
+    syncStatus: "SYNCED",
+    syncError: null,
+  };
+}
+
 async function copyMasterFillToSubscribers(
   prisma: PrismaClient,
   strategyId: string,
@@ -906,6 +1108,10 @@ async function copyMasterFillToSubscribers(
     avgPrice: number;
   },
 ): Promise<void> {
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
+    return;
+  }
+
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
   if (!futureHedgeId || strategyId !== futureHedgeId) {
     console.log(
@@ -933,6 +1139,10 @@ async function notifyMasterFlat(
   },
   options?: { exitReason?: ExitReasonValue },
 ): Promise<void> {
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
+    return;
+  }
+
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
   if (!futureHedgeId || strategyId !== futureHedgeId) {
     console.log(
@@ -1256,6 +1466,10 @@ class StrategyMasterSocket {
     }
 
     if (type === "orders") {
+      if (!(await assertStrategyActiveForCopy(this.prisma, this.strategyId))) {
+        return;
+      }
+
       const records: unknown[] = [];
       const data = asRecord(msg.data);
       if (data) {
@@ -1282,6 +1496,11 @@ class StrategyMasterSocket {
     if (type === "positions") {
       const merged = mergePayloadLayers(parsed);
       const action = String(msg.action ?? "").toLowerCase();
+
+      const copyEnabled = await assertStrategyActiveForCopy(
+        this.prisma,
+        this.strategyId,
+      );
 
       // Build the union of alias keys that should map to a tracked position
       // — both the raw symbol (ETHUSD), the USDT-suffix variant (ETHUSDT)
@@ -1362,6 +1581,10 @@ class StrategyMasterSocket {
 
       // ---- DELETE / CLOSE: WS event is authoritative; do NOT depend on REST ----
       if (action === "delete" || action === "closed") {
+        if (!copyEnabled) {
+          return;
+        }
+
         const rows = collectRows();
         const tryPayloadClose = async (): Promise<boolean> => {
           let closed = 0;
@@ -1502,18 +1725,20 @@ class StrategyMasterSocket {
             contracts: prev,
             avgEntry: snap.avgEntry ?? 0,
           };
-          console.log(
-            `[EXECUTION] Position update -> 0 detected ${closeMeta.symbol} ${closeMeta.side} (${prev} contracts). Triggering follower exits.`,
-          );
-          await notifyMasterFlat(this.prisma, this.strategyId, {
-            symbol: closeMeta.symbol,
-            side: closeMeta.side,
-            masterEntryPrice:
-              Number.isFinite(closeMeta.avgEntry) && closeMeta.avgEntry > 0
-                ? closeMeta.avgEntry
-                : 0,
-            masterContracts: prev,
-          });
+          if (copyEnabled) {
+            console.log(
+              `[EXECUTION] Position update -> 0 detected ${closeMeta.symbol} ${closeMeta.side} (${prev} contracts). Triggering follower exits.`,
+            );
+            await notifyMasterFlat(this.prisma, this.strategyId, {
+              symbol: closeMeta.symbol,
+              side: closeMeta.side,
+              masterEntryPrice:
+                Number.isFinite(closeMeta.avgEntry) && closeMeta.avgEntry > 0
+                  ? closeMeta.avgEntry
+                  : 0,
+              masterContracts: prev,
+            });
+          }
           for (const a of symbolAliasSet(closeMeta.symbol)) {
             this.lastPositionContracts.delete(a);
             this.lastOpenMeta.delete(a);
@@ -1563,11 +1788,8 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   async function syncRoster(): Promise<void> {
     if (cancelled.value) return;
     try {
-      const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
-      if (!futureHedgeId) return;
-
-      const fh = await prisma.strategy.findUnique({
-        where: { id: futureHedgeId },
+      const fh = await prisma.strategy.findFirst({
+        where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
         select: {
           id: true,
           isActive: true,
@@ -1576,22 +1798,30 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         },
       });
 
-      const subs = await findActiveFutureHedgeCopySubscribers(prisma);
       const want = new Set<string>();
 
-      if (
-        fh?.isActive &&
-        fh.masterApiKey?.trim() &&
-        fh.masterApiSecret?.trim() &&
-        subs.length > 0
-      ) {
-        want.add(fh.id);
+      if (fh) {
+        const subs = fh.isActive
+          ? await findActiveCopySubscribersForStrategy(prisma, fh.id)
+          : [];
+
+        if (
+          fh.isActive &&
+          fh.masterApiKey?.trim() &&
+          fh.masterApiSecret?.trim() &&
+          subs.length > 0
+        ) {
+          want.add(fh.id);
+        }
       }
 
       for (const id of sockets.keys()) {
         if (!want.has(id)) {
           sockets.get(id)?.destroy();
           sockets.delete(id);
+          console.log(
+            `[tradeEngine] Future Hedge copy WS stopped strategyId=${id} (paused or no subscribers)`,
+          );
         }
       }
 
@@ -1845,6 +2075,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       for (const sub of subs) {
           if (cancelled.value) return;
 
+          if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
+            continue;
+          }
+
           const creds = resolveSubscriptionCreds(sub);
           if (!creds) {
             console.warn(
@@ -1901,6 +2135,11 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 console.error(
                   `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
                 );
+                await markSubscriptionSyncFailed(prisma, {
+                  userId: sub.userId,
+                  strategyId: strat.id,
+                  error: result.error ?? "Reconcile catch-up failed",
+                });
               }
               continue;
             }
@@ -1923,6 +2162,11 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               console.error(
                 `[RECONCILE] trim failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
               );
+              await markSubscriptionSyncFailed(prisma, {
+                userId: sub.userId,
+                strategyId: strat.id,
+                error: result.error ?? "Reconcile trim failed",
+              });
             }
           }
         }

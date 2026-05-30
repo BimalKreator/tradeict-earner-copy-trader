@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "UserSubscription" ADD COLUMN IF NOT EXISTS "syncStatus" TEXT NOT NULL DEFAULT 'SYNCED';
+ALTER TABLE "UserSubscription" ADD COLUMN IF NOT EXISTS "syncError" TEXT;

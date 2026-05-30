@@ -52,6 +52,8 @@ export type AdminLiveTradesSubscriber = {
   userEmail: string;
   userName: string | null;
   multiplier: number;
+  syncStatus: string;
+  syncError: string | null;
   positions: LiveTradeRow[];
 };
 
@@ -502,6 +504,8 @@ export async function getAdminLiveTradesByStrategy(
         userEmail: sub.user.email,
         userName: sub.user.name,
         multiplier: sub.multiplier,
+        syncStatus: sub.syncStatus,
+        syncError: sub.syncError,
         positions,
       });
     }

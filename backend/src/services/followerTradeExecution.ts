@@ -14,11 +14,18 @@ import {
   findActiveCopySubscriptionForUser,
   findActiveFutureHedgeCopySubscribers,
   followerLotsFromMaster,
+  isStrategyCopyTradingActive,
   resolveCopySubscriptionCreds,
   resolveFutureHedgeStrategyId,
 } from "./strategySubscriptionService.js";
 import { resolveFutureHedgeStrategy } from "./futureHedgeService.js";
 import { logUserActivity } from "./userActivityService.js";
+import {
+  markSubscriptionSynced,
+  markSubscriptionSyncError,
+  markSubscriptionSyncFailed,
+  markSubscriptionSyncPending,
+} from "./subscriptionSyncService.js";
 import {
   buildClientOrderId,
   closeTradePositionsForLeg,
@@ -172,6 +179,20 @@ export type MasterCloseFillArgs = {
   masterEntryPrice: number;
 };
 
+/** Gate all master→follower copy paths when the strategy is paused. */
+export async function assertStrategyActiveForCopy(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<boolean> {
+  const active = await isStrategyCopyTradingActive(prisma, strategyId);
+  if (!active) {
+    console.log(
+      `[copy] Strategy paused — skipping copy/adjust strategyId=${strategyId}`,
+    );
+  }
+  return active;
+}
+
 /**
  * Fan-out a master open fill to every active Future Hedge subscriber.
  * Follower size = floor(master lots × {@link UserStrategySubscription.multiplier}).
@@ -183,6 +204,9 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   const strategy = await resolveFutureHedgeStrategy(prisma);
   if (!strategy.isActive) {
     console.log("[copy] Future Hedge paused — skip master open fan-out");
+    return null;
+  }
+  if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
     return null;
   }
 
@@ -222,6 +246,11 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     await Promise.all(
       subscribers.map(async (sub) => {
         const lots = followerLotsFromMaster(fill.masterLots, sub);
+        await markSubscriptionSyncError(prisma, {
+          userId: sub.userId,
+          strategyId,
+          label: "Slippage Exceeded",
+        });
         await persistCopyTradeRow(prisma, {
           userId: sub.userId,
           strategyId,
@@ -243,6 +272,11 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       const creds = resolveCopySubscriptionCreds(sub);
 
       if (!creds) {
+        await markSubscriptionSyncError(prisma, {
+          userId: sub.userId,
+          strategyId,
+          label: "No API Credentials",
+        });
         await persistCopyTradeRow(prisma, {
           userId: sub.userId,
           strategyId,
@@ -261,6 +295,11 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
       );
 
+      await markSubscriptionSyncPending(prisma, {
+        userId: sub.userId,
+        strategyId,
+      });
+
       const result = await executeFollowerTradeWithVerification(prisma, {
         strategyId,
         userId: sub.userId,
@@ -273,6 +312,10 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       });
 
       if (result.success && result.verified) {
+        await markSubscriptionSynced(prisma, {
+          userId: sub.userId,
+          strategyId,
+        });
         await recordTradePositionOpen(prisma, {
           strategyId,
           userId: sub.userId,
@@ -282,6 +325,12 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           entryPrice: fill.avgPrice,
           ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
           ...(result.clientOrderId ? { clientOrderId: result.clientOrderId } : {}),
+        });
+      } else {
+        await markSubscriptionSyncFailed(prisma, {
+          userId: sub.userId,
+          strategyId,
+          error: result.error ?? "Copy trade execution failed",
         });
       }
 
@@ -339,6 +388,9 @@ export async function syncMasterCloseToFutureHedgeFollowers(
   });
   if (!strat?.isActive) {
     console.log("[copy] Future Hedge paused — skip master close fan-out");
+    return null;
+  }
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
     return null;
   }
 
@@ -415,6 +467,41 @@ export async function syncMasterCloseToFutureHedgeFollowers(
   return { strategyId, fanoutCount: subscribers.length };
 }
 
+async function placeFollowerOrder(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: TradeSide,
+  size: number,
+  opts?: { reduceOnly?: boolean; clientOrderId?: string },
+): Promise<ExecuteTradeResult> {
+  try {
+    return await executeTrade(apiKey, apiSecret, symbol, side, size, opts);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[copy] createOrder threw for ${symbol}: ${message}`);
+    return { success: false, error: message };
+  }
+}
+
+async function markFollowerOrderFailure(
+  prisma: PrismaClient,
+  args: { strategyId?: string | undefined; userId: string; symbol: string; error: string },
+): Promise<void> {
+  if (!args.strategyId) return;
+  await markSubscriptionSyncFailed(prisma, {
+    userId: args.userId,
+    strategyId: args.strategyId,
+    error: args.error,
+  });
+  await notifyFollowerHardFailure(
+    prisma,
+    args.userId,
+    args.symbol,
+    args.error,
+  );
+}
+
 /**
  * Execute → wait 3s → verify → retry (up to {@link MAX_RETRIES}).
  * Skips verification for reduce-only closes (caller should use {@link executeTrade}).
@@ -456,6 +543,11 @@ export async function executeFollowerTradeWithVerification(
       userId: args.userId,
     });
     if (!sub) {
+      await markSubscriptionSyncError(prisma, {
+        userId: args.userId,
+        strategyId: args.strategyId,
+        label: "Subscription Inactive",
+      });
       return {
         success: false,
         error: "No active subscription for this strategy",
@@ -473,11 +565,25 @@ export async function executeFollowerTradeWithVerification(
           symbol,
         })
       : undefined;
-    const single = await executeTrade(apiKey, apiSecret, symbol, side, targetContracts, {
-      reduceOnly: true,
-      ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
-    });
-    if (single.success && args.strategyId) {
+    const single = await placeFollowerOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      targetContracts,
+      {
+        reduceOnly: true,
+        ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+      },
+    );
+    if (!single.success) {
+      await markFollowerOrderFailure(prisma, {
+        strategyId: args.strategyId,
+        userId,
+        symbol,
+        error: single.error ?? "Reduce-only close failed",
+      });
+    } else if (args.strategyId) {
       const openSide: TradeSide = side === "BUY" ? "SELL" : "BUY";
       await closeTradePositionsForLeg(prisma, {
         strategyId: args.strategyId,
@@ -551,13 +657,14 @@ export async function executeFollowerTradeWithVerification(
         })
       : undefined;
 
-    lastResult = await executeTrade(apiKey, apiSecret, symbol, side, orderSize, {
-      ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
-    });
-
-    if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
-      totalFee += lastResult.feeCost;
-    }
+    lastResult = await placeFollowerOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      orderSize,
+      openClientOrderId ? { clientOrderId: openClientOrderId } : undefined,
+    );
 
     if (!lastResult.success) {
       const err = lastResult.error ?? "unknown";
@@ -565,7 +672,12 @@ export async function executeFollowerTradeWithVerification(
         `[RETRY_LOOP] executeTrade failed attempt ${retry + 1}/${MAX_RETRIES}: ${err}`,
       );
       if (isHardExecutionError(err)) {
-        await notifyFollowerHardFailure(prisma, userId, symbol, err);
+        await markFollowerOrderFailure(prisma, {
+          strategyId: args.strategyId,
+          userId,
+          symbol,
+          error: err,
+        });
         return {
           ...lastResult,
           feeCost: totalFee,
@@ -574,6 +686,10 @@ export async function executeFollowerTradeWithVerification(
         };
       }
       continue;
+    }
+
+    if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
+      totalFee += lastResult.feeCost;
     }
 
     console.log(
@@ -643,10 +759,11 @@ export async function executeFollowerTradeWithVerification(
   console.error(
     `[RETRY_LOOP] Exhausted retries for user ${userId} on ${symbol}: ${failMsg}`,
   );
-  await logUserActivity(prisma, {
+  await markFollowerOrderFailure(prisma, {
+    strategyId: args.strategyId,
     userId,
-    kind: "TRADE_EXECUTION_FAILED",
-    message: `Copy trade for ${symbol} could not be verified: ${failMsg}`,
+    symbol,
+    error: failMsg,
   });
 
   return {

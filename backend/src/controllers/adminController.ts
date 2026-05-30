@@ -1746,6 +1746,8 @@ export function createAdminController(prisma: PrismaClient) {
           multiplier: true,
           isActive: true,
           status: true,
+          syncStatus: true,
+          syncError: true,
           joinedDate: true,
           user: {
             select: {
@@ -1772,10 +1774,69 @@ export function createAdminController(prisma: PrismaClient) {
           multiplier: row.multiplier,
           isActive: row.isActive,
           status: row.status,
+          syncStatus: row.syncStatus,
+          syncError: row.syncError,
           joinedDate: row.joinedDate.toISOString(),
         })),
       });
     } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * Manually align one follower's Delta positions to the master's open book
+   * (scaled by multiplier). Resets syncStatus on success.
+   */
+  async function syncStrategyUser(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const strategyId = String(req.params.strategyId ?? "").trim();
+      const userId = String(req.params.userId ?? "").trim();
+      if (!strategyId || !userId) {
+        res.status(400).json({ error: "strategyId and userId are required" });
+        return;
+      }
+
+      const strategy = await prisma.strategy.findUnique({
+        where: { id: strategyId },
+        select: { id: true },
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      const { syncFollowerUserToMasterPositions } = await import(
+        "../services/tradeEngine.js"
+      );
+      const result = await syncFollowerUserToMasterPositions(
+        prisma,
+        strategyId,
+        userId,
+      );
+
+      if (!result.ok) {
+        res.status(422).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        msg.includes("not subscribed") ||
+        msg.includes("inactive") ||
+        msg.includes("no Delta API") ||
+        msg.includes("must be set") ||
+        msg.includes("Failed to fetch master")
+      ) {
+        res.status(400).json({ error: msg });
+        return;
+      }
       next(err);
     }
   }
@@ -1923,6 +1984,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchUserCryptoArbitrageBalance,
     patchUserCryptoArbitrageAllocation,
     listStrategySubscribers,
+    syncStrategyUser,
     updateStrategySubscriber,
     getGroupedLiveTrades,
   };

@@ -220,6 +220,10 @@ model UserStrategySubscription {
   /** When true, copy engine may open/adjust trades for this user on this strategy. */
   isActive           Boolean             @default(true)
   status             SubscriptionStatus  @default(ACTIVE)
+  /** Follower copy state vs master: SYNCED, ERROR, etc. */
+  syncStatus         String              @default("SYNCED")
+  /** Last copy failure reason (e.g. Insufficient Funds). */
+  syncError          String?
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])

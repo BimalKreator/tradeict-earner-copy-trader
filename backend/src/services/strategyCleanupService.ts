@@ -70,8 +70,30 @@ export async function findLegacyCryptoOptionsStrategies(
   return Array.from(byId.values());
 }
 
+/** Hard-delete a strategy row by exact title (cascades dependents). */
+export async function hardDeleteStrategyByExactTitle(
+  prisma: PrismaClient,
+  title: string,
+): Promise<StrategyRemovalSummary | null> {
+  const row = await prisma.strategy.findFirst({
+    where: { title },
+    select: { id: true, title: true },
+  });
+  if (!row) return null;
+  const counts = await deleteStrategyGraph(prisma, row.id);
+  const summary: StrategyRemovalSummary = {
+    strategyId: row.id,
+    title: row.title,
+    ...counts,
+  };
+  console.log(
+    `[strategy-cleanup] hard-deleted "${row.title}" (${row.id}) — ` +
+      `trades=${counts.trades} subs=${counts.subscriptions}`,
+  );
+  return summary;
+}
+
 /**
- * Remove all legacy Crypto Options strategies and ensure Future Hedge exists.
  * Safe to run multiple times (idempotent when legacy rows are already gone).
  */
 export async function removeLegacyCryptoOptionsStrategies(
