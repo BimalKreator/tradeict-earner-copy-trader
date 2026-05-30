@@ -31,6 +31,12 @@ enum TradeStatus {
   FAILED
 }
 
+/** Exchange leg ledger — ties each open/close to a strategy (and user or master). */
+enum TradePositionStatus {
+  OPEN
+  CLOSED
+}
+
 enum TransactionStatus {
   PENDING
   APPROVED
@@ -93,7 +99,8 @@ model User {
   deltaApiKeys     DeltaApiKey[]
   exchangeAccounts ExchangeAccount[]
   subscriptions    UserStrategySubscription[]
-  trades        Trade[]
+  trades           Trade[]
+  tradePositions   TradePosition[]
   wallet        Wallet?
   transactions  Transaction[]
   invoices      Invoice[]
@@ -152,6 +159,7 @@ model Strategy {
 
   subscriptions      UserStrategySubscription[]
   trades             Trade[]
+  tradePositions     TradePosition[]
   pnlRecords         PnLRecord[]
   invoices           Invoice[]
   futureHedgeConfig  FutureHedgeConfig?
@@ -258,6 +266,30 @@ model Trade {
 
   user       User        @relation(fields: [userId], references: [id])
   strategy   Strategy    @relation(fields: [strategyId], references: [id])
+}
+
+/// Per-order leg registry so copy trades never mix across strategies.
+model TradePosition {
+  id            String              @id @default(uuid())
+  /** Null when `isMaster` is true (strategy leader account). */
+  userId        String?
+  isMaster      Boolean             @default(false)
+  strategyId    String
+  symbol        String
+  side          String
+  quantity      Float
+  entryPrice    Float
+  clientOrderId String              @unique
+  status        TradePositionStatus @default(OPEN)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  user     User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@index([strategyId, status])
+  @@index([userId, strategyId, status])
+  @@index([isMaster, strategyId, status, symbol, side])
 }
 
 model Wallet {

@@ -4,6 +4,7 @@ import {
   SubscriptionStatus,
   UserStatus,
 } from "@prisma/client";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 /** Copy engine: only subscribers with an active row for the given strategy. */
 export function activeStrategySubscriptionWhere(
@@ -72,4 +73,57 @@ export async function findActiveCopySubscriptionForUser(
 export function subscriptionMultiplier(sub: { multiplier: number }): number {
   const m = sub.multiplier;
   return Number.isFinite(m) && m > 0 ? m : 1;
+}
+
+/** Integer follower contract lots = floor(master lots × subscription multiplier). */
+export function followerLotsFromMaster(
+  masterLots: number,
+  sub: { multiplier: number },
+): number {
+  const scaled = Math.abs(masterLots) * subscriptionMultiplier(sub);
+  return Math.max(1, Math.floor(scaled));
+}
+
+export async function resolveFutureHedgeStrategyId(
+  prisma: PrismaClient,
+): Promise<string | null> {
+  const row = await prisma.strategy.findFirst({
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+    select: { id: true },
+  });
+  return row?.id ?? null;
+}
+
+/** Active copy subscribers for Future Hedge only. */
+export async function findActiveFutureHedgeCopySubscribers(
+  prisma: PrismaClient,
+): Promise<CopySubscriptionRow[]> {
+  const strategyId = await resolveFutureHedgeStrategyId(prisma);
+  if (!strategyId) return [];
+  return findActiveCopySubscribersForStrategy(prisma, strategyId);
+}
+
+export function resolveCopySubscriptionCreds(
+  sub: CopySubscriptionRow,
+): { apiKey: string; apiSecret: string } | null {
+  if (sub.exchangeAccount != null) {
+    const key = sub.exchangeAccount.apiKey?.trim() ?? "";
+    const secret = sub.exchangeAccount.apiSecret?.trim() ?? "";
+    if (key && secret) {
+      return { apiKey: sub.exchangeAccount.apiKey, apiSecret: sub.exchangeAccount.apiSecret };
+    }
+  }
+  const ex = sub.user.exchangeAccounts[0];
+  if (ex != null) {
+    const key = ex.apiKey?.trim() ?? "";
+    const secret = ex.apiSecret?.trim() ?? "";
+    if (key && secret) return { apiKey: ex.apiKey, apiSecret: ex.apiSecret };
+  }
+  const dk = sub.user.deltaApiKeys[0];
+  if (dk != null) {
+    const key = dk.apiKey?.trim() ?? "";
+    const secret = dk.apiSecret?.trim() ?? "";
+    if (key && secret) return { apiKey: dk.apiKey, apiSecret: dk.apiSecret };
+  }
+  return null;
 }

@@ -100,6 +100,8 @@ export type TradeSide = "BUY" | "SELL";
 export interface ExecuteTradeResult {
   success: boolean;
   orderId?: string;
+  /** Correlates exchange order ↔ {@link TradePosition.clientOrderId}. */
+  clientOrderId?: string;
   /** Actual average fill from CCXT order (preferred over LTP for PnL). */
   fillPrice?: number;
   feeCost?: number;
@@ -480,8 +482,9 @@ export async function executeTrade(
   symbol: string,
   side: TradeSide,
   size: number,
-  opts?: { reduceOnly?: boolean },
+  opts?: { reduceOnly?: boolean; clientOrderId?: string },
 ): Promise<ExecuteTradeResult> {
+  const clientOrderId = opts?.clientOrderId?.trim() || undefined;
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
@@ -490,10 +493,16 @@ export async function executeTrade(
 
     const ccxtSymbol = resolveCcxtSymbol(exchange, symbol);
     const ccxtSide = side === "BUY" ? "buy" : "sell";
-    const params =
-      opts?.reduceOnly === true
-        ? { reduceOnly: true, reduce_only: true }
-        : undefined;
+    const params: Record<string, unknown> = {};
+    if (opts?.reduceOnly === true) {
+      params.reduceOnly = true;
+      params.reduce_only = true;
+    }
+    if (clientOrderId) {
+      params.client_order_id = clientOrderId;
+      params.clientOrderId = clientOrderId;
+    }
+    const orderParams = Object.keys(params).length > 0 ? params : undefined;
 
     let order: Awaited<ReturnType<typeof exchange.createOrder>>;
     try {
@@ -503,7 +512,7 @@ export async function executeTrade(
         ccxtSide,
         size,
         undefined,
-        params,
+        orderParams,
       );
     } catch (orderErr) {
       const message =
@@ -550,6 +559,7 @@ export async function executeTrade(
     return {
       success: true,
       orderId: order.id ?? undefined,
+      ...(clientOrderId ? { clientOrderId } : {}),
       ...(fillPrice != null ? { fillPrice } : {}),
       feeCost,
       raw: order,

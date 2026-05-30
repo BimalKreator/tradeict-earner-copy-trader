@@ -41,6 +41,7 @@ import {
 } from "./services/telegramService.js";
 import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js";
 import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
+import { resolveFutureHedgeStrategy } from "./services/futureHedgeService.js";
 
 const PORT = 5000;
 const __filename = fileURLToPath(import.meta.url);
@@ -54,6 +55,16 @@ if (!connectionString) {
 const pool = new pg.Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+
+void resolveFutureHedgeStrategy(prisma)
+  .then((s) => {
+    console.log(
+      `[BOOT] Primary strategy: "${s.title}" (${s.id})`,
+    );
+  })
+  .catch((err) => {
+    console.error("[BOOT] Failed to resolve Future Hedge strategy:", err);
+  });
 
 initBillingCronJobs(prisma);
 initArbitrageEngine(prisma);

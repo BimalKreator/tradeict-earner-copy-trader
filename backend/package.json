@@ -10,7 +10,8 @@
     "start": "node run-production.mjs",
     "diagnose:delta": "npm run build && node scripts/diagnose-bot.js",
     "build": "tsc",
-    "db:reset-strategy": "npm run build && node dist/scripts/resetDefaultStrategy.js"
+    "db:reset-strategy": "npm run build && node dist/scripts/resetDefaultStrategy.js",
+    "db:remove-legacy-strategies": "npm run build && node dist/scripts/removeLegacyCryptoOptionsStrategy.js"
   },
   "keywords": [],
   "author": "",

@@ -31,13 +31,17 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
-import { executeFollowerTradeWithVerification } from "./followerTradeExecution.js";
+import { executeFollowerTradeWithVerification, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveCopySubscribersForStrategy,
+  findActiveFutureHedgeCopySubscribers,
+  followerLotsFromMaster,
+  resolveFutureHedgeStrategyId,
   STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
   subscriptionMultiplier,
 } from "./strategySubscriptionService.js";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import {
   registerSymbolsForLivePrices,
   startLivePriceTracker,
@@ -102,7 +106,7 @@ function followerContractsFromMaster(
   masterContracts: number,
   multiplier: number,
 ): number {
-  return Math.max(1, Math.floor(masterContracts * multiplier));
+  return followerLotsFromMaster(masterContracts, { multiplier });
 }
 
 function normalizeSide(raw: unknown): TradeSide | null {
@@ -902,140 +906,20 @@ async function copyMasterFillToSubscribers(
     avgPrice: number;
   },
 ): Promise<void> {
-  if (!(await isStrategyCopyEnabled(prisma, strategyId))) {
+  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+  if (!futureHedgeId || strategyId !== futureHedgeId) {
     console.log(
-      `[tradeEngine] Skipping copy fill — strategy paused strategyId=${strategyId}`,
+      `[tradeEngine] Ignoring master open fill for non-Future-Hedge strategyId=${strategyId}`,
     );
     return;
   }
 
-  const strategy = await prisma.strategy.findUnique({
-    where: { id: strategyId },
-    select: STRATEGY_SELECT_SLIPPAGE,
+  await syncMasterOpenFillToFutureHedgeFollowers(prisma, {
+    symbol: args.symbol,
+    side: args.side,
+    masterLots: args.masterContracts,
+    avgPrice: args.avgPrice,
   });
-  if (!strategy) return;
-
-  const tick = await fetchDeltaTicker(args.symbol);
-  const marketPrice =
-    tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
-
-  const uniqueSubs = await findActiveCopySubscribersForStrategy(
-    prisma,
-    strategyId,
-  );
-
-  const skipAll =
-    marketPrice !== undefined &&
-    slippageBlocksCopy(
-      args.symbol,
-      args.avgPrice,
-      marketPrice,
-      strategy.slippage,
-    );
-
-  if (skipAll) {
-    console.warn(
-      `[tradeEngine] Slippage exceeded for ${args.symbol}; skipping copy for strategy ${strategyId}`,
-    );
-    await Promise.all(
-      uniqueSubs.map(async (sub) => {
-        const followerContracts = followerContractsFromMaster(
-          args.masterContracts,
-          subscriptionMultiplier(sub),
-        );
-        console.log(
-          `[EXECUTION] WS copy skip (slippage) user ${sub.userId} — ${args.symbol} ${args.side} — would place ${followerContracts} contracts`,
-        );
-        await recordTrade(prisma, {
-          userId: sub.userId,
-          strategyId,
-          symbol: args.symbol,
-          side: args.side,
-          size: followerContracts,
-          entryPrice: args.avgPrice,
-          status: TradeStatus.FAILED,
-          exitReason: EXIT_REASON.SLIPPAGE_EXCEEDED,
-        });
-      }),
-    );
-    return;
-  }
-
-  await Promise.all(
-    uniqueSubs.map(async (sub) => {
-      const followerContracts = followerContractsFromMaster(
-        args.masterContracts,
-        subscriptionMultiplier(sub),
-      );
-      const creds =
-        sub.exchangeAccount != null
-          ? {
-              apiKey: sub.exchangeAccount.apiKey,
-              apiSecret: sub.exchangeAccount.apiSecret,
-            }
-          : sub.user.exchangeAccounts?.[0] != null
-            ? {
-                apiKey: sub.user.exchangeAccounts[0]!.apiKey,
-                apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
-              }
-            : sub.user.deltaApiKeys[0] != null
-              ? {
-                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
-                }
-              : null;
-
-      if (!creds) {
-        console.log(
-          `[EXECUTION] WS copy skip (no follower creds) user ${sub.userId} — ${args.symbol} — ${followerContracts} contracts`,
-        );
-        await recordTrade(prisma, {
-          userId: sub.userId,
-          strategyId,
-          symbol: args.symbol,
-          side: args.side,
-          size: followerContracts,
-          entryPrice: args.avgPrice,
-          status: TradeStatus.FAILED,
-          exitReason: EXIT_REASON.NO_API_CREDENTIALS,
-        });
-        return;
-      }
-
-      console.log(
-        `[EXECUTION] Placing order for user ${sub.userId} — Size: ${followerContracts} contracts (master ${args.masterContracts} × ${subscriptionMultiplier(sub)}) — ${args.symbol} ${args.side}`,
-      );
-
-      const result = await executeFollowerTradeWithVerification(prisma, {
-        strategyId,
-        userId: sub.userId,
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        symbol: args.symbol,
-        side: args.side,
-        size: followerContracts,
-      });
-
-      await recordTrade(prisma, {
-        userId: sub.userId,
-        strategyId,
-        symbol: args.symbol,
-        side: args.side,
-        size: followerContracts,
-        entryPrice: args.avgPrice,
-        status:
-          result.success && result.verified
-            ? TradeStatus.OPEN
-            : TradeStatus.FAILED,
-        tradingFee: result.success ? (result.feeCost ?? 0) : 0,
-        ...(!result.success || !result.verified
-          ? {
-              exitReason: failedReasonFromExecutionError(result.error),
-            }
-          : {}),
-      });
-    }),
-  );
 }
 
 async function notifyMasterFlat(
@@ -1049,9 +933,10 @@ async function notifyMasterFlat(
   },
   options?: { exitReason?: ExitReasonValue },
 ): Promise<void> {
-  if (!(await isStrategyCopyEnabled(prisma, strategyId))) {
+  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+  if (!futureHedgeId || strategyId !== futureHedgeId) {
     console.log(
-      `[tradeEngine] Skipping master-flat fanout — strategy paused strategyId=${strategyId}`,
+      `[tradeEngine] Ignoring master flat for non-Future-Hedge strategyId=${strategyId}`,
     );
     return;
   }
@@ -1067,101 +952,29 @@ async function notifyMasterFlat(
   );
 
   try {
-  const uniqueSubs = await findActiveCopySubscribersForStrategy(
-    prisma,
-    strategyId,
-  );
-  console.log(
-    `[EXECUTION] notifyMasterFlat fanout strategyId=${strategyId} symbol=${snap.symbol} activeSubs=${uniqueSubs.length}`,
-  );
-
-  await Promise.all(
-    uniqueSubs.map(async (sub) => {
-      const followerContracts = followerContractsFromMaster(
-        snap.masterContracts,
-        subscriptionMultiplier(sub),
-      );
-      const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
-      const creds =
-        sub.exchangeAccount != null
-          ? {
-              apiKey: sub.exchangeAccount.apiKey,
-              apiSecret: sub.exchangeAccount.apiSecret,
-            }
-          : sub.user.exchangeAccounts?.[0] != null
-            ? {
-                apiKey: sub.user.exchangeAccounts[0]!.apiKey,
-                apiSecret: sub.user.exchangeAccounts[0]!.apiSecret,
-              }
-            : sub.user.deltaApiKeys[0] != null
-              ? {
-                  apiKey: sub.user.deltaApiKeys[0]!.apiKey,
-                  apiSecret: sub.user.deltaApiKeys[0]!.apiSecret,
-                }
-              : null;
-
-      if (!creds) {
-        console.log(
-          `[EXECUTION] Close skip (no follower creds) user ${sub.userId} - Size: ${followerContracts} contracts - ${snap.symbol} ${oppositeSide}`,
-        );
-        return;
-      }
-
-      console.log(
-        `[EXECUTION] Master flat — closing follower book user ${sub.userId} — ${snap.symbol} ${snap.side} — ${followerContracts} contracts (master ${snap.masterContracts} × ${subscriptionMultiplier(sub)})`,
-      );
-      console.log(
-        `[EXECUTION] Closing order for user ${sub.userId} - Size: ${followerContracts} contracts - ${snap.symbol} ${oppositeSide}`,
-      );
-      const closeResult = await executeTrade(
-        creds.apiKey,
-        creds.apiSecret,
-        snap.symbol,
-        oppositeSide,
-        followerContracts,
-        { reduceOnly: true },
-      );
-      if (!closeResult.success) {
-        console.error(
-          `[tradeEngine] close executeTrade failed userId=${sub.userId} strategyId=${strategyId} symbol=${snap.symbol} side=${oppositeSide} contracts=${followerContracts}: ${closeResult.error ?? "unknown"}`,
-        );
-        return;
-      }
-
-      let exitPrice = closeResult.fillPrice ?? null;
-      if (exitPrice == null || !Number.isFinite(exitPrice)) {
-        try {
-          const tick = await fetchDeltaTicker(snap.symbol);
-          if (tick.last != null && Number.isFinite(tick.last)) {
-            exitPrice = tick.last;
-          }
-        } catch {
-          /* use master entry fallback below */
-        }
-      }
-      if (exitPrice == null || !Number.isFinite(exitPrice)) {
-        exitPrice =
-          Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
-            ? snap.masterEntryPrice
-            : 0;
-      }
-      console.log(
-        `[EXECUTION] notifyMasterFlat exitPrice=${exitPrice} fill=${closeResult.fillPrice ?? "null"} for ${snap.symbol}`,
-      );
-
-      await closeFollowerTradeAndRecordPnl(prisma, {
-        userId: sub.userId,
-        strategyId,
+    await syncMasterCloseToFutureHedgeFollowers(
+      prisma,
+      {
         symbol: snap.symbol,
         side: snap.side,
+        masterLots: snap.masterContracts,
         masterEntryPrice: snap.masterEntryPrice,
-        sizedPosition: followerContracts,
-        exitPrice,
-        exitFee: closeResult.feeCost ?? 0,
-        exitReason: closureOrigin,
-      });
-    }),
-  );
+      },
+      async (closed) => {
+        await closeFollowerTradeAndRecordPnl(prisma, {
+          userId: closed.userId,
+          strategyId: closed.strategyId,
+          symbol: closed.symbol,
+          side: closed.side,
+          masterEntryPrice: closed.masterEntryPrice,
+          sizedPosition: closed.sizedPosition,
+          exitPrice: closed.exitPrice,
+          exitFee: closed.exitFee,
+          exitReason: closureOrigin,
+        });
+      },
+      { exitReason: closureOrigin },
+    );
   } finally {
     consumeBotInitiatedCloseReason(strategyId, snap.symbol);
   }
@@ -1750,22 +1563,29 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   async function syncRoster(): Promise<void> {
     if (cancelled.value) return;
     try {
-      const strategies = await prisma.strategy.findMany({
-        where: {
-          ...STRATEGY_WHERE_COPY_ENABLED,
-          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
+      const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+      if (!futureHedgeId) return;
+
+      const fh = await prisma.strategy.findUnique({
+        where: { id: futureHedgeId },
+        select: {
+          id: true,
+          isActive: true,
+          masterApiKey: true,
+          masterApiSecret: true,
         },
-        select: { id: true, masterApiKey: true, masterApiSecret: true },
       });
 
+      const subs = await findActiveFutureHedgeCopySubscribers(prisma);
       const want = new Set<string>();
-      for (const s of strategies) {
-        if (
-          s.masterApiKey?.trim() &&
-          s.masterApiSecret?.trim()
-        ) {
-          want.add(s.id);
-        }
+
+      if (
+        fh?.isActive &&
+        fh.masterApiKey?.trim() &&
+        fh.masterApiSecret?.trim() &&
+        subs.length > 0
+      ) {
+        want.add(fh.id);
       }
 
       for (const id of sockets.keys()) {
@@ -1780,6 +1600,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           const conn = new StrategyMasterSocket(prisma, id);
           sockets.set(id, conn);
           conn.start();
+          console.log(
+            `[tradeEngine] Future Hedge copy WS started strategyId=${id} (${FUTURE_HEDGE_STRATEGY_TITLE})`,
+          );
         }
       }
     } catch (err) {
@@ -1813,10 +1636,13 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   async function reconcileGhostExits(): Promise<void> {
     if (cancelled.value) return;
     try {
-      const strategies = await prisma.strategy.findMany({
+      const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+      if (!futureHedgeId) return;
+
+      const strat = await prisma.strategy.findFirst({
         where: {
+          id: futureHedgeId,
           ...STRATEGY_WHERE_COPY_ENABLED,
-          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
         },
         select: {
           id: true,
@@ -1825,40 +1651,36 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           profitShare: true,
         },
       });
-      for (const strat of strategies) {
-        if (cancelled.value) return;
-        if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
-          continue;
-        }
+      if (!strat) return;
 
-        const activeSubs = await findActiveCopySubscribersForStrategy(
-          prisma,
-          strat.id,
+      if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
+        return;
+      }
+
+      const activeSubs = await findActiveFutureHedgeCopySubscribers(prisma);
+      const activeUserIds = new Set(activeSubs.map((s) => s.userId));
+
+      let masterAliases: Set<string>;
+      try {
+        const masters = await fetchMasterOpenPositions(
+          strat.masterApiKey,
+          strat.masterApiSecret,
         );
-        const activeUserIds = new Set(activeSubs.map((s) => s.userId));
-
-        let masterAliases: Set<string>;
-        try {
-          const masters = await fetchMasterOpenPositions(
-            strat.masterApiKey,
-            strat.masterApiSecret,
-          );
-          masterAliases = new Set<string>();
-          for (const m of masters) {
-            for (const a of symbolAliasSet(m.deltaSymbol)) {
-              masterAliases.add(a);
-            }
+        masterAliases = new Set<string>();
+        for (const m of masters) {
+          for (const a of symbolAliasSet(m.deltaSymbol)) {
+            masterAliases.add(a);
           }
-        } catch (err) {
-          // REST creds broken — do NOT close anything based on no data.
-          console.warn(
-            `[reconcile] master REST failed strategyId=${strat.id}; skipping safety-net pass:`,
-            err instanceof Error ? err.message : err,
-          );
-          continue;
         }
+      } catch (err) {
+        console.warn(
+          `[reconcile] master REST failed strategyId=${strat.id}; skipping safety-net pass:`,
+          err instanceof Error ? err.message : err,
+        );
+        return;
+      }
 
-        const openTrades = await prisma.trade.findMany({
+      const openTrades = await prisma.trade.findMany({
           where: {
             strategyId: strat.id,
             status: TradeStatus.OPEN,
@@ -1974,7 +1796,6 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             },
           });
         }
-      }
     } catch (err) {
       console.error("[reconcile] safety-net pass failed:", err);
     }
@@ -1987,10 +1808,13 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   async function reconcilePositionQuantities(): Promise<void> {
     if (cancelled.value) return;
     try {
-      const strategies = await prisma.strategy.findMany({
+      const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+      if (!futureHedgeId) return;
+
+      const strat = await prisma.strategy.findFirst({
         where: {
+          id: futureHedgeId,
           ...STRATEGY_WHERE_COPY_ENABLED,
-          ...STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
         },
         select: {
           id: true,
@@ -1998,33 +1822,27 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           masterApiSecret: true,
         },
       });
+      if (!strat?.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
+        return;
+      }
 
-      for (const strat of strategies) {
-        if (cancelled.value) return;
-        if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
-          continue;
-        }
-
-        let masterLegs: MasterLedTrade[];
-        try {
-          masterLegs = await fetchMasterOpenPositions(
-            strat.masterApiKey,
-            strat.masterApiSecret,
-          );
-        } catch (err) {
-          console.warn(
-            `[RECONCILE] master REST failed strategyId=${strat.id}:`,
-            err instanceof Error ? err.message : err,
-          );
-          continue;
-        }
-
-        const subs = await findActiveCopySubscribersForStrategy(
-          prisma,
-          strat.id,
+      let masterLegs: MasterLedTrade[];
+      try {
+        masterLegs = await fetchMasterOpenPositions(
+          strat.masterApiKey,
+          strat.masterApiSecret,
         );
+      } catch (err) {
+        console.warn(
+          `[RECONCILE] master REST failed strategyId=${strat.id}:`,
+          err instanceof Error ? err.message : err,
+        );
+        return;
+      }
 
-        for (const sub of subs) {
+      const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+
+      for (const sub of subs) {
           if (cancelled.value) return;
 
           const creds = resolveSubscriptionCreds(sub);
@@ -2108,7 +1926,6 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             }
           }
         }
-      }
     } catch (err) {
       console.error("[RECONCILE] position quantity pass failed:", err);
     }

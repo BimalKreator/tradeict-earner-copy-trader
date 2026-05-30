@@ -381,7 +381,6 @@ function StrategyTabPanel({ group }: { group: UserStrategyGroup }) {
 
 export default function DashboardLiveTradesPage() {
   const [groups, setGroups] = useState<UserStrategyGroup[]>([]);
-  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -418,10 +417,6 @@ export default function DashboardLiveTradesPage() {
       const data: unknown = await res.json();
       const list = parseUserGroups(data);
       setGroups(list);
-      setActiveStrategyId((prev) => {
-        if (prev && list.some((g) => g.strategy.id === prev)) return prev;
-        return list[0]?.strategy.id ?? null;
-      });
       setLastRefreshed(new Date());
       if (!silent) {
         setError(null);
@@ -474,8 +469,7 @@ export default function DashboardLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Open copy positions on your Delta account, grouped by each strategy
-              you are actively subscribed to.
+              Your live Future Hedge copy positions on Delta India.
             </p>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-white/40">
               {lastRefreshed && !loading ? (
@@ -514,10 +508,11 @@ export default function DashboardLiveTradesPage() {
         <div className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center">
           <Layers className="mx-auto h-10 w-10 text-white/20" aria-hidden />
           <p className="mt-4 text-sm text-white/60">
-            No active strategy subscriptions.
+            No active Future Hedge subscription.
           </p>
           <p className="mt-2 text-xs text-white/40">
-            Deploy a strategy from My Strategies to see live copy positions here.
+            Deploy Future Hedge Strategy from My Strategies to see live copy
+            positions here.
           </p>
           <Link
             href="/dashboard/strategies"
@@ -527,65 +522,8 @@ export default function DashboardLiveTradesPage() {
           </Link>
         </div>
       ) : (
-        <div className="space-y-4">
-          <div
-            className="sticky top-0 z-10 -mx-1 rounded-xl border border-white/10 bg-[#08080c]/90 px-2 py-2 shadow-lg shadow-black/40 backdrop-blur-md"
-            role="tablist"
-            aria-label="Subscribed strategies"
-          >
-            <div className="flex gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin]">
-              {groups.map((g) => {
-                const selected = activeStrategyId === g.strategy.id;
-                const legCount = g.userPositions.length;
-                return (
-                  <button
-                    key={g.strategy.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    aria-controls={`user-panel-${g.strategy.id}`}
-                    id={`user-tab-${g.strategy.id}`}
-                    onClick={() => setActiveStrategyId(g.strategy.id)}
-                    className={`shrink-0 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
-                      selected
-                        ? "bg-primary text-white shadow-md shadow-primary/25"
-                        : "text-white/55 hover:bg-white/5 hover:text-white"
-                    }`}
-                  >
-                    <span className="block max-w-[200px] truncate sm:max-w-[240px]">
-                      {g.strategy.title}
-                    </span>
-                    <span
-                      className={`mt-0.5 block text-[10px] tabular-nums ${
-                        selected ? "text-white/70" : "text-white/35"
-                      }`}
-                    >
-                      {formatMultiplier(g.strategy.multiplier)} · {legCount} leg
-                      {legCount === 1 ? "" : "s"}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
-            {groups.map((g) => {
-              const selected = activeStrategyId === g.strategy.id;
-              return (
-                <div
-                  key={g.strategy.id}
-                  id={`user-panel-${g.strategy.id}`}
-                  role="tabpanel"
-                  aria-labelledby={`user-tab-${g.strategy.id}`}
-                  hidden={!selected}
-                  className={selected ? "block" : "hidden"}
-                >
-                  <StrategyTabPanel group={g} />
-                </div>
-              );
-            })}
-          </div>
+        <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
+          <StrategyTabPanel group={groups[0]!} />
         </div>
       )}
     </div>

@@ -20,6 +20,7 @@ import {
   resolveLiveMarkPrice,
 } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 export type { DeltaBalanceBreakdown };
 
@@ -413,10 +414,7 @@ export async function masterApiHealth(prisma: PrismaClient): Promise<{
   strategyTitle: string | null;
 }> {
   const strat = await prisma.strategy.findFirst({
-    where: {
-      masterApiKey: { not: "" },
-      masterApiSecret: { not: "" },
-    },
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
     select: { title: true, masterApiKey: true, masterApiSecret: true },
   });
   if (!strat?.masterApiKey?.trim() || !strat?.masterApiSecret?.trim()) {

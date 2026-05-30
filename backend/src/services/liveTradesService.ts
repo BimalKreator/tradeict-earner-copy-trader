@@ -13,6 +13,7 @@ import {
 import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import { COPY_SUBSCRIPTION_INCLUDE } from "./strategySubscriptionService.js";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 export type LiveTradeRow = {
   entryTime: string | null;
@@ -273,7 +274,7 @@ export async function getUserLiveTradesByStrategy(
       userId,
       isActive: true,
       status: SubscriptionStatus.ACTIVE,
-      strategy: { isActive: true },
+      strategy: { isActive: true, title: FUTURE_HEDGE_STRATEGY_TITLE },
       user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
     },
     orderBy: { joinedDate: "desc" },
@@ -382,6 +383,7 @@ export async function getAdminLiveTradesByStrategy(
   prisma: PrismaClient,
 ): Promise<AdminLiveTradesGroup[]> {
   const strategies = await prisma.strategy.findMany({
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -393,6 +395,8 @@ export async function getAdminLiveTradesByStrategy(
       autoExitStopLoss: true,
     },
   });
+
+  if (strategies.length === 0) return [];
 
   const out: AdminLiveTradesGroup[] = [];
   const followerPositionsCache = new Map<string, DeltaLivePosition[]>();

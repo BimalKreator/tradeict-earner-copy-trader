@@ -1,9 +1,8 @@
 /**
- * Ensures Future Hedge Strategy is the sole primary strategy:
- * removes legacy Crypto Options rows, then find-or-creates Future Hedge.
+ * One-time cleanup: delete legacy "Crypto Options …" strategies and related data.
+ * Ensures "Future Hedge Strategy" exists as the sole primary strategy.
  *
- * Run: `npm run db:reset-strategy` from the backend directory
- * (with DATABASE_URL / DIRECT_URL in .env).
+ * Run from backend/: `npm run db:remove-legacy-strategies`
  */
 import "dotenv/config";
 import pg from "pg";
@@ -24,8 +23,20 @@ async function main(): Promise<void> {
 
   try {
     const result = await removeLegacyCryptoOptionsStrategies(prisma);
+
+    if (result.removed.length === 0) {
+      console.log(
+        "No legacy Crypto Options strategies found — nothing to delete.",
+      );
+    } else {
+      console.log(
+        `Removed ${result.removed.length} legacy strateg(ies):`,
+        result.removed.map((r) => `"${r.title}" (${r.strategyId})`).join(", "),
+      );
+    }
+
     console.log(
-      `Legacy strategies removed: ${result.removed.length}. Primary strategy: "${result.primaryStrategyTitle}" (${result.primaryStrategyId}).`,
+      `Primary strategy: "${result.primaryStrategyTitle}" (${result.primaryStrategyId})`,
     );
   } finally {
     await prisma.$disconnect();

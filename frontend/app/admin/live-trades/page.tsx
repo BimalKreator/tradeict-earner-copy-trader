@@ -839,7 +839,6 @@ function PositionTable({
 
 export default function AdminLiveTradesPage() {
   const [strategies, setStrategies] = useState<StrategySection[]>([]);
-  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -923,10 +922,6 @@ export default function AdminLiveTradesPage() {
       const list = parseStrategyGroups(data);
       setStrategies(list);
       ensureExpandedDefaults(list);
-      setActiveStrategyId((prev) => {
-        if (prev && list.some((s) => s.strategyId === prev)) return prev;
-        return list[0]?.strategyId ?? null;
-      });
       setLastRefreshed(new Date());
     } catch (e) {
       if (!silent) {
@@ -1021,8 +1016,8 @@ export default function AdminLiveTradesPage() {
               Live trades
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Strategy tabs group master and follower positions. Data refreshes
-              every {LIVE_TRADES_REFRESH_MS / 1000}s without reloading the page.
+              Future Hedge Strategy — master positions and active follower grid.
+              Refreshes every {LIVE_TRADES_REFRESH_MS / 1000}s without reloading.
             </p>
             {lastRefreshed && !loading ? (
               <p className="mt-1 flex items-center gap-2 text-xs text-white/40">
@@ -1060,99 +1055,45 @@ export default function AdminLiveTradesPage() {
         </div>
       ) : strategies.length === 0 ? (
         <p className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center text-sm text-white/50">
-          No strategies configured.
+          Future Hedge Strategy is not configured yet.
         </p>
       ) : (
-        <div className="space-y-4">
-          <div
-            className="sticky top-0 z-10 -mx-1 rounded-xl border border-white/10 bg-[#08080c]/90 px-2 py-2 shadow-lg shadow-black/40 backdrop-blur-md"
-            role="tablist"
-            aria-label="Strategies"
-          >
-            <div className="flex gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:thin]">
-              {strategies.map((s) => {
-                const selected = activeStrategyId === s.strategyId;
-                const legCount =
-                  s.masterPositions.length +
-                  s.subscribers.reduce((n, u) => n + u.positions.length, 0);
-                return (
-                  <button
-                    key={s.strategyId}
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    aria-controls={`panel-${s.strategyId}`}
-                    id={`tab-${s.strategyId}`}
-                    onClick={() => setActiveStrategyId(s.strategyId)}
-                    className={`shrink-0 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
-                      selected
-                        ? "bg-primary text-white shadow-md shadow-primary/25"
-                        : "text-white/55 hover:bg-white/5 hover:text-white"
-                    }`}
-                  >
-                    <span className="block max-w-[200px] truncate">
-                      {s.strategyTitle}
-                    </span>
-                    <span
-                      className={`mt-0.5 block text-[10px] tabular-nums ${
-                        selected ? "text-white/70" : "text-white/35"
-                      }`}
-                    >
-                      {legCount} leg{legCount === 1 ? "" : "s"} ·{" "}
-                      {s.subscribers.length} sub
-                      {s.subscribers.length === 1 ? "" : "s"}
-                    </span>
-                  </button>
-                );
-              })}
+        (() => {
+          const panel = strategies[0];
+          if (!panel) return null;
+          const expanded =
+            expandedSubsByStrategy[panel.strategyId] ??
+            new Set(panel.subscribers.map((u) => u.userId));
+          return (
+            <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
+              <StrategyLivePanel
+                strategy={panel}
+                isActiveTab
+                expandedSubs={expanded}
+                onToggleSubscriber={(userId) =>
+                  toggleSubscriberExpanded(panel.strategyId, userId)
+                }
+                onCloseTrade={closeTrade}
+                closingKey={closingKey}
+                onAutoExitSaved={(message, updated) => {
+                  setToast(message);
+                  if (updated) {
+                    setStrategies((prev) =>
+                      prev.map((row) =>
+                        row.strategyId === panel.strategyId
+                          ? { ...row, ...updated }
+                          : row,
+                      ),
+                    );
+                  }
+                  if (message.includes("saved")) {
+                    void load({ silent: true });
+                  }
+                }}
+              />
             </div>
-          </div>
-
-          <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
-            {strategies.map((s) => {
-              const selected = activeStrategyId === s.strategyId;
-              const expanded =
-                expandedSubsByStrategy[s.strategyId] ??
-                new Set(s.subscribers.map((u) => u.userId));
-              return (
-                <div
-                  key={s.strategyId}
-                  id={`panel-${s.strategyId}`}
-                  role="tabpanel"
-                  aria-labelledby={`tab-${s.strategyId}`}
-                  hidden={!selected}
-                  className={selected ? "block" : "hidden"}
-                >
-                  <StrategyLivePanel
-                    strategy={s}
-                    isActiveTab={selected}
-                    expandedSubs={expanded}
-                    onToggleSubscriber={(userId) =>
-                      toggleSubscriberExpanded(s.strategyId, userId)
-                    }
-                    onCloseTrade={closeTrade}
-                    closingKey={closingKey}
-                    onAutoExitSaved={(message, updated) => {
-                      setToast(message);
-                      if (updated) {
-                        setStrategies((prev) =>
-                          prev.map((row) =>
-                            row.strategyId === s.strategyId
-                              ? { ...row, ...updated }
-                              : row,
-                          ),
-                        );
-                      }
-                      if (message.includes("saved")) {
-                        void load({ silent: true });
-                      }
-                    }}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        </div>
+          );
+        })()
       )}
     </div>
   );

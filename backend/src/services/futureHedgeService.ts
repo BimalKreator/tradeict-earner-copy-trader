@@ -1,6 +1,7 @@
 import type { FutureHedgeConfig, Prisma, PrismaClient, Strategy } from "@prisma/client";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
-export const FUTURE_HEDGE_STRATEGY_TITLE = "Future Hedge Strategy";
+export { FUTURE_HEDGE_STRATEGY_TITLE };
 
 export type FutureHedgeConfigDto = {
   id: string;
@@ -76,6 +77,9 @@ export async function resolveFutureHedgeStrategy(
 
   return strategy;
 }
+
+/** Alias for callers that need the platform's default / primary strategy row. */
+export const resolvePrimaryStrategy = resolveFutureHedgeStrategy;
 
 export type FutureHedgeConfigUpdateInput = {
   isAutoEnabled?: boolean;
