@@ -1,5 +1,6 @@
 import {
   InvoiceStatus,
+  Role,
   SubscriptionStatus,
   TradeStatus,
   UserStatus,
@@ -264,47 +265,41 @@ export async function activeStrategiesForUser(
 }
 
 /**
- * Total AUM: sum of capital for ACTIVE users only.
- * Prefer Delta total balance when API keys are linked; otherwise platform wallet balance.
+ * Total AUM: sum of Delta **total** USD balance for active users with linked API keys.
+ * Excludes platform wallet balances and users without Delta credentials.
  */
 export async function aggregateUsersAum(prisma: PrismaClient): Promise<number> {
   const activeUsers = await prisma.user.findMany({
-    where: { status: UserStatus.ACTIVE },
-    select: {
-      id: true,
-      wallet: { select: { balance: true } },
-    },
+    where: { status: UserStatus.ACTIVE, role: Role.USER },
+    select: { id: true },
   });
 
   let total = 0;
+  /** One Delta account may appear on multiple rows — count each key pair once. */
+  const countedCreds = new Set<string>();
+
   for (const user of activeUsers) {
-    let userAum = 0;
+    const creds = await resolveUserDeltaCreds(prisma, user.id);
+    if (!creds) continue;
+
+    const credKey = `${creds.apiKey}::${creds.apiSecret}`;
+    if (countedCreds.has(credKey)) continue;
+    countedCreds.add(credKey);
 
     try {
-      const breakdown = await fetchUserCapitalBreakdown(prisma, user.id);
+      const breakdown = await fetchDeltaBalanceBreakdownUsd(
+        creds.apiKey,
+        creds.apiSecret,
+      );
       if (
         Number.isFinite(breakdown.totalBalance) &&
         breakdown.totalBalance > 0
       ) {
-        userAum = breakdown.totalBalance;
-      } else if (
-        Number.isFinite(breakdown.availableBalance) &&
-        breakdown.availableBalance > 0
-      ) {
-        userAum = breakdown.availableBalance;
+        total += breakdown.totalBalance;
       }
     } catch {
-      /* no Delta credentials or fetch failed */
+      /* skip — Delta fetch failed for this user */
     }
-
-    if (userAum <= 0) {
-      const walletUsd = user.wallet?.balance ?? 0;
-      if (Number.isFinite(walletUsd) && walletUsd > 0) {
-        userAum = walletUsd;
-      }
-    }
-
-    total += userAum;
   }
 
   return total;

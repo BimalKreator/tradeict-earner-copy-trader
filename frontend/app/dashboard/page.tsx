@@ -175,18 +175,24 @@ export default function DashboardPage() {
 
             <MetricCard
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
-              label="Available Capital"
-              value={fmtUsd(data.totalBalance ?? data.availableCapital)}
+              label="Total Balance"
+              value={fmtUsd(
+                Math.max(
+                  data.totalBalance ?? 0,
+                  (data.availableBalance ?? data.availableCapital ?? 0) +
+                    (data.usedBalance ?? 0),
+                ),
+              )}
               sub={
                 <div className="space-y-1.5 border-t border-slate-800/80 pt-2">
                   <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-slate-500">Available Capital</span>
+                    <span className="text-slate-500">Available</span>
                     <span className="tabular-nums text-slate-200">
                       {fmtUsd(data.availableBalance ?? data.availableCapital)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-slate-500">Used Capital</span>
+                    <span className="text-slate-500">In active trades</span>
                     <span className="tabular-nums text-slate-200">
                       {fmtUsd(data.usedBalance ?? 0)}
                     </span>

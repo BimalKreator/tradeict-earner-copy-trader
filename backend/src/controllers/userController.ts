@@ -235,11 +235,16 @@ export function createUserController(prisma: PrismaClient) {
       const copyTradingActive =
         !userRow?.copyTradingPaused && apiStatus === "connected";
 
+      const capitalBase =
+        capital.totalBalance > 0
+          ? capital.totalBalance
+          : capital.availableBalance + capital.usedBalance;
+
       res.json({
         todayPnl,
-        todayPnlPercent: pnlPercentOfCapital(todayPnl, capital.availableBalance),
+        todayPnlPercent: pnlPercentOfCapital(todayPnl, capitalBase),
         monthlyPnl,
-        monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, capital.availableBalance),
+        monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, capitalBase),
         availableCapital: capital.availableBalance,
         totalBalance: capital.totalBalance,
         availableBalance: capital.availableBalance,

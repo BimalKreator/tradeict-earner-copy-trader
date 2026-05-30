@@ -1210,11 +1210,88 @@ function parseDeltaBalanceBreakdown(
     totalBalance = usedBalance;
   }
 
+  totalBalance = Math.max(totalBalance, availableBalance + usedBalance);
+
   return {
     totalBalance: Number.isFinite(totalBalance) ? totalBalance : 0,
     availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
     usedBalance: Number.isFinite(usedBalance) ? usedBalance : 0,
   };
+}
+
+/** Parse a Delta India `/v2/wallet/balances` row (USD wallet). */
+function parseDeltaWalletBalanceRow(
+  row: Record<string, unknown>,
+): DeltaBalanceBreakdown | null {
+  const asset =
+    row.asset != null && typeof row.asset === "object"
+      ? (row.asset as Record<string, unknown>)
+      : null;
+  const symbol = String(asset?.symbol ?? row.asset_symbol ?? "")
+    .trim()
+    .toUpperCase();
+  if (symbol !== "USD" && symbol !== "USDT") return null;
+
+  const walletBalance =
+    numberOrNull(row.balance) ??
+    numberOrNull(row.wallet_balance) ??
+    numberOrNull(row.total_balance);
+  const availableBalance =
+    numberOrNull(row.available_balance) ??
+    numberOrNull(row.available) ??
+    numberOrNull(row.available_margin);
+  const positionMargin = numberOrNull(row.position_margin) ?? 0;
+  const orderMargin = numberOrNull(row.order_margin) ?? 0;
+  const blockedMargin =
+    numberOrNull(row.blocked_margin) ?? numberOrNull(row.blocked_balance) ?? 0;
+
+  let usedBalance = positionMargin + orderMargin + blockedMargin;
+  let totalBalance = walletBalance ?? 0;
+  let available = availableBalance ?? 0;
+
+  if (totalBalance <= 0 && available + usedBalance > 0) {
+    totalBalance = available + usedBalance;
+  }
+  if (usedBalance <= 0 && totalBalance > 0 && available >= 0) {
+    usedBalance = Math.max(0, totalBalance - available);
+  }
+  if (available <= 0 && totalBalance > 0 && usedBalance > 0) {
+    available = Math.max(0, totalBalance - usedBalance);
+  }
+
+  totalBalance = Math.max(totalBalance, available + usedBalance);
+
+  return {
+    totalBalance: Number.isFinite(totalBalance) ? totalBalance : 0,
+    availableBalance: Number.isFinite(available) ? available : 0,
+    usedBalance: Number.isFinite(usedBalance) ? usedBalance : 0,
+  };
+}
+
+async function fetchDeltaWalletBalanceBreakdownUsd(
+  exchange: InstanceType<typeof ccxt.delta>,
+): Promise<DeltaBalanceBreakdown | null> {
+  try {
+    type WalletResponse = { result?: unknown[] };
+    const response = (await (
+      exchange as InstanceType<typeof ccxt.delta> & {
+        privateGetWalletBalances: () => Promise<WalletResponse>;
+      }
+    ).privateGetWalletBalances()) as WalletResponse;
+
+    const rows = Array.isArray(response?.result) ? response.result : [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const parsed = parseDeltaWalletBalanceRow(row as Record<string, unknown>);
+      if (parsed) return parsed;
+    }
+  } catch (err) {
+    console.warn(
+      `[exchangeService] privateGetWalletBalances failed:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return null;
 }
 
 /**
@@ -1230,6 +1307,10 @@ export async function fetchDeltaBalanceBreakdownUsd(
     return { totalBalance: 0, availableBalance: 0, usedBalance: 0 };
   }
   const exchange = await getAuthClient(apiKey, secret);
+
+  const walletBreakdown = await fetchDeltaWalletBalanceBreakdownUsd(exchange);
+  if (walletBreakdown) return walletBreakdown;
+
   const bal = await exchange.fetchBalance();
   return parseDeltaBalanceBreakdown(bal);
 }
