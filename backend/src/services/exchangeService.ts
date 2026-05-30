@@ -219,6 +219,57 @@ async function resolveOptionUpnlPrice(
   return { price: displayMark, source: "mark_fallback" };
 }
 
+/**
+ * Options UPNL price without CCXT ticker — bid (long) / offer (short) from margined REST.
+ * Matches {@link resolveOptionUpnlPrice} when payload includes bid/offer; falls back to mark.
+ */
+function resolveOptionUpnlPriceSync(
+  position: Record<string, unknown>,
+  side: TradeSide,
+  displayMark: number | null,
+): number | null {
+  const { bid, offer } = extractDeltaBidOffer(position);
+  if (side === "BUY" && bid != null && bid > 0) return bid;
+  if (side === "SELL" && offer != null && offer > 0) return offer;
+  return displayMark;
+}
+
+function computePositionUnrealizedPnl(args: {
+  isOption: boolean;
+  side: TradeSide;
+  entryPrice: number | null;
+  markPrice: number | null;
+  realBaseSize: number;
+  position: Record<string, unknown>;
+  lite: boolean;
+}): number | null {
+  const { isOption, side, entryPrice, markPrice, realBaseSize, position, lite } =
+    args;
+
+  if (entryPrice === null) return null;
+
+  let upnlPrice: number | null = markPrice;
+  if (isOption) {
+    upnlPrice = resolveOptionUpnlPriceSync(position, side, markPrice);
+  }
+
+  if (upnlPrice === null) {
+    if (!isOption && lite) {
+      return parseApiUnrealizedPnl(position);
+    }
+    return null;
+  }
+
+  const sign = side === "SELL" ? -1 : 1;
+  let unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
+
+  const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
+  if (!Number.isNaN(funding)) unrealizedPnl += funding;
+
+  if (Number.isNaN(unrealizedPnl)) return null;
+  return unrealizedPnl;
+}
+
 function deltaContractValueFromMarket(
   market: { contractSize?: unknown },
   position: Record<string, unknown>,
@@ -926,10 +977,22 @@ export async function fetchDeltaMarginedPositionSnapshot(
       const apiUpnlRaw = position.unrealized_pnl;
 
       if (lite) {
-        unrealizedPnl = parseApiUnrealizedPnl(position);
-        if (unrealizedPnl === null && entryPrice !== null && markPrice !== null) {
-          const sign = side === "SELL" ? -1 : 1;
-          unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+        // Options: never trust raw API unrealized_pnl on Delta India (not USD terminal value).
+        unrealizedPnl = computePositionUnrealizedPnl({
+          isOption,
+          side,
+          entryPrice,
+          markPrice,
+          realBaseSize,
+          position,
+          lite: true,
+        });
+        if (unrealizedPnl === null && !isOption) {
+          unrealizedPnl = parseApiUnrealizedPnl(position);
+          if (unrealizedPnl === null && entryPrice !== null && markPrice !== null) {
+            const sign = side === "SELL" ? -1 : 1;
+            unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+          }
         }
       } else {
       let upnlPrice: number | null = markPrice;
