@@ -1166,6 +1166,89 @@ export type DeltaBalanceBreakdown = {
   usedBalance: number;
 };
 
+function asBalanceRecord(v: unknown): Record<string, unknown> | null {
+  if (v != null && typeof v === "object" && !Array.isArray(v)) {
+    return v as Record<string, unknown>;
+  }
+  return null;
+}
+
+/** Delta terminal "Total Account Value" — includes open-position PnL. */
+function metaNetEquityFrom(...sources: unknown[]): number | null {
+  for (const src of sources) {
+    const rec = asBalanceRecord(src);
+    if (!rec) continue;
+    const meta = asBalanceRecord(rec.meta);
+    if (!meta) continue;
+    const eq =
+      numberOrNull(meta.net_equity) ??
+      numberOrNull(meta.netEquity) ??
+      numberOrNull(meta.equity);
+    if (eq !== null && Number.isFinite(eq)) return eq;
+  }
+  return null;
+}
+
+/**
+ * Sum only non-negative margin buckets (actual locked collateral).
+ * Ignores negative unrealized PnL fields that sometimes appear on margined rows.
+ */
+function positiveLockedMarginUsd(row: Record<string, unknown>): number {
+  const keys = [
+    "position_margin",
+    "order_margin",
+    "blocked_margin",
+    "blocked_balance",
+    "cross_position_margin",
+    "cross_order_margin",
+    "cross_initial_margin",
+    "initial_margin",
+    "used_balance",
+  ];
+  let sum = 0;
+  for (const key of keys) {
+    const n = numberOrNull(row[key]);
+    if (n !== null && n > 0) sum += n;
+  }
+  return sum;
+}
+
+/**
+ * Total = meta.net_equity (terminal account value).
+ * Locked = total − available (never negative).
+ */
+function finalizeDeltaBalanceBreakdown(args: {
+  availableBalance: number;
+  netEquity?: number | null;
+  cashBalance?: number | null;
+  positiveLocked?: number;
+}): DeltaBalanceBreakdown {
+  const available = Math.max(
+    0,
+    Number.isFinite(args.availableBalance) ? args.availableBalance : 0,
+  );
+
+  let totalBalance = args.netEquity ?? null;
+  if (totalBalance === null || !Number.isFinite(totalBalance)) {
+    const cash = Math.max(0, args.cashBalance ?? 0);
+    const locked = Math.max(0, args.positiveLocked ?? 0);
+    if (cash > 0 || locked > 0) {
+      totalBalance = cash + locked;
+    } else {
+      totalBalance = available;
+    }
+  }
+
+  totalBalance = Math.max(available, totalBalance);
+  const usedBalance = Math.max(0, totalBalance - available);
+
+  return {
+    totalBalance,
+    availableBalance: available,
+    usedBalance,
+  };
+}
+
 function balanceFieldUsd(
   bal: Awaited<ReturnType<InstanceType<typeof ccxt.delta>["fetchBalance"]>>,
   bucket: "free" | "used" | "total",
@@ -1184,44 +1267,33 @@ function parseDeltaBalanceBreakdown(
 ): DeltaBalanceBreakdown {
   const info = (bal.info ?? {}) as Record<string, unknown>;
 
-  const totalCcxt = balanceFieldUsd(bal, "total");
   const freeCcxt = balanceFieldUsd(bal, "free");
-  const usedCcxt = balanceFieldUsd(bal, "used");
-
-  const totalInfo = numberOrNull(info.total_balance);
   const availableInfo =
     numberOrNull(info.available_balance) ?? numberOrNull(info.available_margin);
-  const usedInfo =
-    numberOrNull(info.used_balance) ??
-    numberOrNull(info.position_margin) ??
-    numberOrNull(info.blocked_margin);
 
-  let totalBalance = totalCcxt ?? totalInfo ?? 0;
-  let availableBalance = freeCcxt ?? availableInfo ?? 0;
-  let usedBalance = usedCcxt ?? usedInfo ?? 0;
+  const availableBalance = Math.max(
+    0,
+    freeCcxt ?? availableInfo ?? balanceFieldUsd(bal, "total") ?? 0,
+  );
 
-  if (totalBalance <= 0 && availableBalance > 0) {
-    totalBalance = availableBalance + usedBalance;
-  }
-  if (usedBalance <= 0 && totalBalance > 0 && availableBalance >= 0) {
-    usedBalance = Math.max(0, totalBalance - availableBalance);
-  }
-  if (totalBalance <= 0 && availableBalance <= 0 && usedBalance > 0) {
-    totalBalance = usedBalance;
-  }
+  const netEquity = metaNetEquityFrom(info, bal);
+  const cashBalance =
+    numberOrNull(info.balance) ??
+    numberOrNull(info.wallet_balance) ??
+    balanceFieldUsd(bal, "total");
 
-  totalBalance = Math.max(totalBalance, availableBalance + usedBalance);
-
-  return {
-    totalBalance: Number.isFinite(totalBalance) ? totalBalance : 0,
-    availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
-    usedBalance: Number.isFinite(usedBalance) ? usedBalance : 0,
-  };
+  return finalizeDeltaBalanceBreakdown({
+    availableBalance,
+    netEquity,
+    cashBalance,
+    positiveLocked: positiveLockedMarginUsd(info),
+  });
 }
 
 /** Parse a Delta India `/v2/wallet/balances` row (USD wallet). */
 function parseDeltaWalletBalanceRow(
   row: Record<string, unknown>,
+  responseMeta?: Record<string, unknown> | null,
 ): DeltaBalanceBreakdown | null {
   const asset =
     row.asset != null && typeof row.asset === "object"
@@ -1232,57 +1304,45 @@ function parseDeltaWalletBalanceRow(
     .toUpperCase();
   if (symbol !== "USD" && symbol !== "USDT") return null;
 
-  const walletBalance =
-    numberOrNull(row.balance) ??
-    numberOrNull(row.wallet_balance) ??
-    numberOrNull(row.total_balance);
   const availableBalance =
     numberOrNull(row.available_balance) ??
     numberOrNull(row.available) ??
-    numberOrNull(row.available_margin);
-  const positionMargin = numberOrNull(row.position_margin) ?? 0;
-  const orderMargin = numberOrNull(row.order_margin) ?? 0;
-  const blockedMargin =
-    numberOrNull(row.blocked_margin) ?? numberOrNull(row.blocked_balance) ?? 0;
+    numberOrNull(row.available_margin) ??
+    0;
 
-  let usedBalance = positionMargin + orderMargin + blockedMargin;
-  let totalBalance = walletBalance ?? 0;
-  let available = availableBalance ?? 0;
+  const netEquity = metaNetEquityFrom(row, responseMeta);
+  const cashBalance =
+    numberOrNull(row.balance) ??
+    numberOrNull(row.wallet_balance) ??
+    numberOrNull(row.total_balance);
 
-  if (totalBalance <= 0 && available + usedBalance > 0) {
-    totalBalance = available + usedBalance;
-  }
-  if (usedBalance <= 0 && totalBalance > 0 && available >= 0) {
-    usedBalance = Math.max(0, totalBalance - available);
-  }
-  if (available <= 0 && totalBalance > 0 && usedBalance > 0) {
-    available = Math.max(0, totalBalance - usedBalance);
-  }
-
-  totalBalance = Math.max(totalBalance, available + usedBalance);
-
-  return {
-    totalBalance: Number.isFinite(totalBalance) ? totalBalance : 0,
-    availableBalance: Number.isFinite(available) ? available : 0,
-    usedBalance: Number.isFinite(usedBalance) ? usedBalance : 0,
-  };
+  return finalizeDeltaBalanceBreakdown({
+    availableBalance,
+    netEquity,
+    cashBalance,
+    positiveLocked: positiveLockedMarginUsd(row),
+  });
 }
 
 async function fetchDeltaWalletBalanceBreakdownUsd(
   exchange: InstanceType<typeof ccxt.delta>,
 ): Promise<DeltaBalanceBreakdown | null> {
   try {
-    type WalletResponse = { result?: unknown[] };
+    type WalletResponse = { result?: unknown[]; meta?: unknown };
     const response = (await (
       exchange as InstanceType<typeof ccxt.delta> & {
         privateGetWalletBalances: () => Promise<WalletResponse>;
       }
     ).privateGetWalletBalances()) as WalletResponse;
 
+    const responseMeta = asBalanceRecord(response.meta);
     const rows = Array.isArray(response?.result) ? response.result : [];
     for (const row of rows) {
       if (!row || typeof row !== "object") continue;
-      const parsed = parseDeltaWalletBalanceRow(row as Record<string, unknown>);
+      const parsed = parseDeltaWalletBalanceRow(
+        row as Record<string, unknown>,
+        responseMeta,
+      );
       if (parsed) return parsed;
     }
   } catch (err) {
