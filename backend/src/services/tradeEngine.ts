@@ -91,6 +91,8 @@ const SAFETY_RECONCILE_MS = 30_000;
 const AUTO_EXIT_CHECK_MS = 1_000;
 /** Align follower contract counts with master × multiplier (REST safety net). */
 const POSITION_QTY_RECONCILE_MS = 60_000;
+/** Poll master REST positions to catch manual UI fills missed by private WS. */
+const MASTER_REST_POLL_MS = 5_000;
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -186,6 +188,7 @@ async function triggerMasterOpenCopy(
     masterFillKey: string;
     source: "orders" | "positions" | "fills";
   },
+  tracker?: MasterPositionTracker,
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
@@ -217,6 +220,16 @@ async function triggerMasterOpenCopy(
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
   });
+
+  if (tracker) {
+    const prev = tracker.maxContractsForSymbolSide(args.symbol, args.side);
+    tracker.applyMasterLeg({
+      symbol: args.symbol,
+      side: args.side,
+      contracts: prev + args.masterContracts,
+      avgEntry: entryPrice,
+    });
+  }
 }
 
 function normalizeSide(raw: unknown): TradeSide | null {
@@ -521,19 +534,25 @@ async function processMasterOrderFillRecords(
   prisma: PrismaClient,
   strategyId: string,
   records: unknown[],
+  tracker?: MasterPositionTracker,
 ): Promise<void> {
   for (const r of records) {
     const sig = extractOrderFillSignal(r);
     if (!sig || sig.reduceOnly) continue;
     registerSymbolsForLivePrices([sig.symbol]);
-    await triggerMasterOpenCopy(prisma, strategyId, {
-      symbol: sig.symbol,
-      side: sig.side,
-      masterContracts: sig.contracts,
-      avgPrice: sig.avgPrice,
-      masterFillKey: sig.fillKey,
-      source: "orders",
-    });
+    await triggerMasterOpenCopy(
+      prisma,
+      strategyId,
+      {
+        symbol: sig.symbol,
+        side: sig.side,
+        masterContracts: sig.contracts,
+        avgPrice: sig.avgPrice,
+        masterFillKey: sig.fillKey,
+        source: "orders",
+      },
+      tracker,
+    );
   }
 }
 
@@ -541,19 +560,25 @@ async function processMasterUserTradeFillRecords(
   prisma: PrismaClient,
   strategyId: string,
   records: unknown[],
+  tracker?: MasterPositionTracker,
 ): Promise<void> {
   for (const r of records) {
     const sig = extractUserTradeFillSignal(r);
     if (!sig) continue;
     registerSymbolsForLivePrices([sig.symbol]);
-    await triggerMasterOpenCopy(prisma, strategyId, {
-      symbol: sig.symbol,
-      side: sig.side,
-      masterContracts: sig.contracts,
-      avgPrice: sig.avgPrice,
-      masterFillKey: sig.fillKey,
-      source: "fills",
-    });
+    await triggerMasterOpenCopy(
+      prisma,
+      strategyId,
+      {
+        symbol: sig.symbol,
+        side: sig.side,
+        masterContracts: sig.contracts,
+        avgPrice: sig.avgPrice,
+        masterFillKey: sig.fillKey,
+        source: "fills",
+      },
+      tracker,
+    );
   }
 }
 
@@ -1519,6 +1544,254 @@ type LastOpenMeta = {
   avgEntry: number;
 };
 
+function masterLegKey(symbol: string, side: TradeSide): string {
+  return `${compactSymbolKey(symbol)}:${side}`;
+}
+
+/** Shared master position snapshot — WS handlers and REST poll read/write the same maps. */
+class MasterPositionTracker {
+  readonly lastPositionContracts = new Map<string, number>();
+  readonly lastOpenMeta = new Map<string, LastOpenMeta>();
+  private restBaselineSeeded = false;
+
+  aliasesForSnap(snap: {
+    symbol: string;
+    side: TradeSide;
+    productKey: string;
+  }): string[] {
+    const out = new Set<string>();
+    for (const a of symbolAliasSet(snap.symbol)) out.add(a);
+    if (snap.productKey) {
+      out.add(snap.productKey);
+      out.add(snap.productKey.toUpperCase());
+    }
+    out.add(masterLegKey(snap.symbol, snap.side));
+    return Array.from(out).filter(Boolean);
+  }
+
+  maxContractsForSymbolSide(symbol: string, side: TradeSide): number {
+    let prev = 0;
+    for (const a of symbolAliasSet(symbol)) {
+      const m = this.lastOpenMeta.get(a);
+      if (m && m.side === side) {
+        prev = Math.max(
+          prev,
+          this.lastPositionContracts.get(a) ?? m.contracts,
+        );
+      }
+    }
+    const legK = masterLegKey(symbol, side);
+    const legMeta = this.lastOpenMeta.get(legK);
+    if (legMeta?.side === side) {
+      prev = Math.max(
+        prev,
+        this.lastPositionContracts.get(legK) ?? legMeta.contracts,
+      );
+    }
+    return prev;
+  }
+
+  writeTracked(
+    snap: {
+      symbol: string;
+      side: TradeSide;
+      contracts: number;
+      avgEntry: number | null;
+      productKey: string;
+    },
+    contracts: number,
+  ): void {
+    const aliases = this.aliasesForSnap(snap);
+    for (const k of aliases) {
+      const prev = this.lastOpenMeta.get(k);
+      this.lastPositionContracts.set(k, contracts);
+      this.lastOpenMeta.set(k, {
+        symbol: snap.symbol,
+        side: snap.side,
+        contracts,
+        avgEntry: Number.isFinite(snap.avgEntry ?? NaN)
+          ? (snap.avgEntry as number)
+          : prev?.avgEntry ?? 0,
+      });
+    }
+  }
+
+  applyMasterLeg(leg: {
+    symbol: string;
+    side: TradeSide;
+    contracts: number;
+    avgEntry: number;
+  }): void {
+    const snap = {
+      symbol: leg.symbol,
+      side: leg.side,
+      contracts: leg.contracts,
+      avgEntry: leg.avgEntry,
+      productKey: leg.symbol,
+    };
+    this.writeTracked(snap, leg.contracts);
+  }
+
+  clearLegKeys(keys: Iterable<string>): void {
+    for (const k of keys) {
+      this.lastPositionContracts.delete(k);
+      this.lastOpenMeta.delete(k);
+    }
+  }
+
+  isRestBaselineSeeded(): boolean {
+    return this.restBaselineSeeded;
+  }
+
+  markRestBaselineSeeded(): void {
+    this.restBaselineSeeded = true;
+  }
+}
+
+/**
+ * REST fallback: compare exchange master positions to the shared tracker every
+ * {@link MASTER_REST_POLL_MS}. Catches manual UI fills that private WS missed.
+ */
+async function pollMasterPositionsFallback(
+  prisma: PrismaClient,
+  tracker: MasterPositionTracker,
+  cancelled: { value: boolean },
+): Promise<void> {
+  if (cancelled.value) return;
+
+  try {
+    const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+    if (!futureHedgeId) return;
+
+    const strat = await prisma.strategy.findFirst({
+      where: {
+        id: futureHedgeId,
+        ...STRATEGY_WHERE_COPY_ENABLED,
+      },
+      select: {
+        id: true,
+        isActive: true,
+        masterApiKey: true,
+        masterApiSecret: true,
+      },
+    });
+    if (!strat?.isActive) return;
+    if (!strat.masterApiKey?.trim() || !strat.masterApiSecret?.trim()) {
+      return;
+    }
+
+    const subs = await findActiveCopySubscribersForStrategy(prisma, strat.id);
+    if (subs.length === 0) return;
+
+    if (!(await assertStrategyActiveForCopy(prisma, strat.id))) return;
+
+    let masters: MasterLedTrade[];
+    try {
+      masters = await fetchMasterOpenPositions(
+        strat.masterApiKey,
+        strat.masterApiSecret,
+      );
+    } catch (err) {
+      console.warn(
+        "[MASTER-REST-SYNC] fetch positions failed:",
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+
+    registerSymbolsForLivePrices(masters.map((m) => m.deltaSymbol));
+
+    if (!tracker.isRestBaselineSeeded()) {
+      for (const m of masters) {
+        tracker.applyMasterLeg({
+          symbol: m.deltaSymbol,
+          side: m.side,
+          contracts: m.masterContracts,
+          avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+        });
+      }
+      tracker.markRestBaselineSeeded();
+      console.log(
+        `[MASTER-REST-SYNC] baseline seeded ${masters.length} open master leg(s)`,
+      );
+      return;
+    }
+
+    const seenLegs = new Set<string>();
+
+    for (const m of masters) {
+      if (cancelled.value) return;
+
+      const legKey = masterLegKey(m.deltaSymbol, m.side);
+      seenLegs.add(legKey);
+
+      const prev = tracker.maxContractsForSymbolSide(m.deltaSymbol, m.side);
+      const next = m.masterContracts;
+
+      if (next > prev) {
+        const increment = next - prev;
+        console.log(
+          "[MASTER-REST-SYNC] Detected missing/new master position, triggering copy for:",
+          m.deltaSymbol,
+        );
+        const entryPrice = await resolveMasterCopyEntryPrice(
+          m.deltaSymbol,
+          m.entryPrice,
+        );
+        if (entryPrice == null) {
+          console.warn(
+            `[MASTER-REST-SYNC] skip copy ${m.deltaSymbol} +${increment} — no entry/mark price`,
+          );
+          continue;
+        }
+
+        const fillKey = `rest-sync:${buildMasterFillKey([
+          m.deltaSymbol,
+          m.side,
+          String(prev),
+          String(next),
+          String(entryPrice),
+        ])}`;
+        await copyMasterFillToSubscribers(prisma, strat.id, {
+          symbol: m.deltaSymbol,
+          side: m.side,
+          masterContracts: increment,
+          avgPrice: entryPrice,
+          masterFillKey: fillKey,
+        });
+      }
+
+      tracker.applyMasterLeg({
+        symbol: m.deltaSymbol,
+        side: m.side,
+        contracts: next,
+        avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+      });
+    }
+
+    const trackedLegs = new Map<string, LastOpenMeta>();
+    for (const meta of tracker.lastOpenMeta.values()) {
+      const lk = masterLegKey(meta.symbol, meta.side);
+      const cur = tracker.maxContractsForSymbolSide(meta.symbol, meta.side);
+      if (cur > 0) trackedLegs.set(lk, meta);
+    }
+    for (const [lk, meta] of trackedLegs) {
+      if (seenLegs.has(lk)) continue;
+      tracker.applyMasterLeg({
+        symbol: meta.symbol,
+        side: meta.side,
+        contracts: 0,
+        avgEntry: 0,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[MASTER-REST-SYNC] poll failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 class StrategyMasterSocket {
   private ws: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1527,13 +1800,11 @@ class StrategyMasterSocket {
   private destroyed = false;
   /** Serializes WS handlers so fills/closes for this strategy never overlap. */
   private messageChain: Promise<void> = Promise.resolve();
-  /** Last non-zero position per product (for closed detection). */
-  private readonly lastPositionContracts = new Map<string, number>();
-  private readonly lastOpenMeta = new Map<string, LastOpenMeta>();
 
   constructor(
     private readonly prisma: PrismaClient,
     readonly strategyId: string,
+    private readonly tracker: MasterPositionTracker,
   ) {}
 
   private enqueueMessage(handler: () => Promise<void>): void {
@@ -1612,22 +1883,19 @@ class StrategyMasterSocket {
       );
       registerSymbolsForLivePrices(masters.map((m) => m.deltaSymbol));
       for (const m of masters) {
-        const aliases = symbolAliasSet(m.deltaSymbol);
-        for (const k of aliases) {
-          this.lastPositionContracts.set(k, m.masterContracts);
-          this.lastOpenMeta.set(k, {
-            symbol: m.deltaSymbol,
-            side: m.side,
-            contracts: m.masterContracts,
-            avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
-          });
-        }
+        this.tracker.applyMasterLeg({
+          symbol: m.deltaSymbol,
+          side: m.side,
+          contracts: m.masterContracts,
+          avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+        });
       }
       console.log(
         `[tradeEngine] seeded ${masters.length} master open positions strategyId=${this.strategyId} keys=${JSON.stringify(
-          Array.from(this.lastOpenMeta.keys()),
+          Array.from(this.tracker.lastOpenMeta.keys()),
         )}`,
       );
+      this.tracker.markRestBaselineSeeded();
     } catch (err) {
       console.warn(
         `[tradeEngine] seedPositionMapsFromRest failed strategyId=${this.strategyId}:`,
@@ -1776,6 +2044,7 @@ class StrategyMasterSocket {
         this.prisma,
         this.strategyId,
         records,
+        this.tracker,
       );
       return;
     }
@@ -1790,6 +2059,7 @@ class StrategyMasterSocket {
         this.prisma,
         this.strategyId,
         records,
+        this.tracker,
       );
       return;
     }
@@ -1802,48 +2072,6 @@ class StrategyMasterSocket {
         this.prisma,
         this.strategyId,
       );
-
-      // Build the union of alias keys that should map to a tracked position
-      // — both the raw symbol (ETHUSD), the USDT-suffix variant (ETHUSDT)
-      // and the numeric `product_id` (so WS deletes that omit the symbol
-      // string still resolve a tracked entry).
-      const aliasesForSnap = (snap: {
-        symbol: string;
-        productKey: string;
-      }): string[] => {
-        const out = new Set<string>();
-        for (const a of symbolAliasSet(snap.symbol)) out.add(a);
-        if (snap.productKey) {
-          out.add(snap.productKey);
-          out.add(snap.productKey.toUpperCase());
-        }
-        return Array.from(out).filter(Boolean);
-      };
-
-      const writeTracked = (
-        snap: {
-          symbol: string;
-          side: TradeSide;
-          contracts: number;
-          avgEntry: number | null;
-          productKey: string;
-        },
-        contracts: number,
-      ): void => {
-        const aliases = aliasesForSnap(snap);
-        for (const k of aliases) {
-          const prev = this.lastOpenMeta.get(k);
-          this.lastPositionContracts.set(k, contracts);
-          this.lastOpenMeta.set(k, {
-            symbol: snap.symbol,
-            side: snap.side,
-            contracts,
-            avgEntry: Number.isFinite(snap.avgEntry ?? NaN)
-              ? (snap.avgEntry as number)
-              : prev?.avgEntry ?? 0,
-          });
-        }
-      };
 
       const collectRows = (): unknown[] => {
         const rows: unknown[] = [];
@@ -1869,12 +2097,12 @@ class StrategyMasterSocket {
           const snap = extractPositionSnapshot(r);
           if (!snap) continue;
           if (snap.contracts <= 0) continue;
-          writeTracked(snap, snap.contracts);
+          this.tracker.writeTracked(snap, snap.contracts);
           n += 1;
         }
         console.log(
           `[tradeEngine WS] positions snapshot processed ${n} rows strategyId=${this.strategyId} keys=${JSON.stringify(
-            Array.from(this.lastOpenMeta.keys()),
+            Array.from(this.tracker.lastOpenMeta.keys()),
           )}`,
         );
         return;
@@ -1904,12 +2132,12 @@ class StrategyMasterSocket {
             let hitMeta: LastOpenMeta | undefined;
             let hitContracts = 0;
             for (const k of candidateKeys) {
-              const m = this.lastOpenMeta.get(k);
+              const m = this.tracker.lastOpenMeta.get(k);
               if (m) {
                 hitMeta = m;
                 hitContracts = Math.max(
                   hitContracts,
-                  this.lastPositionContracts.get(k) ?? m.contracts,
+                  this.tracker.lastPositionContracts.get(k) ?? m.contracts,
                 );
               }
             }
@@ -1929,12 +2157,12 @@ class StrategyMasterSocket {
             });
             // wipe every alias of the closed symbol
             for (const a of symbolAliasSet(hitMeta.symbol)) {
-              this.lastPositionContracts.delete(a);
-              this.lastOpenMeta.delete(a);
+              this.tracker.lastPositionContracts.delete(a);
+              this.tracker.lastOpenMeta.delete(a);
             }
             for (const k of candidateKeys) {
-              this.lastPositionContracts.delete(k);
-              this.lastOpenMeta.delete(k);
+              this.tracker.lastPositionContracts.delete(k);
+              this.tracker.lastOpenMeta.delete(k);
             }
             closed += 1;
           }
@@ -1947,7 +2175,7 @@ class StrategyMasterSocket {
           // de-dupe by symbol so we don't fire the same close twice when
           // a position is registered under multiple alias keys.
           const fired = new Set<string>();
-          const entries = Array.from(this.lastOpenMeta.entries());
+          const entries = Array.from(this.tracker.lastOpenMeta.entries());
           if (entries.length === 0) {
             console.warn(
               `[tradeEngine WS] ${reason} but no tracked positions to close strategyId=${this.strategyId}`,
@@ -1961,7 +2189,7 @@ class StrategyMasterSocket {
             const lastContracts = Math.max(
               meta.contracts,
               ...Array.from(symbolAliasSet(meta.symbol)).map(
-                (a) => this.lastPositionContracts.get(a) ?? 0,
+                (a) => this.tracker.lastPositionContracts.get(a) ?? 0,
               ),
             );
             if (lastContracts <= 0) continue;
@@ -1978,8 +2206,8 @@ class StrategyMasterSocket {
               masterContracts: lastContracts,
             });
             for (const a of symbolAliasSet(meta.symbol)) {
-              this.lastPositionContracts.delete(a);
-              this.lastOpenMeta.delete(a);
+              this.tracker.lastPositionContracts.delete(a);
+              this.tracker.lastOpenMeta.delete(a);
             }
           }
         };
@@ -1987,7 +2215,7 @@ class StrategyMasterSocket {
         console.log(
           `[tradeEngine WS] positions delete strategyId=${this.strategyId} payload=${JSON.stringify(
             msg.data ?? null,
-          )} trackedKeys=${JSON.stringify(Array.from(this.lastOpenMeta.keys()))}`,
+          )} trackedKeys=${JSON.stringify(Array.from(this.tracker.lastOpenMeta.keys()))}`,
         );
 
         const matched = await tryPayloadClose();
@@ -2008,13 +2236,13 @@ class StrategyMasterSocket {
         const snap = extractPositionSnapshot(r);
         if (!snap) continue;
 
-        const aliases = aliasesForSnap(snap);
+        const aliases = this.tracker.aliasesForSnap(snap);
         let prev = 0;
         let meta: LastOpenMeta | undefined;
         for (const k of aliases) {
-          const c = this.lastPositionContracts.get(k) ?? 0;
+          const c = this.tracker.lastPositionContracts.get(k) ?? 0;
           if (c > prev) prev = c;
-          const m = this.lastOpenMeta.get(k);
+          const m = this.tracker.lastOpenMeta.get(k);
           if (!meta && m) meta = m;
         }
         const next = snap.contracts;
@@ -2041,19 +2269,19 @@ class StrategyMasterSocket {
             });
           }
           for (const a of symbolAliasSet(closeMeta.symbol)) {
-            this.lastPositionContracts.delete(a);
-            this.lastOpenMeta.delete(a);
+            this.tracker.lastPositionContracts.delete(a);
+            this.tracker.lastOpenMeta.delete(a);
           }
           for (const k of aliases) {
-            this.lastPositionContracts.delete(k);
-            this.lastOpenMeta.delete(k);
+            this.tracker.lastPositionContracts.delete(k);
+            this.tracker.lastOpenMeta.delete(k);
           }
           continue;
         }
 
         if (next > 0) {
           registerSymbolsForLivePrices([snap.symbol]);
-          writeTracked(snap, next);
+          this.tracker.writeTracked(snap, next);
           console.log(
             `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
           );
@@ -2103,11 +2331,13 @@ class StrategyMasterSocket {
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
   const stopLivePriceTracker = startLivePriceTracker(prisma);
+  const masterPositionTracker = new MasterPositionTracker();
   const sockets = new Map<string, StrategyMasterSocket>();
   let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconcileTimeout: ReturnType<typeof setTimeout> | null = null;
   let qtyReconcileTimeout: ReturnType<typeof setTimeout> | null = null;
   let autoExitTimeout: ReturnType<typeof setTimeout> | null = null;
+  let masterRestPollInterval: ReturnType<typeof setInterval> | null = null;
 
   async function syncRoster(): Promise<void> {
     if (cancelled.value) return;
@@ -2151,7 +2381,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
       for (const id of want) {
         if (!sockets.has(id)) {
-          const conn = new StrategyMasterSocket(prisma, id);
+          const conn = new StrategyMasterSocket(prisma, id, masterPositionTracker);
           sockets.set(id, conn);
           conn.start();
           console.log(
@@ -2614,9 +2844,22 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     if (!cancelled.value) scheduleAutoExit();
   });
 
+  masterRestPollInterval = setInterval(() => {
+    void pollMasterPositionsFallback(
+      prisma,
+      masterPositionTracker,
+      cancelled,
+    );
+  }, MASTER_REST_POLL_MS);
+  void pollMasterPositionsFallback(prisma, masterPositionTracker, cancelled);
+
   return () => {
     cancelled.value = true;
     stopLivePriceTracker();
+    if (masterRestPollInterval != null) {
+      clearInterval(masterRestPollInterval);
+      masterRestPollInterval = null;
+    }
     if (rosterTimeout != null) {
       clearTimeout(rosterTimeout);
       rosterTimeout = null;
