@@ -31,7 +31,7 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
-import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers, forceSyncMasterOpenToFollowers } from "./followerTradeExecution.js";
+import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers, followerBotOpenDeficitLots } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveCopySubscribersForStrategy,
@@ -186,14 +186,16 @@ async function triggerMasterOpenCopy(
     masterContracts: number;
     avgPrice: number | null;
     masterFillKey: string;
-    source: "orders" | "positions" | "fills";
+    source: "orders" | "positions" | "fills" | "rest";
+    forceRestSync?: boolean;
   },
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
+  const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
   console.log(
-    `[MASTER-WS] Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
+    `${logTag} Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
       `(source=${args.source} side=${args.side} qty=${args.masterContracts})`,
   );
 
@@ -203,15 +205,25 @@ async function triggerMasterOpenCopy(
   );
   if (entryPrice == null) {
     console.warn(
-      `[MASTER-WS] skip copy ${args.symbol} — could not resolve entry/mark price`,
+      `${logTag} skip copy ${args.symbol} — could not resolve entry/mark price`,
     );
     return;
   }
 
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
   console.log(
-    `[MASTER-WS] Future Hedge strategyId=${futureHedgeId ?? "none"} socketStrategyId=${strategyId}`,
+    `${logTag} Future Hedge strategyId=${futureHedgeId ?? "none"} socketStrategyId=${strategyId}`,
   );
+
+  const forceRestSync =
+    args.forceRestSync === true || args.source === "rest";
+
+  if (forceRestSync) {
+    console.log(
+      "[FORCE-SYNC] Forcing market open order synchronization for followers on symbol:",
+      args.symbol,
+    );
+  }
 
   await copyMasterFillToSubscribers(prisma, strategyId, {
     symbol: args.symbol,
@@ -219,6 +231,7 @@ async function triggerMasterOpenCopy(
     masterContracts: args.masterContracts,
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
+    ...(forceRestSync ? { forceRestSync: true } : {}),
   });
 
   if (tracker) {
@@ -230,6 +243,52 @@ async function triggerMasterOpenCopy(
       avgEntry: entryPrice,
     });
   }
+}
+
+/** True when at least one active follower is under-allocated vs master × multiplier. */
+async function followersMissingOpenLeg(
+  prisma: PrismaClient,
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+  masterLots: number,
+): Promise<boolean> {
+  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  if (subscribers.length === 0) return false;
+
+  const openSide = side === "BUY" ? "BUY" : "SELL";
+
+  for (const sub of subscribers) {
+    const expectedLots = followerLotsFromMaster(masterLots, sub);
+    const deficitLots = await followerBotOpenDeficitLots(prisma, {
+      strategyId,
+      userId: sub.userId,
+      symbol,
+      side: openSide,
+      targetLots: expectedLots,
+    });
+    if (deficitLots > 0) {
+      console.log(
+        `[MASTER-REST-SYNC] follower user=${sub.userId} needs +${deficitLots} lots on ${symbol} ${openSide} ` +
+          `(target=${expectedLots} masterLots=${masterLots})`,
+      );
+      return true;
+    }
+  }
+  return false;
+}
+
+function scheduleMasterRestPoll(
+  prisma: PrismaClient,
+  tracker: MasterPositionTracker,
+  cancelled: { value: boolean },
+): void {
+  void pollMasterPositionsFallback(prisma, tracker, cancelled).catch((err) => {
+    console.error(
+      "[MASTER-REST-SYNC] initial poll unhandled rejection:",
+      err instanceof Error ? err.message : err,
+    );
+  });
 }
 
 function normalizeSide(raw: unknown): TradeSide | null {
@@ -1682,7 +1741,7 @@ async function pollMasterPositionsFallback(
       return;
     }
 
-    const subs = await findActiveCopySubscribersForStrategy(prisma, strat.id);
+    const subs = await findActiveFutureHedgeCopySubscribers(prisma);
     if (subs.length === 0) return;
 
     if (!(await assertStrategyActiveForCopy(prisma, strat.id))) return;
@@ -1726,23 +1785,39 @@ async function pollMasterPositionsFallback(
       const legKey = masterLegKey(m.deltaSymbol, m.side);
       seenLegs.add(legKey);
 
-      const entryPrice = await resolveMasterCopyEntryPrice(
+      if (m.masterContracts <= 0) continue;
+
+      const missingOnFollowers = await followersMissingOpenLeg(
+        prisma,
+        strat.id,
         m.deltaSymbol,
-        m.entryPrice,
+        m.side,
+        m.masterContracts,
       );
-      if (entryPrice == null) {
-        console.warn(
-          `[MASTER-REST-SYNC] skip force sync ${m.deltaSymbol} — no entry/mark price`,
-        );
-      } else {
-        await forceSyncMasterOpenToFollowers(prisma, {
-          symbol: m.deltaSymbol,
-          side: m.side,
-          masterLots: m.masterContracts,
-          avgPrice: entryPrice,
-          masterFillKey: `force-rest:${legKey}:${m.masterContracts}`,
-          forceRestSync: true,
-        });
+
+      if (missingOnFollowers) {
+        const fillKey = `force-rest:${buildMasterFillKey([
+          m.deltaSymbol,
+          m.side,
+          String(m.masterContracts),
+          legKey,
+        ])}`;
+        try {
+          await triggerMasterOpenCopy(prisma, strat.id, {
+            symbol: m.deltaSymbol,
+            side: m.side,
+            masterContracts: m.masterContracts,
+            avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
+            masterFillKey: fillKey,
+            source: "rest",
+            forceRestSync: true,
+          });
+        } catch (copyErr) {
+          console.error(
+            `[MASTER-REST-SYNC] force copy failed ${m.deltaSymbol} ${m.side}:`,
+            copyErr instanceof Error ? copyErr.message : copyErr,
+          );
+        }
       }
 
       tracker.applyMasterLeg({
@@ -2829,13 +2904,25 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   });
 
   masterRestPollInterval = setInterval(() => {
-    void pollMasterPositionsFallback(
-      prisma,
-      masterPositionTracker,
-      cancelled,
-    );
+    try {
+      void pollMasterPositionsFallback(
+        prisma,
+        masterPositionTracker,
+        cancelled,
+      ).catch((err) => {
+        console.error(
+          "[MASTER-REST-SYNC] interval poll unhandled rejection:",
+          err instanceof Error ? err.message : err,
+        );
+      });
+    } catch (err) {
+      console.error(
+        "[MASTER-REST-SYNC] interval callback error:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }, MASTER_REST_POLL_MS);
-  void pollMasterPositionsFallback(prisma, masterPositionTracker, cancelled);
+  scheduleMasterRestPoll(prisma, masterPositionTracker, cancelled);
 
   return () => {
     cancelled.value = true;

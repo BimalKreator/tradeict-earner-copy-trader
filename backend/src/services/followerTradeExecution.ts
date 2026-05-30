@@ -25,7 +25,6 @@ import {
   markSubscriptionSyncError,
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
-  subscriptionSyncBlocksReconcile,
 } from "./subscriptionSyncService.js";
 import {
   buildClientOrderId,
@@ -188,19 +187,43 @@ async function followerFillAlreadyCopied(
   prisma: PrismaClient,
   clientOrderId: string,
 ): Promise<boolean> {
-  const trade = await prisma.trade.findUnique({
-    where: { clientOrderId },
-    select: { status: true },
-  });
-  if (trade?.status === TradeStatus.OPEN) {
-    return true;
-  }
-
   const leg = await prisma.tradePosition.findUnique({
     where: { clientOrderId },
     select: { status: true },
   });
-  return leg?.status === TradePositionStatus.OPEN;
+  if (leg?.status === TradePositionStatus.OPEN) {
+    return true;
+  }
+
+  // Stale Trade rows without a bot-managed leg must not block retries.
+  return false;
+}
+
+/**
+ * How many follower contract lots are still missing vs target (0 = synced).
+ * Uses bot-managed TradePosition qty only — not legacy Trade rows.
+ */
+export async function followerBotOpenDeficitLots(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    symbol: string;
+    side: TradeSide | string;
+    targetLots: number;
+  },
+): Promise<number> {
+  const target = Math.max(0, Math.floor(args.targetLots));
+  if (target <= 0) return 0;
+
+  const botQty = await sumOpenFollowerBotQuantity(prisma, {
+    strategyId: args.strategyId,
+    userId: args.userId,
+    symbol: args.symbol,
+    side: args.side,
+  });
+  if (botQty >= target) return 0;
+  return Math.max(1, target - Math.floor(botQty));
 }
 
 export type MasterOpenFillArgs = {
@@ -270,55 +293,31 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     side: fill.side,
     quantity: fill.masterLots,
     entryPrice: fill.avgPrice,
+  }).catch((err) => {
+    console.warn(
+      `[copy] master TradePosition ledger skipped ${fill.symbol}:`,
+      err instanceof Error ? err.message : err,
+    );
   });
 
   const tick = await fetchDeltaTicker(fill.symbol);
   const marketPrice =
     tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
 
-  const skipAll =
+  let entryForCopy = fill.avgPrice;
+  if (
     marketPrice !== undefined &&
     slippageBlocksCopy(
       fill.symbol,
       fill.avgPrice,
       marketPrice,
       strategy.slippage,
-    );
-
-  if (skipAll) {
+    )
+  ) {
     console.warn(
-      `[copy] Slippage exceeded for ${fill.symbol}; skipping Future Hedge fan-out`,
+      `[copy] Slippage vs master entry for ${fill.symbol}; using market ${marketPrice} for follower entry`,
     );
-    await Promise.all(
-      subscribers.map(async (sub) => {
-        const lots = followerLotsFromMaster(fill.masterLots, sub);
-        const clientOrderId = buildStableCopyClientOrderId({
-          strategyId,
-          userId: sub.userId,
-          masterFillKey: fill.masterFillKey,
-          symbol: fill.symbol,
-          side: fill.side,
-          leg: "open",
-        });
-        await markSubscriptionSyncError(prisma, {
-          userId: sub.userId,
-          strategyId,
-          label: "Slippage Exceeded",
-        });
-        await persistCopyTradeRow(prisma, {
-          userId: sub.userId,
-          strategyId,
-          symbol: fill.symbol,
-          side: fill.side,
-          size: lots,
-          entryPrice: fill.avgPrice,
-          status: TradeStatus.FAILED,
-          exitReason: EXIT_REASON.SLIPPAGE_EXCEEDED,
-          clientOrderId,
-        });
-      }),
-    );
-    return { strategyId, fanoutCount: subscribers.length };
+    entryForCopy = marketPrice;
   }
 
   await Promise.all(
@@ -346,7 +345,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           symbol: fill.symbol,
           side: fill.side,
           size: lots,
-          entryPrice: fill.avgPrice,
+          entryPrice: entryForCopy,
           status: TradeStatus.FAILED,
           exitReason: EXIT_REASON.NO_API_CREDENTIALS,
           clientOrderId,
@@ -357,13 +356,6 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       if (await followerFillAlreadyCopied(prisma, clientOrderId)) {
         console.log(
           `[copy] Skip duplicate master fill user=${sub.userId} ${fill.symbol} clientOrderId=${clientOrderId}`,
-        );
-        return;
-      }
-
-      if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
-        console.log(
-          `[copy] Skip user=${sub.userId} strategyId=${strategyId} — syncStatus=${sub.syncStatus} (admin re-sync required)`,
         );
         return;
       }
@@ -386,7 +378,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         symbol: fill.symbol,
         side: fill.side,
         size: lots,
-        entryPrice: fill.avgPrice,
+        entryPrice: entryForCopy,
         clientOrderId,
       });
 
@@ -401,7 +393,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           symbol: fill.symbol,
           side: fill.side,
           quantity: lots,
-          entryPrice: fill.avgPrice,
+          entryPrice: entryForCopy,
           clientOrderId,
           ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
         });
@@ -419,7 +411,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         symbol: fill.symbol,
         side: fill.side,
         size: lots,
-        entryPrice: fill.avgPrice,
+        entryPrice: entryForCopy,
         status:
           result.success && result.verified
             ? TradeStatus.OPEN
@@ -448,160 +440,183 @@ export async function forceSyncMasterOpenToFollowers(
   prisma: PrismaClient,
   fill: MasterOpenFillArgs,
 ): Promise<{ strategyId: string; fanoutCount: number } | null> {
-  const strategy = await resolveFutureHedgeStrategy(prisma);
-  if (!strategy.isActive) {
-    console.log("[FORCE-SYNC] Future Hedge paused — skip force open sync");
-    return null;
-  }
-  if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
-    return null;
-  }
-
-  const strategyId = strategy.id;
-  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
-  if (subscribers.length === 0) {
-    return { strategyId, fanoutCount: 0 };
-  }
-
-  const pending: Array<{
-    sub: (typeof subscribers)[number];
-    expectedLots: number;
-  }> = [];
-
-  for (const sub of subscribers) {
-    const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
-    const actualLots = await sumOpenFollowerBotQuantity(prisma, {
-      strategyId,
-      userId: sub.userId,
-      symbol: fill.symbol,
-      side: fill.side,
-    });
-    if (actualLots <= 0 && expectedLots > 0) {
-      pending.push({ sub, expectedLots });
-    }
-  }
-
-  if (pending.length === 0) {
-    return { strategyId, fanoutCount: 0 };
-  }
-
-  console.log(
-    "[FORCE-SYNC] Forcing market open order synchronization for followers on symbol:",
-    fill.symbol,
-  );
-
-  await recordTradePositionOpen(prisma, {
-    isMaster: true,
-    strategyId,
-    symbol: fill.symbol,
-    side: fill.side,
-    quantity: fill.masterLots,
-    entryPrice: fill.avgPrice,
-  });
-
-  let tickLast: number | undefined;
   try {
-    const tick = await fetchDeltaTicker(fill.symbol);
-    if (tick.last != null && Number.isFinite(tick.last)) {
-      tickLast = tick.last;
+    const strategy = await resolveFutureHedgeStrategy(prisma);
+    if (!strategy.isActive) {
+      console.log("[FORCE-SYNC] Future Hedge paused — skip force open sync");
+      return null;
     }
-  } catch {
-    /* use master entry */
-  }
-  const entryPrice =
-    tickLast != null && tickLast > 0 ? tickLast : fill.avgPrice;
+    if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
+      return null;
+    }
 
-  await Promise.all(
-    pending.map(async ({ sub, expectedLots }) => {
-      const lots = Math.max(1, expectedLots);
-      const creds = resolveCopySubscriptionCreds(sub);
-      const clientOrderId = buildClientOrderId({
+    const strategyId = strategy.id;
+    const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+    if (subscribers.length === 0) {
+      return { strategyId, fanoutCount: 0 };
+    }
+
+    const pending: Array<{
+      sub: (typeof subscribers)[number];
+      lots: number;
+    }> = [];
+
+    for (const sub of subscribers) {
+      const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
+      const deficitLots = await followerBotOpenDeficitLots(prisma, {
         strategyId,
         userId: sub.userId,
         symbol: fill.symbol,
+        side: fill.side,
+        targetLots: expectedLots,
       });
-
-      if (!creds) {
-        await persistCopyTradeRow(prisma, {
-          userId: sub.userId,
-          strategyId,
-          symbol: fill.symbol,
-          side: fill.side,
-          size: lots,
-          entryPrice,
-          status: TradeStatus.FAILED,
-          exitReason: EXIT_REASON.NO_API_CREDENTIALS,
-          clientOrderId,
-        });
-        return;
+      if (deficitLots > 0) {
+        pending.push({ sub, lots: deficitLots });
       }
+    }
 
-      console.log(
-        `[FORCE-SYNC] market open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-          `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
+    if (pending.length === 0) {
+      return { strategyId, fanoutCount: 0 };
+    }
+
+    console.log(
+      "[FORCE-SYNC] Forcing market open order synchronization for followers on symbol:",
+      fill.symbol,
+    );
+
+    try {
+      await recordTradePositionOpen(prisma, {
+        isMaster: true,
+        strategyId,
+        symbol: fill.symbol,
+        side: fill.side,
+        quantity: fill.masterLots,
+        entryPrice: fill.avgPrice,
+        clientOrderId: `m:${strategyId.slice(0, 8)}:${fill.masterFillKey.slice(0, 32)}`,
+      });
+    } catch (masterLegErr) {
+      console.warn(
+        "[FORCE-SYNC] master TradePosition ledger skipped:",
+        masterLegErr instanceof Error ? masterLegErr.message : masterLegErr,
       );
+    }
 
-      const result = await executeFollowerTradeWithVerification(prisma, {
-        strategyId,
-        userId: sub.userId,
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        symbol: fill.symbol,
-        side: fill.side,
-        size: lots,
-        entryPrice,
-        clientOrderId,
-        forceRestSync: true,
-      });
-
-      if (result.success && result.verified) {
-        await markSubscriptionSynced(prisma, {
-          userId: sub.userId,
-          strategyId,
-        });
-        await recordTradePositionOpen(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-          quantity: lots,
-          entryPrice,
-          clientOrderId,
-          ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
-        });
-      } else {
-        await markSubscriptionSyncFailed(prisma, {
-          userId: sub.userId,
-          strategyId,
-          error: result.error ?? "Force-sync open failed",
-        });
+    let tickLast: number | undefined;
+    try {
+      const tick = await fetchDeltaTicker(fill.symbol);
+      if (tick.last != null && Number.isFinite(tick.last)) {
+        tickLast = tick.last;
       }
+    } catch {
+      /* use master entry */
+    }
+    const entryPrice =
+      tickLast != null && tickLast > 0 ? tickLast : fill.avgPrice;
 
-      await persistCopyTradeRow(prisma, {
-        userId: sub.userId,
-        strategyId,
-        symbol: fill.symbol,
-        side: fill.side,
-        size: lots,
-        entryPrice,
-        status:
-          result.success && result.verified
-            ? TradeStatus.OPEN
-            : TradeStatus.FAILED,
-        tradingFee: result.success ? (result.feeCost ?? 0) : 0,
-        clientOrderId,
-        ...(!result.success || !result.verified
-          ? {
-              exitReason: isHardExecutionError(result.error ?? "")
-                ? EXIT_REASON.INSUFFICIENT_MARGIN
-                : EXIT_REASON.EXECUTION_FAILED,
-            }
-          : {}),
-      });
-    }),
-  );
+    await Promise.all(
+      pending.map(async ({ sub, lots }) => {
+        try {
+          const creds = resolveCopySubscriptionCreds(sub);
+          const clientOrderId = buildClientOrderId({
+            strategyId,
+            userId: sub.userId,
+            symbol: fill.symbol,
+          });
 
-  return { strategyId, fanoutCount: pending.length };
+          if (!creds) {
+            await persistCopyTradeRow(prisma, {
+              userId: sub.userId,
+              strategyId,
+              symbol: fill.symbol,
+              side: fill.side,
+              size: lots,
+              entryPrice,
+              status: TradeStatus.FAILED,
+              exitReason: EXIT_REASON.NO_API_CREDENTIALS,
+              clientOrderId,
+            });
+            return;
+          }
+
+          console.log(
+            `[FORCE-SYNC] market open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+              `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
+          );
+
+          const result = await executeFollowerTradeWithVerification(prisma, {
+            strategyId,
+            userId: sub.userId,
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+            symbol: fill.symbol,
+            side: fill.side,
+            size: lots,
+            entryPrice,
+            clientOrderId,
+            forceRestSync: true,
+          });
+
+          if (result.success && result.verified) {
+            await markSubscriptionSynced(prisma, {
+              userId: sub.userId,
+              strategyId,
+            });
+            await recordTradePositionOpen(prisma, {
+              strategyId,
+              userId: sub.userId,
+              symbol: fill.symbol,
+              side: fill.side,
+              quantity: lots,
+              entryPrice,
+              clientOrderId,
+              ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
+            });
+          } else {
+            await markSubscriptionSyncFailed(prisma, {
+              userId: sub.userId,
+              strategyId,
+              error: result.error ?? "Force-sync open failed",
+            });
+          }
+
+          await persistCopyTradeRow(prisma, {
+            userId: sub.userId,
+            strategyId,
+            symbol: fill.symbol,
+            side: fill.side,
+            size: lots,
+            entryPrice,
+            status:
+              result.success && result.verified
+                ? TradeStatus.OPEN
+                : TradeStatus.FAILED,
+            tradingFee: result.success ? (result.feeCost ?? 0) : 0,
+            clientOrderId,
+            ...(!result.success || !result.verified
+              ? {
+                  exitReason: isHardExecutionError(result.error ?? "")
+                    ? EXIT_REASON.INSUFFICIENT_MARGIN
+                    : EXIT_REASON.EXECUTION_FAILED,
+                }
+              : {}),
+          });
+        } catch (subErr) {
+          console.error(
+            `[FORCE-SYNC] follower open failed user=${sub.userId} ${fill.symbol}:`,
+            subErr instanceof Error ? subErr.message : subErr,
+          );
+        }
+      }),
+    );
+
+    return { strategyId, fanoutCount: pending.length };
+  } catch (err) {
+    console.error(
+      "[FORCE-SYNC] forceSyncMasterOpenToFollowers failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 /**
