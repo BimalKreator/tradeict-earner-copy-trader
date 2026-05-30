@@ -143,6 +143,7 @@ export default function AdminUserDetails({
   const [flushingArbitrage, setFlushingArbitrage] = useState(false);
   const [arbitrageSourceUserIdDraft, setArbitrageSourceUserIdDraft] = useState("");
   const [savingArbitrageSource, setSavingArbitrageSource] = useState(false);
+  const [syncingArbitrageFromSource, setSyncingArbitrageFromSource] = useState(false);
   const [adminUserOptions, setAdminUserOptions] = useState<AdminUserOption[]>([]);
   const [arbitrageWithdrawals, setArbitrageWithdrawals] = useState<ArbitrageWithdrawal[]>([]);
   const [withdrawAmount, setWithdrawAmount] = useState("");
@@ -482,6 +483,48 @@ export default function AdminUserDetails({
       );
     } finally {
       setSavingArbitrageSource(false);
+    }
+  }
+
+  async function forceSyncArbitrageFromSource(): Promise<void> {
+    const sourceId = arbitrageSourceUserIdDraft.trim();
+    if (!sourceId) return;
+
+    const ok = window.confirm(
+      "This will delete current arbitrage trades for this user and completely clone the capital, trades, and withdrawals from the source user. Continue?",
+    );
+    if (!ok) return;
+
+    setSyncingArbitrageFromSource(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${userId}/sync-arbitrage`, {
+        method: "POST",
+        headers: authHeaders,
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        message?: string;
+        insertedTrades?: number;
+        insertedWithdrawals?: number;
+        cryptoBalance?: number;
+      };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to sync arbitrage data from source.");
+      }
+      const detail =
+        typeof body.insertedTrades === "number"
+          ? ` Cloned ${body.insertedTrades} trade(s) and ${body.insertedWithdrawals ?? 0} withdrawal(s).`
+          : "";
+      setNotice((body.message ?? "Arbitrage data synced from source user.") + detail);
+      await loadAll();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to sync arbitrage data from source.",
+      );
+    } finally {
+      setSyncingArbitrageFromSource(false);
     }
   }
 
@@ -1162,6 +1205,30 @@ export default function AdminUserDetails({
                     ({user.arbitrageSourceUser.email})
                   </p>
                 ) : null}
+                <div className="mt-4 border-t border-white/10 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => void forceSyncArbitrageFromSource()}
+                    disabled={
+                      !arbitrageSourceUserIdDraft.trim() ||
+                      syncingArbitrageFromSource ||
+                      savingArbitrageSource
+                    }
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/15 px-4 py-2.5 text-sm font-medium text-red-100 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                  >
+                    {syncingArbitrageFromSource ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    ) : null}
+                    {syncingArbitrageFromSource
+                      ? "Syncing from source…"
+                      : "Force Sync Arbitrage Data from Source"}
+                  </button>
+                  <p className="mt-2 text-xs text-amber-200/70">
+                    Replaces this user&apos;s crypto balance, trades, and withdrawals with
+                    a full copy from the source user. Save the copy source ID first if you
+                    changed it above.
+                  </p>
+                </div>
               </div>
 
               <div className="rounded-lg border border-white/10 bg-black/25 p-4">

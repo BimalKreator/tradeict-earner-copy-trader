@@ -207,6 +207,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     "/users/:id/arbitrage-withdrawals",
     adminController.createUserArbitrageWithdrawal,
   );
+  router.post("/users/:id/sync-arbitrage", adminController.syncUserArbitrage);
 
   router.patch("/users/:id/copy-trading", async (req, res, next) => {
     try {

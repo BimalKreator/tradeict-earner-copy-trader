@@ -1712,6 +1712,156 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  const ARBITRAGE_SYNC_BATCH = 500;
+
+  /**
+   * Hard-sync target user's arbitrage ledger from `arbitrageSourceUserId`:
+   * balance, trades, and withdrawals are replaced with copies from the source user.
+   */
+  async function syncUserArbitrage(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const targetUserId = String(req.params.id ?? "").trim();
+      if (!targetUserId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const target = await prisma.user.findUnique({
+        where: { id: targetUserId },
+        select: {
+          id: true,
+          email: true,
+          arbitrageSourceUserId: true,
+        },
+      });
+      if (!target) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const sourceUserId = target.arbitrageSourceUserId?.trim();
+      if (!sourceUserId) {
+        res.status(400).json({
+          error: "Target user has no arbitrageSourceUserId configured",
+        });
+        return;
+      }
+      if (sourceUserId === targetUserId) {
+        res.status(400).json({
+          error: "arbitrageSourceUserId cannot be the same as the target user",
+        });
+        return;
+      }
+
+      const source = await prisma.user.findUnique({
+        where: { id: sourceUserId },
+        select: { id: true, email: true, cryptoBalance: true },
+      });
+      if (!source) {
+        res.status(400).json({ error: "Arbitrage source user not found" });
+        return;
+      }
+
+      const [sourceTrades, sourceWithdrawals] = await Promise.all([
+        prisma.arbitrageTrade.findMany({
+          where: { userId: sourceUserId },
+          select: {
+            token: true,
+            qty: true,
+            buyPrice: true,
+            sellPrice: true,
+            buyDex: true,
+            sellDex: true,
+            feePercent: true,
+            feeAmount: true,
+            netProfit: true,
+            createdAt: true,
+          },
+        }),
+        prisma.arbitrageWithdrawal.findMany({
+          where: { userId: sourceUserId },
+          select: {
+            amount: true,
+            date: true,
+            createdAt: true,
+          },
+        }),
+      ]);
+
+      const summary = await prisma.$transaction(async (tx) => {
+        await tx.user.update({
+          where: { id: targetUserId },
+          data: { cryptoBalance: source.cryptoBalance },
+        });
+
+        const deletedTrades = await tx.arbitrageTrade.deleteMany({
+          where: { userId: targetUserId },
+        });
+        const deletedWithdrawals = await tx.arbitrageWithdrawal.deleteMany({
+          where: { userId: targetUserId },
+        });
+
+        const tradeRows = sourceTrades.map((t) => ({
+          userId: targetUserId,
+          token: t.token,
+          qty: t.qty,
+          buyPrice: t.buyPrice,
+          sellPrice: t.sellPrice,
+          buyDex: t.buyDex,
+          sellDex: t.sellDex,
+          feePercent: t.feePercent,
+          feeAmount: t.feeAmount,
+          netProfit: t.netProfit,
+          createdAt: t.createdAt,
+        }));
+
+        for (let i = 0; i < tradeRows.length; i += ARBITRAGE_SYNC_BATCH) {
+          await tx.arbitrageTrade.createMany({
+            data: tradeRows.slice(i, i + ARBITRAGE_SYNC_BATCH),
+          });
+        }
+
+        const withdrawalRows = sourceWithdrawals.map((w) => ({
+          userId: targetUserId,
+          amount: w.amount,
+          date: w.date,
+          createdAt: w.createdAt,
+        }));
+
+        for (let i = 0; i < withdrawalRows.length; i += ARBITRAGE_SYNC_BATCH) {
+          await tx.arbitrageWithdrawal.createMany({
+            data: withdrawalRows.slice(i, i + ARBITRAGE_SYNC_BATCH),
+          });
+        }
+
+        return {
+          deletedTrades: deletedTrades.count,
+          deletedWithdrawals: deletedWithdrawals.count,
+          insertedTrades: tradeRows.length,
+          insertedWithdrawals: withdrawalRows.length,
+        };
+      });
+
+      res.json({
+        ok: true,
+        message:
+          "Arbitrage balance, trades, and withdrawals synced from source user.",
+        targetUserId,
+        targetEmail: target.email,
+        sourceUserId,
+        sourceEmail: source.email,
+        cryptoBalance: source.cryptoBalance,
+        ...summary,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   const cryptoArbitrageSelect = {
     id: true,
     cryptoArbitrageEnabled: true,
@@ -2137,6 +2287,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchUserCryptoArbitrageAllocation,
     listUserArbitrageWithdrawals,
     createUserArbitrageWithdrawal,
+    syncUserArbitrage,
     listStrategySubscribers,
     syncStrategyUser,
     updateStrategySubscriber,
