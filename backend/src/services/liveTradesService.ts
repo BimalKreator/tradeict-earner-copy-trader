@@ -22,6 +22,8 @@ import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 /** Per-account Delta fetch budget — avoids nginx 502 from long sequential CCXT loadMarkets. */
 const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
+/** Master poll budget — lite snapshot avoids per-option tickers; keep headroom for many legs. */
+const MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS = 45_000;
 
 /** Successful REST polls reporting explicit size=0 before a master leg is removed from UI. */
 const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 3;
@@ -123,14 +125,18 @@ async function fetchAndMergeMasterLiveTrades(
 ): Promise<{ positions: LiveTradeRow[]; fetchException?: string }> {
   try {
     const snapshot = await withDeltaFetchTimeout(
-      fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret),
+      fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret, { lite: true }),
       label,
+      MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS,
     );
-    const enriched = await enrichPositionsList(snapshot.open);
+    const rows = snapshot.open.map((pos) => deltaToRow(pos));
     const positions = mergeMasterLiveTradesCache(
       strategyId,
-      enriched,
+      rows,
       snapshot.explicitFlatLegKeys,
+    );
+    console.log(
+      `[live-trades] master snapshot ok strategyId=${strategyId} open=${snapshot.open.length} cached=${positions.length}`,
     );
     return { positions };
   } catch (err) {
@@ -199,15 +205,16 @@ function applyUserLiveTradesSticky(
 function withDeltaFetchTimeout<T>(
   promise: Promise<T>,
   label: string,
+  timeoutMs: number = DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(
         new Error(
-          `${label} timed out after ${DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS}ms`,
+          `${label} timed out after ${timeoutMs}ms`,
         ),
       );
-    }, DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS);
+    }, timeoutMs);
     promise
       .then((value) => {
         clearTimeout(timer);
@@ -659,16 +666,22 @@ export async function getAdminLiveTradesByStrategy(
         },
       });
 
-      const subs = await subsPromise;
-
-      const masterMerged = credentialsPresent
-        ? await fetchAndMergeMasterLiveTrades(
+      const masterMergedPromise = credentialsPresent
+        ? fetchAndMergeMasterLiveTrades(
             strat.id,
             strat.masterApiKey!,
             strat.masterApiSecret!,
             `master positions strategy=${strat.id}`,
           )
-        : { positions: [] as LiveTradeRow[] };
+        : Promise.resolve({
+            positions: [] as LiveTradeRow[],
+            fetchException: undefined,
+          });
+
+      const [subs, masterMerged] = await Promise.all([
+        subsPromise,
+        masterMergedPromise,
+      ]);
 
       if (masterMerged.fetchException) {
         console.error(

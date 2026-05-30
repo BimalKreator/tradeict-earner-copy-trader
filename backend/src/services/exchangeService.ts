@@ -337,6 +337,21 @@ export type DeltaMarginedPositionSnapshot = {
   explicitFlatLegKeys: string[];
 };
 
+/** When `lite: true`, skip per-row CCXT tickers (admin live-trades master poll). */
+export type FetchMarginedSnapshotOptions = {
+  lite?: boolean;
+};
+
+function parseApiUnrealizedPnl(position: Record<string, unknown>): number | null {
+  const apiUpnlRaw = position.unrealized_pnl;
+  if (apiUpnlRaw === undefined || apiUpnlRaw === null) return null;
+  const upnl = parseFloat(String(apiUpnlRaw));
+  if (!Number.isFinite(upnl)) return null;
+  const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
+  if (!Number.isNaN(funding)) return upnl + funding;
+  return upnl;
+}
+
 export function deltaLiveLegKey(symbolKey: string, side: TradeSide): string {
   return `${symbolKey}:${side}`;
 }
@@ -782,7 +797,9 @@ export async function fetchDeltaTicker(
 export async function fetchDeltaMarginedPositionSnapshot(
   apiKeyStored: string,
   apiSecretStored: string,
+  options?: FetchMarginedSnapshotOptions,
 ): Promise<DeltaMarginedPositionSnapshot> {
+  const lite = options?.lite === true;
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
 
@@ -896,7 +913,7 @@ export async function fetchDeltaMarginedPositionSnapshot(
         markPrice = Number.isFinite(parsed) ? parsed : null;
       }
 
-      if (markPrice === null && !isOption) {
+      if (markPrice === null && !isOption && !lite) {
         try {
           const ticker = await exchange.fetchTicker(unified);
           markPrice = extractMarkFromCcxtTicker(ticker);
@@ -908,6 +925,13 @@ export async function fetchDeltaMarginedPositionSnapshot(
       let unrealizedPnl: number | null = null;
       const apiUpnlRaw = position.unrealized_pnl;
 
+      if (lite) {
+        unrealizedPnl = parseApiUnrealizedPnl(position);
+        if (unrealizedPnl === null && entryPrice !== null && markPrice !== null) {
+          const sign = side === "SELL" ? -1 : 1;
+          unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
+        }
+      } else {
       let upnlPrice: number | null = markPrice;
       let upnlPriceSource = "mark";
 
@@ -954,6 +978,9 @@ export async function fetchDeltaMarginedPositionSnapshot(
         `[PNL_TRACKER] API unrealized_pnl (ignored for options): ${apiUpnlRaw ?? "n/a"}`,
       );
       console.log(`[PNL_TRACKER] -------------------------\n`);
+      }
+
+      if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
 
       let stopLoss: number | null = null;
       let takeProfit: number | null = null;
