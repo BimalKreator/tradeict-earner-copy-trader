@@ -124,6 +124,21 @@ function fmtPnl(n: number | null | undefined): string {
   return usdPnlFmt.format(n);
 }
 
+/** Contract lot count — always positive for display (SELL may arrive signed from API). */
+function fmtLots(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const lots = Math.abs(n);
+  if (lots >= 1) {
+    return lots % 1 === 0 ? String(lots) : lots.toFixed(4).replace(/\.?0+$/, "");
+  }
+  return lots.toFixed(6).replace(/\.?0+$/, "");
+}
+
+function lotSize(n: number | null | undefined): number {
+  if (n === null || n === undefined || !Number.isFinite(n)) return 0;
+  return Math.abs(n);
+}
+
 function sumLivePnl(rows: LiveRow[]): number {
   return rows.reduce((acc, r) => {
     if (r.livePnl != null && Number.isFinite(r.livePnl)) return acc + r.livePnl;
@@ -330,11 +345,12 @@ function MasterLegsTable({
 
   return (
     <div className="scroll-table overflow-x-auto">
-      <table className="w-full min-w-[720px] text-left text-sm">
+      <table className="w-full min-w-[820px] text-left text-sm">
         <thead className="border-b border-primary/30 bg-primary/10">
           <tr>
             <th className="px-4 py-3 font-medium text-white/80">Token</th>
             <th className="px-4 py-3 font-medium text-white/80">Side</th>
+            <th className="px-4 py-3 font-medium text-white/80">Quantity (Lots)</th>
             <th className="px-4 py-3 font-medium text-white/80">Entry price</th>
             <th className="px-4 py-3 font-medium text-white/80">Live PnL</th>
             <th className="px-4 py-3 font-medium text-white/80">Mark price</th>
@@ -349,6 +365,9 @@ function MasterLegsTable({
             >
               <td className="px-4 py-3 font-medium text-white">{r.token}</td>
               <td className="px-4 py-3 text-white/70">{r.side}</td>
+              <td className="px-4 py-3 tabular-nums text-white/85">
+                {fmtLots(r.size)}
+              </td>
               <td className="px-4 py-3 tabular-nums text-white/85">
                 {fmtPrice(r.entryPrice)}
               </td>
@@ -367,7 +386,7 @@ function MasterLegsTable({
                 {fmtPrice(r.markPrice)}
               </td>
               <td className="px-4 py-3">
-                {r.size != null && r.size > 0 ? (
+                {lotSize(r.size) > 0 ? (
                   <button
                     type="button"
                     disabled={
@@ -379,7 +398,7 @@ function MasterLegsTable({
                         strategyId,
                         symbol: r.token,
                         side: r.side,
-                        size: r.size ?? 0,
+                        size: lotSize(r.size),
                         isMaster: true,
                       })
                     }
@@ -939,7 +958,7 @@ function PositionTable({
 
   return (
     <div className="scroll-table overflow-x-auto">
-      <table className="w-full min-w-[900px] text-left text-sm">
+      <table className="w-full min-w-[1000px] text-left text-sm">
         <thead
           className={
             variant === "master"
@@ -958,6 +977,7 @@ function PositionTable({
             <th className="px-3 py-2 font-medium text-white/70">Entry time</th>
             <th className="px-3 py-2 font-medium text-white/70">Token</th>
             <th className="px-3 py-2 font-medium text-white/70">Side</th>
+            <th className="px-3 py-2 font-medium text-white/70">Quantity (Lots)</th>
             <th className="px-3 py-2 font-medium text-white/70">Entry price</th>
             <th className="px-3 py-2 font-medium text-white/70">Live PnL</th>
             <th
@@ -988,6 +1008,9 @@ function PositionTable({
               <td className="px-3 py-2 font-medium text-white">{r.token}</td>
               <td className="px-3 py-2 text-white/65">{r.side}</td>
               <td className="px-3 py-2 tabular-nums text-white/80">
+                {fmtLots(r.size)}
+              </td>
+              <td className="px-3 py-2 tabular-nums text-white/80">
                 {fmtPrice(r.entryPrice)}
               </td>
               <td
@@ -1005,7 +1028,7 @@ function PositionTable({
                 {fmtPrice(r.markPrice)}
               </td>
               <td className="px-3 py-2">
-                {r.size != null && Number.isFinite(r.size) && r.size > 0 ? (
+                {lotSize(r.size) > 0 ? (
                   <button
                     type="button"
                     disabled={
@@ -1019,7 +1042,7 @@ function PositionTable({
                           variant === "master" ? undefined : closeUserId,
                         symbol: r.token,
                         side: r.side,
-                        size: r.size ?? 0,
+                        size: lotSize(r.size),
                         isMaster: variant === "master",
                       })
                     }
