@@ -11,7 +11,8 @@
     "diagnose:delta": "npm run build && node scripts/diagnose-bot.js",
     "build": "tsc",
     "db:reset-strategy": "npm run build && node dist/scripts/resetDefaultStrategy.js",
-    "db:remove-legacy-strategies": "npm run build && node dist/scripts/removeLegacyCryptoOptionsStrategy.js"
+    "db:remove-legacy-strategies": "npm run build && node dist/scripts/removeLegacyCryptoOptionsStrategy.js",
+    "db:import-arbitrage": "npm run build && node dist/scripts/import-arbitrage.js"
   },
   "keywords": [],
   "author": "",
@@ -38,7 +39,8 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "razorpay": "^2.9.6",
     "telegraf": "^4.16.3",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",

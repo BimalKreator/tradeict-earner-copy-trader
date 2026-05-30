@@ -22,6 +22,27 @@ type UserState = {
   cryptoArbitrageEnabled?: boolean;
   cryptoBalance?: number;
   cryptoCapitalPerTradePercent?: number;
+  arbitrageSourceUserId?: string | null;
+  arbitrageSourceUser?: ArbitrageSourceUser | null;
+};
+
+type ArbitrageSourceUser = {
+  id: string;
+  email: string;
+  name: string | null;
+};
+
+type AdminUserOption = {
+  id: string;
+  email: string;
+  name: string | null;
+};
+
+type ArbitrageWithdrawal = {
+  id: string;
+  amount: number;
+  date: string;
+  createdAt: string;
 };
 
 type ManagementPayload = {
@@ -120,6 +141,15 @@ export default function AdminUserDetails({
   const [cryptoAllocationDraft, setCryptoAllocationDraft] = useState("10");
   const [savingArbitrage, setSavingArbitrage] = useState(false);
   const [flushingArbitrage, setFlushingArbitrage] = useState(false);
+  const [arbitrageSourceUserIdDraft, setArbitrageSourceUserIdDraft] = useState("");
+  const [savingArbitrageSource, setSavingArbitrageSource] = useState(false);
+  const [adminUserOptions, setAdminUserOptions] = useState<AdminUserOption[]>([]);
+  const [arbitrageWithdrawals, setArbitrageWithdrawals] = useState<ArbitrageWithdrawal[]>([]);
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawDate, setWithdrawDate] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [submittingWithdrawal, setSubmittingWithdrawal] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editFirstName, setEditFirstName] = useState("");
   const [editLastName, setEditLastName] = useState("");
@@ -146,6 +176,10 @@ export default function AdminUserDetails({
         fetch(`${API_BASE}/admin/users/${userId}/trades`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/transactions`, { headers: authHeaders }),
         fetch(`${API_BASE}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/users/${userId}/arbitrage-withdrawals`, {
+          headers: authHeaders,
+        }),
+        fetch(`${API_BASE}/admin/users`, { headers: authHeaders }),
       ]);
 
       const mgRes = results[0].status === "fulfilled" ? results[0].value : null;
@@ -154,6 +188,8 @@ export default function AdminUserDetails({
       const trRes = results[3].status === "fulfilled" ? results[3].value : null;
       const txRes = results[4].status === "fulfilled" ? results[4].value : null;
       const reqRes = results[5].status === "fulfilled" ? results[5].value : null;
+      const wdRes = results[6].status === "fulfilled" ? results[6].value : null;
+      const usersRes = results[7].status === "fulfilled" ? results[7].value : null;
 
       if (!mgRes?.ok) {
         throw new Error("Failed to load user details.");
@@ -209,7 +245,11 @@ export default function AdminUserDetails({
         nextBalanceStatus = "Keys not set";
       }
 
-      setUser(mg.user);
+      setUser({
+        ...mg.user,
+        arbitrageSourceUserId: mg.user.arbitrageSourceUserId ?? null,
+        arbitrageSourceUser: mg.user.arbitrageSourceUser ?? null,
+      });
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
       setCopyTradingPausedDraft(Boolean(mg.user.copyTradingPaused));
       setCryptoArbitrageEnabledDraft(Boolean(mg.user.cryptoArbitrageEnabled));
@@ -225,6 +265,7 @@ export default function AdminUserDetails({
           : "10",
       );
       setCryptoBalanceAdjustment("");
+      setArbitrageSourceUserIdDraft(mg.user.arbitrageSourceUserId ?? "");
       const source = mg.deltaApiKey ?? mg.exchangeAccount;
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyDraft(source?.apiKey ?? "");
@@ -236,6 +277,32 @@ export default function AdminUserDetails({
       setTransactions(tx.transactions ?? []);
       setCurrentProfile(reqData.current ?? null);
       setRequests(reqData.requests ?? []);
+
+      if (wdRes?.ok) {
+        const wd = (await wdRes.json()) as { withdrawals?: ArbitrageWithdrawal[] };
+        setArbitrageWithdrawals(
+          Array.isArray(wd.withdrawals) ? wd.withdrawals : [],
+        );
+      } else {
+        setArbitrageWithdrawals([]);
+      }
+
+      if (usersRes?.ok) {
+        const list = (await usersRes.json()) as AdminUserOption[];
+        setAdminUserOptions(
+          Array.isArray(list)
+            ? list
+                .filter((u) => u.id !== userId)
+                .map((u) => ({
+                  id: u.id,
+                  email: u.email,
+                  name: u.name ?? null,
+                }))
+            : [],
+        );
+      } else {
+        setAdminUserOptions([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load page.");
     } finally {
@@ -381,6 +448,79 @@ export default function AdminUserDetails({
       setError(e instanceof Error ? e.message : "Failed to save crypto arbitrage settings.");
     } finally {
       setSavingArbitrage(false);
+    }
+  }
+
+  async function saveArbitrageSourceUser(): Promise<void> {
+    setSavingArbitrageSource(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const sourceId = arbitrageSourceUserIdDraft.trim();
+      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+        method: "PUT",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          arbitrageSourceUserId: sourceId.length > 0 ? sourceId : null,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        user?: { arbitrageSourceUserId?: string | null };
+      };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to save arbitrage copy source.");
+      }
+      if (body.user?.arbitrageSourceUserId !== undefined) {
+        setArbitrageSourceUserIdDraft(body.user.arbitrageSourceUserId ?? "");
+      }
+      setNotice("Arbitrage copy source updated.");
+      await loadAll();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to save arbitrage copy source.",
+      );
+    } finally {
+      setSavingArbitrageSource(false);
+    }
+  }
+
+  async function submitArbitrageWithdrawal(): Promise<void> {
+    const amount = Number(withdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Withdraw amount must be a positive number.");
+      return;
+    }
+    if (!withdrawDate.trim()) {
+      setError("Withdraw date is required.");
+      return;
+    }
+
+    setSubmittingWithdrawal(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const dateIso = new Date(`${withdrawDate}T12:00:00`).toISOString();
+      const res = await fetch(
+        `${API_BASE}/admin/users/${userId}/arbitrage-withdrawals`,
+        {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ amount, date: dateIso }),
+        },
+      );
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to submit withdrawal.");
+      }
+      setWithdrawAmount("");
+      setWithdrawDate(new Date().toISOString().slice(0, 10));
+      setNotice("Arbitrage withdrawal recorded.");
+      await loadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to submit withdrawal.");
+    } finally {
+      setSubmittingWithdrawal(false);
     }
   }
 
@@ -969,6 +1109,141 @@ export default function AdminUserDetails({
                     className="mt-1 w-full max-w-xs rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
                   />
                 </label>
+              </div>
+
+              <div className="rounded-lg border border-white/10 bg-black/25 p-4">
+                <h3 className="text-sm font-semibold text-white">
+                  Arbitrage copy source
+                </h3>
+                <p className="mt-1 text-xs text-white/45">
+                  When set, this user&apos;s arbitrage trades view mirrors the source
+                  user&apos;s trade history (
+                  <code className="text-cyan-300/90">arbitrageSourceUserId</code>
+                  ).
+                </p>
+                <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                  <label className="block text-sm text-white/70">
+                    Arbitrage Copy Source User
+                    <select
+                      value={arbitrageSourceUserIdDraft}
+                      onChange={(e) => setArbitrageSourceUserIdDraft(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                    >
+                      <option value="">None (own trades only)</option>
+                      {adminUserOptions.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.name?.trim() || opt.email} · {opt.email} ({opt.id.slice(0, 8)}…)
+                        </option>
+                      ))}
+                    </select>
+                    <span className="mt-1 block text-xs text-white/40">
+                      Or paste a user ID below if not listed.
+                    </span>
+                    <input
+                      type="text"
+                      value={arbitrageSourceUserIdDraft}
+                      onChange={(e) => setArbitrageSourceUserIdDraft(e.target.value)}
+                      placeholder="User UUID (optional manual entry)"
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 font-mono text-xs text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void saveArbitrageSourceUser()}
+                    disabled={savingArbitrageSource}
+                    className="rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-4 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-500/25 disabled:opacity-60"
+                  >
+                    {savingArbitrageSource ? "Saving…" : "Save copy source"}
+                  </button>
+                </div>
+                {user?.arbitrageSourceUser ? (
+                  <p className="mt-2 text-xs text-cyan-200/80">
+                    Linked to: {user.arbitrageSourceUser.name ?? user.arbitrageSourceUser.email}{" "}
+                    ({user.arbitrageSourceUser.email})
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="rounded-lg border border-white/10 bg-black/25 p-4">
+                <h3 className="text-sm font-semibold text-white">Withdrawals</h3>
+                <p className="mt-1 text-xs text-white/45">
+                  Record a manual arbitrage withdrawal for this user.
+                </p>
+                <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
+                  <label className="block text-sm text-white/70">
+                    Withdraw Amount (USD)
+                    <input
+                      type="number"
+                      min={0.01}
+                      step="0.01"
+                      placeholder="e.g. 500"
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                    />
+                  </label>
+                  <label className="block text-sm text-white/70">
+                    Withdraw Date
+                    <input
+                      type="date"
+                      value={withdrawDate}
+                      onChange={(e) => setWithdrawDate(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-cyan-500/40"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void submitArbitrageWithdrawal()}
+                    disabled={submittingWithdrawal}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-60"
+                  >
+                    {submittingWithdrawal ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    ) : null}
+                    {submittingWithdrawal ? "Submitting…" : "Submit Withdrawal"}
+                  </button>
+                </div>
+
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full min-w-[320px] text-left text-sm">
+                    <thead className="border-b border-white/10 text-white/60">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">Date</th>
+                        <th className="px-3 py-2 font-medium">Amount (USD)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {arbitrageWithdrawals.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={2}
+                            className="px-3 py-6 text-center text-white/45"
+                          >
+                            No withdrawals recorded yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        arbitrageWithdrawals.map((w) => (
+                          <tr
+                            key={w.id}
+                            className="border-b border-white/[0.06] last:border-0"
+                          >
+                            <td className="px-3 py-2 text-white/75">
+                              {new Date(w.date).toLocaleDateString(undefined, {
+                                year: "numeric",
+                                month: "short",
+                                day: "numeric",
+                              })}
+                            </td>
+                            <td className="px-3 py-2 font-medium tabular-nums text-white">
+                              ${w.amount.toFixed(2)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">

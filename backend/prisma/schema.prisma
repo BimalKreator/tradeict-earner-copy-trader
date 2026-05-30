@@ -89,6 +89,8 @@ model User {
   cryptoBalance                Float   @default(0.0)
   /** Percent of cryptoBalance allocated per arbitrage trade. */
   cryptoCapitalPerTradePercent Float   @default(10.0)
+  /** When set, this user's arbitrage trades UI reads from the source user's trade history. */
+  arbitrageSourceUserId        String?
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique
@@ -111,6 +113,9 @@ model User {
   paymentTransactions  PaymentTransaction[]
   notifications        Notification[]
   arbitrageTrades      ArbitrageTrade[]
+  arbitrageWithdrawals ArbitrageWithdrawal[]
+  arbitrageSourceUser  User?                 @relation("ArbitrageSource", fields: [arbitrageSourceUserId], references: [id], onDelete: SetNull)
+  arbitrageSourceFollowers User[]            @relation("ArbitrageSource")
   tickets              Ticket[]
   ticketMessages       TicketMessage[]
 }
@@ -482,6 +487,18 @@ model ArbitrageTrade {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+model ArbitrageWithdrawal {
+  id        String   @id @default(uuid())
+  userId    String
+  amount    Float
+  date      DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
 }
 
 model DiscountCoupon {

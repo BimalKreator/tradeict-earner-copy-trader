@@ -1,6 +1,20 @@
 import type { PrismaClient } from "@prisma/client";
 import { startOfUtcDay, startOfUtcMonth } from "./dashboardMetricsService.js";
 
+/** User id whose {@link ArbitrageTrade} rows power the requesting user's arbitrage UI. */
+export async function resolveArbitrageTradesUserId(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<string> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, arbitrageSourceUserId: true },
+  });
+  if (!user) return userId;
+  const sourceId = user.arbitrageSourceUserId?.trim();
+  return sourceId && sourceId !== user.id ? sourceId : user.id;
+}
+
 export async function sumArbitrageNetProfitSince(
   prisma: PrismaClient,
   userId: string,

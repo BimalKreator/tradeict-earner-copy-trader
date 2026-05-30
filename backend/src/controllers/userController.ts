@@ -14,6 +14,7 @@ import {
 } from "../services/dashboardMetricsService.js";
 import {
   getUserArbitrageDashboardMetrics,
+  resolveArbitrageTradesUserId,
   sumArbitrageNetProfitAllTime,
 } from "../services/arbitrageMetricsService.js";
 import {
@@ -276,10 +277,12 @@ export function createUserController(prisma: PrismaClient) {
         ? Math.min(Math.max(1, Math.floor(limitRaw)), MAX_TRADE_LIMIT)
         : DEFAULT_TRADE_LIMIT;
 
+      const tradesUserId = await resolveArbitrageTradesUserId(prisma, userId);
+
       const [totalEarnings, trades] = await Promise.all([
-        sumArbitrageNetProfitAllTime(prisma, userId),
+        sumArbitrageNetProfitAllTime(prisma, tradesUserId),
         prisma.arbitrageTrade.findMany({
-          where: { userId },
+          where: { userId: tradesUserId },
           orderBy: { createdAt: "desc" },
           take: limit,
           select: {
@@ -303,6 +306,42 @@ export function createUserController(prisma: PrismaClient) {
         trades: trades.map((t) => ({
           ...t,
           createdAt: t.createdAt.toISOString(),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listArbitrageWithdrawals(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const rows = await prisma.arbitrageWithdrawal.findMany({
+        where: { userId },
+        orderBy: { date: "desc" },
+        select: {
+          id: true,
+          amount: true,
+          date: true,
+          createdAt: true,
+        },
+      });
+
+      res.json({
+        withdrawals: rows.map((w) => ({
+          id: w.id,
+          amount: w.amount,
+          date: w.date.toISOString(),
+          createdAt: w.createdAt.toISOString(),
         })),
       });
     } catch (err) {
@@ -801,6 +840,7 @@ export function createUserController(prisma: PrismaClient) {
     listInvoices,
     getDashboardOverview,
     listArbitrageTrades,
+    listArbitrageWithdrawals,
     patchCopyTrading,
     createDeposit,
     listDeposits,

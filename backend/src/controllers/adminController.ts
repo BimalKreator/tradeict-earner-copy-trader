@@ -542,11 +542,20 @@ export function createAdminController(prisma: PrismaClient) {
         phone?: unknown;
         status?: unknown;
         role?: unknown;
+        arbitrageSourceUserId?: unknown;
       };
 
       const existing = await prisma.user.findUnique({
         where: { id },
-        select: { id: true, email: true, name: true, mobile: true, status: true, role: true },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          mobile: true,
+          status: true,
+          role: true,
+          arbitrageSourceUserId: true,
+        },
       });
       if (!existing) {
         res.status(404).json({ error: "User not found" });
@@ -559,6 +568,7 @@ export function createAdminController(prisma: PrismaClient) {
         mobile?: string | null;
         status?: UserStatus;
         role?: Role;
+        arbitrageSourceUserId?: string | null;
       } = {};
 
       if (body.firstName !== undefined || body.lastName !== undefined) {
@@ -618,10 +628,41 @@ export function createAdminController(prisma: PrismaClient) {
         data.role = role as Role;
       }
 
+      if (body.arbitrageSourceUserId !== undefined) {
+        if (body.arbitrageSourceUserId === null || body.arbitrageSourceUserId === "") {
+          data.arbitrageSourceUserId = null;
+        } else if (typeof body.arbitrageSourceUserId === "string") {
+          const sourceId = body.arbitrageSourceUserId.trim();
+          if (!sourceId) {
+            data.arbitrageSourceUserId = null;
+          } else if (sourceId === id) {
+            res.status(400).json({
+              error: "arbitrageSourceUserId cannot be the same as the user id",
+            });
+            return;
+          } else {
+            const source = await prisma.user.findUnique({
+              where: { id: sourceId },
+              select: { id: true },
+            });
+            if (!source) {
+              res.status(400).json({ error: "arbitrageSourceUserId user not found" });
+              return;
+            }
+            data.arbitrageSourceUserId = sourceId;
+          }
+        } else {
+          res.status(400).json({
+            error: "arbitrageSourceUserId must be a string, null, or empty to clear",
+          });
+          return;
+        }
+      }
+
       if (Object.keys(data).length === 0) {
         res.status(400).json({
           error:
-            "Provide at least one of firstName, lastName, email, phone, status, or role",
+            "Provide at least one of firstName, lastName, email, phone, status, role, or arbitrageSourceUserId",
         });
         return;
       }
@@ -636,6 +677,7 @@ export function createAdminController(prisma: PrismaClient) {
           mobile: true,
           status: true,
           role: true,
+          arbitrageSourceUserId: true,
           createdAt: true,
         },
       });
@@ -652,6 +694,7 @@ export function createAdminController(prisma: PrismaClient) {
           mobile: user.mobile,
           status: user.status,
           role: user.role,
+          arbitrageSourceUserId: user.arbitrageSourceUserId,
           createdAt: user.createdAt,
         },
       });
@@ -1560,6 +1603,115 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listUserArbitrageWithdrawals(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const rows = await prisma.arbitrageWithdrawal.findMany({
+        where: { userId },
+        orderBy: { date: "desc" },
+        select: {
+          id: true,
+          amount: true,
+          date: true,
+          createdAt: true,
+        },
+      });
+
+      res.json({
+        userId,
+        withdrawals: rows.map((w) => ({
+          id: w.id,
+          amount: w.amount,
+          date: w.date.toISOString(),
+          createdAt: w.createdAt.toISOString(),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function createUserArbitrageWithdrawal(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const body = req.body as { amount?: unknown; date?: unknown };
+      const amount = Number(body.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: "amount must be a positive number" });
+        return;
+      }
+
+      if (typeof body.date !== "string" || !body.date.trim()) {
+        res.status(400).json({ error: "date is required (ISO 8601 string)" });
+        return;
+      }
+      const date = new Date(body.date);
+      if (Number.isNaN(date.getTime())) {
+        res.status(400).json({ error: "date must be a valid ISO 8601 datetime" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const withdrawal = await prisma.arbitrageWithdrawal.create({
+        data: { userId, amount, date },
+        select: {
+          id: true,
+          userId: true,
+          amount: true,
+          date: true,
+          createdAt: true,
+        },
+      });
+
+      res.status(201).json({
+        withdrawal: {
+          id: withdrawal.id,
+          userId: withdrawal.userId,
+          amount: withdrawal.amount,
+          date: withdrawal.date.toISOString(),
+          createdAt: withdrawal.createdAt.toISOString(),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   const cryptoArbitrageSelect = {
     id: true,
     cryptoArbitrageEnabled: true,
@@ -1983,6 +2135,8 @@ export function createAdminController(prisma: PrismaClient) {
     patchUserCryptoArbitrageEnabled,
     patchUserCryptoArbitrageBalance,
     patchUserCryptoArbitrageAllocation,
+    listUserArbitrageWithdrawals,
+    createUserArbitrageWithdrawal,
     listStrategySubscribers,
     syncStrategyUser,
     updateStrategySubscriber,

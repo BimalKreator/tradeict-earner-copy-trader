@@ -25,6 +25,17 @@ type ArbitrageTradesResponse = {
   trades: ArbitrageTradeRow[];
 };
 
+type ArbitrageWithdrawalRow = {
+  id: string;
+  amount: number;
+  date: string;
+  createdAt: string;
+};
+
+type ArbitrageWithdrawalsResponse = {
+  withdrawals: ArbitrageWithdrawalRow[];
+};
+
 const usdFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -71,6 +82,18 @@ function fmtDate(iso: string): string {
   }
 }
 
+function fmtDateShort(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
 function pnlClass(n: number): string {
   if (n > 0) return "text-emerald-400";
   if (n < 0) return "text-red-400";
@@ -79,35 +102,63 @@ function pnlClass(n: number): string {
 
 export default function ArbitrageTradesPage() {
   const [rows, setRows] = useState<ArbitrageTradeRow[]>([]);
-  const [totalEarnings, setTotalEarnings] = useState(0);
+  const [grossEarnings, setGrossEarnings] = useState(0);
+  const [withdrawals, setWithdrawals] = useState<ArbitrageWithdrawalRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
 
+  const totalWithdrawn = withdrawals.reduce(
+    (sum, w) => sum + (Number.isFinite(w.amount) ? w.amount : 0),
+    0,
+  );
+  const netEarnings = grossEarnings - totalWithdrawn;
+
   const load = useCallback(async (silent: boolean) => {
     try {
       const token =
         typeof window !== "undefined" ? localStorage.getItem("token") : null;
-      const res = await fetch(`${API_BASE}/user/arbitrage-trades?limit=500`, {
-        cache: "no-store",
-        headers: { Authorization: `Bearer ${token ?? ""}` },
-      });
-      if (res.status === 401) {
+      const headers = { Authorization: `Bearer ${token ?? ""}` };
+
+      const [tradesRes, withdrawalsRes] = await Promise.all([
+        fetch(`${API_BASE}/user/arbitrage-trades?limit=500`, {
+          cache: "no-store",
+          headers,
+        }),
+        fetch(`${API_BASE}/user/arbitrage-withdrawals`, {
+          cache: "no-store",
+          headers,
+        }),
+      ]);
+
+      if (tradesRes.status === 401 || withdrawalsRes.status === 401) {
         if (!silent) {
           setUnauthorized(true);
           setRows([]);
+          setWithdrawals([]);
         }
         return;
       }
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      const data = (await res.json()) as ArbitrageTradesResponse;
+      if (!tradesRes.ok) throw new Error(`Trades request failed (${tradesRes.status})`);
+
+      const data = (await tradesRes.json()) as ArbitrageTradesResponse;
       setRows(data.trades ?? []);
-      setTotalEarnings(
+      setGrossEarnings(
         typeof data.totalEarnings === "number" && Number.isFinite(data.totalEarnings)
           ? data.totalEarnings
           : 0,
       );
+
+      if (withdrawalsRes.ok) {
+        const wd = (await withdrawalsRes.json()) as ArbitrageWithdrawalsResponse;
+        setWithdrawals(
+          Array.isArray(wd.withdrawals) ? wd.withdrawals : [],
+        );
+      } else {
+        setWithdrawals([]);
+      }
+
       if (!silent) {
         setError(null);
         setUnauthorized(false);
@@ -180,15 +231,86 @@ export default function ArbitrageTradesPage() {
         <p className="text-xs font-medium uppercase tracking-wider text-teal-300/80">
           Total Arbitrage Earnings
         </p>
-        <p className={`mt-2 text-3xl font-semibold tabular-nums md:text-4xl ${pnlClass(totalEarnings)}`}>
-          {fmtPnl(totalEarnings)}
+        <p
+          className={`mt-2 text-3xl font-semibold tabular-nums md:text-4xl ${pnlClass(netEarnings)}`}
+        >
+          {loading ? "—" : fmtPnl(netEarnings)}
         </p>
         <p className="mt-2 text-sm text-white/50">
-          Cumulative net profit from all completed arbitrage trades.
+          Cumulative net profit from trades minus recorded withdrawals.
         </p>
+        {!loading && (grossEarnings !== 0 || totalWithdrawn !== 0) ? (
+          <dl className="mt-4 grid gap-2 border-t border-white/10 pt-4 text-sm sm:grid-cols-2">
+            <div>
+              <dt className="text-white/45">Gross trade profit</dt>
+              <dd className={`mt-0.5 font-medium tabular-nums ${pnlClass(grossEarnings)}`}>
+                {fmtPnl(grossEarnings)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-white/45">Total withdrawn</dt>
+              <dd className="mt-0.5 font-medium tabular-nums text-amber-300/90">
+                −{fmtUsd(totalWithdrawn)}
+              </dd>
+            </div>
+          </dl>
+        ) : null}
       </div>
 
       <div className="overflow-hidden rounded-xl border border-glassBorder bg-white/[0.02] shadow-lg shadow-black/20">
+        <div className="border-b border-glassBorder bg-black/25 px-4 py-3">
+          <h2 className="text-sm font-semibold text-white">Withdrawal history</h2>
+          <p className="mt-0.5 text-xs text-white/45">
+            Withdrawals recorded on your account by an administrator.
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[320px] text-left text-sm">
+            <thead className="border-b border-glassBorder bg-black/20">
+              <tr>
+                <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-white/45">
+                  Date
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-white/45">
+                  Amount
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={2} className="px-4 py-10 text-center">
+                    <Loader2 className="mx-auto h-6 w-6 animate-spin text-teal-400" />
+                  </td>
+                </tr>
+              ) : withdrawals.length === 0 ? (
+                <tr>
+                  <td colSpan={2} className="px-4 py-10 text-center text-white/50">
+                    No withdrawals recorded yet.
+                  </td>
+                </tr>
+              ) : (
+                withdrawals.map((w) => (
+                  <tr
+                    key={w.id}
+                    className="border-b border-glassBorder/60 last:border-0 hover:bg-white/[0.03]"
+                  >
+                    <td className="px-4 py-3 text-white/80">{fmtDateShort(w.date)}</td>
+                    <td className="px-4 py-3 text-right font-medium tabular-nums text-amber-300">
+                      {fmtUsd(w.amount)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-glassBorder bg-white/[0.02] shadow-lg shadow-black/20">
+        <div className="border-b border-glassBorder bg-black/25 px-4 py-3">
+          <h2 className="text-sm font-semibold text-white">Trade history</h2>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1000px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-black/30">
