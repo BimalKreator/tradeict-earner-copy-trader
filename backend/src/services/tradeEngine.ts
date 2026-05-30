@@ -1,6 +1,6 @@
 import { createHmac, createHash } from "node:crypto";
 import WebSocket from "ws";
-import { type PrismaClient, TradeStatus } from "@prisma/client";
+import { type PrismaClient, TradeStatus, TradePositionStatus } from "@prisma/client";
 import {
   executeTrade,
   fetchDeltaOpenPositions,
@@ -53,7 +53,14 @@ import {
   registerSymbolsForLivePrices,
   startLivePriceTracker,
 } from "./livePriceTracker.js";
-import { buildClientOrderId } from "./tradePositionService.js";
+import {
+  buildClientOrderId,
+  closeTradePositionsForLeg,
+  listOpenFollowerBotLegs,
+  recordTradePositionOpen,
+  tradePositionSymbolsAlign,
+  trimOpenFollowerBotQuantity,
+} from "./tradePositionService.js";
 
 /** Re-exported live mark cache (updated by {@link startLivePriceTracker} + public WS). */
 export { liveMarkPrices } from "./liveMarkPriceCache.js";
@@ -246,17 +253,48 @@ function extractDeltaProductSymbol(o: Record<string, unknown>): string {
 }
 
 function orderStateIndicatesFill(state: string): boolean {
-  const u = state.toLowerCase();
+  const u = state.toLowerCase().trim();
+  if (!u) return false;
   return (
     u.includes("fill") ||
     u === "closed" ||
     u === "completed" ||
-    u === "done"
+    u === "done" ||
+    u === "filled" ||
+    u === "executed"
   );
+}
+
+/** Master copy entry — REST mark fallback when WS omits avg fill price (common on manual UI orders). */
+async function resolveMasterCopyEntryPrice(
+  symbol: string,
+  avgFromPayload: number | null | undefined,
+): Promise<number | null> {
+  if (
+    avgFromPayload != null &&
+    Number.isFinite(avgFromPayload) &&
+    avgFromPayload > 0
+  ) {
+    return avgFromPayload;
+  }
+  try {
+    const tick = await fetchDeltaTicker(symbol);
+    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+      return tick.last;
+    }
+  } catch {
+    /* fallback exhausted */
+  }
+  return null;
+}
+
+function buildMasterFillKey(parts: string[]): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 32);
 }
 
 /**
  * Derives a copy signal from an `orders` channel message (schema varies by contract type).
+ * Accepts manual UI / non-API orders — never filters on client_order_id format.
  */
 function extractOrderFillSignal(
   raw: unknown,
@@ -264,14 +302,15 @@ function extractOrderFillSignal(
   symbol: string;
   side: TradeSide;
   contracts: number;
-  avgPrice: number;
+  avgPrice: number | null;
   reduceOnly: boolean;
   /** Stable key for follower dedup (master order id or fill fingerprint). */
   fillKey: string;
 } | null {
   const o = mergePayloadLayers(raw);
-  const state = String(o.state ?? o.order_state ?? o.status ?? "");
-  if (!orderStateIndicatesFill(state)) return null;
+  const state = String(o.state ?? o.order_state ?? o.status ?? "")
+    .toLowerCase()
+    .trim();
 
   const symbol = extractDeltaProductSymbol(o);
   if (!symbol) return null;
@@ -279,22 +318,37 @@ function extractOrderFillSignal(
   const side = normalizeSide(o.side ?? o.order_side);
   if (!side) return null;
 
-  const contracts =
+  const reduceOnly = Boolean(o.reduce_only ?? o.reduceOnly);
+
+  const incrementalFill =
     num(o.fill_qty) ??
+    num(o.last_fill_qty) ??
+    num(o.trade_qty) ??
+    num(o.exec_qty);
+  const cumulativeFilled =
     num(o.filled_qty) ??
-    num(o.size) ??
-    num(o.order_qty);
+    num(o.cum_fill_qty) ??
+    num(o.cumulative_fill_qty);
+
+  let contracts: number | null = null;
+  if (incrementalFill != null && incrementalFill > 0) {
+    contracts = incrementalFill;
+  } else if (cumulativeFilled != null && cumulativeFilled > 0) {
+    contracts = cumulativeFilled;
+  } else if (orderStateIndicatesFill(state)) {
+    contracts = num(o.size) ?? num(o.order_qty);
+  }
+
   if (contracts == null || contracts <= 0) return null;
 
   const avgPrice =
     num(o.average_fill_price) ??
     num(o.avg_fill_price) ??
     num(o.fill_avg_price) ??
+    num(o.average_price) ??
     num(o.price) ??
-    num(o.limit_price);
-  if (avgPrice == null || avgPrice <= 0) return null;
-
-  const reduceOnly = Boolean(o.reduce_only ?? o.reduceOnly);
+    num(o.limit_price) ??
+    num(o.mark_price);
 
   const orderIdRaw =
     o.id ?? o.order_id ?? o.client_order_id ?? o.clientOrderId;
@@ -302,10 +356,13 @@ function extractOrderFillSignal(
     orderIdRaw != null ? String(orderIdRaw).trim() : "";
   const fillKey =
     orderId ||
-    createHash("sha256")
-      .update(`${symbol}|${side}|${contracts}|${avgPrice}|${state}`)
-      .digest("hex")
-      .slice(0, 32);
+    buildMasterFillKey([
+      symbol,
+      side,
+      String(contracts),
+      String(avgPrice ?? 0),
+      state || "fill",
+    ]);
 
   return { symbol, side, contracts, avgPrice, reduceOnly, fillKey };
 }
@@ -1113,7 +1170,7 @@ export async function syncFollowerUserToMasterPositions(
 
 async function copyMasterFillToSubscribers(
   prisma: PrismaClient,
-  strategyId: string,
+  _strategyId: string,
   args: {
     symbol: string;
     side: TradeSide;
@@ -1122,15 +1179,15 @@ async function copyMasterFillToSubscribers(
     masterFillKey: string;
   },
 ): Promise<void> {
-  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
+  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+  if (!futureHedgeId) {
+    console.log(
+      "[tradeEngine] No active Future Hedge strategy — skip master fill copy",
+    );
     return;
   }
 
-  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
-  if (!futureHedgeId || strategyId !== futureHedgeId) {
-    console.log(
-      `[tradeEngine] Ignoring master open fill for non-Future-Hedge strategyId=${strategyId}`,
-    );
+  if (!(await assertStrategyActiveForCopy(prisma, futureHedgeId))) {
     return;
   }
 
@@ -1511,11 +1568,21 @@ class StrategyMasterSocket {
         const sig = extractOrderFillSignal(r);
         if (!sig || sig.reduceOnly) continue;
         registerSymbolsForLivePrices([sig.symbol]);
+        const entryPrice = await resolveMasterCopyEntryPrice(
+          sig.symbol,
+          sig.avgPrice,
+        );
+        if (entryPrice == null) {
+          console.warn(
+            `[tradeEngine WS] orders fill ${sig.symbol} ${sig.side} qty=${sig.contracts} — no entry price, skip copy`,
+          );
+          continue;
+        }
         await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
           symbol: sig.symbol,
           side: sig.side,
           masterContracts: sig.contracts,
-          avgPrice: sig.avgPrice,
+          avgPrice: entryPrice,
           masterFillKey: sig.fillKey,
         });
       }
@@ -1785,6 +1852,42 @@ class StrategyMasterSocket {
           console.log(
             `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
           );
+
+          if (copyEnabled && next > prev) {
+            const increment = next - prev;
+            const entryFromSnap =
+              snap.avgEntry != null && Number.isFinite(snap.avgEntry)
+                ? snap.avgEntry
+                : meta?.avgEntry;
+            const entryPrice = await resolveMasterCopyEntryPrice(
+              snap.symbol,
+              entryFromSnap,
+            );
+            if (entryPrice != null && increment > 0) {
+              const fillKey = `pos:${buildMasterFillKey([
+                snap.symbol,
+                snap.side,
+                String(prev),
+                String(next),
+                String(entryPrice),
+              ])}`;
+              console.log(
+                `[EXECUTION] Master position increase ${snap.symbol} ${snap.side} ` +
+                  `${prev} → ${next} (+${increment}) — copying to Future Hedge followers`,
+              );
+              await copyMasterFillToSubscribers(this.prisma, this.strategyId, {
+                symbol: snap.symbol,
+                side: snap.side,
+                masterContracts: increment,
+                avgPrice: entryPrice,
+                masterFillKey: fillKey,
+              });
+            } else {
+              console.warn(
+                `[tradeEngine WS] position increase ${snap.symbol} +${increment} but no entry price — skip copy`,
+              );
+            }
+          }
         }
       }
       return;
@@ -1939,6 +2042,114 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         return;
       }
 
+      for (const sub of activeSubs) {
+        if (cancelled.value) return;
+
+        const creds = resolveSubscriptionCreds(sub);
+        const botLegs = await listOpenFollowerBotLegs(
+          prisma,
+          strat.id,
+          sub.userId,
+        );
+
+        for (const botLeg of botLegs) {
+          if (cancelled.value) return;
+
+          const legAliases = symbolAliasSet(botLeg.symbol);
+          const masterStillOpen = Array.from(legAliases).some((a) =>
+            masterAliases.has(a),
+          );
+          if (masterStillOpen) continue;
+
+          const openSide = botLeg.side === "BUY" ? "BUY" : "SELL";
+          const oppositeSide: TradeSide = openSide === "BUY" ? "SELL" : "BUY";
+          const followerContracts = Math.max(
+            1,
+            Math.floor(botLeg.quantity),
+          );
+
+          if (creds) {
+            console.log(
+              `[reconcile] master flat — closing bot-managed ${botLeg.symbol} ${openSide} qty=${followerContracts} userId=${sub.userId}`,
+            );
+            const result = await executeTrade(
+              creds.apiKey,
+              creds.apiSecret,
+              botLeg.symbol,
+              oppositeSide,
+              followerContracts,
+              { reduceOnly: true },
+            );
+            if (!result.success) {
+              console.error(
+                `[reconcile] bot leg close failed userId=${sub.userId} symbol=${botLeg.symbol}: ${result.error ?? "unknown"}`,
+              );
+            }
+          } else {
+            console.warn(
+              `[reconcile] no creds to close bot leg userId=${sub.userId} ${botLeg.symbol}; marking DB CLOSED only`,
+            );
+          }
+
+          await closeTradePositionsForLeg(prisma, {
+            strategyId: strat.id,
+            userId: sub.userId,
+            symbol: botLeg.symbol,
+            side: openSide,
+          });
+
+          let exitPrice = 0;
+          try {
+            const tick = await fetchDeltaTicker(botLeg.symbol);
+            if (tick.last != null && Number.isFinite(tick.last)) {
+              exitPrice = tick.last;
+            }
+          } catch {
+            /* fallback below */
+          }
+
+          const openTrades = await prisma.trade.findMany({
+            where: {
+              userId: sub.userId,
+              strategyId: strat.id,
+              symbol: botLeg.symbol,
+              side: openSide,
+              status: TradeStatus.OPEN,
+            },
+            orderBy: { createdAt: "asc" },
+          });
+          for (const trade of openTrades) {
+            const px =
+              exitPrice > 0 ? exitPrice : trade.entryPrice;
+            const pnl = await realizedPnlUsd({
+              symbol: botLeg.symbol,
+              side: openSide,
+              entryPrice: trade.entryPrice,
+              exitPrice: px,
+              contracts: trade.size,
+            });
+            const totalTradingFee = Math.max(0, Number(trade.tradingFee ?? 0));
+            const netPnl = pnl - totalTradingFee;
+            const revenueShareAmt = computeRevenueShareAmt(
+              netPnl,
+              strat.profitShare,
+            );
+            await prisma.trade.update({
+              where: { id: trade.id },
+              data: {
+                status: TradeStatus.CLOSED,
+                exitPrice: px,
+                tradingFee: totalTradingFee,
+                pnl: netPnl,
+                tradePnl: netPnl,
+                revenueShareAmt,
+                exitReason: EXIT_REASON.EXTERNAL_DELTA,
+              },
+            });
+          }
+        }
+      }
+
       const openTrades = await prisma.trade.findMany({
           where: {
             strategyId: strat.id,
@@ -1968,89 +2179,22 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           );
           if (stillOpen) continue;
 
-          const sub = activeSubs.find((s) => s.userId === trade.userId);
-
-          const creds =
-            sub?.exchangeAccount != null
-              ? {
-                  apiKey: sub.exchangeAccount.apiKey,
-                  apiSecret: sub.exchangeAccount.apiSecret,
-                }
-              : trade.user.exchangeAccounts?.[0] != null
-                ? {
-                    apiKey: trade.user.exchangeAccounts[0]!.apiKey,
-                    apiSecret: trade.user.exchangeAccounts[0]!.apiSecret,
-                  }
-                : trade.user.deltaApiKeys?.[0] != null
-                  ? {
-                      apiKey: trade.user.deltaApiKeys[0]!.apiKey,
-                      apiSecret: trade.user.deltaApiKeys[0]!.apiSecret,
-                    }
-                  : null;
-
-          const oppositeSide: TradeSide =
-            String(trade.side).toUpperCase() === "BUY" ? "SELL" : "BUY";
-          const followerContracts = Math.max(1, Math.floor(trade.size));
-
-          if (creds) {
-            console.log(
-              `[reconcile] master no longer holds ${trade.symbol} but DB has OPEN trade for user ${trade.userId} — firing reduceOnly close ${oppositeSide} ${followerContracts}`,
-            );
-            const result = await executeTrade(
-              creds.apiKey,
-              creds.apiSecret,
-              trade.symbol,
-              oppositeSide,
-              followerContracts,
-              { reduceOnly: true },
-            );
-            if (!result.success) {
-              console.error(
-                `[reconcile] follower close failed userId=${trade.userId} symbol=${trade.symbol}: ${result.error ?? "unknown"}`,
-              );
-              // still mark CLOSED below — exchange may already be flat
-            }
-          } else {
-            console.warn(
-              `[reconcile] no creds to close ghost trade for user ${trade.userId} ${trade.symbol}; marking DB CLOSED only`,
-            );
-          }
-
-          let exitPrice = trade.entryPrice;
-          try {
-            const tick = await fetchDeltaTicker(trade.symbol);
-            if (tick.last != null && Number.isFinite(tick.last)) {
-              exitPrice = tick.last;
-            }
-          } catch {
-            /* keep entryPrice fallback */
-          }
-
-          const tradeSide: TradeSide =
-            String(trade.side).toUpperCase() === "BUY" ? "BUY" : "SELL";
-          const pnl = await realizedPnlUsd({
-            symbol: trade.symbol,
-            side: tradeSide,
-            entryPrice: trade.entryPrice,
-            exitPrice,
-            contracts: trade.size,
+          // Ledger-only OPEN Trade with no TradePosition row — mark closed, do not hit exchange.
+          const botQty = await prisma.tradePosition.count({
+            where: {
+              strategyId: strat.id,
+              userId: trade.userId,
+              isMaster: false,
+              status: TradePositionStatus.OPEN,
+              side: String(trade.side).toUpperCase(),
+            },
           });
-          const totalTradingFee = Math.max(0, Number(trade.tradingFee ?? 0));
-          const netPnl = pnl - totalTradingFee;
-          const revenueShareAmt = computeRevenueShareAmt(
-            netPnl,
-            strat.profitShare,
-          );
+          if (botQty > 0) continue;
 
           await prisma.trade.update({
             where: { id: trade.id },
             data: {
               status: TradeStatus.CLOSED,
-              exitPrice,
-              tradingFee: totalTradingFee,
-              pnl: netPnl,
-              tradePnl: netPnl,
-              revenueShareAmt,
               exitReason: EXIT_REASON.EXTERNAL_DELTA,
             },
           });
@@ -2061,8 +2205,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   }
 
   /**
-   * Every {@link POSITION_QTY_RECONCILE_MS}, compare each follower's live Delta
-   * leg size to `masterContracts × multiplier` and market-adjust the difference.
+   * Every {@link POSITION_QTY_RECONCILE_MS}, align each follower's bot-managed
+   * {@link TradePosition} qty to master × multiplier. Never reads total exchange
+   * portfolio size (manual user trades are ignored).
    */
   async function reconcilePositionQuantities(): Promise<void> {
     if (cancelled.value) return;
@@ -2116,85 +2261,112 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             continue;
           }
 
-          let followerPositions: DeltaLivePosition[];
-          try {
-            followerPositions = await fetchDeltaOpenPositions(
-              creds.apiKey,
-              creds.apiSecret,
-            );
-          } catch (err) {
-            console.warn(
-              `[RECONCILE] follower REST failed userId=${sub.userId} strategyId=${strat.id}:`,
-              err instanceof Error ? err.message : err,
-            );
-            continue;
-          }
+          const botLegs = await listOpenFollowerBotLegs(
+            prisma,
+            strat.id,
+            sub.userId,
+          );
 
-          for (const master of masterLegs) {
+          for (const botLeg of botLegs) {
             if (cancelled.value) return;
 
-            const expectedContracts = followerContractsFromMaster(
-              master.masterContracts,
-              subscriptionMultiplier(sub),
+            const master = masterLegs.find(
+              (m) =>
+                m.side === botLeg.side &&
+                tradePositionSymbolsAlign(botLeg.symbol, m.deltaSymbol),
             );
-            const leg = findFollowerLeg(
-              followerPositions,
-              master.deltaSymbol,
-              master.side,
-            );
-            const actualContracts = leg
-              ? Math.max(0, Math.floor(Math.abs(leg.contracts)))
+            const expectedContracts = master
+              ? followerContractsFromMaster(
+                  master.masterContracts,
+                  subscriptionMultiplier(sub),
+                )
               : 0;
+            const dbQty = Math.max(0, Math.floor(botLeg.quantity));
 
-            if (actualContracts === expectedContracts) continue;
+            if (dbQty === expectedContracts) continue;
 
-            if (actualContracts < expectedContracts) {
-              const diff = expectedContracts - actualContracts;
+            if (dbQty < expectedContracts) {
+              const diff = expectedContracts - dbQty;
               console.log(
-                `[RECONCILE] Adjusting position for user ${sub.userId} on ${master.deltaSymbol}: expected ${expectedContracts}, actual ${actualContracts}. Diff: +${diff} (${master.side})`,
+                `[RECONCILE] Bot leg catch-up user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (+${diff})`,
               );
               const result = await executeTrade(
                 creds.apiKey,
                 creds.apiSecret,
-                master.deltaSymbol,
-                master.side,
+                botLeg.symbol,
+                botLeg.side as TradeSide,
                 diff,
               );
               if (!result.success) {
                 console.error(
-                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
+                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${botLeg.symbol} diff=${diff}: ${result.error ?? "unknown"}`,
                 );
                 await markSubscriptionSyncFailed(prisma, {
                   userId: sub.userId,
                   strategyId: strat.id,
                   error: result.error ?? "Reconcile catch-up failed",
                 });
+              } else {
+                let px =
+                  master != null &&
+                  Number.isFinite(master.entryPrice) &&
+                  master.entryPrice > 0
+                    ? master.entryPrice
+                    : 0;
+                if (px <= 0) {
+                  try {
+                    const tick = await fetchDeltaTicker(botLeg.symbol);
+                    if (tick.last != null && Number.isFinite(tick.last)) {
+                      px = tick.last;
+                    }
+                  } catch {
+                    /* skip DB record if no price */
+                  }
+                }
+                if (px > 0) {
+                  await recordTradePositionOpen(prisma, {
+                    strategyId: strat.id,
+                    userId: sub.userId,
+                    symbol: botLeg.symbol,
+                    side: botLeg.side,
+                    quantity: diff,
+                    entryPrice: px,
+                  });
+                }
               }
               continue;
             }
 
-            const diff = actualContracts - expectedContracts;
+            const diff = dbQty - expectedContracts;
             const trimSide: TradeSide =
-              master.side === "BUY" ? "SELL" : "BUY";
+              botLeg.side === "BUY" ? "SELL" : "BUY";
             console.log(
-              `[RECONCILE] Adjusting position for user ${sub.userId} on ${master.deltaSymbol}: expected ${expectedContracts}, actual ${actualContracts}. Diff: -${diff} (${trimSide} reduceOnly)`,
+              `[RECONCILE] Bot leg trim user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (-${diff} reduceOnly)`,
             );
             const result = await executeTrade(
               creds.apiKey,
               creds.apiSecret,
-              master.deltaSymbol,
+              botLeg.symbol,
               trimSide,
               diff,
               { reduceOnly: true },
             );
             if (!result.success) {
               console.error(
-                `[RECONCILE] trim failed userId=${sub.userId} symbol=${master.deltaSymbol} diff=${diff}: ${result.error ?? "unknown"}`,
+                `[RECONCILE] trim failed userId=${sub.userId} symbol=${botLeg.symbol} diff=${diff}: ${result.error ?? "unknown"}`,
               );
               await markSubscriptionSyncFailed(prisma, {
                 userId: sub.userId,
                 strategyId: strat.id,
                 error: result.error ?? "Reconcile trim failed",
+              });
+            } else {
+              await trimOpenFollowerBotQuantity(prisma, {
+                strategyId: strat.id,
+                userId: sub.userId,
+                symbol: botLeg.symbol,
+                side: botLeg.side,
+                reduceBy: diff,
               });
             }
           }

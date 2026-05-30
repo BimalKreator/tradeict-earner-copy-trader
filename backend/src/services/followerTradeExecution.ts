@@ -29,8 +29,9 @@ import {
 } from "./subscriptionSyncService.js";
 import {
   buildStableCopyClientOrderId,
-  recordTradePositionOpen,
   closeTradePositionsForLeg,
+  recordTradePositionOpen,
+  sumOpenFollowerBotQuantity,
 } from "./tradePositionService.js";
 
 /** Wait after each successful order before re-checking positions. */
@@ -478,12 +479,34 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
   await Promise.all(
     subscribers.map(async (sub) => {
-      const lots = followerLotsFromMaster(snap.masterLots, sub);
       const creds = resolveCopySubscriptionCreds(sub);
       if (!creds) return;
 
+      const dbLots = await sumOpenFollowerBotQuantity(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol: snap.symbol,
+        side: snap.side,
+      });
+      if (dbLots <= 0) {
+        console.log(
+          `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — no bot-managed OPEN qty in DB`,
+        );
+        return;
+      }
+
+      const lots = Math.max(1, Math.floor(dbLots));
+      const closeClientOrderId = buildStableCopyClientOrderId({
+        strategyId,
+        userId: sub.userId,
+        masterFillKey: `close:${snap.symbol}:${snap.side}:${lots}`,
+        symbol: snap.symbol,
+        side: oppositeSide,
+        leg: "close",
+      });
+
       console.log(
-        `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots}`,
+        `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots} (DB-managed qty)`,
       );
 
       const closeResult = await executeFollowerTradeWithVerification(prisma, {
@@ -495,6 +518,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         side: oppositeSide,
         size: lots,
         reduceOnly: true,
+        clientOrderId: closeClientOrderId,
       });
 
       if (!closeResult.success) {

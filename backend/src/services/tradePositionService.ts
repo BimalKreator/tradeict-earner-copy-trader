@@ -221,3 +221,119 @@ export async function closeTradePositionsForLeg(
 
   return matches.length;
 }
+
+export type GroupedBotManagedLeg = {
+  symbol: string;
+  side: string;
+  quantity: number;
+};
+
+/** Sum bot-managed OPEN quantity for one follower leg (ignores manual exchange positions). */
+export async function sumOpenFollowerBotQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    symbol: string;
+    side: TradeSide | string;
+  },
+): Promise<number> {
+  const openSide = String(args.side).toUpperCase();
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      userId: args.userId,
+      isMaster: false,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    select: { symbol: true, quantity: true },
+  });
+  return rows
+    .filter((r) => tradePositionSymbolsAlign(args.symbol, r.symbol))
+    .reduce((sum, r) => sum + Math.abs(r.quantity), 0);
+}
+
+/** All OPEN bot-managed legs for a follower on a strategy (grouped by symbol + side). */
+export async function listOpenFollowerBotLegs(
+  prisma: PrismaClient,
+  strategyId: string,
+  userId: string,
+): Promise<GroupedBotManagedLeg[]> {
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId,
+      userId,
+      isMaster: false,
+      status: TradePositionStatus.OPEN,
+    },
+    orderBy: { createdAt: "asc" },
+    select: { symbol: true, side: true, quantity: true },
+  });
+
+  const grouped = new Map<string, GroupedBotManagedLeg>();
+  for (const row of rows) {
+    const side = String(row.side).toUpperCase();
+    const key = `${compactSymbolKey(row.symbol)}:${side}`;
+    const qty = Math.abs(row.quantity);
+    const hit = grouped.get(key);
+    if (hit) {
+      hit.quantity += qty;
+    } else {
+      grouped.set(key, { symbol: row.symbol, side, quantity: qty });
+    }
+  }
+  return Array.from(grouped.values());
+}
+
+/** Reduce bot-managed OPEN quantity in DB after a reduce-only exchange trim (FIFO rows). */
+export async function trimOpenFollowerBotQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    symbol: string;
+    side: TradeSide | string;
+    reduceBy: number;
+  },
+): Promise<number> {
+  let remaining = Math.max(0, Math.floor(args.reduceBy));
+  if (remaining <= 0) return 0;
+
+  const openSide = String(args.side).toUpperCase();
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      userId: args.userId,
+      isMaster: false,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const matches = rows.filter((r) =>
+    tradePositionSymbolsAlign(args.symbol, r.symbol),
+  );
+
+  let trimmed = 0;
+  for (const row of matches) {
+    if (remaining <= 0) break;
+    const qty = Math.abs(row.quantity);
+    if (qty <= remaining) {
+      await prisma.tradePosition.update({
+        where: { id: row.id },
+        data: { status: TradePositionStatus.CLOSED },
+      });
+      remaining -= qty;
+      trimmed += qty;
+    } else {
+      await prisma.tradePosition.update({
+        where: { id: row.id },
+        data: { quantity: qty - remaining },
+      });
+      trimmed += remaining;
+      remaining = 0;
+    }
+  }
+  return trimmed;
+}
