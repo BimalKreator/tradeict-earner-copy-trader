@@ -1163,7 +1163,17 @@ export default function AdminLiveTradesPage() {
         }
         return;
       }
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      if (!res.ok) {
+        const payload: unknown = await res.json().catch(() => null);
+        const apiMessage =
+          typeof payload === "object" &&
+          payload !== null &&
+          "message" in payload &&
+          typeof (payload as { message: unknown }).message === "string"
+            ? (payload as { message: string }).message
+            : null;
+        throw new Error(apiMessage ?? `Request failed (${res.status})`);
+      }
       const data: unknown = await res.json();
       const list = parseStrategyGroups(data);
       setStrategies(list);
@@ -1349,11 +1359,11 @@ export default function AdminLiveTradesPage() {
         <div className="flex justify-center py-20">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
         </div>
-      ) : strategies.length === 0 ? (
+      ) : strategies.length === 0 && !error ? (
         <p className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center text-sm text-white/50">
           Future Hedge Strategy is not configured yet.
         </p>
-      ) : (
+      ) : strategies.length > 0 ? (
         <div className="space-y-4">
           <AdminLiveTradesStrategyTabs
             strategies={strategies}
@@ -1402,7 +1412,7 @@ export default function AdminLiveTradesPage() {
             })}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -1201,13 +1201,20 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
    * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
    * For full master + subscriber matching, use `GET /admin/live-trades/grouped`.
    */
-  router.get("/live-trades/master-positions", async (_req, res, next) => {
+  router.get("/live-trades/master-positions", async (_req, res) => {
     try {
       const strategies = await getAdminMasterPositionSnapshots(prisma);
       applyNoStoreCacheHeaders(res);
       res.json({ strategies });
     } catch (err) {
-      next(err);
+      const message =
+        err instanceof Error ? err.message : String(err ?? "Unknown error");
+      console.error("[live-trades] GET /master-positions failed:", message);
+      res.status(500).json({
+        success: false,
+        message: "Error fetching live trades",
+        error: message,
+      });
     }
   });
 
