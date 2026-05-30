@@ -120,6 +120,71 @@ export function computeArbitrageTradeMath(
   };
 }
 
+export type ArbitrageTradeCopyPayload = {
+  token: string;
+  qty: number;
+  buyPrice: number;
+  sellPrice: number;
+  buyDex: string;
+  sellDex: string;
+  feePercent: number;
+  feeAmount: number;
+  netProfit: number;
+};
+
+/**
+ * Mirror a source user's arbitrage fill to every follower linked via
+ * `arbitrageSourceUserId` with arbitrage enabled. One transaction per follower.
+ */
+export async function copyArbitrageTradeToFollowers(
+  prisma: PrismaClient,
+  sourceUserId: string,
+  trade: ArbitrageTradeCopyPayload,
+): Promise<number> {
+  const followers = await prisma.user.findMany({
+    where: {
+      arbitrageSourceUserId: sourceUserId,
+      cryptoArbitrageEnabled: true,
+    },
+    select: { id: true },
+  });
+
+  let copied = 0;
+  for (const follower of followers) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.arbitrageTrade.create({
+          data: {
+            userId: follower.id,
+            token: trade.token,
+            qty: trade.qty,
+            buyPrice: trade.buyPrice,
+            sellPrice: trade.sellPrice,
+            buyDex: trade.buyDex,
+            sellDex: trade.sellDex,
+            feePercent: trade.feePercent,
+            feeAmount: trade.feeAmount,
+            netProfit: trade.netProfit,
+          },
+        });
+        await tx.user.update({
+          where: { id: follower.id },
+          data: { cryptoBalance: { increment: trade.netProfit } },
+        });
+      });
+      copied += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[arbitrage-engine] follower copy failed sourceUserId=${sourceUserId} ` +
+          `followerId=${follower.id} token=${trade.token}:`,
+        msg,
+      );
+    }
+  }
+  return copied;
+}
+
 async function userRecentlyTradedOpportunity(
   prisma: PrismaClient,
   userId: string,
@@ -143,6 +208,8 @@ async function userRecentlyTradedOpportunity(
 /**
  * One engine cycle: refresh scanner data, pick the best net spread, execute at most
  * one trade per eligible user (skip duplicate venue pairs within the lookback window).
+ * Users with `arbitrageSourceUserId` set are excluded — they receive fills via
+ * `copyArbitrageTradeToFollowers` after each source user's trade commits.
  */
 export async function runArbitrageEngineCycle(
   prisma: PrismaClient,
@@ -166,6 +233,8 @@ export async function runArbitrageEngineCycle(
       cryptoArbitrageEnabled: true,
       status: UserStatus.ACTIVE,
       cryptoBalance: { gt: 0 },
+      /** Copy-source followers mirror another user's ledger — no independent scanner trades. */
+      arbitrageSourceUserId: null,
     },
     select: {
       id: true,
@@ -193,20 +262,24 @@ export async function runArbitrageEngineCycle(
     );
     if (isDuplicate) continue;
 
+    const tradePayload: ArbitrageTradeCopyPayload = {
+      token: best.token,
+      qty: math.qty,
+      buyPrice: best.lowestPrice,
+      sellPrice: best.highestPrice,
+      buyDex: best.lowestDex,
+      sellDex: best.highestDex,
+      feePercent: math.feePercent,
+      feeAmount: math.feeAmount,
+      netProfit: math.netProfit,
+    };
+
     try {
       await prisma.$transaction(async (tx) => {
         await tx.arbitrageTrade.create({
           data: {
             userId: user.id,
-            token: best.token,
-            qty: math.qty,
-            buyPrice: best.lowestPrice,
-            sellPrice: best.highestPrice,
-            buyDex: best.lowestDex,
-            sellDex: best.highestDex,
-            feePercent: math.feePercent,
-            feeAmount: math.feeAmount,
-            netProfit: math.netProfit,
+            ...tradePayload,
           },
         });
         await tx.user.update({
@@ -214,6 +287,8 @@ export async function runArbitrageEngineCycle(
           data: { cryptoBalance: { increment: math.netProfit } },
         });
       });
+
+      await copyArbitrageTradeToFollowers(prisma, user.id, tradePayload);
       tradesExecuted += 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
