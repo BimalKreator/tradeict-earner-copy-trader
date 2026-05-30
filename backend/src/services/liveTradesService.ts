@@ -32,6 +32,59 @@ type MasterLiveTradesSticky = {
 /** In-memory sticky master rows — avoids flicker when Delta REST briefly omits open legs. */
 const masterLiveTradesSticky = new Map<string, MasterLiveTradesSticky>();
 
+type UserLiveTradesSticky = {
+  positions: LiveTradeRow[];
+  firstEmptyAt: number | null;
+};
+
+/** Per user+strategy — same 10s gate as master sticky. */
+const userLiveTradesSticky = new Map<string, UserLiveTradesSticky>();
+
+function userLiveTradesStickyKey(userId: string, strategyId: string): string {
+  return `${userId}:${strategyId}`;
+}
+
+function applyUserLiveTradesSticky(
+  userId: string,
+  strategyId: string,
+  fetched: LiveTradeRow[],
+  fetchSucceeded: boolean,
+): LiveTradeRow[] {
+  const key = userLiveTradesStickyKey(userId, strategyId);
+  if (!fetchSucceeded) {
+    const prev = userLiveTradesSticky.get(key);
+    return prev?.positions ?? [];
+  }
+
+  const now = Date.now();
+  if (fetched.length > 0) {
+    userLiveTradesSticky.set(key, { positions: fetched, firstEmptyAt: null });
+    return fetched;
+  }
+
+  const prev = userLiveTradesSticky.get(key);
+  if (!prev || prev.positions.length === 0) {
+    userLiveTradesSticky.set(key, { positions: [], firstEmptyAt: now });
+    return [];
+  }
+
+  const firstEmpty = prev.firstEmptyAt ?? now;
+  if (now - firstEmpty < MASTER_LIVE_TRADES_FLAT_CONFIRM_MS) {
+    userLiveTradesSticky.set(key, {
+      positions: prev.positions,
+      firstEmptyAt: firstEmpty,
+    });
+    console.log(
+      `[live-trades] user sticky hold userId=${userId} strategyId=${strategyId} ` +
+        `(${prev.positions.length} leg(s))`,
+    );
+    return prev.positions;
+  }
+
+  userLiveTradesSticky.set(key, { positions: [], firstEmptyAt: firstEmpty });
+  return [];
+}
+
 function applyMasterLiveTradesSticky(
   strategyId: string,
   fetched: LiveTradeRow[],
@@ -369,7 +422,7 @@ export async function getUserLiveTradesByStrategy(
 
   for (const sub of subs) {
     const creds = resolveCopySubscriptionCreds(sub);
-    const userPositions: LiveTradeRow[] = [];
+    let userPositions: LiveTradeRow[] = [];
 
     if (creds) {
       try {
@@ -377,11 +430,23 @@ export async function getUserLiveTradesByStrategy(
           fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret),
           `user positions userId=${userId} strategyId=${sub.strategyId}`,
         );
-        userPositions.push(...(await enrichPositionsList(positions)));
+        const enriched = await enrichPositionsList(positions);
+        userPositions = applyUserLiveTradesSticky(
+          userId,
+          sub.strategyId,
+          enriched,
+          true,
+        );
         userPositions.sort((a, b) =>
           (b.entryTime ?? "").localeCompare(a.entryTime ?? ""),
         );
       } catch (err) {
+        userPositions = applyUserLiveTradesSticky(
+          userId,
+          sub.strategyId,
+          [],
+          false,
+        );
         console.warn(
           `[live-trades] user strategy fetch failed userId=${userId} strategyId=${sub.strategyId}:`,
           err instanceof Error ? err.message : err,

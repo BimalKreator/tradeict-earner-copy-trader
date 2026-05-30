@@ -365,15 +365,25 @@ function UserPositionsTable({ rows }: { rows: LiveRow[] }) {
 }
 
 function StrategyTabPanel({ group }: { group: UserStrategyGroup }) {
-  const masterFlat = group.masterOpenCount === 0;
+  const hasUserPositions = group.userPositions.length > 0;
+  const masterHasOpens = group.masterOpenCount > 0;
 
   return (
     <div className="space-y-5">
       <StrategyOverviewCard group={group} />
-      {masterFlat ? (
-        <MasterFlatEmptyState />
+      {hasUserPositions || masterHasOpens ? (
+        <>
+          {!hasUserPositions && masterHasOpens ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              Master has {group.masterOpenCount} open leg
+              {group.masterOpenCount === 1 ? "" : "s"}. Your copy positions may
+              still be syncing — refresh in a few seconds.
+            </div>
+          ) : null}
+          <UserPositionsTable rows={group.userPositions} />
+        </>
       ) : (
-        <UserPositionsTable rows={group.userPositions} />
+        <MasterFlatEmptyState />
       )}
     </div>
   );
