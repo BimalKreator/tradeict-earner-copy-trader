@@ -53,6 +53,17 @@ function sortMasterCachedRows(cache: MasterStrategyLegCache): LiveTradeRow[] {
     .sort((a, b) => (b.entryTime ?? "").localeCompare(a.entryTime ?? ""));
 }
 
+function masterCachedPositions(strategyId: string): LiveTradeRow[] {
+  const cache = lastKnownMasterPositions.get(strategyId);
+  if (!cache || cache.size === 0) return [];
+  return sortMasterCachedRows(cache);
+}
+
+type MasterLiveFetchOpts = {
+  /** No client timeout — used for background refresh and cold-start retry. */
+  background?: boolean;
+};
+
 /**
  * Merge a successful (or failed) master REST snapshot into {@link lastKnownMasterPositions}.
  * - Fetch error/timeout → keep cache unchanged.
@@ -122,13 +133,17 @@ async function fetchAndMergeMasterLiveTrades(
   apiKey: string,
   apiSecret: string,
   label: string,
+  opts?: MasterLiveFetchOpts,
 ): Promise<{ positions: LiveTradeRow[]; fetchException?: string }> {
-  try {
-    const snapshot = await withDeltaFetchTimeout(
-      fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret, { lite: true }),
-      label,
-      MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS,
-    );
+  const runOnce = async (timeoutMs: number | null) => {
+    const promise = fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret, {
+      lite: true,
+      skipCache: opts?.background === true,
+    });
+    const snapshot =
+      timeoutMs != null
+        ? await withDeltaFetchTimeout(promise, label, timeoutMs)
+        : await promise;
     const rows = snapshot.open.map((pos) => deltaToRow(pos));
     const positions = mergeMasterLiveTradesCache(
       strategyId,
@@ -136,13 +151,42 @@ async function fetchAndMergeMasterLiveTrades(
       snapshot.explicitFlatLegKeys,
     );
     console.log(
-      `[live-trades] master snapshot ok strategyId=${strategyId} open=${snapshot.open.length} cached=${positions.length}`,
+      `[live-trades] master snapshot ok strategyId=${strategyId} open=${snapshot.open.length} cached=${positions.length}` +
+        (opts?.background ? " (background)" : ""),
     );
+    return positions;
+  };
+
+  try {
+    const timeoutMs = opts?.background ? null : MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS;
+    const positions = await runOnce(timeoutMs);
     return { positions };
   } catch (err) {
     const fetchException =
       err instanceof Error ? err.message : String(err ?? "fetch failed");
+    const hadCachedLegs = masterCachedPositions(strategyId).length > 0;
+
+    if (!opts?.background && !hadCachedLegs) {
+      try {
+        console.warn(
+          `[live-trades] master snapshot slow retry strategyId=${strategyId} after: ${fetchException}`,
+        );
+        const positions = await runOnce(null);
+        return { positions };
+      } catch (retryErr) {
+        const retryMsg =
+          retryErr instanceof Error
+            ? retryErr.message
+            : String(retryErr ?? "fetch failed");
+        const positions = mergeMasterLiveTradesCache(strategyId, null, []);
+        return { positions, fetchException: retryMsg };
+      }
+    }
+
     const positions = mergeMasterLiveTradesCache(strategyId, null, []);
+    if (positions.length > 0) {
+      return { positions };
+    }
     return { positions, fetchException };
   }
 }
@@ -667,12 +711,32 @@ export async function getAdminLiveTradesByStrategy(
       });
 
       const masterMergedPromise = credentialsPresent
-        ? fetchAndMergeMasterLiveTrades(
-            strat.id,
-            strat.masterApiKey!,
-            strat.masterApiSecret!,
-            `master positions strategy=${strat.id}`,
-          )
+        ? (async () => {
+            const stale = masterCachedPositions(strat.id);
+            if (stale.length > 0) {
+              void fetchAndMergeMasterLiveTrades(
+                strat.id,
+                strat.masterApiKey!,
+                strat.masterApiSecret!,
+                `master positions background strategy=${strat.id}`,
+                { background: true },
+              ).catch((bgErr) => {
+                console.warn(
+                  `[live-trades] master background refresh failed strategyId=${strat.id}:`,
+                  bgErr instanceof Error ? bgErr.message : bgErr,
+                );
+              });
+              return {
+                positions: stale,
+              };
+            }
+            return fetchAndMergeMasterLiveTrades(
+              strat.id,
+              strat.masterApiKey!,
+              strat.masterApiSecret!,
+              `master positions strategy=${strat.id}`,
+            );
+          })()
         : Promise.resolve({
             positions: [] as LiveTradeRow[],
             fetchException: undefined,

@@ -391,7 +391,36 @@ export type DeltaMarginedPositionSnapshot = {
 /** When `lite: true`, skip per-row CCXT tickers (admin live-trades master poll). */
 export type FetchMarginedSnapshotOptions = {
   lite?: boolean;
+  /** Bypass 8s snapshot TTL (still shares in-flight dedupe). */
+  skipCache?: boolean;
 };
+
+/** One margined snapshot per account at a time; 8s TTL avoids duplicate Delta REST under load. */
+const MARGINED_SNAPSHOT_TTL_MS = 8_000;
+const marginedSnapshotCache = new Map<
+  string,
+  { at: number; snapshot: DeltaMarginedPositionSnapshot }
+>();
+const marginedSnapshotInflight = new Map<
+  string,
+  Promise<DeltaMarginedPositionSnapshot>
+>();
+
+function marginedSnapshotCacheKey(
+  apiKeyStored: string,
+  apiSecretStored: string,
+): string {
+  const k = decryptDeltaSecretOrPlain(apiKeyStored);
+  const s = decryptDeltaSecretOrPlain(apiSecretStored);
+  return `${k}::${s}`;
+}
+
+/** Lightweight symbol key for flat legs — avoids CCXT `market()` on zero-size rows. */
+function fastFlatLegSymbolKey(productSymbol: string): string {
+  const ps = productSymbol.trim();
+  if (isDeltaOptionProductId(ps)) return ps;
+  return unifiedSymbolToKey(normalizeDeltaPerpSymbolForCcxt(ps));
+}
 
 function parseApiUnrealizedPnl(position: Record<string, unknown>): number | null {
   const apiUpnlRaw = position.unrealized_pnl;
@@ -844,13 +873,14 @@ export async function fetchDeltaTicker(
 
 /**
  * Authenticated margined positions snapshot — open legs and explicit flat leg keys.
+ * Wrapped by {@link fetchDeltaMarginedPositionSnapshot} with in-flight dedupe + TTL cache.
  */
-export async function fetchDeltaMarginedPositionSnapshot(
+async function fetchDeltaMarginedPositionSnapshotInner(
   apiKeyStored: string,
   apiSecretStored: string,
   options?: FetchMarginedSnapshotOptions,
 ): Promise<DeltaMarginedPositionSnapshot> {
-  const lite = options?.lite === true;
+  const lite = options?.lite !== false;
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
 
@@ -897,21 +927,27 @@ export async function fetchDeltaMarginedPositionSnapshot(
 
       if (rawSize === null || Math.abs(rawSize) < 1e-12) {
         if (productSymbol) {
-          try {
-            const { symbolKey } = resolvePositionMarket(exchange, productSymbol);
-            const side =
-              normalizePositionSide(
-                position.side ??
-                  position.position_side ??
-                  info?.side ??
-                  info?.position_side,
-              ) ?? "BUY";
-            explicitFlatLegKeys.push(deltaLiveLegKey(symbolKey, side));
-          } catch (flatErr) {
-            console.warn(
-              `[exchangeService] explicit flat leg parse failed product_symbol=${productSymbol}:`,
-              flatErr instanceof Error ? flatErr.message : flatErr,
+          const side =
+            normalizePositionSide(
+              position.side ??
+                position.position_side ??
+                info?.side ??
+                info?.position_side,
+            ) ?? "BUY";
+          if (lite) {
+            explicitFlatLegKeys.push(
+              deltaLiveLegKey(fastFlatLegSymbolKey(productSymbol), side),
             );
+          } else {
+            try {
+              const { symbolKey } = resolvePositionMarket(exchange, productSymbol);
+              explicitFlatLegKeys.push(deltaLiveLegKey(symbolKey, side));
+            } catch (flatErr) {
+              console.warn(
+                `[exchangeService] explicit flat leg parse failed product_symbol=${productSymbol}:`,
+                flatErr instanceof Error ? flatErr.message : flatErr,
+              );
+            }
           }
         }
         continue;
@@ -1096,17 +1132,55 @@ export async function fetchDeltaMarginedPositionSnapshot(
   return { open, explicitFlatLegKeys };
 }
 
+export async function fetchDeltaMarginedPositionSnapshot(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  options?: FetchMarginedSnapshotOptions,
+): Promise<DeltaMarginedPositionSnapshot> {
+  const cacheKey = marginedSnapshotCacheKey(apiKeyStored, apiSecretStored);
+  const bypassTtl = options?.skipCache === true;
+
+  if (!bypassTtl) {
+    const hit = marginedSnapshotCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < MARGINED_SNAPSHOT_TTL_MS) {
+      return hit.snapshot;
+    }
+  }
+
+  const existing = marginedSnapshotInflight.get(cacheKey);
+  if (existing) return existing;
+
+  const work = fetchDeltaMarginedPositionSnapshotInner(
+    apiKeyStored,
+    apiSecretStored,
+    options,
+  )
+    .then((snapshot) => {
+      marginedSnapshotCache.set(cacheKey, { at: Date.now(), snapshot });
+      return snapshot;
+    })
+    .finally(() => {
+      marginedSnapshotInflight.delete(cacheKey);
+    });
+
+  marginedSnapshotInflight.set(cacheKey, work);
+  return work;
+}
+
 /**
  * Authenticated open positions via Delta India **`GET /v2/positions/margined`** (raw API).
  * Avoids CCXT `fetchPositions` / `parsePosition`, which drops `mark_price` and `unrealized_pnl`.
+ * Defaults to `lite: true` (no per-option tickers) — safe for trade engine, auto-exit, admin UI.
  */
 export async function fetchDeltaOpenPositions(
   apiKeyStored: string,
   apiSecretStored: string,
+  options?: FetchMarginedSnapshotOptions,
 ): Promise<DeltaLivePosition[]> {
   const snapshot = await fetchDeltaMarginedPositionSnapshot(
     apiKeyStored,
     apiSecretStored,
+    { lite: true, ...options },
   );
   return snapshot.open;
 }
