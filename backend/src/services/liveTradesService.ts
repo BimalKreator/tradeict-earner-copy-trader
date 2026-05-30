@@ -479,7 +479,9 @@ export async function getAdminLiveTradesByStrategy(
         },
       });
 
-      const masterPromise = (async (): Promise<{
+      const subs = await subsPromise;
+
+      const masterResult = await (async (): Promise<{
         list: DeltaLivePosition[];
         fetchException?: string;
       }> => {
@@ -503,11 +505,6 @@ export async function getAdminLiveTradesByStrategy(
           return { list: [], fetchException };
         }
       })();
-
-      const [masterResult, subs] = await Promise.all([
-        masterPromise,
-        subsPromise,
-      ]);
 
       const masterMeta = {
         credentialsPresent,

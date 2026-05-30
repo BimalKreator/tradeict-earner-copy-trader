@@ -281,13 +281,17 @@ function MasterApiStatusBadge({ meta }: { meta: MasterMeta }) {
     );
   }
   if (meta.fetchException) {
+    const shortErr =
+      meta.fetchException.length > 72
+        ? `${meta.fetchException.slice(0, 69)}…`
+        : meta.fetchException;
     return (
       <span
-        className="inline-flex max-w-md items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 ring-1 ring-red-500/35"
+        className="inline-flex max-w-lg items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 ring-1 ring-red-500/35"
         title={meta.fetchException}
       >
         <WifiOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        API error
+        API error: {shortErr}
       </span>
     );
   }

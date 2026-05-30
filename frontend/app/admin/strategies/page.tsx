@@ -7,6 +7,7 @@ import {
   adminAuthHeaders,
   buildPerformanceMetrics,
   isFutureHedgeStrategy,
+  testMasterDeltaConnection,
   type Strategy,
 } from "@/lib/adminStrategyForm";
 
@@ -17,6 +18,10 @@ export default function AdminStrategiesPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [testingMasterConnection, setTestingMasterConnection] = useState(false);
+  const [masterConnectionMessage, setMasterConnectionMessage] = useState<
+    string | null
+  >(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -103,7 +108,45 @@ export default function AdminStrategiesPage() {
   function openCreateModal() {
     resetCreateForm();
     setFormError(null);
+    setMasterConnectionMessage(null);
     setModalOpen(true);
+  }
+
+  async function handleTestMasterConnection() {
+    if (!masterApiKey.trim() || !masterApiSecret.trim()) {
+      setMasterConnectionMessage(
+        "Enter both API key and secret before testing.",
+      );
+      return;
+    }
+    setTestingMasterConnection(true);
+    setMasterConnectionMessage(null);
+    try {
+      const result = await testMasterDeltaConnection({
+        masterApiKey: masterApiKey.trim(),
+        masterApiSecret: masterApiSecret.trim(),
+      });
+      if (result.success) {
+        const bal =
+          result.availableBalanceUsd != null &&
+          Number.isFinite(result.availableBalanceUsd)
+            ? ` · Balance $${result.availableBalanceUsd.toFixed(2)}`
+            : "";
+        setMasterConnectionMessage(
+          `Connected (${result.apiKeyPrefix ?? "key OK"}) · ${result.openPositionCount ?? 0} open position(s)${bal}`,
+        );
+      } else {
+        setMasterConnectionMessage(
+          result.error ?? "Connection failed — check Delta India API keys.",
+        );
+      }
+    } catch (e) {
+      setMasterConnectionMessage(
+        e instanceof Error ? e.message : "Connection test failed",
+      );
+    } finally {
+      setTestingMasterConnection(false);
+    }
   }
 
   async function handleForceSync(s: Strategy) {
@@ -469,6 +512,27 @@ export default function AdminStrategiesPage() {
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void handleTestMasterConnection()}
+                    disabled={testingMasterConnection}
+                    className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
+                  >
+                    {testingMasterConnection ? "Testing…" : "Test connection"}
+                  </button>
+                  {masterConnectionMessage ? (
+                    <p
+                      className={`text-xs ${
+                        masterConnectionMessage.startsWith("Connected")
+                          ? "text-emerald-300"
+                          : "text-red-300"
+                      }`}
+                    >
+                      {masterConnectionMessage}
+                    </p>
+                  ) : null}
+                </div>
                 <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
                   <input
                     type="checkbox"

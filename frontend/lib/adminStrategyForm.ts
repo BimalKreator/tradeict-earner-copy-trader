@@ -12,7 +12,10 @@ export type Strategy = {
   id: string;
   title: string;
   description: string;
-  masterApiKey: string;
+  /** @deprecated Use masterApiKeyMasked — raw key is no longer returned by the API. */
+  masterApiKey?: string;
+  masterApiKeyMasked?: string;
+  hasMasterApiKey?: boolean;
   hasMasterApiSecret?: boolean;
   performanceMetrics?: PerformanceMetricsPayload | unknown;
   slippage: number;
@@ -23,6 +26,14 @@ export type Strategy = {
   futureHedgeConfig?: FutureHedgeConfig | null;
   syncActiveTrades?: boolean;
   createdAt: string;
+};
+
+export type MasterConnectionTestResult = {
+  success: boolean;
+  error?: string;
+  openPositionCount?: number;
+  availableBalanceUsd?: number | null;
+  apiKeyPrefix?: string;
 };
 
 export type StrategySubscriber = {
@@ -81,6 +92,28 @@ export function adminAuthHeaders(): HeadersInit {
 
 export function adminApiBase(): string {
   return resolveApiBase();
+}
+
+export async function testMasterDeltaConnection(args: {
+  strategyId?: string;
+  masterApiKey?: string;
+  masterApiSecret?: string;
+}): Promise<MasterConnectionTestResult> {
+  const base = adminApiBase();
+  const res = await fetch(`${base}/admin/strategies/test-master-connection`, {
+    method: "POST",
+    headers: adminAuthHeaders(),
+    body: JSON.stringify(args),
+  });
+  const payload: unknown = await res.json().catch(() => ({}));
+  if (!res.ok && typeof payload === "object" && payload !== null) {
+    const err =
+      "error" in payload && typeof (payload as { error: unknown }).error === "string"
+        ? (payload as { error: string }).error
+        : `Test failed (${res.status})`;
+    return { success: false, error: err };
+  }
+  return payload as MasterConnectionTestResult;
 }
 
 export function parseCommaSeparatedStrings(raw: string): string[] {
@@ -304,9 +337,10 @@ export function hydratePerformanceFields(pm: unknown): {
 
 export function applyStrategyToFormState(s: Strategy): {
   savedMasterApiSecret: boolean;
+  savedMasterApiKey: boolean;
+  masterApiKeyMasked: string;
   title: string;
   description: string;
-  masterApiKey: string;
   slippage: string;
   monthlyFee: string;
   profitShare: string;
@@ -318,12 +352,18 @@ export function applyStrategyToFormState(s: Strategy): {
 } {
   const h = hydratePerformanceFields(s.performanceMetrics);
   const cfg = s.futureHedgeConfig;
+  const hasKey = Boolean(
+    s.hasMasterApiKey ?? s.masterApiKey?.trim() ?? s.masterApiKeyMasked,
+  );
 
   return {
     savedMasterApiSecret: Boolean(s.hasMasterApiSecret),
+    savedMasterApiKey: hasKey,
+    masterApiKeyMasked:
+      s.masterApiKeyMasked ??
+      (hasKey ? "•••••••• (saved)" : ""),
     title: s.title,
     description: s.description,
-    masterApiKey: s.masterApiKey,
     slippage: String(s.slippage),
     monthlyFee: String(s.monthlyFee),
     profitShare: String(s.profitShare),

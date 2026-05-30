@@ -10,6 +10,7 @@ import {
   buildPerformanceMetrics,
   DEFAULT_FUTURE_HEDGE,
   isFutureHedgeStrategy,
+  testMasterDeltaConnection,
   type Strategy,
   type StrategySubscriber,
 } from "@/lib/adminStrategyForm";
@@ -27,6 +28,12 @@ export default function AdminEditStrategyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [savedMasterApiSecret, setSavedMasterApiSecret] = useState(false);
+  const [savedMasterApiKey, setSavedMasterApiKey] = useState(false);
+  const [masterApiKeyMasked, setMasterApiKeyMasked] = useState("");
+  const [testingMasterConnection, setTestingMasterConnection] = useState(false);
+  const [masterConnectionMessage, setMasterConnectionMessage] = useState<
+    string | null
+  >(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -80,9 +87,11 @@ export default function AdminEditStrategyPage() {
   const hydrateFormFromStrategy = useCallback((s: Strategy) => {
     const applied = applyStrategyToFormState(s);
     setSavedMasterApiSecret(applied.savedMasterApiSecret);
+    setSavedMasterApiKey(applied.savedMasterApiKey);
+    setMasterApiKeyMasked(applied.masterApiKeyMasked);
     setTitle(applied.title);
     setDescription(applied.description);
-    setMasterApiKey(applied.masterApiKey);
+    setMasterApiKey("");
     setMasterApiSecret("");
     setSlippage(applied.slippage);
     setMonthlyFee(applied.monthlyFee);
@@ -282,6 +291,40 @@ export default function AdminEditStrategyPage() {
     }
   }
 
+  async function handleTestMasterConnection() {
+    setTestingMasterConnection(true);
+    setMasterConnectionMessage(null);
+    try {
+      const result = await testMasterDeltaConnection({
+        strategyId,
+        ...(masterApiKey.trim() ? { masterApiKey: masterApiKey.trim() } : {}),
+        ...(masterApiSecret.trim()
+          ? { masterApiSecret: masterApiSecret.trim() }
+          : {}),
+      });
+      if (result.success) {
+        const bal =
+          result.availableBalanceUsd != null &&
+          Number.isFinite(result.availableBalanceUsd)
+            ? ` · Balance $${result.availableBalanceUsd.toFixed(2)}`
+            : "";
+        setMasterConnectionMessage(
+          `Connected (${result.apiKeyPrefix ?? "key OK"}) · ${result.openPositionCount ?? 0} open position(s)${bal}`,
+        );
+      } else {
+        setMasterConnectionMessage(
+          result.error ?? "Connection failed — check Delta India API keys.",
+        );
+      }
+    } catch (e) {
+      setMasterConnectionMessage(
+        e instanceof Error ? e.message : "Connection test failed",
+      );
+    } finally {
+      setTestingMasterConnection(false);
+    }
+  }
+
   async function handleSubmitStrategy(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
@@ -330,7 +373,6 @@ export default function AdminEditStrategyPage() {
     const payload: Record<string, unknown> = {
       title,
       description,
-      masterApiKey,
       slippage: slippageNum,
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
@@ -339,8 +381,20 @@ export default function AdminEditStrategyPage() {
       isActive,
     };
 
+    if (masterApiKey.trim()) {
+      payload.masterApiKey = masterApiKey.trim();
+    } else if (!savedMasterApiKey) {
+      setFormError("Master Delta API key is required.");
+      setSubmitting(false);
+      return;
+    }
+
     if (masterApiSecret.trim()) {
       payload.masterApiSecret = masterApiSecret.trim();
+    } else if (!savedMasterApiSecret) {
+      setFormError("Master Delta API secret is required.");
+      setSubmitting(false);
+      return;
     }
 
     if (isFutureHedgeStrategy(title)) {
@@ -706,12 +760,21 @@ export default function AdminEditStrategyPage() {
                 </span>
                 <input
                   type="text"
-                  required
                   value={masterApiKey}
                   onChange={(e) => setMasterApiKey(e.target.value)}
                   autoComplete="off"
                   className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  placeholder={
+                    savedMasterApiKey
+                      ? `Saved: ${masterApiKeyMasked || "••••••••"} — enter only to replace`
+                      : "Paste API key from Delta Exchange India"
+                  }
                 />
+                {savedMasterApiKey ? (
+                  <p className="mt-1 text-[11px] text-white/45">
+                    A key is already stored. Enter a new one only to replace it.
+                  </p>
+                ) : null}
               </label>
               <label className="block">
                 <span className="text-xs font-medium text-white/60">
@@ -736,6 +799,27 @@ export default function AdminEditStrategyPage() {
                   </p>
                 ) : null}
               </label>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void handleTestMasterConnection()}
+                  disabled={testingMasterConnection}
+                  className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
+                >
+                  {testingMasterConnection ? "Testing…" : "Test connection"}
+                </button>
+                {masterConnectionMessage ? (
+                  <p
+                    className={`text-xs ${
+                      masterConnectionMessage.startsWith("Connected")
+                        ? "text-emerald-300"
+                        : "text-red-300"
+                    }`}
+                  >
+                    {masterConnectionMessage}
+                  </p>
+                ) : null}
+              </div>
               <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
                 <input
                   type="checkbox"

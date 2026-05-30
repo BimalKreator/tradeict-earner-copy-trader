@@ -31,6 +31,15 @@ import { createSettingsController } from "../controllers/settingsController.js";
 import { createCouponController } from "../controllers/couponController.js";
 import { createAdminNotificationController } from "../controllers/adminNotificationController.js";
 import { createFutureHedgeController } from "../controllers/futureHedgeController.js";
+import {
+  decryptDeltaSecretOrPlain,
+  maskDeltaApiKey,
+  normalizeStoredDeltaSecret,
+} from "../utils/encryption.js";
+import {
+  clearDeltaAuthClientCache,
+  testDeltaIndiaConnection,
+} from "../services/exchangeService.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -610,11 +619,14 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       });
       res.json(
         strategies.map((s) => {
-          const { masterApiSecret, ...rest } = s;
+          const { masterApiKey, masterApiSecret, ...rest } = s;
           const hasSecret = Boolean(masterApiSecret?.trim());
-          const credPresent = Boolean(s.masterApiKey?.trim() && hasSecret);
+          const hasKey = Boolean(decryptDeltaSecretOrPlain(masterApiKey ?? "").trim());
+          const credPresent = hasKey && hasSecret;
           return {
             ...rest,
+            masterApiKeyMasked: maskDeltaApiKey(masterApiKey ?? ""),
+            hasMasterApiKey: hasKey,
             hasMasterApiSecret: hasSecret,
             masterConnection: {
               credentialsPresent: credPresent,
@@ -671,12 +683,26 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           ? body.syncActiveTrades
           : false;
 
+      let storedMasterApiKey: string;
+      let storedMasterApiSecret: string;
+      try {
+        storedMasterApiKey = normalizeStoredDeltaSecret(masterApiKey);
+        storedMasterApiSecret = masterApiSecret
+          ? normalizeStoredDeltaSecret(masterApiSecret)
+          : "";
+      } catch (credErr) {
+        const msg =
+          credErr instanceof Error ? credErr.message : String(credErr);
+        res.status(400).json({ error: msg });
+        return;
+      }
+
       const strategy = await prisma.strategy.create({
         data: {
           title,
           description,
-          masterApiKey,
-          masterApiSecret,
+          masterApiKey: storedMasterApiKey,
+          masterApiSecret: storedMasterApiSecret,
           ...(performanceMetrics !== undefined
             ? { performanceMetrics }
             : {}),
@@ -707,6 +733,56 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     "/strategies/:strategyId/sync-user/:userId",
     adminController.syncStrategyUser,
   );
+
+  router.post("/strategies/test-master-connection", async (req, res) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const strategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      let masterApiKey =
+        typeof body.masterApiKey === "string" ? body.masterApiKey.trim() : "";
+      let masterApiSecret =
+        typeof body.masterApiSecret === "string"
+          ? body.masterApiSecret.trim()
+          : "";
+
+      if (strategyId) {
+        const strat = await prisma.strategy.findUnique({
+          where: { id: strategyId },
+          select: { masterApiKey: true, masterApiSecret: true },
+        });
+        if (!strat) {
+          res.status(404).json({ success: false, error: "Strategy not found" });
+          return;
+        }
+        if (!masterApiKey && strat.masterApiKey?.trim()) {
+          masterApiKey = strat.masterApiKey;
+        }
+        if (!masterApiSecret && strat.masterApiSecret?.trim()) {
+          masterApiSecret = strat.masterApiSecret;
+        }
+      }
+
+      if (!masterApiKey || !masterApiSecret) {
+        res.status(400).json({
+          success: false,
+          error:
+            "Master API key and secret are required (enter both or save the strategy first).",
+        });
+        return;
+      }
+
+      const result = await testDeltaIndiaConnection(
+        masterApiKey,
+        masterApiSecret,
+      );
+      res.json(result);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : String(err ?? "Unknown error");
+      res.status(500).json({ success: false, error: message });
+    }
+  });
 
   router.put("/strategies/:id", async (req, res, next) => {
     try {
@@ -849,10 +925,21 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         if (data.title !== undefined) updateData.title = data.title;
         if (data.description !== undefined)
           updateData.description = data.description;
-        if (data.masterApiKey !== undefined)
-          updateData.masterApiKey = data.masterApiKey;
-        if (data.masterApiSecret !== undefined)
-          updateData.masterApiSecret = data.masterApiSecret;
+        try {
+          if (data.masterApiKey !== undefined)
+            updateData.masterApiKey = normalizeStoredDeltaSecret(
+              data.masterApiKey,
+            );
+          if (data.masterApiSecret !== undefined)
+            updateData.masterApiSecret = normalizeStoredDeltaSecret(
+              data.masterApiSecret,
+            );
+        } catch (credErr) {
+          const msg =
+            credErr instanceof Error ? credErr.message : String(credErr);
+          res.status(400).json({ error: msg });
+          return;
+        }
         if (data.performanceMetrics !== undefined)
           updateData.performanceMetrics = data.performanceMetrics;
         if (data.slippage !== undefined) updateData.slippage = data.slippage;
@@ -888,6 +975,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
                 where: { id },
                 select: STRATEGY_SELECT_ADMIN_SAFE,
               });
+
+        if (
+          data.masterApiKey !== undefined ||
+          data.masterApiSecret !== undefined
+        ) {
+          clearDeltaAuthClientCache();
+        }
 
         if (
           existingSync &&

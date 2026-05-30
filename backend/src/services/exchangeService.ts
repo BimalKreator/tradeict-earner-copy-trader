@@ -95,6 +95,11 @@ async function getAuthClient(
   return entry.client;
 }
 
+/** Drop cached CCXT clients after master credentials change. */
+export function clearDeltaAuthClientCache(): void {
+  _authClientCache.clear();
+}
+
 export type TradeSide = "BUY" | "SELL";
 
 export interface ExecuteTradeResult {
@@ -875,6 +880,55 @@ export async function fetchDeltaOpenPositions(
   }
 
   return out;
+}
+
+/** Verify Delta India credentials and return open leg count for admin "Test connection". */
+export async function testDeltaIndiaConnection(
+  apiKeyStored: string,
+  apiSecretStored: string,
+): Promise<{
+  success: boolean;
+  openPositionCount?: number;
+  availableBalanceUsd?: number | null;
+  apiKeyPrefix?: string;
+  error?: string;
+}> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  const apiKeyPrefix =
+    apiKey.length > 6 ? `${apiKey.slice(0, 6)}***` : apiKey ? "***" : "";
+
+  if (!apiKey.trim() || !secret.trim()) {
+    return {
+      success: false,
+      apiKeyPrefix,
+      error:
+        "API key and secret are missing or unreadable — re-paste from Delta Exchange India.",
+    };
+  }
+
+  try {
+    const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
+    let availableBalanceUsd: number | null = null;
+    try {
+      availableBalanceUsd = await fetchDeltaTotalBalanceUsd(
+        apiKeyStored,
+        apiSecretStored,
+      );
+    } catch {
+      /* balance is optional — positions fetch proves auth */
+    }
+    return {
+      success: true,
+      openPositionCount: positions.length,
+      availableBalanceUsd,
+      apiKeyPrefix,
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : String(err ?? "Connection failed");
+    return { success: false, error: message, apiKeyPrefix };
+  }
 }
 
 export type DeltaBalanceBreakdown = {

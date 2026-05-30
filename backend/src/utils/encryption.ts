@@ -79,3 +79,27 @@ export function decryptDeltaSecretOrPlain(stored: string): string {
   // failure (Delta will reject with `invalid_api_key`, which we surface).
   return decrypted || plain;
 }
+
+/** Mask a stored key for admin UI (never return full secrets in JSON). */
+export function maskDeltaApiKey(stored: string): string {
+  const plain = decryptDeltaSecretOrPlain(stored);
+  if (!plain) return "";
+  if (plain.length <= 8) return "••••••••";
+  return `${plain.slice(0, 6)}••••${plain.slice(-4)}`;
+}
+
+/**
+ * Normalize credentials for DB storage — always AES-encrypt canonical plaintext.
+ * Accepts either legacy plaintext rows or existing ciphertext.
+ */
+export function normalizeStoredDeltaSecret(plaintextOrStored: string): string {
+  const trimmed = plaintextOrStored.trim();
+  if (!trimmed) return "";
+  const plain = decryptDeltaSecretOrPlain(trimmed);
+  if (!plain) {
+    throw new Error(
+      "Could not read API credential — re-paste from Delta Exchange India without extra spaces.",
+    );
+  }
+  return encryptDeltaSecret(plain);
+}
