@@ -5,6 +5,7 @@ import {
 } from "@prisma/client";
 import {
   fetchDeltaMarkPrice,
+  fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
   isDeltaOptionProductId,
   type DeltaLivePosition,
@@ -21,24 +22,134 @@ import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 /** Per-account Delta fetch budget — avoids nginx 502 from long sequential CCXT loadMarkets. */
 const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
-/** Hold master legs on the live-trades panel until REST reports flat for this long. */
-const MASTER_LIVE_TRADES_FLAT_CONFIRM_MS = 10_000;
 
-type MasterLiveTradesSticky = {
-  positions: LiveTradeRow[];
-  firstEmptyAt: number | null;
+/** Successful REST polls reporting explicit size=0 before a master leg is removed from UI. */
+const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 3;
+
+type MasterLegCacheEntry = {
+  row: LiveTradeRow;
+  explicitFlatStreak: number;
 };
 
-/** In-memory sticky master rows — avoids flicker when Delta REST briefly omits open legs. */
-const masterLiveTradesSticky = new Map<string, MasterLiveTradesSticky>();
+/** strategyId → (legKey → cached row + flat-eviction streak) */
+type MasterStrategyLegCache = Map<string, MasterLegCacheEntry>;
+
+/**
+ * Persistent in-memory master legs for admin live-trades UI.
+ * Never time-expires — only evicts after {@link MASTER_EXPLICIT_FLAT_POLLS_REQUIRED}
+ * consecutive successful REST polls with explicit size/contracts === 0.
+ */
+export const lastKnownMasterPositions = new Map<string, MasterStrategyLegCache>();
+
+function masterLegKeyFromRow(row: LiveTradeRow): string {
+  return `${row.token}:${row.side}`;
+}
+
+function sortMasterCachedRows(cache: MasterStrategyLegCache): LiveTradeRow[] {
+  return [...cache.values()]
+    .map((e) => e.row)
+    .sort((a, b) => (b.entryTime ?? "").localeCompare(a.entryTime ?? ""));
+}
+
+/**
+ * Merge a successful (or failed) master REST snapshot into {@link lastKnownMasterPositions}.
+ * - Fetch error/timeout → keep cache unchanged.
+ * - Empty open array → keep cache unchanged (missing ≠ flat).
+ * - Open legs → upsert and reset flat streak.
+ * - explicitFlatLegKeys → increment streak; remove only after 3 consecutive successful flat reads.
+ */
+function mergeMasterLiveTradesCache(
+  strategyId: string,
+  fetched: LiveTradeRow[] | null,
+  explicitFlatLegKeys: string[],
+): LiveTradeRow[] {
+  let cache = lastKnownMasterPositions.get(strategyId);
+  if (!cache) {
+    cache = new Map();
+    lastKnownMasterPositions.set(strategyId, cache);
+  }
+
+  if (fetched === null) {
+    console.log(
+      `[live-trades] master cache hold (fetch failed) strategyId=${strategyId} legs=${cache.size}`,
+    );
+    return sortMasterCachedRows(cache);
+  }
+
+  const fetchedKeys = new Set<string>();
+  for (const row of fetched) {
+    const key = masterLegKeyFromRow(row);
+    fetchedKeys.add(key);
+    cache.set(key, { row, explicitFlatStreak: 0 });
+  }
+
+  const flatSet = new Set(explicitFlatLegKeys);
+
+  for (const [key, entry] of [...cache.entries()]) {
+    if (fetchedKeys.has(key)) continue;
+
+    if (flatSet.has(key)) {
+      const streak = entry.explicitFlatStreak + 1;
+      if (streak >= MASTER_EXPLICIT_FLAT_POLLS_REQUIRED) {
+        cache.delete(key);
+        console.log(
+          `[live-trades] master leg removed after ${streak} explicit flat REST polls: ${key}`,
+        );
+      } else {
+        cache.set(key, { row: entry.row, explicitFlatStreak: streak });
+        console.log(
+          `[live-trades] master explicit flat ${key} streak=${streak}/${MASTER_EXPLICIT_FLAT_POLLS_REQUIRED}`,
+        );
+      }
+      continue;
+    }
+
+    // Leg missing from a successful response — retain cached row (API lag / parse skip).
+    if (fetched.length === 0 && cache.size > 0) {
+      console.log(
+        `[live-trades] master cache hold (empty open snapshot) strategyId=${strategyId} legs=${cache.size}`,
+      );
+    }
+  }
+
+  return sortMasterCachedRows(cache);
+}
+
+async function fetchAndMergeMasterLiveTrades(
+  strategyId: string,
+  apiKey: string,
+  apiSecret: string,
+  label: string,
+): Promise<{ positions: LiveTradeRow[]; fetchException?: string }> {
+  try {
+    const snapshot = await withDeltaFetchTimeout(
+      fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret),
+      label,
+    );
+    const enriched = await enrichPositionsList(snapshot.open);
+    const positions = mergeMasterLiveTradesCache(
+      strategyId,
+      enriched,
+      snapshot.explicitFlatLegKeys,
+    );
+    return { positions };
+  } catch (err) {
+    const fetchException =
+      err instanceof Error ? err.message : String(err ?? "fetch failed");
+    const positions = mergeMasterLiveTradesCache(strategyId, null, []);
+    return { positions, fetchException };
+  }
+}
 
 type UserLiveTradesSticky = {
   positions: LiveTradeRow[];
   firstEmptyAt: number | null;
 };
 
-/** Per user+strategy — same 10s gate as master sticky. */
 const userLiveTradesSticky = new Map<string, UserLiveTradesSticky>();
+
+/** Per user+strategy — short hold when user Delta fetch fails (master uses {@link lastKnownMasterPositions}). */
+const USER_LIVE_TRADES_FLAT_CONFIRM_MS = 10_000;
 
 function userLiveTradesStickyKey(userId: string, strategyId: string): string {
   return `${userId}:${strategyId}`;
@@ -69,7 +180,7 @@ function applyUserLiveTradesSticky(
   }
 
   const firstEmpty = prev.firstEmptyAt ?? now;
-  if (now - firstEmpty < MASTER_LIVE_TRADES_FLAT_CONFIRM_MS) {
+  if (now - firstEmpty < USER_LIVE_TRADES_FLAT_CONFIRM_MS) {
     userLiveTradesSticky.set(key, {
       positions: prev.positions,
       firstEmptyAt: firstEmpty,
@@ -82,51 +193,6 @@ function applyUserLiveTradesSticky(
   }
 
   userLiveTradesSticky.set(key, { positions: [], firstEmptyAt: firstEmpty });
-  return [];
-}
-
-function applyMasterLiveTradesSticky(
-  strategyId: string,
-  fetched: LiveTradeRow[],
-  fetchSucceeded: boolean,
-): LiveTradeRow[] {
-  if (!fetchSucceeded) {
-    const prev = masterLiveTradesSticky.get(strategyId);
-    return prev?.positions ?? [];
-  }
-
-  const now = Date.now();
-  if (fetched.length > 0) {
-    masterLiveTradesSticky.set(strategyId, {
-      positions: fetched,
-      firstEmptyAt: null,
-    });
-    return fetched;
-  }
-
-  const prev = masterLiveTradesSticky.get(strategyId);
-  if (!prev || prev.positions.length === 0) {
-    masterLiveTradesSticky.set(strategyId, { positions: [], firstEmptyAt: now });
-    return [];
-  }
-
-  const firstEmpty = prev.firstEmptyAt ?? now;
-  if (now - firstEmpty < MASTER_LIVE_TRADES_FLAT_CONFIRM_MS) {
-    masterLiveTradesSticky.set(strategyId, {
-      positions: prev.positions,
-      firstEmptyAt: firstEmpty,
-    });
-    console.log(
-      `[live-trades] master sticky hold strategyId=${strategyId} ` +
-        `(${prev.positions.length} leg(s), empty ${Math.round((now - firstEmpty) / 1000)}s / ${MASTER_LIVE_TRADES_FLAT_CONFIRM_MS / 1000}s)`,
-    );
-    return prev.positions;
-  }
-
-  masterLiveTradesSticky.set(strategyId, {
-    positions: [],
-    firstEmptyAt: firstEmpty,
-  });
   return [];
 }
 
@@ -336,26 +402,18 @@ export async function getAdminMasterPositionSnapshots(
       strat.masterApiKey?.trim() && strat.masterApiSecret?.trim(),
     );
 
-    let masterList: DeltaLivePosition[] = [];
+    let positions: LiveTradeRow[] = [];
     let fetchException: string | undefined;
     if (credentialsPresent) {
-      try {
-        masterList = await withDeltaFetchTimeout(
-          fetchDeltaOpenPositions(strat.masterApiKey, strat.masterApiSecret),
-          `master snapshot strategy=${strat.id}`,
-        );
-      } catch (err) {
-        fetchException =
-          err instanceof Error ? err.message : String(err ?? "fetch failed");
-        masterList = [];
-      }
+      const merged = await fetchAndMergeMasterLiveTrades(
+        strat.id,
+        strat.masterApiKey,
+        strat.masterApiSecret,
+        `master snapshot strategy=${strat.id}`,
+      );
+      positions = merged.positions;
+      fetchException = merged.fetchException;
     }
-
-    const positions = applyMasterLiveTradesSticky(
-      strat.id,
-      await enrichPositionsList(masterList),
-      fetchException === undefined,
-    );
 
     out.push({
       strategyId: strat.id,
@@ -458,26 +516,17 @@ export async function getUserLiveTradesByStrategy(
     const masterKey = sub.strategy.masterApiKey?.trim() ?? "";
     const masterSecret = sub.strategy.masterApiSecret?.trim() ?? "";
     if (masterKey && masterSecret) {
-      try {
-        const masterList = await withDeltaFetchTimeout(
-          fetchDeltaOpenPositions(
-            sub.strategy.masterApiKey!,
-            sub.strategy.masterApiSecret!,
-          ),
-          `master snapshot strategyId=${sub.strategyId}`,
-        );
-        const enriched = await enrichPositionsList(masterList);
-        masterOpenCount = applyMasterLiveTradesSticky(
-          sub.strategyId,
-          enriched,
-          true,
-        ).length;
-      } catch (err) {
-        const sticky = masterLiveTradesSticky.get(sub.strategyId);
-        masterOpenCount = sticky?.positions.length ?? 0;
+      const merged = await fetchAndMergeMasterLiveTrades(
+        sub.strategyId,
+        sub.strategy.masterApiKey!,
+        sub.strategy.masterApiSecret!,
+        `master snapshot strategyId=${sub.strategyId}`,
+      );
+      masterOpenCount = merged.positions.length;
+      if (merged.fetchException) {
         console.warn(
           `[live-trades] master snapshot failed strategyId=${sub.strategyId}:`,
-          err instanceof Error ? err.message : err,
+          merged.fetchException,
         );
       }
     }
@@ -612,43 +661,30 @@ export async function getAdminLiveTradesByStrategy(
 
       const subs = await subsPromise;
 
-      const masterResult = await (async (): Promise<{
-        list: DeltaLivePosition[];
-        fetchException?: string;
-      }> => {
-        if (!credentialsPresent) return { list: [] };
-        try {
-          const list = await withDeltaFetchTimeout(
-            fetchDeltaOpenPositions(
-              strat.masterApiKey!,
-              strat.masterApiSecret!,
-            ),
+      const masterMerged = credentialsPresent
+        ? await fetchAndMergeMasterLiveTrades(
+            strat.id,
+            strat.masterApiKey!,
+            strat.masterApiSecret!,
             `master positions strategy=${strat.id}`,
-          );
-          return { list };
-        } catch (err) {
-          const fetchException =
-            err instanceof Error ? err.message : String(err ?? "fetch failed");
-          console.error(
-            `[live-trades] Master Delta positions threw for "${strat.title}" (${strat.id}):`,
-            fetchException,
-          );
-          return { list: [], fetchException };
-        }
-      })();
+          )
+        : { positions: [] as LiveTradeRow[] };
+
+      if (masterMerged.fetchException) {
+        console.error(
+          `[live-trades] Master Delta positions threw for "${strat.title}" (${strat.id}):`,
+          masterMerged.fetchException,
+        );
+      }
 
       const masterMeta = {
         credentialsPresent,
-        ...(masterResult.fetchException !== undefined
-          ? { fetchException: masterResult.fetchException }
+        ...(masterMerged.fetchException !== undefined
+          ? { fetchException: masterMerged.fetchException }
           : {}),
       };
 
-      const masterPositions = applyMasterLiveTradesSticky(
-        strat.id,
-        await enrichPositionsList(masterResult.list),
-        masterResult.fetchException === undefined,
-      );
+      const masterPositions = masterMerged.positions;
 
       const subscribers = await Promise.all(
         subs.map(async (sub): Promise<AdminLiveTradesSubscriber> => {
