@@ -95,36 +95,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/users/list", adminController.listUsersMinimal);
   router.get("/users/search", adminController.searchUsers);
 
-  router.get("/users", async (_req, res, next) => {
-    try {
-      const users = await prisma.user.findMany({
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          status: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "desc" },
-      });
-      const pnlAgg = await prisma.trade.groupBy({
-        by: ["userId"],
-        _sum: { tradePnl: true },
-      });
-      const pnlByUser = new Map<string, number>(
-        pnlAgg.map((r) => [r.userId, r._sum.tradePnl ?? 0]),
-      );
-      res.json(
-        users.map((u) => ({
-          ...u,
-          totalPnlToDate: pnlByUser.get(u.id) ?? 0,
-        })),
-      );
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.get("/users", adminController.listUsersForAdmin);
 
   router.get("/users/:id/management", async (req, res, next) => {
     try {

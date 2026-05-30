@@ -32,7 +32,22 @@ type AdminUser = {
   status: string;
   createdAt: string;
   totalPnlToDate: number;
+  walletBalance: number;
+  deltaBalance: number | null;
+  deltaConnected: boolean;
 };
+
+const usdFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return usdFmt.format(n);
+}
 
 export default function AdminUsersPage() {
   const apiBase = useMemo(() => resolveAdminApiBase(), []);
@@ -58,7 +73,29 @@ export default function AdminUsersPage() {
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();
       if (!Array.isArray(data)) throw new Error("Invalid response");
-      setUsers(data as AdminUser[]);
+      setUsers(
+        (data as Record<string, unknown>[]).map((row) => ({
+          id: String(row.id ?? ""),
+          name: typeof row.name === "string" ? row.name : null,
+          email: String(row.email ?? ""),
+          role: String(row.role ?? ""),
+          status: String(row.status ?? ""),
+          createdAt: String(row.createdAt ?? ""),
+          totalPnlToDate:
+            typeof row.totalPnlToDate === "number" && Number.isFinite(row.totalPnlToDate)
+              ? row.totalPnlToDate
+              : 0,
+          walletBalance:
+            typeof row.walletBalance === "number" && Number.isFinite(row.walletBalance)
+              ? row.walletBalance
+              : 0,
+          deltaBalance:
+            typeof row.deltaBalance === "number" && Number.isFinite(row.deltaBalance)
+              ? row.deltaBalance
+              : null,
+          deltaConnected: row.deltaConnected === true,
+        })),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load users");
       setUsers([]);
@@ -142,12 +179,14 @@ export default function AdminUsersPage() {
 
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[880px] text-left text-sm">
+          <table className="w-full min-w-[1080px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">User Name</th>
                 <th className="px-4 py-3 font-medium text-white/70">Email</th>
                 <th className="px-4 py-3 font-medium text-white/70">Status</th>
+                <th className="px-4 py-3 font-medium text-white/70">Wallet Balance</th>
+                <th className="px-4 py-3 font-medium text-white/70">Delta Balance</th>
                 <th className="px-4 py-3 font-medium text-white/70">Total PnL</th>
                 <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
@@ -155,13 +194,13 @@ export default function AdminUsersPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
                     Loading users…
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
                     No users found.
                   </td>
                 </tr>
@@ -186,12 +225,30 @@ export default function AdminUsersPage() {
                         {u.status}
                       </span>
                     </td>
+                    <td className="px-4 py-3 tabular-nums text-white/85">
+                      {fmtUsd(u.walletBalance)}
+                    </td>
+                    <td
+                      className="px-4 py-3 tabular-nums text-white/85"
+                      title={
+                        !u.deltaConnected
+                          ? "No Delta API keys linked"
+                          : u.deltaBalance === null
+                            ? "Delta balance unavailable (fetch failed or timed out)"
+                            : "Live total balance from Delta Exchange India"
+                      }
+                    >
+                      {fmtUsd(u.deltaBalance)}
+                      {!u.deltaConnected ? (
+                        <span className="ml-1.5 text-[10px] text-white/35">N/C</span>
+                      ) : null}
+                    </td>
                     <td
                       className={`px-4 py-3 tabular-nums ${
                         u.totalPnlToDate >= 0 ? "text-emerald-300" : "text-red-300"
                       }`}
                     >
-                      ${u.totalPnlToDate.toFixed(2)}
+                      {fmtUsd(u.totalPnlToDate)}
                     </td>
                     <td className="px-4 py-3">
                       <Link

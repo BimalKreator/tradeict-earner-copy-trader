@@ -10,6 +10,7 @@ import {
 import {
   aggregateUsersAum,
   fetchUserAvailableCapital,
+  fetchUserCapitalBreakdown,
   masterApiHealth,
   resolveUserDeltaCreds,
   startOfUtcDay,
@@ -461,6 +462,132 @@ export function createAdminController(prisma: PrismaClient) {
         orderBy: { email: "asc" },
       });
       res.json(users);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** Per-user Delta balance fetch timeout (admin list — avoid blocking page load). */
+  const ADMIN_DELTA_BALANCE_TIMEOUT_MS = 12_000;
+  /** Max concurrent Delta balance API calls when listing users. */
+  const ADMIN_DELTA_BALANCE_CONCURRENCY = 4;
+
+  async function mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    fn: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let nextIndex = 0;
+    async function worker(): Promise<void> {
+      for (;;) {
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= items.length) return;
+        results[i] = await fn(items[i]!, i);
+      }
+    }
+    const workers = Math.min(Math.max(1, concurrency), items.length || 1);
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+    return results;
+  }
+
+  async function fetchAdminUserDeltaBalanceUsd(userId: string): Promise<{
+    deltaBalance: number | null;
+    deltaConnected: boolean;
+  }> {
+    const creds = await resolveUserDeltaCreds(prisma, userId);
+    if (!creds) {
+      return { deltaBalance: null, deltaConnected: false };
+    }
+    try {
+      const breakdown = await Promise.race([
+        fetchUserCapitalBreakdown(prisma, userId),
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("Delta balance fetch timed out")),
+            ADMIN_DELTA_BALANCE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      return {
+        deltaBalance: breakdown.totalBalance,
+        deltaConnected: true,
+      };
+    } catch (err) {
+      console.warn(
+        `[admin] Delta balance fetch failed userId=${userId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return { deltaBalance: null, deltaConnected: true };
+    }
+  }
+
+  /**
+   * GET /api/admin/users
+   * Platform users with PnL, internal wallet balance (DB), and live Delta balance (batched REST).
+   */
+  async function listUsersForAdmin(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const users = await prisma.user.findMany({
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          status: true,
+          createdAt: true,
+          wallet: { select: { balance: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const pnlAgg = await prisma.trade.groupBy({
+        by: ["userId"],
+        _sum: { tradePnl: true },
+      });
+      const pnlByUser = new Map<string, number>(
+        pnlAgg.map((r) => [r.userId, r._sum.tradePnl ?? 0]),
+      );
+
+      const deltaByUserId = new Map<
+        string,
+        { deltaBalance: number | null; deltaConnected: boolean }
+      >();
+
+      await mapWithConcurrency(
+        users,
+        ADMIN_DELTA_BALANCE_CONCURRENCY,
+        async (user) => {
+          const result = await fetchAdminUserDeltaBalanceUsd(user.id);
+          deltaByUserId.set(user.id, result);
+        },
+      );
+
+      res.json(
+        users.map((u) => {
+          const delta = deltaByUserId.get(u.id) ?? {
+            deltaBalance: null,
+            deltaConnected: false,
+          };
+          return {
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            role: u.role,
+            status: u.status,
+            createdAt: u.createdAt,
+            totalPnlToDate: pnlByUser.get(u.id) ?? 0,
+            walletBalance: u.wallet?.balance ?? 0,
+            deltaBalance: delta.deltaBalance,
+            deltaConnected: delta.deltaConnected,
+          };
+        }),
+      );
     } catch (err) {
       next(err);
     }
@@ -2292,6 +2419,7 @@ export function createAdminController(prisma: PrismaClient) {
     getUserTradesBilling,
     listAllTrades,
     listUsersMinimal,
+    listUsersForAdmin,
     searchUsers,
     updateUserProfile,
     patchStrategyAutoExit,
