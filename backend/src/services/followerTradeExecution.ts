@@ -791,7 +791,8 @@ async function markFollowerOrderFailure(
 
 /**
  * Execute → wait 3s → verify → retry (up to {@link MAX_RETRIES}).
- * Skips verification for reduce-only closes (caller should use {@link executeTrade}).
+ * Opens replicate the master leg direction verbatim (`side` = master BUY/SELL).
+ * Reduce-only closes use the opposite exchange side to flatten an existing leg.
  */
 export async function executeFollowerTradeWithVerification(
   prisma: PrismaClient,

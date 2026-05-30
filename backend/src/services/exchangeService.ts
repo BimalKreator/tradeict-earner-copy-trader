@@ -102,6 +102,13 @@ export function clearDeltaAuthClientCache(): void {
 
 export type TradeSide = "BUY" | "SELL";
 
+/** Delta India: positive signed size/lots = long (BUY), negative = short (SELL). */
+export function tradeSideFromSignedSize(rawSize: number): TradeSide {
+  if (rawSize > 0) return "BUY";
+  if (rawSize < 0) return "SELL";
+  return "BUY";
+}
+
 export interface ExecuteTradeResult {
   success: boolean;
   orderId?: string;
@@ -720,8 +727,15 @@ export async function fetchDeltaOpenPositions(
   for (const row of rawList) {
     if (!row || typeof row !== "object") continue;
     const position = row as Record<string, unknown>;
+    const info =
+      position.info != null && typeof position.info === "object"
+        ? (position.info as Record<string, unknown>)
+        : null;
 
-    const rawSize = numberOrNull(position.size);
+    const rawSize =
+      numberOrNull(position.size) ??
+      numberOrNull(info?.size) ??
+      numberOrNull(position.contracts);
     if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
 
     const productSymbol = String(position.product_symbol ?? "").trim();
@@ -748,6 +762,9 @@ export async function fetchDeltaOpenPositions(
     const contractSize =
       Number.isFinite(csRaw) && csRaw > 0 ? csRaw : fallbackSize;
 
+    // Side MUST follow raw signed size — do not infer from converted base units.
+    const side: TradeSide = tradeSideFromSignedSize(contractLots);
+
     // Options: API `size` is contract count (±100) → scale to BTC (±0.1) via contractSize.
     const signedBtc = isOption
       ? contractLots * contractSize
@@ -758,7 +775,6 @@ export async function fetchDeltaOpenPositions(
     if (Math.abs(signedBtc) < 1e-12) continue;
 
     const symbolKey = symbolKeyFromCcxtMarket(unified, market);
-    const side: TradeSide = signedBtc < 0 ? "SELL" : "BUY";
     const realBaseSize = Math.abs(signedBtc);
     const contractLotCount = isOption
       ? Math.abs(contractLots)

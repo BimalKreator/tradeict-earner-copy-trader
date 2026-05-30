@@ -8,6 +8,7 @@ import {
   fetchDeltaTicker,
   isDeltaOptionProductId,
   normalizeDeltaPerpSymbolForCcxt,
+  tradeSideFromSignedSize,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
@@ -421,36 +422,6 @@ function extractDeltaProductSymbol(o: Record<string, unknown>): string {
   return "";
 }
 
-/** True when a positions delete payload names a specific product/symbol to close. */
-function deletePayloadIdentifiesSymbol(raw: unknown): boolean {
-  if (raw == null) return false;
-  if (typeof raw !== "object") return false;
-
-  const inspect = (row: unknown): boolean => {
-    if (row == null || typeof row !== "object") return false;
-    const item = mergePayloadLayers(row);
-    if (Object.keys(item).length === 0) return false;
-    const symbol = extractDeltaProductSymbol(item);
-    const productKey = String(item.product_id ?? "").trim();
-    return Boolean(symbol || productKey);
-  };
-
-  if (Array.isArray(raw)) {
-    return raw.some((row) => inspect(row));
-  }
-
-  const layer = asRecord(raw);
-  if (!layer) return inspect(raw);
-
-  const nested: unknown[] = [];
-  if (Array.isArray(layer.positions)) nested.push(...layer.positions);
-  if (Array.isArray(layer.open)) nested.push(...layer.open);
-  if (Array.isArray(layer.closed)) nested.push(...layer.closed);
-  if (nested.length > 0) return nested.some((row) => inspect(row));
-
-  return inspect(layer);
-}
-
 function orderStateIndicatesFill(state: string): boolean {
   const u = state.toLowerCase().trim();
   if (!u) return false;
@@ -724,18 +695,13 @@ function extractPositionSnapshot(raw: unknown): {
   const contracts =
     rawSize !== null && Number.isFinite(rawSize) ? Math.abs(rawSize) : 0;
 
-  // Side preference order:
-  //   1) explicit side / position_side / direction string
-  //   2) sign of size (positive => BUY, negative => SELL on Delta India)
-  let side = normalizeSide(o.side ?? o.position_side ?? o.direction);
-  if (!side && rawSize !== null && Number.isFinite(rawSize) && rawSize !== 0) {
-    side = rawSize > 0 ? "BUY" : "SELL";
+  // Signed raw size is authoritative on Delta India (+ = BUY/long, − = SELL/short).
+  let side: TradeSide;
+  if (rawSize !== null && Number.isFinite(rawSize) && rawSize !== 0) {
+    side = tradeSideFromSignedSize(rawSize);
+  } else {
+    side = normalizeSide(o.side ?? o.position_side ?? o.direction) ?? "BUY";
   }
-  // For zero-size rows (a "delete" notification disguised as an update),
-  // we still want to track the row so the downstream close-detection branch
-  // can fire. Default to BUY; the close path reads the side from the prior
-  // tracked meta anyway.
-  if (!side) side = "BUY";
 
   const avgEntry =
     num(o.entry_price) ?? num(o.avg_entry_price) ?? num(o.avg_admission_price);
@@ -1039,10 +1005,12 @@ function deltaPositionsToMasterLed(
     if (entry === null) continue;
     const masterContracts = Math.abs(p.contracts);
     if (!Number.isFinite(masterContracts) || masterContracts < 1e-12) continue;
+    // Side comes from signed raw REST size via fetchDeltaOpenPositions — replicate verbatim.
+    const side: TradeSide = p.side === "SELL" ? "SELL" : "BUY";
     out.push({
-      id: `${p.symbolKey}:${p.side}`,
+      id: `${p.symbolKey}:${side}`,
       deltaSymbol: p.symbolKey,
-      side: p.side,
+      side,
       entryPrice: entry,
       masterContracts,
     });
@@ -1529,6 +1497,11 @@ async function copyMasterFillToSubscribers(
     return;
   }
 
+  console.log(
+    `[copy] master fill → followers ${args.symbol} ${args.side} lots=${args.masterContracts} ` +
+      `forceRestSync=${args.forceRestSync === true}`,
+  );
+
   await syncMasterOpenFillToFutureHedgeFollowers(prisma, {
     symbol: args.symbol,
     side: args.side,
@@ -1740,8 +1713,8 @@ class MasterPositionTracker {
 }
 
 /**
- * REST fallback: poll master exchange positions and force-sync follower opens
- * when bot-managed DB qty is missing. Runs every {@link MASTER_REST_POLL_MS}.
+ * REST fallback: poll master exchange positions — force-sync opens and confirm
+ * closes only when REST shows the master leg is flat/missing.
  */
 async function pollMasterPositionsFallback(
   prisma: PrismaClient,
@@ -1792,7 +1765,9 @@ async function pollMasterPositionsFallback(
 
     registerSymbolsForLivePrices(masters.map((m) => m.deltaSymbol));
 
-    if (!tracker.isRestBaselineSeeded()) {
+    const wasBaselineSeeded = tracker.isRestBaselineSeeded();
+
+    if (!wasBaselineSeeded) {
       for (const m of masters) {
         tracker.applyMasterLeg({
           symbol: m.deltaSymbol,
@@ -1807,14 +1782,14 @@ async function pollMasterPositionsFallback(
       );
     }
 
-    const seenLegs = new Set<string>();
+    const restOpenByLeg = new Map<string, MasterLedTrade>();
+    for (const m of masters) {
+      if (m.masterContracts <= 0) continue;
+      restOpenByLeg.set(masterLegKey(m.deltaSymbol, m.side), m);
+    }
 
     for (const m of masters) {
       if (cancelled.value) return;
-
-      const legKey = masterLegKey(m.deltaSymbol, m.side);
-      seenLegs.add(legKey);
-
       if (m.masterContracts <= 0) continue;
 
       const missingOnFollowers = await followersMissingOpenLeg(
@@ -1826,6 +1801,7 @@ async function pollMasterPositionsFallback(
       );
 
       if (missingOnFollowers) {
+        const legKey = masterLegKey(m.deltaSymbol, m.side);
         const fillKey = `force-rest:${buildMasterFillKey([
           m.deltaSymbol,
           m.side,
@@ -1858,20 +1834,56 @@ async function pollMasterPositionsFallback(
       });
     }
 
-    const trackedLegs = new Map<string, LastOpenMeta>();
-    for (const meta of tracker.lastOpenMeta.values()) {
-      const lk = masterLegKey(meta.symbol, meta.side);
-      const cur = tracker.maxContractsForSymbolSide(meta.symbol, meta.side);
-      if (cur > 0) trackedLegs.set(lk, meta);
-    }
-    for (const [lk, meta] of trackedLegs) {
-      if (seenLegs.has(lk)) continue;
-      tracker.applyMasterLeg({
-        symbol: meta.symbol,
-        side: meta.side,
-        contracts: 0,
-        avgEntry: 0,
-      });
+    if (wasBaselineSeeded) {
+      const trackedLegs = new Map<string, LastOpenMeta>();
+      for (const meta of tracker.lastOpenMeta.values()) {
+        const lk = masterLegKey(meta.symbol, meta.side);
+        if (trackedLegs.has(lk)) continue;
+        const cur = tracker.maxContractsForSymbolSide(meta.symbol, meta.side);
+        if (cur > 0) trackedLegs.set(lk, meta);
+      }
+
+      for (const [lk, meta] of trackedLegs) {
+        if (cancelled.value) return;
+        if (restOpenByLeg.has(lk)) continue;
+
+        const lastContracts = tracker.maxContractsForSymbolSide(
+          meta.symbol,
+          meta.side,
+        );
+        if (lastContracts <= 0) continue;
+
+        console.log(
+          `[MASTER-REST-SYNC] Master flat confirmed via REST ${meta.symbol} ${meta.side} ` +
+            `(${lastContracts} contracts) — closing followers.`,
+        );
+
+        try {
+          await notifyMasterFlat(prisma, strat.id, {
+            symbol: meta.symbol,
+            side: meta.side,
+            masterEntryPrice:
+              Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
+                ? meta.avgEntry
+                : 0,
+            masterContracts: lastContracts,
+          });
+        } catch (closeErr) {
+          console.error(
+            `[MASTER-REST-SYNC] notifyMasterFlat failed ${meta.symbol} ${meta.side}:`,
+            closeErr instanceof Error ? closeErr.message : closeErr,
+          );
+          continue;
+        }
+
+        tracker.clearLegKeys(
+          tracker.aliasesForSnap({
+            symbol: meta.symbol,
+            side: meta.side,
+            productKey: meta.symbol,
+          }),
+        );
+      }
     }
   } catch (err) {
     console.error(
@@ -2124,6 +2136,15 @@ class StrategyMasterSocket {
     const eventKind = classifyMasterWsEvent(msg);
 
     if (eventKind === "orders") {
+      const orderAction = String(msg.action ?? "").toLowerCase();
+      if (orderAction === "delete" || orderAction === "closed") {
+        console.warn(
+          `[tradeEngine WS] orders ${orderAction} ignored strategyId=${this.strategyId} — ` +
+            `REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
+        );
+        return;
+      }
+
       if (!(await assertStrategyActiveForCopy(this.prisma, this.strategyId))) {
         return;
       }
@@ -2197,88 +2218,13 @@ class StrategyMasterSocket {
         return;
       }
 
-      // ---- DELETE / CLOSE: only act when payload names the closed symbol ----
+      // WS delete/close events are ignored — REST poll confirms master flat.
       if (action === "delete" || action === "closed") {
-        if (!copyEnabled) {
-          return;
-        }
-
-        console.log(
-          `[tradeEngine WS] positions delete strategyId=${this.strategyId} payload=${JSON.stringify(
+        console.warn(
+          `[tradeEngine WS] positions ${action} ignored strategyId=${this.strategyId} payload=${JSON.stringify(
             msg.data ?? null,
-          )} trackedKeys=${JSON.stringify(Array.from(this.tracker.lastOpenMeta.keys()))}`,
+          )} — REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
         );
-
-        if (!deletePayloadIdentifiesSymbol(msg.data)) {
-          console.warn(
-            `[tradeEngine WS] positions delete with null/empty payload strategyId=${this.strategyId} — ` +
-              `ignoring WS close; REST poll (${MASTER_REST_POLL_MS / 1000}s) and reconcile will confirm master flat.`,
-          );
-          return;
-        }
-
-        const rows = collectRows();
-        const tryPayloadClose = async (): Promise<boolean> => {
-          let closed = 0;
-          for (const r of rows) {
-            const item = mergePayloadLayers(r);
-            const symbol = extractDeltaProductSymbol(item);
-            const productKey = String(item.product_id ?? "").trim();
-
-            const candidateKeys = new Set<string>();
-            for (const a of symbolAliasSet(symbol)) candidateKeys.add(a);
-            if (productKey) {
-              candidateKeys.add(productKey);
-              candidateKeys.add(productKey.toUpperCase());
-            }
-
-            let hitMeta: LastOpenMeta | undefined;
-            let hitContracts = 0;
-            for (const k of candidateKeys) {
-              const m = this.tracker.lastOpenMeta.get(k);
-              if (m) {
-                hitMeta = m;
-                hitContracts = Math.max(
-                  hitContracts,
-                  this.tracker.lastPositionContracts.get(k) ?? m.contracts,
-                );
-              }
-            }
-            if (!hitMeta || hitContracts <= 0) continue;
-
-            console.log(
-              `[EXECUTION] Position delete payload matched ${hitMeta.symbol} (${hitContracts} contracts). Triggering follower exits.`,
-            );
-            await notifyMasterFlat(this.prisma, this.strategyId, {
-              symbol: hitMeta.symbol,
-              side: hitMeta.side,
-              masterEntryPrice:
-                Number.isFinite(hitMeta.avgEntry) && hitMeta.avgEntry > 0
-                  ? hitMeta.avgEntry
-                  : 0,
-              masterContracts: hitContracts,
-            });
-            // wipe every alias of the closed symbol
-            for (const a of symbolAliasSet(hitMeta.symbol)) {
-              this.tracker.lastPositionContracts.delete(a);
-              this.tracker.lastOpenMeta.delete(a);
-            }
-            for (const k of candidateKeys) {
-              this.tracker.lastPositionContracts.delete(k);
-              this.tracker.lastOpenMeta.delete(k);
-            }
-            closed += 1;
-          }
-          return closed > 0;
-        };
-
-        const matched = await tryPayloadClose();
-        if (!matched) {
-          console.warn(
-            `[tradeEngine WS] positions delete payload did not match any tracked leg strategyId=${this.strategyId} — ` +
-              `ignoring WS close; REST poll (${MASTER_REST_POLL_MS / 1000}s) and reconcile will confirm master flat.`,
-          );
-        }
         return;
       }
 
@@ -2300,34 +2246,10 @@ class StrategyMasterSocket {
         const next = snap.contracts;
 
         if (next <= 0 && prev > 0) {
-          const closeMeta = meta ?? {
-            symbol: snap.symbol,
-            side: snap.side,
-            contracts: prev,
-            avgEntry: snap.avgEntry ?? 0,
-          };
-          if (copyEnabled) {
-            console.log(
-              `[EXECUTION] Position update -> 0 detected ${closeMeta.symbol} ${closeMeta.side} (${prev} contracts). Triggering follower exits.`,
-            );
-            await notifyMasterFlat(this.prisma, this.strategyId, {
-              symbol: closeMeta.symbol,
-              side: closeMeta.side,
-              masterEntryPrice:
-                Number.isFinite(closeMeta.avgEntry) && closeMeta.avgEntry > 0
-                  ? closeMeta.avgEntry
-                  : 0,
-              masterContracts: prev,
-            });
-          }
-          for (const a of symbolAliasSet(closeMeta.symbol)) {
-            this.tracker.lastPositionContracts.delete(a);
-            this.tracker.lastOpenMeta.delete(a);
-          }
-          for (const k of aliases) {
-            this.tracker.lastPositionContracts.delete(k);
-            this.tracker.lastOpenMeta.delete(k);
-          }
+          console.warn(
+            `[tradeEngine WS] positions update size→0 ignored ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — ` +
+              `REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
+          );
           continue;
         }
 
