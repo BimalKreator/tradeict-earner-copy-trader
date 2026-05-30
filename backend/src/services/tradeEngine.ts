@@ -421,6 +421,36 @@ function extractDeltaProductSymbol(o: Record<string, unknown>): string {
   return "";
 }
 
+/** True when a positions delete payload names a specific product/symbol to close. */
+function deletePayloadIdentifiesSymbol(raw: unknown): boolean {
+  if (raw == null) return false;
+  if (typeof raw !== "object") return false;
+
+  const inspect = (row: unknown): boolean => {
+    if (row == null || typeof row !== "object") return false;
+    const item = mergePayloadLayers(row);
+    if (Object.keys(item).length === 0) return false;
+    const symbol = extractDeltaProductSymbol(item);
+    const productKey = String(item.product_id ?? "").trim();
+    return Boolean(symbol || productKey);
+  };
+
+  if (Array.isArray(raw)) {
+    return raw.some((row) => inspect(row));
+  }
+
+  const layer = asRecord(raw);
+  if (!layer) return inspect(raw);
+
+  const nested: unknown[] = [];
+  if (Array.isArray(layer.positions)) nested.push(...layer.positions);
+  if (Array.isArray(layer.open)) nested.push(...layer.open);
+  if (Array.isArray(layer.closed)) nested.push(...layer.closed);
+  if (nested.length > 0) return nested.some((row) => inspect(row));
+
+  return inspect(layer);
+}
+
 function orderStateIndicatesFill(state: string): boolean {
   const u = state.toLowerCase().trim();
   if (!u) return false;
@@ -2167,9 +2197,23 @@ class StrategyMasterSocket {
         return;
       }
 
-      // ---- DELETE / CLOSE: WS event is authoritative; do NOT depend on REST ----
+      // ---- DELETE / CLOSE: only act when payload names the closed symbol ----
       if (action === "delete" || action === "closed") {
         if (!copyEnabled) {
+          return;
+        }
+
+        console.log(
+          `[tradeEngine WS] positions delete strategyId=${this.strategyId} payload=${JSON.stringify(
+            msg.data ?? null,
+          )} trackedKeys=${JSON.stringify(Array.from(this.tracker.lastOpenMeta.keys()))}`,
+        );
+
+        if (!deletePayloadIdentifiesSymbol(msg.data)) {
+          console.warn(
+            `[tradeEngine WS] positions delete with null/empty payload strategyId=${this.strategyId} — ` +
+              `ignoring WS close; REST poll (${MASTER_REST_POLL_MS / 1000}s) and reconcile will confirm master flat.`,
+          );
           return;
         }
 
@@ -2228,62 +2272,11 @@ class StrategyMasterSocket {
           return closed > 0;
         };
 
-        const closeAllTracked = async (
-          reason: string,
-        ): Promise<void> => {
-          // de-dupe by symbol so we don't fire the same close twice when
-          // a position is registered under multiple alias keys.
-          const fired = new Set<string>();
-          const entries = Array.from(this.tracker.lastOpenMeta.entries());
-          if (entries.length === 0) {
-            console.warn(
-              `[tradeEngine WS] ${reason} but no tracked positions to close strategyId=${this.strategyId}`,
-            );
-            return;
-          }
-          for (const [, meta] of entries) {
-            const sigKey = `${meta.symbol}:${meta.side}`;
-            if (fired.has(sigKey)) continue;
-            fired.add(sigKey);
-            const lastContracts = Math.max(
-              meta.contracts,
-              ...Array.from(symbolAliasSet(meta.symbol)).map(
-                (a) => this.tracker.lastPositionContracts.get(a) ?? 0,
-              ),
-            );
-            if (lastContracts <= 0) continue;
-            console.log(
-              `[EXECUTION] ${reason} — forcing close for ${meta.symbol} ${meta.side} (${lastContracts} contracts).`,
-            );
-            await notifyMasterFlat(this.prisma, this.strategyId, {
-              symbol: meta.symbol,
-              side: meta.side,
-              masterEntryPrice:
-                Number.isFinite(meta.avgEntry) && meta.avgEntry > 0
-                  ? meta.avgEntry
-                  : 0,
-              masterContracts: lastContracts,
-            });
-            for (const a of symbolAliasSet(meta.symbol)) {
-              this.tracker.lastPositionContracts.delete(a);
-              this.tracker.lastOpenMeta.delete(a);
-            }
-          }
-        };
-
-        console.log(
-          `[tradeEngine WS] positions delete strategyId=${this.strategyId} payload=${JSON.stringify(
-            msg.data ?? null,
-          )} trackedKeys=${JSON.stringify(Array.from(this.tracker.lastOpenMeta.keys()))}`,
-        );
-
         const matched = await tryPayloadClose();
         if (!matched) {
-          // WS told us a position was deleted but our payload-key lookup
-          // didn't resolve a tracked entry. Treat the WS signal as
-          // authoritative and close every locally-tracked position.
-          await closeAllTracked(
-            "delete signal without payload match",
+          console.warn(
+            `[tradeEngine WS] positions delete payload did not match any tracked leg strategyId=${this.strategyId} — ` +
+              `ignoring WS close; REST poll (${MASTER_REST_POLL_MS / 1000}s) and reconcile will confirm master flat.`,
           );
         }
         return;

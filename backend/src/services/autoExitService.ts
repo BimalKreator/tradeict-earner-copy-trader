@@ -187,6 +187,9 @@ export async function closeAllMasterPositionsMarket(
 /**
  * Poll-driven auto-exit: compare total master unrealized PnL to strategy thresholds
  * and market-close every open master leg when breached.
+ *
+ * Hard gate: `Strategy.autoExitEnabled` must be true (also enforced in
+ * {@link runAllStrategyAutoExitChecks} DB query). When disabled, no local PnL exits run.
  */
 export async function runStrategyAutoExitCheck(
   prisma: PrismaClient,
