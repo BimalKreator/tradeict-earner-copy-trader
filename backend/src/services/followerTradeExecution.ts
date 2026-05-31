@@ -2496,3 +2496,120 @@ export async function adminAdjustMasterTradeQuantity(
     ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
   };
 }
+
+export type AdminBulkAdjustMasterLegResult =
+  | (Extract<AdminAdjustMasterQtyResult, { ok: true }>)
+  | { ok: false; error: string; symbol: string; side: string };
+
+export type AdminBulkAdjustMasterQtyResult =
+  | {
+      ok: true;
+      strategyId: string;
+      adjustmentLots: number;
+      copyToUsers: boolean;
+      legsAttempted: number;
+      legsSucceeded: number;
+      results: AdminBulkAdjustMasterLegResult[];
+    }
+  | { ok: false; error: string; status?: number };
+
+/** Apply the same lot delta to every open master leg (Delta REST positions). */
+export async function adminBulkAdjustMasterTradeQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    adjustmentLots: number;
+    copyToUsers: boolean;
+  },
+): Promise<AdminBulkAdjustMasterQtyResult> {
+  const { strategyId } = args;
+  const adjustmentLots = Math.trunc(args.adjustmentLots);
+  const copyToUsers = args.copyToUsers === true;
+
+  if (!strategyId) {
+    return { ok: false, error: "strategyId is required", status: 400 };
+  }
+  if (!Number.isFinite(adjustmentLots) || adjustmentLots === 0) {
+    return { ok: false, error: "adjustmentLots must be a non-zero integer", status: 400 };
+  }
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { id: true, masterApiKey: true, masterApiSecret: true },
+  });
+  if (!strategy) {
+    return { ok: false, error: "Strategy not found", status: 404 };
+  }
+
+  const apiKey = strategy.masterApiKey?.trim() ?? "";
+  const apiSecret = strategy.masterApiSecret?.trim() ?? "";
+  if (!apiKey || !apiSecret) {
+    return { ok: false, error: "Master Delta credentials are missing", status: 400 };
+  }
+
+  const { fetchMasterOpenPositions } = await import("./tradeEngine.js");
+  let legs: Awaited<ReturnType<typeof fetchMasterOpenPositions>>;
+  try {
+    legs = await fetchMasterOpenPositions(apiKey, apiSecret);
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Failed to fetch master open positions from Delta",
+      status: 502,
+    };
+  }
+
+  const activeLegs = legs.filter((leg) => leg.masterContracts > 0);
+  if (activeLegs.length === 0) {
+    return { ok: false, error: "No open master positions on Delta", status: 404 };
+  }
+
+  const results: AdminBulkAdjustMasterLegResult[] = [];
+  let legsSucceeded = 0;
+
+  for (const leg of activeLegs) {
+    const currentSide = leg.side;
+    if (currentSide !== "BUY" && currentSide !== "SELL") continue;
+
+    const result = await adminAdjustMasterTradeQuantity(prisma, {
+      strategyId,
+      symbol: leg.deltaSymbol,
+      currentSide,
+      adjustmentLots,
+      copyToUsers,
+    });
+
+    if (result.ok) {
+      legsSucceeded += 1;
+      results.push(result);
+    } else {
+      results.push({
+        ok: false,
+        error: result.error,
+        symbol: leg.deltaSymbol,
+        side: currentSide,
+      });
+    }
+  }
+
+  if (legsSucceeded === 0) {
+    return {
+      ok: false,
+      error: results[0]?.ok === false ? results[0].error : "All master leg adjustments failed",
+      status: 422,
+    };
+  }
+
+  return {
+    ok: true,
+    strategyId,
+    adjustmentLots,
+    copyToUsers,
+    legsAttempted: activeLegs.length,
+    legsSucceeded,
+    results,
+  };
+}

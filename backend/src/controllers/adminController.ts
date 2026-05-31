@@ -2508,6 +2508,54 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function bulkAdjustMasterLiveTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        strategyId?: unknown;
+        adjustmentLots?: unknown;
+        copyToUsers?: unknown;
+      };
+      const strategyId = String(body.strategyId ?? "").trim();
+      const adjustmentLots = Number(body.adjustmentLots);
+      const copyToUsers = body.copyToUsers === true;
+
+      if (!strategyId) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+      if (
+        !Number.isFinite(adjustmentLots) ||
+        adjustmentLots === 0 ||
+        !Number.isInteger(adjustmentLots)
+      ) {
+        res.status(400).json({ error: "adjustmentLots must be a non-zero integer" });
+        return;
+      }
+
+      const { adminBulkAdjustMasterTradeQuantity } = await import(
+        "../services/followerTradeExecution.js"
+      );
+      const result = await adminBulkAdjustMasterTradeQuantity(prisma, {
+        strategyId,
+        adjustmentLots: Math.trunc(adjustmentLots),
+        copyToUsers,
+      });
+
+      if (!result.ok) {
+        res.status(result.status ?? 422).json({ error: result.error });
+        return;
+      }
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   /** Update per-user multiplier and/or copy-trading isActive for one strategy. */
   async function updateStrategySubscriber(
     req: Request,
@@ -2660,6 +2708,7 @@ export function createAdminController(prisma: PrismaClient) {
     adjustFollowerQtyLiveTrade,
     bulkAdjustFollowerLiveTrades,
     adjustMasterQtyLiveTrade,
+    bulkAdjustMasterLiveTrades,
     updateStrategySubscriber,
     getGroupedLiveTrades,
   };

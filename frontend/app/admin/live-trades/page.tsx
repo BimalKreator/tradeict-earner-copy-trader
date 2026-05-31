@@ -34,6 +34,10 @@ import {
   MasterAdjustQtyModal,
   type MasterAdjustQtyTarget,
 } from "@/components/admin/MasterAdjustQtyModal";
+import {
+  BulkMasterAdjustQtyModal,
+  type BulkMasterAdjustQtyTarget,
+} from "@/components/admin/BulkMasterAdjustQtyModal";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -631,6 +635,7 @@ function StrategyLivePanel({
   onOpenAdjustQty,
   onOpenBulkAdjust,
   onOpenMasterAdjust,
+  onOpenBulkMasterAdjust,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -654,6 +659,7 @@ function StrategyLivePanel({
   onOpenAdjustQty: (target: AdjustQtyTarget) => void;
   onOpenBulkAdjust: (target: BulkAdjustQtyTarget) => void;
   onOpenMasterAdjust: (target: MasterAdjustQtyTarget) => void;
+  onOpenBulkMasterAdjust: (target: BulkMasterAdjustQtyTarget) => void;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -697,9 +703,27 @@ function StrategyLivePanel({
               Leader open legs (CCXT / Delta India)
             </p>
           </div>
-          <span className="rounded-md bg-white/5 px-2 py-1 text-xs tabular-nums text-white/60">
-            {strategy.masterPositions.length} open
-          </span>
+          <div className="flex items-center gap-2">
+            {strategy.masterPositions.length > 0 ? (
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenBulkMasterAdjust({
+                    strategyId: strategy.strategyId,
+                    legCount: strategy.masterPositions.length,
+                  })
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg border border-primary/45 bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/25"
+                title="Apply the same lot delta to every open master leg"
+              >
+                <Layers className="h-3.5 w-3.5" aria-hidden />
+                Bulk Adjust Qty
+              </button>
+            ) : null}
+            <span className="rounded-md bg-white/5 px-2 py-1 text-xs tabular-nums text-white/60">
+              {strategy.masterPositions.length} open
+            </span>
+          </div>
         </div>
         <MasterLegsTable
           rows={strategy.masterPositions}
@@ -1232,6 +1256,8 @@ export default function AdminLiveTradesPage() {
     useState<BulkAdjustQtyTarget | null>(null);
   const [masterAdjustTarget, setMasterAdjustTarget] =
     useState<MasterAdjustQtyTarget | null>(null);
+  const [bulkMasterAdjustTarget, setBulkMasterAdjustTarget] =
+    useState<BulkMasterAdjustQtyTarget | null>(null);
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1360,6 +1386,13 @@ export default function AdminLiveTradesPage() {
   const openMasterAdjust = useCallback((target: MasterAdjustQtyTarget) => {
     setMasterAdjustTarget(target);
   }, []);
+
+  const openBulkMasterAdjust = useCallback(
+    (target: BulkMasterAdjustQtyTarget) => {
+      setBulkMasterAdjustTarget(target);
+    },
+    [],
+  );
 
   const closeTrade = useCallback(
     async (args: {
@@ -1527,6 +1560,7 @@ export default function AdminLiveTradesPage() {
                     onOpenAdjustQty={openAdjustQty}
                     onOpenBulkAdjust={openBulkAdjust}
                     onOpenMasterAdjust={openMasterAdjust}
+                    onOpenBulkMasterAdjust={openBulkMasterAdjust}
                     onAutoExitSaved={(message, updated) => {
                       setToast(message);
                       if (updated) {
@@ -1613,6 +1647,24 @@ export default function AdminLiveTradesPage() {
         open={masterAdjustTarget != null}
         target={masterAdjustTarget}
         onClose={() => setMasterAdjustTarget(null)}
+        apiBase={resolveAdminApiBase()}
+        authToken={
+          typeof window !== "undefined"
+            ? localStorage.getItem("token") ?? ""
+            : ""
+        }
+        onSuccess={(message) => {
+          setToast(message);
+          setError(null);
+          void load({ silent: true });
+        }}
+        onError={(message) => setError(message)}
+      />
+
+      <BulkMasterAdjustQtyModal
+        open={bulkMasterAdjustTarget != null}
+        target={bulkMasterAdjustTarget}
+        onClose={() => setBulkMasterAdjustTarget(null)}
         apiBase={resolveAdminApiBase()}
         authToken={
           typeof window !== "undefined"
