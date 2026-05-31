@@ -1278,6 +1278,24 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   );
 
   /**
+   * Bulk admin follower lot adjustment — same delta applied to every open leg.
+   * Body: `{ userId, strategyId, adjustmentLots }`
+   */
+  router.post(
+    "/live-trades/bulk-adjust-follower",
+    adminController.bulkAdjustFollowerLiveTrades,
+  );
+
+  /**
+   * Admin master lot adjustment with optional follower fan-out.
+   * Body: `{ strategyId, symbol, currentSide, adjustmentLots, copyToUsers }`
+   */
+  router.post(
+    "/live-trades/adjust-master",
+    adminController.adjustMasterQtyLiveTrade,
+  );
+
+  /**
    * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
    * For full master + subscriber matching, use `GET /admin/live-trades/grouped`.
    */

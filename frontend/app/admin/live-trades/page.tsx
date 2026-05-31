@@ -26,6 +26,14 @@ import {
   AdjustQtyModal,
   type AdjustQtyTarget,
 } from "@/components/admin/AdjustQtyModal";
+import {
+  BulkAdjustQtyModal,
+  type BulkAdjustQtyTarget,
+} from "@/components/admin/BulkAdjustQtyModal";
+import {
+  MasterAdjustQtyModal,
+  type MasterAdjustQtyTarget,
+} from "@/components/admin/MasterAdjustQtyModal";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -332,6 +340,7 @@ function MasterLegsTable({
   strategyId,
   onCloseTrade,
   closingKey,
+  onOpenMasterAdjust,
 }: {
   rows: LiveRow[];
   strategyId: string;
@@ -343,6 +352,7 @@ function MasterLegsTable({
     isMaster: boolean;
   }) => Promise<void>;
   closingKey: string | null;
+  onOpenMasterAdjust: (target: MasterAdjustQtyTarget) => void;
 }) {
   if (rows.length === 0) {
     return (
@@ -396,25 +406,42 @@ function MasterLegsTable({
               </td>
               <td className="px-4 py-3">
                 {lotSize(r.size) > 0 ? (
-                  <button
-                    type="button"
-                    disabled={
-                      closingKey ===
-                      `${strategyId}:${r.token}:${r.side}:master`
-                    }
-                    onClick={() =>
-                      void onCloseTrade({
-                        strategyId,
-                        symbol: r.token,
-                        side: r.side,
-                        size: lotSize(r.size),
-                        isMaster: true,
-                      })
-                    }
-                    className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:opacity-50"
-                  >
-                    Close
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenMasterAdjust({
+                          strategyId,
+                          symbol: r.token,
+                          currentSide: r.side,
+                          currentLots: lotSize(r.size),
+                        })
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-primary/45 bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/25"
+                    >
+                      <SlidersHorizontal className="h-3 w-3" aria-hidden />
+                      Adjust Qty
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        closingKey ===
+                        `${strategyId}:${r.token}:${r.side}:master`
+                      }
+                      onClick={() =>
+                        void onCloseTrade({
+                          strategyId,
+                          symbol: r.token,
+                          side: r.side,
+                          size: lotSize(r.size),
+                          isMaster: true,
+                        })
+                      }
+                      className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:opacity-50"
+                    >
+                      Close
+                    </button>
+                  </div>
                 ) : (
                   <span className="text-white/35">—</span>
                 )}
@@ -437,6 +464,7 @@ function SubscriberAccordionItem({
   closingKey,
   onOpenGranularSync,
   onOpenAdjustQty,
+  onOpenBulkAdjust,
 }: {
   user: SubscriberUser;
   strategyId: string;
@@ -458,6 +486,7 @@ function SubscriberAccordionItem({
     masterPositions: LiveRow[],
   ) => void;
   onOpenAdjustQty: (target: AdjustQtyTarget) => void;
+  onOpenBulkAdjust: (target: BulkAdjustQtyTarget) => void;
 }) {
   const totalPnl = sumLivePnl(user.positions);
   const pnlPositive = totalPnl > 0;
@@ -528,20 +557,41 @@ function SubscriberAccordionItem({
             {fmtPnl(totalPnl)}
           </p>
         </button>
-        {showSync ? (
-          <div className="flex shrink-0 items-center border-l border-white/[0.06] px-3">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenGranularSync(strategyId, user, masterPositions);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-500/45 bg-violet-500/15 px-2.5 py-1.5 text-xs font-medium text-violet-100 transition hover:bg-violet-500/25"
-              title="Add exact lots per master leg (no multiplier)"
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-              Granular Force Sync
-            </button>
+        {(user.positions.length > 0 || showSync) ? (
+          <div className="flex shrink-0 items-center gap-2 border-l border-white/[0.06] px-3">
+            {user.positions.length > 0 ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenBulkAdjust({
+                    strategyId,
+                    userId: user.userId,
+                    userLabel: displayName,
+                    legCount: user.positions.length,
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/45 bg-sky-500/15 px-2.5 py-1.5 text-xs font-medium text-sky-100 transition hover:bg-sky-500/25"
+                title="Apply the same lot delta to every open leg"
+              >
+                <Layers className="h-3.5 w-3.5" aria-hidden />
+                Bulk Adjust Qty
+              </button>
+            ) : null}
+            {showSync ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenGranularSync(strategyId, user, masterPositions);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-violet-500/45 bg-violet-500/15 px-2.5 py-1.5 text-xs font-medium text-violet-100 transition hover:bg-violet-500/25"
+                title="Add exact lots per master leg (no multiplier)"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                Granular Force Sync
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -579,6 +629,8 @@ function StrategyLivePanel({
   onAutoExitSaved,
   onOpenGranularSync,
   onOpenAdjustQty,
+  onOpenBulkAdjust,
+  onOpenMasterAdjust,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -600,6 +652,8 @@ function StrategyLivePanel({
     masterPositions: LiveRow[],
   ) => void;
   onOpenAdjustQty: (target: AdjustQtyTarget) => void;
+  onOpenBulkAdjust: (target: BulkAdjustQtyTarget) => void;
+  onOpenMasterAdjust: (target: MasterAdjustQtyTarget) => void;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -652,6 +706,7 @@ function StrategyLivePanel({
           strategyId={strategy.strategyId}
           onCloseTrade={onCloseTrade}
           closingKey={closingKey}
+          onOpenMasterAdjust={onOpenMasterAdjust}
         />
       </section>
 
@@ -686,6 +741,7 @@ function StrategyLivePanel({
                 closingKey={closingKey}
                 onOpenGranularSync={onOpenGranularSync}
                 onOpenAdjustQty={onOpenAdjustQty}
+                onOpenBulkAdjust={onOpenBulkAdjust}
               />
             ))}
           </div>
@@ -1172,6 +1228,10 @@ export default function AdminLiveTradesPage() {
   const [adjustQtyTarget, setAdjustQtyTarget] = useState<AdjustQtyTarget | null>(
     null,
   );
+  const [bulkAdjustTarget, setBulkAdjustTarget] =
+    useState<BulkAdjustQtyTarget | null>(null);
+  const [masterAdjustTarget, setMasterAdjustTarget] =
+    useState<MasterAdjustQtyTarget | null>(null);
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1291,6 +1351,14 @@ export default function AdminLiveTradesPage() {
 
   const openAdjustQty = useCallback((target: AdjustQtyTarget) => {
     setAdjustQtyTarget(target);
+  }, []);
+
+  const openBulkAdjust = useCallback((target: BulkAdjustQtyTarget) => {
+    setBulkAdjustTarget(target);
+  }, []);
+
+  const openMasterAdjust = useCallback((target: MasterAdjustQtyTarget) => {
+    setMasterAdjustTarget(target);
   }, []);
 
   const closeTrade = useCallback(
@@ -1457,6 +1525,8 @@ export default function AdminLiveTradesPage() {
                     closingKey={closingKey}
                     onOpenGranularSync={openGranularSync}
                     onOpenAdjustQty={openAdjustQty}
+                    onOpenBulkAdjust={openBulkAdjust}
+                    onOpenMasterAdjust={openMasterAdjust}
                     onAutoExitSaved={(message, updated) => {
                       setToast(message);
                       if (updated) {
@@ -1507,6 +1577,42 @@ export default function AdminLiveTradesPage() {
         open={adjustQtyTarget != null}
         target={adjustQtyTarget}
         onClose={() => setAdjustQtyTarget(null)}
+        apiBase={resolveAdminApiBase()}
+        authToken={
+          typeof window !== "undefined"
+            ? localStorage.getItem("token") ?? ""
+            : ""
+        }
+        onSuccess={(message) => {
+          setToast(message);
+          setError(null);
+          void load({ silent: true });
+        }}
+        onError={(message) => setError(message)}
+      />
+
+      <BulkAdjustQtyModal
+        open={bulkAdjustTarget != null}
+        target={bulkAdjustTarget}
+        onClose={() => setBulkAdjustTarget(null)}
+        apiBase={resolveAdminApiBase()}
+        authToken={
+          typeof window !== "undefined"
+            ? localStorage.getItem("token") ?? ""
+            : ""
+        }
+        onSuccess={(message) => {
+          setToast(message);
+          setError(null);
+          void load({ silent: true });
+        }}
+        onError={(message) => setError(message)}
+      />
+
+      <MasterAdjustQtyModal
+        open={masterAdjustTarget != null}
+        target={masterAdjustTarget}
+        onClose={() => setMasterAdjustTarget(null)}
         apiBase={resolveAdminApiBase()}
         authToken={
           typeof window !== "undefined"

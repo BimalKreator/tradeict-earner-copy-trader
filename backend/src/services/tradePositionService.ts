@@ -405,3 +405,136 @@ export async function incrementOrRecordFollowerTradePosition(
   });
   return created ? { id: created.id } : null;
 }
+
+/** Sum bot-managed OPEN master quantity for one leg. */
+export async function sumOpenMasterBotQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    symbol: string;
+    side: TradeSide | string;
+  },
+): Promise<number> {
+  const openSide = String(args.side).toUpperCase();
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      isMaster: true,
+      userId: null,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    select: { symbol: true, quantity: true },
+  });
+  return rows
+    .filter((r) => tradePositionSymbolsAlign(args.symbol, r.symbol))
+    .reduce((sum, r) => sum + Math.abs(r.quantity), 0);
+}
+
+/** Reduce bot-managed OPEN master quantity (FIFO rows). */
+export async function trimOpenMasterBotQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    symbol: string;
+    side: TradeSide | string;
+    reduceBy: number;
+  },
+): Promise<number> {
+  let remaining = Math.max(0, Math.floor(args.reduceBy));
+  if (remaining <= 0) return 0;
+
+  const openSide = String(args.side).toUpperCase();
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      isMaster: true,
+      userId: null,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const matches = rows.filter((r) =>
+    tradePositionSymbolsAlign(args.symbol, r.symbol),
+  );
+
+  let trimmed = 0;
+  for (const row of matches) {
+    if (remaining <= 0) break;
+    const qty = Math.abs(row.quantity);
+    if (qty <= remaining) {
+      await prisma.tradePosition.update({
+        where: { id: row.id },
+        data: { status: TradePositionStatus.CLOSED },
+      });
+      remaining -= qty;
+      trimmed += qty;
+    } else {
+      await prisma.tradePosition.update({
+        where: { id: row.id },
+        data: { quantity: qty - remaining },
+      });
+      trimmed += remaining;
+      remaining = 0;
+    }
+  }
+  return trimmed;
+}
+
+/** Admin master adjust — add lots to an existing OPEN leg or create a new row. */
+export async function incrementOrRecordMasterTradePosition(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    symbol: string;
+    side: TradeSide | string;
+    addLots: number;
+    entryPrice: number;
+    clientOrderId?: string;
+    exchangeOrderId?: string | null;
+  },
+): Promise<{ id: string } | null> {
+  const add = Math.floor(Math.abs(args.addLots));
+  if (!Number.isFinite(add) || add <= 0) return null;
+  const openSide = String(args.side).toUpperCase();
+
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      isMaster: true,
+      userId: null,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const existing = rows.find((r) =>
+    tradePositionSymbolsAlign(args.symbol, r.symbol),
+  );
+
+  if (existing) {
+    await prisma.tradePosition.update({
+      where: { id: existing.id },
+      data: { quantity: Math.abs(existing.quantity) + add },
+    });
+    console.log(
+      `[tradePosition] INCREMENT master ${args.symbol} ${openSide} +${add} → qty=${Math.abs(existing.quantity) + add}`,
+    );
+    return { id: existing.id };
+  }
+
+  const created = await recordTradePositionOpen(prisma, {
+    isMaster: true,
+    strategyId: args.strategyId,
+    symbol: args.symbol,
+    side: openSide,
+    quantity: add,
+    entryPrice: args.entryPrice,
+    ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
+    ...(args.exchangeOrderId != null
+      ? { exchangeOrderId: args.exchangeOrderId }
+      : {}),
+  });
+  return created ? { id: created.id } : null;
+}

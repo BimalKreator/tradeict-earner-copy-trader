@@ -65,6 +65,10 @@ import {
   startLivePriceTracker,
 } from "./livePriceTracker.js";
 import {
+  shouldSkipMasterFillCopy,
+  shouldSuppressMasterRestCopy,
+} from "./masterNoCopyOrders.js";
+import {
   buildClientOrderId,
   closeTradePositionsForLeg,
   listOpenFollowerBotLegs,
@@ -204,6 +208,7 @@ async function triggerMasterOpenCopy(
     masterOpenedAt?: Date | null;
     locallyFirstSeenAt?: Date | null;
     restPreExistingUnknown?: boolean;
+    skipFollowerCopy?: boolean;
   },
   tracker?: MasterPositionTracker,
 ): Promise<void> {
@@ -211,10 +216,18 @@ async function triggerMasterOpenCopy(
 
   const isLiveMasterFill = args.source !== "rest";
   const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
-  console.log(
-    `${logTag} Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
-      `(source=${args.source} side=${args.side} qty=${args.masterContracts})`,
-  );
+  const skipCopy = args.skipFollowerCopy === true;
+
+  if (skipCopy) {
+    console.log(
+      `${logTag} Master fill (no-copy) ${args.symbol} ${args.side} qty=${args.masterContracts} — skipping follower fan-out`,
+    );
+  } else {
+    console.log(
+      `${logTag} Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
+        `(source=${args.source} side=${args.side} qty=${args.masterContracts})`,
+    );
+  }
 
   const entryPrice = await resolveMasterCopyEntryPrice(
     args.symbol,
@@ -222,18 +235,20 @@ async function triggerMasterOpenCopy(
   );
   if (entryPrice == null) {
     console.warn(
-      `${logTag} skip copy ${args.symbol} — could not resolve entry/mark price`,
+      `${logTag} skip ${skipCopy ? "tracker" : "copy"} ${args.symbol} — could not resolve entry/mark price`,
     );
-    return;
+    if (!skipCopy) return;
   }
 
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
-  console.log(
-    `${logTag} Future Hedge strategyId=${futureHedgeId ?? "none"} socketStrategyId=${strategyId}`,
-  );
+  if (!skipCopy) {
+    console.log(
+      `${logTag} Future Hedge strategyId=${futureHedgeId ?? "none"} socketStrategyId=${strategyId}`,
+    );
+  }
 
   const forceRestSync =
-    args.forceRestSync === true || args.source === "rest";
+    !skipCopy && (args.forceRestSync === true || args.source === "rest");
 
   if (forceRestSync) {
     console.log(
@@ -242,7 +257,8 @@ async function triggerMasterOpenCopy(
     );
   }
 
-  await copyMasterFillToSubscribers(prisma, strategyId, {
+  if (!skipCopy && entryPrice != null) {
+    await copyMasterFillToSubscribers(prisma, strategyId, {
     symbol: args.symbol,
     side: args.side,
     masterContracts: args.masterContracts,
@@ -260,9 +276,10 @@ async function triggerMasterOpenCopy(
     ...(args.restPreExistingUnknown
       ? { restPreExistingUnknown: true }
       : {}),
-  });
+    });
+  }
 
-  if (tracker) {
+  if (tracker && entryPrice != null) {
     if (isLiveMasterFill) {
       const isNewLeg = tracker.isNewLegThisSession(args.symbol, args.side);
       tracker.noteLegObserved(args.symbol, args.side, null, isNewLeg);
@@ -507,6 +524,11 @@ function buildMasterFillKey(parts: string[]): string {
   return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 32);
 }
 
+function extractClientOrderIdFromPayload(raw: unknown): string {
+  const o = mergePayloadLayers(raw);
+  return String(o.client_order_id ?? o.clientOrderId ?? "").trim();
+}
+
 /**
  * Derives a copy signal from an `orders` channel message (schema varies by contract type).
  * Accepts manual UI / non-API orders — never filters on client_order_id format.
@@ -519,6 +541,7 @@ function extractOrderFillSignal(
   contracts: number;
   avgPrice: number | null;
   reduceOnly: boolean;
+  clientOrderId: string;
   /** Stable key for follower dedup (master order id or fill fingerprint). */
   fillKey: string;
 } | null {
@@ -575,6 +598,9 @@ function extractOrderFillSignal(
     o.id ?? o.order_id ?? o.client_order_id ?? o.clientOrderId;
   const orderId =
     orderIdRaw != null ? String(orderIdRaw).trim() : "";
+  const clientOrderId = String(
+    o.client_order_id ?? o.clientOrderId ?? "",
+  ).trim();
   const fillKey =
     orderId ||
     buildMasterFillKey([
@@ -585,7 +611,7 @@ function extractOrderFillSignal(
       state || "fill",
     ]);
 
-  return { symbol, side, contracts, avgPrice, reduceOnly, fillKey };
+  return { symbol, side, contracts, avgPrice, reduceOnly, clientOrderId, fillKey };
 }
 
 /** `user_trades` / fill stream — common for manual UI market orders. */
@@ -596,6 +622,7 @@ function extractUserTradeFillSignal(
   side: TradeSide;
   contracts: number;
   avgPrice: number | null;
+  clientOrderId: string;
   fillKey: string;
 } | null {
   const o = mergePayloadLayers(raw);
@@ -622,6 +649,9 @@ function extractUserTradeFillSignal(
   const tradeIdRaw = o.id ?? o.trade_id ?? o.fill_id ?? o.order_id;
   const tradeId =
     tradeIdRaw != null ? String(tradeIdRaw).trim() : "";
+  const clientOrderId = String(
+    o.client_order_id ?? o.clientOrderId ?? "",
+  ).trim();
   const fillKey =
     tradeId ||
     buildMasterFillKey([
@@ -632,7 +662,7 @@ function extractUserTradeFillSignal(
       String(avgPrice ?? 0),
     ]);
 
-  return { symbol, side, contracts, avgPrice, fillKey };
+  return { symbol, side, contracts, avgPrice, clientOrderId, fillKey };
 }
 
 async function processMasterOrderFillRecords(
@@ -643,8 +673,19 @@ async function processMasterOrderFillRecords(
 ): Promise<void> {
   for (const r of records) {
     const sig = extractOrderFillSignal(r);
-    if (!sig || sig.reduceOnly) continue;
+    if (!sig) continue;
+    const clientOrderId =
+      sig.clientOrderId || extractClientOrderIdFromPayload(r);
+    if (sig.reduceOnly) {
+      if (shouldSkipMasterFillCopy({ clientOrderId })) {
+        console.log(
+          `[MASTER-WS] NC_ reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
+        );
+      }
+      continue;
+    }
     registerSymbolsForLivePrices([sig.symbol]);
+    const skipCopy = shouldSkipMasterFillCopy({ clientOrderId });
     await triggerMasterOpenCopy(
       prisma,
       strategyId,
@@ -655,6 +696,7 @@ async function processMasterOrderFillRecords(
         avgPrice: sig.avgPrice,
         masterFillKey: sig.fillKey,
         source: "orders",
+        skipFollowerCopy: skipCopy,
       },
       tracker,
     );
@@ -670,7 +712,10 @@ async function processMasterUserTradeFillRecords(
   for (const r of records) {
     const sig = extractUserTradeFillSignal(r);
     if (!sig) continue;
+    const clientOrderId =
+      sig.clientOrderId || extractClientOrderIdFromPayload(r);
     registerSymbolsForLivePrices([sig.symbol]);
+    const skipCopy = shouldSkipMasterFillCopy({ clientOrderId });
     await triggerMasterOpenCopy(
       prisma,
       strategyId,
@@ -681,6 +726,7 @@ async function processMasterUserTradeFillRecords(
         avgPrice: sig.avgPrice,
         masterFillKey: sig.fillKey,
         source: "fills",
+        skipFollowerCopy: skipCopy,
       },
       tracker,
     );
@@ -1954,6 +2000,25 @@ async function pollMasterPositionsFallback(
           continue;
         }
 
+        if (
+          shouldSuppressMasterRestCopy({
+            strategyId: strat.id,
+            symbol: m.deltaSymbol,
+            openSide: m.side,
+          })
+        ) {
+          tracker.applyMasterLeg({
+            symbol: m.deltaSymbol,
+            side: m.side,
+            contracts: m.masterContracts,
+            avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+          });
+          console.log(
+            `[MASTER-REST-SYNC] NC_/no-copy suppress — tracker synced ${m.deltaSymbol} ${m.side} qty=${m.masterContracts}, skip follower fan-out`,
+          );
+          continue;
+        }
+
         const missingOnFollowers = await followersMissingOpenLeg(
           prisma,
           strat.id,
@@ -2492,6 +2557,11 @@ class StrategyMasterSocket {
               snap.avgEntry != null && Number.isFinite(snap.avgEntry)
                 ? snap.avgEntry
                 : meta?.avgEntry;
+            const suppressCopy = shouldSuppressMasterRestCopy({
+              strategyId: this.strategyId,
+              symbol: snap.symbol,
+              openSide: snap.side,
+            });
             const fillKey = `pos:${buildMasterFillKey([
               snap.symbol,
               snap.side,
@@ -2506,6 +2576,7 @@ class StrategyMasterSocket {
               avgPrice: entryFromSnap ?? null,
               masterFillKey: fillKey,
               source: "positions",
+              skipFollowerCopy: suppressCopy,
             });
           }
         }

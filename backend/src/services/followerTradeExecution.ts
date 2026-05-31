@@ -39,7 +39,15 @@ import {
   listOpenFollowerBotLegs,
   sumOpenFollowerBotQuantity,
   trimOpenFollowerBotQuantity,
+  sumOpenMasterBotQuantity,
+  trimOpenMasterBotQuantity,
+  incrementOrRecordMasterTradePosition,
 } from "./tradePositionService.js";
+import {
+  buildMasterNoCopyClientOrderId,
+  registerMasterNoCopyRestSuppress,
+  registerPendingMasterNoCopyOrderId,
+} from "./masterNoCopyOrders.js";
 
 /** How long to wait after a successful market order before REST position verify. */
 const POST_ORDER_VERIFY_WAIT_MS = 8_000;
@@ -2183,6 +2191,308 @@ export async function adminAdjustFollowerTradeQuantity(
     newQuantity,
     executeSide: orderPlan.executeSide,
     reduceOnly: orderPlan.reduceOnly,
+    ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
+  };
+}
+
+export type AdminBulkAdjustFollowerLegResult =
+  | (Extract<AdminAdjustFollowerQtyResult, { ok: true }>)
+  | { ok: false; error: string; symbol: string; side: string };
+
+export type AdminBulkAdjustFollowerQtyResult =
+  | {
+      ok: true;
+      strategyId: string;
+      userId: string;
+      adjustmentLots: number;
+      legsAttempted: number;
+      legsSucceeded: number;
+      results: AdminBulkAdjustFollowerLegResult[];
+    }
+  | { ok: false; error: string; status?: number };
+
+/** Apply the same lot delta to every open follower leg for a user. */
+export async function adminBulkAdjustFollowerTradeQuantity(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    adjustmentLots: number;
+  },
+): Promise<AdminBulkAdjustFollowerQtyResult> {
+  const { strategyId, userId } = args;
+  const adjustmentLots = Math.trunc(args.adjustmentLots);
+
+  if (!strategyId || !userId) {
+    return { ok: false, error: "strategyId and userId are required", status: 400 };
+  }
+  if (!Number.isFinite(adjustmentLots) || adjustmentLots === 0) {
+    return { ok: false, error: "adjustmentLots must be a non-zero integer", status: 400 };
+  }
+
+  const legs = await listOpenFollowerBotLegs(prisma, strategyId, userId);
+  if (legs.length === 0) {
+    return { ok: false, error: "No open TradePosition legs for this user", status: 404 };
+  }
+
+  const results: AdminBulkAdjustFollowerLegResult[] = [];
+  let legsSucceeded = 0;
+
+  for (const leg of legs) {
+    const side = leg.side.toUpperCase() as TradeSide;
+    if (side !== "BUY" && side !== "SELL") continue;
+
+    const result = await adminAdjustFollowerTradeQuantity(prisma, {
+      strategyId,
+      userId,
+      symbol: leg.symbol,
+      currentSide: side,
+      adjustmentLots,
+    });
+
+    if (result.ok) {
+      legsSucceeded += 1;
+      results.push(result);
+    } else {
+      results.push({
+        ok: false,
+        error: result.error,
+        symbol: leg.symbol,
+        side: leg.side,
+      });
+    }
+  }
+
+  if (legsSucceeded === 0) {
+    return {
+      ok: false,
+      error: results[0]?.ok === false ? results[0].error : "All leg adjustments failed",
+      status: 422,
+    };
+  }
+
+  return {
+    ok: true,
+    strategyId,
+    userId,
+    adjustmentLots,
+    legsAttempted: legs.length,
+    legsSucceeded,
+    results,
+  };
+}
+
+export type AdminAdjustMasterQtyArgs = {
+  strategyId: string;
+  symbol: string;
+  currentSide: TradeSide;
+  adjustmentLots: number;
+  copyToUsers: boolean;
+};
+
+export type AdminAdjustMasterQtyResult =
+  | {
+      ok: true;
+      strategyId: string;
+      symbol: string;
+      currentSide: TradeSide;
+      adjustmentLots: number;
+      copyToUsers: boolean;
+      previousQuantity: number;
+      newQuantity: number;
+      executeSide: TradeSide;
+      reduceOnly: boolean;
+      clientOrderId: string;
+      orderId?: string;
+    }
+  | { ok: false; error: string; status?: number };
+
+/** Admin manual lot adjustment on one master leg — optional follower fan-out via copy engine. */
+export async function adminAdjustMasterTradeQuantity(
+  prisma: PrismaClient,
+  args: AdminAdjustMasterQtyArgs,
+): Promise<AdminAdjustMasterQtyResult> {
+  const { strategyId, symbol } = args;
+  const currentSide = args.currentSide;
+  const adjustmentLots = Math.trunc(args.adjustmentLots);
+  const copyToUsers = args.copyToUsers === true;
+
+  if (!strategyId || !symbol.trim()) {
+    return { ok: false, error: "strategyId and symbol are required", status: 400 };
+  }
+  if (currentSide !== "BUY" && currentSide !== "SELL") {
+    return { ok: false, error: "currentSide must be BUY or SELL", status: 400 };
+  }
+  if (!Number.isFinite(adjustmentLots) || adjustmentLots === 0) {
+    return { ok: false, error: "adjustmentLots must be a non-zero integer", status: 400 };
+  }
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { id: true, masterApiKey: true, masterApiSecret: true },
+  });
+  if (!strategy) {
+    return { ok: false, error: "Strategy not found", status: 404 };
+  }
+
+  const apiKey = strategy.masterApiKey?.trim() ?? "";
+  const apiSecret = strategy.masterApiSecret?.trim() ?? "";
+  if (!apiKey || !apiSecret) {
+    return { ok: false, error: "Master Delta credentials are missing", status: 400 };
+  }
+
+  const previousQuantity = await sumOpenMasterBotQuantity(prisma, {
+    strategyId,
+    symbol,
+    side: currentSide,
+  });
+
+  let orderPlan: ReturnType<typeof resolveAdminQtyAdjustmentOrder>;
+  try {
+    orderPlan = resolveAdminQtyAdjustmentOrder({ currentSide, adjustmentLots });
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Invalid adjustment",
+      status: 400,
+    };
+  }
+
+  if (orderPlan.reduceOnly && orderPlan.lots > previousQuantity) {
+    return {
+      ok: false,
+      error:
+        `Cannot reduce ${orderPlan.lots} lots — bot-managed master quantity is ${previousQuantity}`,
+      status: 400,
+    };
+  }
+
+  const clientOrderId = copyToUsers
+    ? buildClientOrderId({ strategyId, isMaster: true, symbol })
+    : buildMasterNoCopyClientOrderId();
+
+  if (!copyToUsers) {
+    registerPendingMasterNoCopyOrderId(clientOrderId);
+    registerMasterNoCopyRestSuppress({
+      strategyId,
+      symbol,
+      side: currentSide,
+    });
+  }
+
+  console.log(
+    `[admin-master-qty-adjust] strategy=${strategyId} ${symbol} open=${currentSide} delta=${adjustmentLots} ` +
+      `copyToUsers=${copyToUsers} clientOrderId=${clientOrderId} → ${orderPlan.executeSide} lots=${orderPlan.lots}`,
+  );
+
+  const orderResult = await executeTrade(
+    apiKey,
+    apiSecret,
+    symbol,
+    orderPlan.executeSide,
+    orderPlan.lots,
+    {
+      ...(orderPlan.reduceOnly ? { reduceOnly: true } : {}),
+      clientOrderId,
+    },
+  );
+
+  if (!orderResult.success) {
+    return {
+      ok: false,
+      error: orderResult.error ?? "Master market order failed",
+      status: 502,
+    };
+  }
+
+  if (copyToUsers) {
+    if (orderPlan.reduceOnly) {
+      await trimOpenMasterBotQuantity(prisma, {
+        strategyId,
+        symbol,
+        side: currentSide,
+        reduceBy: orderPlan.lots,
+      });
+
+      const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+      for (const sub of subscribers) {
+        await adminAdjustFollowerTradeQuantity(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol,
+          currentSide,
+          adjustmentLots,
+        });
+      }
+    }
+
+    const newQuantityEstimate = Math.max(0, previousQuantity + adjustmentLots);
+    return {
+      ok: true,
+      strategyId,
+      symbol,
+      currentSide,
+      adjustmentLots,
+      copyToUsers,
+      previousQuantity,
+      newQuantity: newQuantityEstimate,
+      executeSide: orderPlan.executeSide,
+      reduceOnly: orderPlan.reduceOnly,
+      clientOrderId,
+      ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
+    };
+  }
+
+  let entryPrice = 0;
+  try {
+    const tick = await fetchDeltaTicker(symbol);
+    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+      entryPrice = tick.last;
+    }
+  } catch {
+    /* optional for DB row */
+  }
+
+  if (orderPlan.reduceOnly) {
+    await trimOpenMasterBotQuantity(prisma, {
+      strategyId,
+      symbol,
+      side: currentSide,
+      reduceBy: orderPlan.lots,
+    });
+  } else {
+    if (entryPrice <= 0) {
+      return {
+        ok: false,
+        error: `Order placed but could not resolve mark price to update master TradePosition for ${symbol}`,
+        status: 502,
+      };
+    }
+    await incrementOrRecordMasterTradePosition(prisma, {
+      strategyId,
+      symbol,
+      side: currentSide,
+      addLots: orderPlan.lots,
+      entryPrice,
+      clientOrderId,
+      exchangeOrderId: orderResult.orderId ?? null,
+    });
+  }
+
+  const newQuantity = Math.max(0, previousQuantity + adjustmentLots);
+
+  return {
+    ok: true,
+    strategyId,
+    symbol,
+    currentSide,
+    adjustmentLots,
+    copyToUsers,
+    previousQuantity,
+    newQuantity,
+    executeSide: orderPlan.executeSide,
+    reduceOnly: orderPlan.reduceOnly,
+    clientOrderId,
     ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
   };
 }
