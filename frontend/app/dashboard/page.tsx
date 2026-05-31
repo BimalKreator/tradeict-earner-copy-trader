@@ -11,8 +11,8 @@ import {
   KeyRound,
   Layers,
   Loader2,
-  Percent,
   PlayCircle,
+  TrendingUp,
   Wallet,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
@@ -21,17 +21,23 @@ import { useAuth } from "@/context/AuthContext";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type DashboardOverview = {
+  earnedPnl: number;
+  earnedPnlPercent: number;
   todayPnl: number;
   todayPnlPercent: number;
   monthlyPnl: number;
   monthlyPnlPercent: number;
+  grossBookedPnlMonth?: number;
+  revenueSharingDue: number;
   availableCapital: number;
   totalBalance: number;
   availableBalance: number;
   usedBalance: number;
-  totalDue: number;
-  winRate: number;
-  activeStrategies: { count: number; names: string[] };
+  activeStrategies: {
+    count: number;
+    names: string[];
+    daysUntilNextFee: number | null;
+  };
   apiStatus: "connected" | "disconnected";
   copyTradingActive: boolean;
   copyTradingPaused: boolean;
@@ -154,7 +160,19 @@ export default function DashboardPage() {
             <Loader2 className="h-8 w-8 animate-spin text-cyan-400" />
           </div>
         ) : data ? (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricCard
+              icon={<TrendingUp className="h-5 w-5 text-emerald-400" />}
+              label="Earned PnL"
+              value={fmtUsd(data.earnedPnl)}
+              sub={
+                <span className="text-slate-500">
+                  Net take-home after revenue sharing
+                </span>
+              }
+              valueClass={pnlTone(data.earnedPnl)}
+            />
+
             <MetricCard
               icon={<Activity className="h-5 w-5 text-cyan-400" />}
               label="Today's PnL"
@@ -172,16 +190,25 @@ export default function DashboardPage() {
               label="Monthly PnL"
               value={fmtUsd(data.monthlyPnl)}
               sub={
-                <span className={pnlTone(data.monthlyPnlPercent)}>
-                  {fmtPct(data.monthlyPnlPercent)} of capital
-                </span>
+                <div className="space-y-0.5">
+                  <span className={pnlTone(data.monthlyPnlPercent)}>
+                    {fmtPct(data.monthlyPnlPercent)} of capital
+                  </span>
+                  {typeof data.grossBookedPnlMonth === "number" &&
+                  data.grossBookedPnlMonth !== data.monthlyPnl ? (
+                    <p className="text-xs text-slate-500">
+                      Gross booked {fmtUsd(data.grossBookedPnlMonth)} − share{" "}
+                      {fmtUsd(data.revenueSharingDue)}
+                    </p>
+                  ) : null}
+                </div>
               }
               valueClass={pnlTone(data.monthlyPnl)}
             />
 
             <MetricCard
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
-              label="Total Balance"
+              label="Total Delta Balance"
               value={fmtUsdBalance(data.totalBalance)}
               sub={
                 <div className="space-y-1.5 border-t border-slate-800/80 pt-2">
@@ -204,29 +231,26 @@ export default function DashboardPage() {
 
             <MetricCard
               icon={<CreditCard className="h-5 w-5 text-amber-400" />}
-              label="Total Due"
-              value={fmtUsd(data.totalDue)}
+              label="Revenue Sharing Due"
+              value={fmtUsd(data.revenueSharingDue)}
               sub={
-                data.totalDue > 0 ? (
-                  <Link
-                    href="/dashboard/wallet"
-                    className="inline-flex items-center rounded-md bg-cyan-500/15 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-500/30 transition hover:bg-cyan-500/25"
-                  >
-                    Pay Now
-                  </Link>
+                data.revenueSharingDue > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs text-slate-500">
+                      Profit share on net booked PnL this month
+                    </span>
+                    <Link
+                      href="/dashboard/billing"
+                      className="inline-flex w-fit items-center rounded-md bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-500/40 transition hover:bg-amber-500/30"
+                    >
+                      Pay Now
+                    </Link>
+                  </div>
                 ) : (
-                  <span className="text-slate-500">No pending fees</span>
+                  <span className="text-slate-500">No revenue share due this month</span>
                 )
               }
               valueClass="text-amber-300"
-            />
-
-            <MetricCard
-              icon={<Percent className="h-5 w-5 text-emerald-400" />}
-              label="Total Win Rate"
-              value={`${data.winRate.toFixed(1)}%`}
-              sub={<span className="text-slate-500">Closed trades this month</span>}
-              valueClass="text-white"
             />
 
             <MetricCard
@@ -234,10 +258,21 @@ export default function DashboardPage() {
               label="Active Strategies"
               value={String(data.activeStrategies.count)}
               sub={
-                data.activeStrategies.names.length > 0 ? (
-                  <p className="text-xs leading-relaxed text-slate-400">
-                    {data.activeStrategies.names.join(" · ")}
-                  </p>
+                data.activeStrategies.count > 0 ? (
+                  <div className="space-y-1">
+                    {data.activeStrategies.daysUntilNextFee != null ? (
+                      <p className="text-xs font-medium text-indigo-300/90">
+                        {data.activeStrategies.daysUntilNextFee} day
+                        {data.activeStrategies.daysUntilNextFee === 1 ? "" : "s"}{" "}
+                        until next subscription fee
+                      </p>
+                    ) : null}
+                    {data.activeStrategies.names.length > 0 ? (
+                      <p className="text-xs leading-relaxed text-slate-400">
+                        {data.activeStrategies.names.join(" · ")}
+                      </p>
+                    ) : null}
+                  </div>
                 ) : (
                   <span className="text-slate-500">None deployed</span>
                 )

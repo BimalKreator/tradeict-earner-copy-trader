@@ -220,6 +220,104 @@ export async function sumClosedTradePnlSince(
   return trades.reduce((s, t) => s + realizedTradePnl(t), 0);
 }
 
+/** All-time realized PnL from CLOSED trades only (gross booked). */
+export async function sumAllClosedTradePnl(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<number> {
+  const trades = await prisma.trade.findMany({
+    where: { userId, status: TradeStatus.CLOSED },
+    select: { tradePnl: true, pnl: true },
+  });
+  return trades.reduce((s, t) => s + realizedTradePnl(t), 0);
+}
+
+export type BookedPnlAndRevenueDue = {
+  /** Sum of realized PnL on CLOSED trades in the window (ignores open/floating). */
+  grossBookedPnl: number;
+  /**
+   * Per-strategy: max(0, net booked PnL) × profitShare%.
+   * Losses reduce net booked; if net ≤ 0 for a strategy, its due is $0.
+   */
+  revenueSharingDue: number;
+};
+
+/**
+ * Gross booked PnL and revenue-sharing due from CLOSED trades only.
+ * @param since — UTC start of window; `null` = all-time.
+ */
+export async function computeUserBookedPnlAndRevenueDue(
+  prisma: PrismaClient,
+  userId: string,
+  since: Date | null,
+): Promise<BookedPnlAndRevenueDue> {
+  const trades = await prisma.trade.findMany({
+    where: {
+      userId,
+      status: TradeStatus.CLOSED,
+      ...(since ? { createdAt: { gte: since } } : {}),
+    },
+    select: { strategyId: true, tradePnl: true, pnl: true },
+  });
+
+  let grossBookedPnl = 0;
+  const pnlByStrategy = new Map<string, number>();
+
+  for (const t of trades) {
+    const pnl = realizedTradePnl(t);
+    grossBookedPnl += pnl;
+    pnlByStrategy.set(t.strategyId, (pnlByStrategy.get(t.strategyId) ?? 0) + pnl);
+  }
+
+  if (pnlByStrategy.size === 0) {
+    return { grossBookedPnl: 0, revenueSharingDue: 0 };
+  }
+
+  const strategies = await prisma.strategy.findMany({
+    where: { id: { in: [...pnlByStrategy.keys()] } },
+    select: { id: true, profitShare: true },
+  });
+  const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
+
+  let revenueSharingDue = 0;
+  for (const [strategyId, netBooked] of pnlByStrategy) {
+    if (netBooked <= 0) continue;
+    const pct = sharePctById.get(strategyId) ?? 0;
+    revenueSharingDue += netBooked * (pct / 100);
+  }
+
+  return { grossBookedPnl, revenueSharingDue };
+}
+
+/** Calendar-month subscription fee renewal — days until next joinedDate anniversary. */
+export function daysUntilNextMonthlyFee(
+  joinedDate: Date,
+  ref = new Date(),
+): number {
+  const anchor = new Date(joinedDate);
+  let next = new Date(
+    Date.UTC(
+      anchor.getUTCFullYear(),
+      anchor.getUTCMonth(),
+      anchor.getUTCDate(),
+    ),
+  );
+  while (next.getTime() <= ref.getTime()) {
+    next = new Date(
+      Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate()),
+    );
+  }
+  const diffMs = next.getTime() - ref.getTime();
+  return Math.max(0, Math.ceil(diffMs / 86_400_000));
+}
+
+export type ActiveStrategiesSummary = {
+  count: number;
+  names: string[];
+  /** Soonest subscription fee renewal among active subs; null when none. */
+  daysUntilNextFee: number | null;
+};
+
 export async function monthlyWinRate(
   prisma: PrismaClient,
   userId: string,
@@ -252,15 +350,24 @@ export async function userTotalDue(prisma: PrismaClient, userId: string): Promis
 export async function activeStrategiesForUser(
   prisma: PrismaClient,
   userId: string,
-): Promise<{ count: number; names: string[] }> {
+): Promise<ActiveStrategiesSummary> {
   const subs = await prisma.userStrategySubscription.findMany({
     where: { userId, status: SubscriptionStatus.ACTIVE },
     include: { strategy: { select: { title: true } } },
     orderBy: { joinedDate: "desc" },
   });
+
+  let daysUntilNextFee: number | null = null;
+  if (subs.length > 0) {
+    daysUntilNextFee = Math.min(
+      ...subs.map((s) => daysUntilNextMonthlyFee(s.joinedDate)),
+    );
+  }
+
   return {
     count: subs.length,
     names: subs.map((s) => strategyShortName(s.strategy.title)),
+    daysUntilNextFee,
   };
 }
 

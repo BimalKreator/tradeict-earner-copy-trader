@@ -3,14 +3,12 @@ import type { PrismaClient } from "@prisma/client";
 import {
   activeStrategiesForUser,
   checkDeltaApiConnected,
+  computeUserBookedPnlAndRevenueDue,
   fetchUserCapitalBreakdown,
-  monthlyWinRate,
   pnlPercentOfCapital,
   resolveUserDeltaCreds,
   startOfUtcMonth,
   computeTodaysPnl,
-  sumClosedTradePnlSince,
-  userTotalDue,
 } from "../services/dashboardMetricsService.js";
 import {
   getUserArbitrageDashboardMetrics,
@@ -207,24 +205,22 @@ export function createUserController(prisma: PrismaClient) {
       const [
         userRow,
         todayPnl,
-        monthlyPnl,
         capital,
-        totalDue,
-        winRate,
         activeStrategies,
         arbitrage,
+        allTimeBooked,
+        monthBooked,
       ] = await Promise.all([
         prisma.user.findUnique({
           where: { id: userId },
           select: { copyTradingPaused: true },
         }),
         computeTodaysPnl(prisma, userId),
-        sumClosedTradePnlSince(prisma, userId, monthStart),
         fetchUserCapitalBreakdown(prisma, userId),
-        userTotalDue(prisma, userId),
-        monthlyWinRate(prisma, userId),
         activeStrategiesForUser(prisma, userId),
         getUserArbitrageDashboardMetrics(prisma, userId),
+        computeUserBookedPnlAndRevenueDue(prisma, userId, null),
+        computeUserBookedPnlAndRevenueDue(prisma, userId, monthStart),
       ]);
 
       const creds = await resolveUserDeltaCreds(prisma, userId);
@@ -240,17 +236,26 @@ export function createUserController(prisma: PrismaClient) {
           ? capital.totalBalance
           : capital.availableBalance + capital.usedBalance;
 
+      const earnedPnl =
+        allTimeBooked.grossBookedPnl - allTimeBooked.revenueSharingDue;
+      const monthlyPnl =
+        monthBooked.grossBookedPnl - monthBooked.revenueSharingDue;
+      const revenueSharingDue = monthBooked.revenueSharingDue;
+
       res.json({
+        earnedPnl,
+        earnedPnlPercent: pnlPercentOfCapital(earnedPnl, capitalBase),
         todayPnl,
         todayPnlPercent: pnlPercentOfCapital(todayPnl, capitalBase),
         monthlyPnl,
         monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, capitalBase),
+        grossBookedPnlAllTime: allTimeBooked.grossBookedPnl,
+        grossBookedPnlMonth: monthBooked.grossBookedPnl,
+        revenueSharingDue,
         availableCapital: capital.availableBalance,
         totalBalance: capital.totalBalance,
         availableBalance: capital.availableBalance,
         usedBalance: capital.usedBalance,
-        totalDue,
-        winRate,
         activeStrategies,
         apiStatus,
         copyTradingActive,
