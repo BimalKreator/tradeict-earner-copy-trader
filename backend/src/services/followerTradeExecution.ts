@@ -68,6 +68,11 @@ export function isHardExecutionError(message: string): boolean {
   return HARD_ERROR_PATTERNS.some((p) => u.includes(p.toUpperCase()));
 }
 
+/** Delta returned reduce-only but follower is already flat — not a hard failure. */
+export function isAlreadyFlatReduceOnlyError(message: string): boolean {
+  return message.toUpperCase().includes("NO_POSITION_FOR_REDUCE_ONLY");
+}
+
 function compactSymbolKey(s: string): string {
   return s.replace(/[/:]/g, "").toUpperCase();
 }
@@ -240,7 +245,7 @@ export async function followerBotOpenDeficitLots(
 }
 
 /** REST poll may only open a master leg for followers if it opened within this window. */
-export const MASTER_REST_CATCHUP_MAX_AGE_MS = 60_000;
+export const MASTER_REST_CATCHUP_MAX_AGE_MS = 15 * 60 * 1000;
 
 export function parseMasterLegOpenedAt(
   iso: string | null | undefined,
@@ -373,13 +378,6 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
 
   await Promise.all(
     subscribers.map(async (sub) => {
-      if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
-        console.log(
-          `[copy] skip master open user=${sub.userId} syncStatus=${sub.syncStatus}`,
-        );
-        return;
-      }
-
       const effectiveMasterOpenedAt =
         fill.masterOpenedAt ?? (fill.forceRestSync ? null : new Date());
       if (
@@ -454,6 +452,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         size: lots,
         entryPrice: entryForCopy,
         clientOrderId,
+        liveMasterFill: true,
       });
 
       if (result.success && result.verified) {
@@ -538,6 +537,7 @@ export async function forceSyncMasterOpenToFollowers(
     for (const sub of subscribers) {
       if (
         !fill.adminForceSync &&
+        !fill.forceRestSync &&
         subscriptionSyncBlocksReconcile(sub.syncStatus)
       ) {
         console.log(
@@ -551,6 +551,7 @@ export async function forceSyncMasterOpenToFollowers(
           joinedDate: sub.joinedDate,
           masterOpenedAt: fill.masterOpenedAt ?? null,
           ...(fill.adminForceSync ? { adminForceSync: true } : {}),
+          ...(fill.forceRestSync ? { adminForceSync: true } : {}),
         })
       ) {
         console.log(
@@ -657,7 +658,8 @@ export async function forceSyncMasterOpenToFollowers(
             entryPrice,
             clientOrderId,
             forceRestSync: true,
-            adminForceSync: fill.adminForceSync === true,
+            adminForceSync:
+              fill.adminForceSync === true || fill.forceRestSync === true,
           });
 
           if (result.success && result.verified) {
@@ -1009,17 +1011,29 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         side: snap.side,
       });
 
-      const lots = Math.max(
-        Math.floor(exchangeLots),
-        Math.floor(dbLots),
-      );
+      const exchangeLotsFloor = Math.floor(exchangeLots);
+      const dbLotsFloor = Math.floor(dbLots);
 
-      if (lots <= 0) {
-        console.log(
-          `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — flat on exchange and no DB qty`,
-        );
+      if (exchangeLotsFloor <= 0) {
+        if (dbLotsFloor > 0) {
+          await closeTradePositionsForLeg(prisma, {
+            strategyId,
+            userId: sub.userId,
+            symbol: snap.symbol,
+            side: snap.side,
+          });
+          console.log(
+            `[copy] Cleared DB ghost leg user=${sub.userId} ${snap.symbol} ${snap.side} (exchange already flat)`,
+          );
+        } else {
+          console.log(
+            `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — flat on exchange and no DB qty`,
+          );
+        }
         return;
       }
+
+      const lots = Math.max(1, exchangeLotsFloor);
 
       const closeClientOrderId = buildStableCopyClientOrderId({
         strategyId,
@@ -1032,7 +1046,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
       console.log(
         `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots} ` +
-          `(exchange=${Math.floor(exchangeLots)} db=${Math.floor(dbLots)})`,
+          `(exchange=${exchangeLotsFloor} db=${dbLotsFloor})`,
       );
 
       const closeResult = await executeFollowerTradeWithVerification(prisma, {
@@ -1416,12 +1430,19 @@ export async function executeFollowerTradeWithVerification(
     clientOrderId?: string;
     /** REST force-sync: skip subscription syncStatus gate on the open path. */
     forceRestSync?: boolean;
+    /** Live master fill fan-out — never block on prior FAILED syncStatus. */
+    liveMasterFill?: boolean;
     /** Admin Force Sync — allow opens despite FAILED syncStatus / late-join rules. */
     adminForceSync?: boolean;
   },
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
   const targetContracts = Math.max(1, Math.floor(args.size));
+  const skipSyncStatusGate =
+    args.adminForceSync === true ||
+    args.forceRestSync === true ||
+    args.liveMasterFill === true;
+  const isOptionLeg = isDeltaOptionProductId(symbol);
 
   if (args.strategyId) {
     const strat = await prisma.strategy.findUnique({
@@ -1471,7 +1492,7 @@ export async function executeFollowerTradeWithVerification(
     }
 
     if (
-      !args.adminForceSync &&
+      !skipSyncStatusGate &&
       subscriptionSyncBlocksReconcile(sub.syncStatus)
     ) {
       console.log(
@@ -1511,11 +1532,34 @@ export async function executeFollowerTradeWithVerification(
       },
     );
     if (!single.success) {
+      const err = single.error ?? "Reduce-only close failed";
+      if (isAlreadyFlatReduceOnlyError(err)) {
+        if (args.strategyId) {
+          const openSide: TradeSide = side === "BUY" ? "SELL" : "BUY";
+          await closeTradePositionsForLeg(prisma, {
+            strategyId: args.strategyId,
+            userId: args.userId,
+            symbol,
+            side: openSide,
+            ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+          });
+        }
+        return {
+          success: true,
+          attempts: 1,
+          verified: true,
+          ...(single.orderId != null ? { orderId: single.orderId } : {}),
+          ...(single.clientOrderId != null ? { clientOrderId: single.clientOrderId } : {}),
+          ...(single.fillPrice != null ? { fillPrice: single.fillPrice } : {}),
+          ...(single.feeCost != null ? { feeCost: single.feeCost } : {}),
+          ...(single.raw !== undefined ? { raw: single.raw } : {}),
+        };
+      }
       await markFollowerOrderFailure(prisma, {
         strategyId: args.strategyId,
         userId,
         symbol,
-        error: single.error ?? "Reduce-only close failed",
+        error: err,
       });
     } else if (args.strategyId) {
       const openSide: TradeSide = side === "BUY" ? "SELL" : "BUY";
@@ -1630,6 +1674,33 @@ export async function executeFollowerTradeWithVerification(
       totalFee += lastResult.feeCost;
     }
 
+    if (isOptionLeg) {
+      console.log(
+        `[RETRY_LOOP] Option ${symbol} fill accepted — skipping REST lot verify (Delta options lag)`,
+      );
+      if (args.strategyId && args.entryPrice != null && Number.isFinite(args.entryPrice)) {
+        await recordTradePositionOpen(prisma, {
+          strategyId: args.strategyId,
+          userId: args.userId,
+          symbol,
+          side,
+          quantity: targetContracts,
+          entryPrice: args.entryPrice,
+          ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+          ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
+        });
+      }
+      return {
+        success: true,
+        ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+        feeCost: totalFee,
+        ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+        attempts,
+        verified: true,
+      };
+    }
+
     console.log(
       `[RETRY_LOOP] Order accepted; waiting ${POST_ORDER_VERIFY_WAIT_MS}ms before verify (user ${userId}, ${symbol})`,
     );
@@ -1680,6 +1751,33 @@ export async function executeFollowerTradeWithVerification(
     side,
   );
   if (finalContracts >= minFilled) {
+    return {
+      success: true,
+      ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+      ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+      feeCost: totalFee,
+      ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+      attempts,
+      verified: true,
+    };
+  }
+
+  if (isOptionLeg && lastResult.success) {
+    console.warn(
+      `[RETRY_LOOP] Option ${symbol} REST verify inconclusive (${finalContracts}/${targetContracts}) — trusting last fill ack`,
+    );
+    if (args.strategyId && args.entryPrice != null && Number.isFinite(args.entryPrice)) {
+      await recordTradePositionOpen(prisma, {
+        strategyId: args.strategyId,
+        userId: args.userId,
+        symbol,
+        side,
+        quantity: targetContracts,
+        entryPrice: args.entryPrice,
+        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+        ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
+      });
+    }
     return {
       success: true,
       ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
