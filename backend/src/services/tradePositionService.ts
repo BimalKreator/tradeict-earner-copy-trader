@@ -347,3 +347,60 @@ export async function trimOpenFollowerBotQuantity(
   }
   return trimmed;
 }
+
+/** Admin granular sync — add lots to an existing OPEN leg or create a new row. */
+export async function incrementOrRecordFollowerTradePosition(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    symbol: string;
+    side: TradeSide | string;
+    addLots: number;
+    entryPrice: number;
+    clientOrderId?: string;
+    exchangeOrderId?: string | null;
+  },
+): Promise<{ id: string } | null> {
+  const add = Math.max(1, Math.floor(Math.abs(args.addLots)));
+  const openSide = String(args.side).toUpperCase();
+
+  const rows = await prisma.tradePosition.findMany({
+    where: {
+      strategyId: args.strategyId,
+      userId: args.userId,
+      isMaster: false,
+      status: TradePositionStatus.OPEN,
+      side: openSide,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const existing = rows.find((r) =>
+    tradePositionSymbolsAlign(args.symbol, r.symbol),
+  );
+
+  if (existing) {
+    await prisma.tradePosition.update({
+      where: { id: existing.id },
+      data: { quantity: Math.abs(existing.quantity) + add },
+    });
+    console.log(
+      `[tradePosition] INCREMENT user=${args.userId} ${args.symbol} ${openSide} +${add} → qty=${Math.abs(existing.quantity) + add}`,
+    );
+    return { id: existing.id };
+  }
+
+  const created = await recordTradePositionOpen(prisma, {
+    strategyId: args.strategyId,
+    userId: args.userId,
+    symbol: args.symbol,
+    side: openSide,
+    quantity: add,
+    entryPrice: args.entryPrice,
+    ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
+    ...(args.exchangeOrderId != null
+      ? { exchangeOrderId: args.exchangeOrderId }
+      : {}),
+  });
+  return created ? { id: created.id } : null;
+}

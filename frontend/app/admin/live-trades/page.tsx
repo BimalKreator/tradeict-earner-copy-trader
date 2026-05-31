@@ -17,6 +17,10 @@ import {
   WifiOff,
 } from "lucide-react";
 import Link from "next/link";
+import {
+  GranularSyncModal,
+  type GranularSyncMasterLeg,
+} from "@/components/admin/GranularSyncModal";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -426,8 +430,7 @@ function SubscriberAccordionItem({
   onToggle,
   onCloseTrade,
   closingKey,
-  onSyncUser,
-  syncingUserId,
+  onOpenGranularSync,
 }: {
   user: SubscriberUser;
   strategyId: string;
@@ -443,8 +446,11 @@ function SubscriberAccordionItem({
     isMaster: boolean;
   }) => Promise<void>;
   closingKey: string | null;
-  onSyncUser: (strategyId: string, userId: string) => Promise<void>;
-  syncingUserId: string | null;
+  onOpenGranularSync: (
+    strategyId: string,
+    user: SubscriberUser,
+    masterPositions: LiveRow[],
+  ) => void;
 }) {
   const totalPnl = sumLivePnl(user.positions);
   const pnlPositive = totalPnl > 0;
@@ -453,7 +459,6 @@ function SubscriberAccordionItem({
   const failed = subscriberSyncFailed(user);
   const outOfSync = subscriberOutOfSync(user, masterPositions);
   const showSync = subscriberNeedsManualSync(user, masterPositions);
-  const isSyncing = syncingUserId === user.userId;
 
   return (
     <div
@@ -520,20 +525,15 @@ function SubscriberAccordionItem({
           <div className="flex shrink-0 items-center border-l border-white/[0.06] px-3">
             <button
               type="button"
-              disabled={isSyncing}
               onClick={(e) => {
                 e.stopPropagation();
-                void onSyncUser(strategyId, user.userId);
+                onOpenGranularSync(strategyId, user, masterPositions);
               }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-500/45 bg-violet-500/15 px-2.5 py-1.5 text-xs font-medium text-violet-100 transition hover:bg-violet-500/25 disabled:cursor-not-allowed disabled:opacity-60"
-              title="Mirror master open positions to this follower"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-500/45 bg-violet-500/15 px-2.5 py-1.5 text-xs font-medium text-violet-100 transition hover:bg-violet-500/25"
+              title="Add exact lots per master leg (no multiplier)"
             >
-              {isSyncing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-              ) : (
-                <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-              )}
-              {isSyncing ? "Syncing…" : "Force Copy / Sync Trade"}
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+              Granular Force Sync
             </button>
           </div>
         ) : null}
@@ -568,8 +568,7 @@ function StrategyLivePanel({
   onCloseTrade,
   closingKey,
   onAutoExitSaved,
-  onSyncUser,
-  syncingUserId,
+  onOpenGranularSync,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -585,8 +584,11 @@ function StrategyLivePanel({
   }) => Promise<void>;
   closingKey: string | null;
   onAutoExitSaved: (message: string, updated?: AutoExitSaved) => void;
-  onSyncUser: (strategyId: string, userId: string) => Promise<void>;
-  syncingUserId: string | null;
+  onOpenGranularSync: (
+    strategyId: string,
+    user: SubscriberUser,
+    masterPositions: LiveRow[],
+  ) => void;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -671,8 +673,7 @@ function StrategyLivePanel({
                 onToggle={() => onToggleSubscriber(user.userId)}
                 onCloseTrade={onCloseTrade}
                 closingKey={closingKey}
-                onSyncUser={onSyncUser}
-                syncingUserId={syncingUserId}
+                onOpenGranularSync={onOpenGranularSync}
               />
             ))}
           </div>
@@ -1117,8 +1118,13 @@ export default function AdminLiveTradesPage() {
   const [forbidden, setForbidden] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [closingKey, setClosingKey] = useState<string | null>(null);
-  const [syncingUserId, setSyncingUserId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [granularSyncModal, setGranularSyncModal] = useState<{
+    strategyId: string;
+    userId: string;
+    userLabel: string;
+    masterLegs: GranularSyncMasterLeg[];
+  } | null>(null);
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1216,6 +1222,26 @@ export default function AdminLiveTradesPage() {
     }
   }, [ensureExpandedDefaults]);
 
+  const openGranularSync = useCallback(
+    (
+      strategyId: string,
+      user: SubscriberUser,
+      masterPositions: LiveRow[],
+    ) => {
+      setGranularSyncModal({
+        strategyId,
+        userId: user.userId,
+        userLabel: user.userName?.trim() || user.userEmail,
+        masterLegs: masterPositions.map((leg) => ({
+          symbol: leg.token,
+          side: leg.side,
+          masterQty: lotSize(leg.size),
+        })),
+      });
+    },
+    [],
+  );
+
   const closeTrade = useCallback(
     async (args: {
       strategyId: string;
@@ -1253,44 +1279,6 @@ export default function AdminLiveTradesPage() {
         setError(e instanceof Error ? e.message : "Failed to close trade");
       } finally {
         setClosingKey(null);
-      }
-    },
-    [load],
-  );
-
-  const syncUser = useCallback(
-    async (strategyId: string, userId: string) => {
-      setSyncingUserId(userId);
-      try {
-        const base = resolveAdminApiBase();
-        const res = await fetch(
-          `${base}/admin/strategies/${encodeURIComponent(strategyId)}/sync-user/${encodeURIComponent(userId)}`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
-            },
-          },
-        );
-        const payload: unknown = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const msg =
-            typeof payload === "object" && payload !== null
-              ? typeof (payload as { error?: unknown }).error === "string"
-                ? (payload as { error: string }).error
-                : typeof (payload as { syncError?: unknown }).syncError ===
-                    "string"
-                  ? (payload as { syncError: string }).syncError
-                  : `Sync failed (${res.status})`
-              : `Sync failed (${res.status})`;
-          throw new Error(msg);
-        }
-        setToast("Follower synced to master positions.");
-        await load({ silent: true });
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to sync follower");
-      } finally {
-        setSyncingUserId(null);
       }
     },
     [load],
@@ -1416,8 +1404,7 @@ export default function AdminLiveTradesPage() {
                     }
                     onCloseTrade={closeTrade}
                     closingKey={closingKey}
-                    onSyncUser={syncUser}
-                    syncingUserId={syncingUserId}
+                    onOpenGranularSync={openGranularSync}
                     onAutoExitSaved={(message, updated) => {
                       setToast(message);
                       if (updated) {
@@ -1439,6 +1426,29 @@ export default function AdminLiveTradesPage() {
             })}
           </div>
         </div>
+      ) : null}
+
+      {granularSyncModal ? (
+        <GranularSyncModal
+          open
+          onClose={() => setGranularSyncModal(null)}
+          strategyId={granularSyncModal.strategyId}
+          userId={granularSyncModal.userId}
+          userLabel={granularSyncModal.userLabel}
+          masterLegs={granularSyncModal.masterLegs}
+          apiBase={resolveAdminApiBase()}
+          authToken={
+            typeof window !== "undefined"
+              ? localStorage.getItem("token") ?? ""
+              : ""
+          }
+          onSuccess={(message) => {
+            setToast(message);
+            setError(null);
+            void load({ silent: true });
+          }}
+          onError={(message) => setError(message)}
+        />
       ) : null}
     </div>
   );

@@ -32,7 +32,16 @@ import {
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
 import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
-import { executeFollowerTradeWithVerification, assertStrategyActiveForCopy, syncMasterCloseToFutureHedgeFollowers, syncMasterOpenFillToFutureHedgeFollowers, followerBotOpenDeficitLots } from "./followerTradeExecution.js";
+import {
+  assertStrategyActiveForCopy,
+  executeFollowerTradeWithVerification,
+  followerBotOpenDeficitLots,
+  followerEligibleForMasterLegCopy,
+  isMasterLegFreshForRestCatchup,
+  parseMasterLegOpenedAt,
+  syncMasterCloseToFutureHedgeFollowers,
+  syncMasterOpenFillToFutureHedgeFollowers,
+} from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveCopySubscribersForStrategy,
@@ -190,6 +199,8 @@ async function triggerMasterOpenCopy(
     masterFillKey: string;
     source: "orders" | "positions" | "fills" | "rest";
     forceRestSync?: boolean;
+    adminForceSync?: boolean;
+    masterOpenedAt?: Date | null;
   },
   tracker?: MasterPositionTracker,
 ): Promise<void> {
@@ -234,6 +245,10 @@ async function triggerMasterOpenCopy(
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
     ...(forceRestSync ? { forceRestSync: true } : {}),
+    ...(args.adminForceSync ? { adminForceSync: true } : {}),
+    ...(args.masterOpenedAt !== undefined
+      ? { masterOpenedAt: args.masterOpenedAt }
+      : {}),
   });
 
   if (tracker) {
@@ -247,13 +262,14 @@ async function triggerMasterOpenCopy(
   }
 }
 
-/** True when at least one active follower is under-allocated vs master × multiplier. */
+/** True when at least one eligible follower is under-allocated vs master × multiplier. */
 async function followersMissingOpenLeg(
   prisma: PrismaClient,
   strategyId: string,
   symbol: string,
   side: TradeSide,
   masterLots: number,
+  masterOpenedAt: Date | null,
 ): Promise<boolean> {
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   if (subscribers.length === 0) return false;
@@ -261,6 +277,18 @@ async function followersMissingOpenLeg(
   const openSide = side === "BUY" ? "BUY" : "SELL";
 
   for (const sub of subscribers) {
+    if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
+      continue;
+    }
+    if (
+      !followerEligibleForMasterLegCopy({
+        joinedDate: sub.joinedDate,
+        masterOpenedAt,
+      })
+    ) {
+      continue;
+    }
+
     const expectedLots = followerLotsFromMaster(masterLots, sub);
     const deficitLots = await followerBotOpenDeficitLots(prisma, {
       strategyId,
@@ -990,6 +1018,8 @@ export type MasterLedTrade = {
   side: TradeSide;
   entryPrice: number;
   masterContracts: number;
+  /** Master leg open time from Delta margined REST (`created_at` / entryTime). */
+  openedAt: Date | null;
 };
 
 function masterLegOpenOnRest(
@@ -1025,6 +1055,7 @@ function deltaPositionsToMasterLed(
       side,
       entryPrice: entry,
       masterContracts,
+      openedAt: parseMasterLegOpenedAt(p.entryTime),
     });
   }
   return out;
@@ -1085,6 +1116,20 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
   }
 
   for (const leader of leaders) {
+    if (
+      !args.force &&
+      !followerEligibleForMasterLegCopy({
+        joinedDate: sub.joinedDate,
+        masterOpenedAt: leader.openedAt,
+      })
+    ) {
+      console.log(
+        `[late-join] skip user=${args.userId} ${leader.deltaSymbol} ${leader.side} — ` +
+          `master leg predates subscription`,
+      );
+      continue;
+    }
+
     const tickLj = await fetchDeltaTicker(leader.deltaSymbol);
     const marketPrice =
       tickLj.last != null && Number.isFinite(tickLj.last)
@@ -1495,6 +1540,8 @@ async function copyMasterFillToSubscribers(
     avgPrice: number;
     masterFillKey: string;
     forceRestSync?: boolean;
+    adminForceSync?: boolean;
+    masterOpenedAt?: Date | null;
   },
 ): Promise<void> {
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
@@ -1521,6 +1568,10 @@ async function copyMasterFillToSubscribers(
     avgPrice: args.avgPrice,
     masterFillKey: args.masterFillKey,
     ...(args.forceRestSync ? { forceRestSync: true } : {}),
+    ...(args.adminForceSync ? { adminForceSync: true } : {}),
+    ...(args.masterOpenedAt !== undefined
+      ? { masterOpenedAt: args.masterOpenedAt }
+      : {}),
   });
 }
 
@@ -1798,37 +1849,45 @@ async function pollMasterPositionsFallback(
 
       tracker.clearPendingFlat(masterLegKey(m.deltaSymbol, m.side));
 
-      const missingOnFollowers = await followersMissingOpenLeg(
-        prisma,
-        strat.id,
-        m.deltaSymbol,
-        m.side,
-        m.masterContracts,
-      );
+      if (wasBaselineSeeded) {
+        if (!isMasterLegFreshForRestCatchup(m.openedAt)) {
+          continue;
+        }
 
-      if (missingOnFollowers) {
-        const legKey = masterLegKey(m.deltaSymbol, m.side);
-        const fillKey = `force-rest:${buildMasterFillKey([
+        const missingOnFollowers = await followersMissingOpenLeg(
+          prisma,
+          strat.id,
           m.deltaSymbol,
           m.side,
-          String(m.masterContracts),
-          legKey,
-        ])}`;
-        try {
-          await triggerMasterOpenCopy(prisma, strat.id, {
-            symbol: m.deltaSymbol,
-            side: m.side,
-            masterContracts: m.masterContracts,
-            avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
-            masterFillKey: fillKey,
-            source: "rest",
-            forceRestSync: true,
-          });
-        } catch (copyErr) {
-          console.error(
-            `[MASTER-REST-SYNC] force copy failed ${m.deltaSymbol} ${m.side}:`,
-            copyErr instanceof Error ? copyErr.message : copyErr,
-          );
+          m.masterContracts,
+          m.openedAt,
+        );
+
+        if (missingOnFollowers) {
+          const legKey = masterLegKey(m.deltaSymbol, m.side);
+          const fillKey = `force-rest:${buildMasterFillKey([
+            m.deltaSymbol,
+            m.side,
+            String(m.masterContracts),
+            legKey,
+          ])}`;
+          try {
+            await triggerMasterOpenCopy(prisma, strat.id, {
+              symbol: m.deltaSymbol,
+              side: m.side,
+              masterContracts: m.masterContracts,
+              avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
+              masterFillKey: fillKey,
+              source: "rest",
+              forceRestSync: true,
+              masterOpenedAt: m.openedAt,
+            });
+          } catch (copyErr) {
+            console.error(
+              `[MASTER-REST-SYNC] force copy failed ${m.deltaSymbol} ${m.side}:`,
+              copyErr instanceof Error ? copyErr.message : copyErr,
+            );
+          }
         }
       }
 
@@ -2490,6 +2549,22 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             if (dbQty === expectedContracts) continue;
 
             if (dbQty < expectedContracts) {
+              const masterOpenedAt = master?.openedAt ?? null;
+              if (
+                !master ||
+                !isMasterLegFreshForRestCatchup(masterOpenedAt) ||
+                !followerEligibleForMasterLegCopy({
+                  joinedDate: sub.joinedDate,
+                  masterOpenedAt,
+                })
+              ) {
+                console.log(
+                  `[RECONCILE] skip catch-up user ${sub.userId} ${botLeg.symbol} — ` +
+                    `late-join guard (fresh=${isMasterLegFreshForRestCatchup(masterOpenedAt)})`,
+                );
+                continue;
+              }
+
               const diff = expectedContracts - dbQty;
               console.log(
                 `[RECONCILE] Bot leg catch-up user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (+${diff})`,

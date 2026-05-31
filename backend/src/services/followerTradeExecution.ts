@@ -13,6 +13,7 @@ import { STRATEGY_SELECT_IS_ACTIVE } from "../prisma/strategySelect.js";
 import {
   findActiveCopySubscriptionForUser,
   findActiveFutureHedgeCopySubscribers,
+  findCopySubscriptionForUser,
   followerLotsFromMaster,
   isStrategyCopyTradingActive,
   resolveCopySubscriptionCreds,
@@ -25,11 +26,13 @@ import {
   markSubscriptionSyncError,
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
+  subscriptionSyncBlocksReconcile,
 } from "./subscriptionSyncService.js";
 import {
   buildClientOrderId,
   buildStableCopyClientOrderId,
   closeTradePositionsForLeg,
+  incrementOrRecordFollowerTradePosition,
   recordTradePositionOpen,
   sumOpenFollowerBotQuantity,
 } from "./tradePositionService.js";
@@ -226,6 +229,40 @@ export async function followerBotOpenDeficitLots(
   return Math.max(1, target - Math.floor(botQty));
 }
 
+/** REST poll may only open a master leg for followers if it opened within this window. */
+export const MASTER_REST_CATCHUP_MAX_AGE_MS = 60_000;
+
+export function parseMasterLegOpenedAt(
+  iso: string | null | undefined,
+): Date | null {
+  if (!iso?.trim()) return null;
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+/** Brand-new master legs only — stale open legs are never REST catch-up targets. */
+export function isMasterLegFreshForRestCatchup(
+  openedAt: Date | null,
+  refMs = Date.now(),
+): boolean {
+  if (!openedAt) return false;
+  return refMs - openedAt.getTime() <= MASTER_REST_CATCHUP_MAX_AGE_MS;
+}
+
+/**
+ * Follower may copy a master leg when they subscribed on or before the leg opened.
+ * Unknown master open time → ineligible (avoids late-join backfill).
+ */
+export function followerEligibleForMasterLegCopy(args: {
+  joinedDate: Date;
+  masterOpenedAt: Date | null;
+  adminForceSync?: boolean;
+}): boolean {
+  if (args.adminForceSync) return true;
+  if (!args.masterOpenedAt) return false;
+  return args.joinedDate.getTime() <= args.masterOpenedAt.getTime();
+}
+
 export type MasterOpenFillArgs = {
   symbol: string;
   side: TradeSide;
@@ -233,8 +270,12 @@ export type MasterOpenFillArgs = {
   avgPrice: number;
   /** Master order id or fill fingerprint — one follower leg per key. */
   masterFillKey: string;
-  /** REST force-sync: bypass slippage, syncStatus, and stable dedup gates. */
+  /** REST force-sync: bypass slippage and stable dedup gates. */
   forceRestSync?: boolean;
+  /** Admin Force Sync — bypass late-join and syncStatus blocks. */
+  adminForceSync?: boolean;
+  /** When the master leg opened (Delta margined `created_at` / entryTime). */
+  masterOpenedAt?: Date | null;
 };
 
 export type MasterCloseFillArgs = {
@@ -322,6 +363,29 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
 
   await Promise.all(
     subscribers.map(async (sub) => {
+      if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
+        console.log(
+          `[copy] skip master open user=${sub.userId} syncStatus=${sub.syncStatus}`,
+        );
+        return;
+      }
+
+      const effectiveMasterOpenedAt =
+        fill.masterOpenedAt ?? (fill.forceRestSync ? null : new Date());
+      if (
+        !followerEligibleForMasterLegCopy({
+          joinedDate: sub.joinedDate,
+          masterOpenedAt: effectiveMasterOpenedAt,
+          ...(fill.adminForceSync ? { adminForceSync: true } : {}),
+        })
+      ) {
+        console.log(
+          `[copy] skip late-join user=${sub.userId} ${fill.symbol} — ` +
+            `subscribed after master leg opened`,
+        );
+        return;
+      }
+
       const lots = followerLotsFromMaster(fill.masterLots, sub);
       const clientOrderId = buildStableCopyClientOrderId({
         strategyId,
@@ -462,6 +526,30 @@ export async function forceSyncMasterOpenToFollowers(
     }> = [];
 
     for (const sub of subscribers) {
+      if (
+        !fill.adminForceSync &&
+        subscriptionSyncBlocksReconcile(sub.syncStatus)
+      ) {
+        console.log(
+          `[FORCE-SYNC] skip user=${sub.userId} syncStatus=${sub.syncStatus}`,
+        );
+        continue;
+      }
+
+      if (
+        !followerEligibleForMasterLegCopy({
+          joinedDate: sub.joinedDate,
+          masterOpenedAt: fill.masterOpenedAt ?? null,
+          ...(fill.adminForceSync ? { adminForceSync: true } : {}),
+        })
+      ) {
+        console.log(
+          `[FORCE-SYNC] skip late-join user=${sub.userId} ${fill.symbol} — ` +
+            `master leg predates subscription (joined=${sub.joinedDate.toISOString()})`,
+        );
+        continue;
+      }
+
       const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
       const deficitLots = await followerBotOpenDeficitLots(prisma, {
         strategyId,
@@ -559,6 +647,7 @@ export async function forceSyncMasterOpenToFollowers(
             entryPrice,
             clientOrderId,
             forceRestSync: true,
+            adminForceSync: fill.adminForceSync === true,
           });
 
           if (result.success && result.verified) {
@@ -622,6 +711,223 @@ export async function forceSyncMasterOpenToFollowers(
     );
     return null;
   }
+}
+
+export type GranularSyncLegInput = {
+  symbol: string;
+  side: TradeSide | string;
+  addLots: number;
+};
+
+export type GranularSyncLegResult = {
+  symbol: string;
+  side: string;
+  addLots: number;
+  success: boolean;
+  error?: string;
+};
+
+export type GranularAdminSyncResult = {
+  ok: boolean;
+  strategyId: string;
+  userId: string;
+  legsAttempted: number;
+  legsSucceeded: number;
+  results: GranularSyncLegResult[];
+  syncStatus: string;
+  syncError: string | null;
+  error?: string;
+};
+
+/**
+ * Admin granular sync — exact lot counts per leg (no multiplier), bypasses late-join guards.
+ */
+export async function adminGranularSyncFollowerLegs(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    legs: GranularSyncLegInput[];
+  },
+): Promise<GranularAdminSyncResult> {
+  const strategyId = args.strategyId.trim();
+  const userId = args.userId.trim();
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { id: true, isActive: true },
+  });
+  if (!strategy) {
+    throw new Error("Strategy not found.");
+  }
+
+  const sub = await findCopySubscriptionForUser(prisma, { strategyId, userId });
+  if (!sub) {
+    throw new Error("User is not subscribed to this strategy.");
+  }
+
+  const creds = resolveCopySubscriptionCreds(sub);
+  if (!creds) {
+    throw new Error("Follower has no Delta API credentials configured.");
+  }
+
+  const pending = args.legs
+    .map((leg) => ({
+      symbol: String(leg.symbol ?? "").trim(),
+      side: String(leg.side ?? "").toUpperCase(),
+      addLots: Math.floor(Number(leg.addLots)),
+    }))
+    .filter(
+      (leg) =>
+        leg.symbol.length > 0 &&
+        (leg.side === "BUY" || leg.side === "SELL") &&
+        leg.addLots > 0,
+    );
+
+  if (pending.length === 0) {
+    return {
+      ok: false,
+      strategyId,
+      userId,
+      legsAttempted: 0,
+      legsSucceeded: 0,
+      results: [],
+      syncStatus: sub.syncStatus,
+      syncError: "No legs with addLots > 0",
+      error: "No legs with addLots > 0",
+    };
+  }
+
+  await markSubscriptionSyncPending(prisma, { userId, strategyId });
+
+  const results: GranularSyncLegResult[] = [];
+  let legsSucceeded = 0;
+  const errors: string[] = [];
+
+  for (const leg of pending) {
+    const side = leg.side as TradeSide;
+    let entryPrice = 0;
+    try {
+      const tick = await fetchDeltaTicker(leg.symbol);
+      if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+        entryPrice = tick.last;
+      }
+    } catch {
+      /* fallback below */
+    }
+    if (entryPrice <= 0) {
+      const err = `Could not resolve market price for ${leg.symbol}`;
+      results.push({
+        symbol: leg.symbol,
+        side: leg.side,
+        addLots: leg.addLots,
+        success: false,
+        error: err,
+      });
+      errors.push(err);
+      break;
+    }
+
+    const clientOrderId = buildClientOrderId({
+      strategyId,
+      userId,
+      symbol: leg.symbol,
+    });
+
+    console.log(
+      `[granular-sync] user=${userId} ${leg.symbol} ${side} +${leg.addLots} lots (admin exact)`,
+    );
+
+    const exec = await executeFollowerTradeWithVerification(prisma, {
+      strategyId,
+      userId,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      symbol: leg.symbol,
+      side,
+      size: leg.addLots,
+      clientOrderId,
+      adminForceSync: true,
+    });
+
+    if (exec.success && exec.verified) {
+      await incrementOrRecordFollowerTradePosition(prisma, {
+        strategyId,
+        userId,
+        symbol: leg.symbol,
+        side,
+        addLots: leg.addLots,
+        entryPrice,
+        clientOrderId,
+        ...(exec.orderId ? { exchangeOrderId: exec.orderId } : {}),
+      });
+      await persistCopyTradeRow(prisma, {
+        userId,
+        strategyId,
+        symbol: leg.symbol,
+        side,
+        size: leg.addLots,
+        entryPrice,
+        status: TradeStatus.OPEN,
+        tradingFee: exec.feeCost ?? 0,
+        clientOrderId,
+      });
+      results.push({
+        symbol: leg.symbol,
+        side: leg.side,
+        addLots: leg.addLots,
+        success: true,
+      });
+      legsSucceeded += 1;
+      continue;
+    }
+
+    const errMsg = exec.error ?? "Execution failed";
+    results.push({
+      symbol: leg.symbol,
+      side: leg.side,
+      addLots: leg.addLots,
+      success: false,
+      error: errMsg,
+    });
+    errors.push(`${leg.symbol} ${leg.side}: ${errMsg}`);
+    if (isHardExecutionError(errMsg)) {
+      break;
+    }
+  }
+
+  if (errors.length === 0) {
+    await markSubscriptionSynced(prisma, { userId, strategyId });
+    return {
+      ok: true,
+      strategyId,
+      userId,
+      legsAttempted: pending.length,
+      legsSucceeded,
+      results,
+      syncStatus: "SYNCED",
+      syncError: null,
+    };
+  }
+
+  const syncError = errors.join("; ");
+  await markSubscriptionSyncFailed(prisma, {
+    userId,
+    strategyId,
+    error: syncError,
+  });
+
+  return {
+    ok: false,
+    strategyId,
+    userId,
+    legsAttempted: pending.length,
+    legsSucceeded,
+    results,
+    syncStatus: "FAILED",
+    syncError,
+    error: syncError,
+  };
 }
 
 /**
@@ -811,6 +1117,8 @@ export async function executeFollowerTradeWithVerification(
     clientOrderId?: string;
     /** REST force-sync: skip subscription syncStatus gate on the open path. */
     forceRestSync?: boolean;
+    /** Admin Force Sync — allow opens despite FAILED syncStatus / late-join rules. */
+    adminForceSync?: boolean;
   },
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
@@ -821,7 +1129,7 @@ export async function executeFollowerTradeWithVerification(
       where: { id: args.strategyId },
       select: STRATEGY_SELECT_IS_ACTIVE,
     });
-    if (!strat?.isActive) {
+    if (!strat?.isActive && !args.adminForceSync) {
       return {
         success: false,
         error: "Strategy is paused",
@@ -830,10 +1138,15 @@ export async function executeFollowerTradeWithVerification(
       };
     }
 
-    const sub = await findActiveCopySubscriptionForUser(prisma, {
-      strategyId: args.strategyId,
-      userId: args.userId,
-    });
+    const sub = args.adminForceSync
+      ? await findCopySubscriptionForUser(prisma, {
+          strategyId: args.strategyId,
+          userId: args.userId,
+        })
+      : await findActiveCopySubscriptionForUser(prisma, {
+          strategyId: args.strategyId,
+          userId: args.userId,
+        });
     if (!sub) {
       await markSubscriptionSyncError(prisma, {
         userId: args.userId,
@@ -842,7 +1155,32 @@ export async function executeFollowerTradeWithVerification(
       });
       return {
         success: false,
-        error: "No active subscription for this strategy",
+        error: args.adminForceSync
+          ? "User is not subscribed to this strategy"
+          : "No active subscription for this strategy",
+        attempts: 0,
+        verified: false,
+      };
+    }
+    if (args.adminForceSync && !sub.isActive) {
+      return {
+        success: false,
+        error: "User copy subscription is inactive (isActive is false).",
+        attempts: 0,
+        verified: false,
+      };
+    }
+
+    if (
+      !args.adminForceSync &&
+      subscriptionSyncBlocksReconcile(sub.syncStatus)
+    ) {
+      console.log(
+        `[RETRY_LOOP] skip open user=${args.userId} syncStatus=${sub.syncStatus}`,
+      );
+      return {
+        success: false,
+        error: `Subscription sync blocked (${sub.syncStatus})`,
         attempts: 0,
         verified: false,
       };

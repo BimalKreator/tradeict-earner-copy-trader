@@ -2296,6 +2296,71 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  /**
+   * Admin granular sync — exact lot counts per master leg (no multiplier).
+   * Bypasses late-join guards via adminForceSync.
+   */
+  async function granularSyncLiveTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        userId?: unknown;
+        strategyId?: unknown;
+        legs?: unknown;
+      };
+      const userId = String(body.userId ?? "").trim();
+      const strategyId = String(body.strategyId ?? "").trim();
+      if (!userId || !strategyId) {
+        res.status(400).json({ error: "userId and strategyId are required" });
+        return;
+      }
+      if (!Array.isArray(body.legs)) {
+        res.status(400).json({ error: "legs must be an array" });
+        return;
+      }
+
+      const legs = body.legs
+        .filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null)
+        .map((row) => ({
+          symbol: String(row.symbol ?? "").trim(),
+          side: String(row.side ?? "").trim(),
+          addLots: Number(row.addLots),
+        }));
+
+      const { adminGranularSyncFollowerLegs } = await import(
+        "../services/followerTradeExecution.js"
+      );
+      const result = await adminGranularSyncFollowerLegs(prisma, {
+        userId,
+        strategyId,
+        legs,
+      });
+
+      if (!result.ok) {
+        const status = result.legsAttempted === 0 ? 400 : 422;
+        res.status(status).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        msg.includes("not subscribed") ||
+        msg.includes("inactive") ||
+        msg.includes("no Delta API") ||
+        msg.includes("Strategy not found")
+      ) {
+        res.status(400).json({ error: msg });
+        return;
+      }
+      next(err);
+    }
+  }
+
   /** Update per-user multiplier and/or copy-trading isActive for one strategy. */
   async function updateStrategySubscriber(
     req: Request,
@@ -2444,6 +2509,7 @@ export function createAdminController(prisma: PrismaClient) {
     syncUserArbitrage,
     listStrategySubscribers,
     syncStrategyUser,
+    granularSyncLiveTrades,
     updateStrategySubscriber,
     getGroupedLiveTrades,
   };

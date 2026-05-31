@@ -1263,6 +1263,12 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/live-trades/grouped", adminController.getGroupedLiveTrades);
 
   /**
+   * Admin granular force sync — add exact lot counts per master leg (no multiplier).
+   * Body: `{ userId, strategyId, legs: [{ symbol, side, addLots }] }`
+   */
+  router.post("/live-trades/granular-sync", adminController.granularSyncLiveTrades);
+
+  /**
    * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
    * For full master + subscriber matching, use `GET /admin/live-trades/grouped`.
    */
