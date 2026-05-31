@@ -1,5 +1,6 @@
 "use client";
 
+import { StrategySubscriptionCheckout } from "@/components/strategies/StrategySubscriptionCheckout";
 import { StrategySparkline } from "@/components/strategies/StrategySparkline";
 import {
   mockSubscriberCount,
@@ -49,6 +50,7 @@ type Tab = "marketplace" | "my";
 type ModalState =
   | { kind: "deploy"; sub: SubscriptionRow }
   | { kind: "modify"; sub: SubscriptionRow }
+  | { kind: "checkout"; strategy: Strategy }
   | null;
 
 function pausedLike(status: string): boolean {
@@ -178,18 +180,9 @@ export default function StrategySubscriptionLifecyclePage() {
     }
   }
 
-  async function addToMyStrategies(strategyId: string) {
-    setSubmitting(true);
-    try {
-      await post("/subscriptions/subscribe", { strategyId });
-      setToast("Added to My Strategies");
-      setTab("my");
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to subscribe");
-    } finally {
-      setSubmitting(false);
-    }
+  function openCheckout(strategy: Strategy) {
+    setError(null);
+    setModal({ kind: "checkout", strategy });
   }
 
   function openDeploy(sub: SubscriptionRow) {
@@ -350,7 +343,7 @@ export default function StrategySubscriptionLifecyclePage() {
                     <button
                       type="button"
                       disabled={submitting}
-                      onClick={() => void addToMyStrategies(s.id)}
+                      onClick={() => openCheckout(s)}
                       className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
                     >
                       Subscribe
@@ -414,7 +407,32 @@ export default function StrategySubscriptionLifecyclePage() {
         </div>
       )}
 
-      {modal && (
+      {modal?.kind === "checkout" ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-md">
+            <button
+              type="button"
+              onClick={() => setModal(null)}
+              className="absolute -top-10 right-0 text-sm text-white/70 hover:text-white"
+            >
+              Cancel
+            </button>
+            <StrategySubscriptionCheckout
+              strategyId={modal.strategy.id}
+              strategyTitle={modal.strategy.title}
+              monthlyFeeInr={modal.strategy.monthlyFee}
+              onSubscribed={() => {
+                setModal(null);
+                setToast("Added to My Strategies");
+                setTab("my");
+                void load();
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {modal && modal.kind !== "checkout" ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="glass-card w-full max-w-md border border-glassBorder p-6">
             <h2 className="text-lg font-semibold text-white">
@@ -464,7 +482,7 @@ export default function StrategySubscriptionLifecyclePage() {
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
       {toast && (
         <div className="fixed bottom-6 left-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2">
