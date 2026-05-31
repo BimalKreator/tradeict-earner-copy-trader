@@ -2344,6 +2344,64 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function adjustFollowerQtyLiveTrade(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        userId?: unknown;
+        strategyId?: unknown;
+        symbol?: unknown;
+        currentSide?: unknown;
+        adjustmentLots?: unknown;
+      };
+      const userId = String(body.userId ?? "").trim();
+      const strategyId = String(body.strategyId ?? "").trim();
+      const symbol = String(body.symbol ?? "").trim();
+      const currentSideRaw = String(body.currentSide ?? "").toUpperCase();
+      const adjustmentLots = Number(body.adjustmentLots);
+
+      if (!userId || !strategyId || !symbol) {
+        res.status(400).json({ error: "userId, strategyId, and symbol are required" });
+        return;
+      }
+      if (currentSideRaw !== "BUY" && currentSideRaw !== "SELL") {
+        res.status(400).json({ error: "currentSide must be BUY or SELL" });
+        return;
+      }
+      if (
+        !Number.isFinite(adjustmentLots) ||
+        adjustmentLots === 0 ||
+        !Number.isInteger(adjustmentLots)
+      ) {
+        res.status(400).json({ error: "adjustmentLots must be a non-zero integer" });
+        return;
+      }
+
+      const { adminAdjustFollowerTradeQuantity } = await import(
+        "../services/followerTradeExecution.js"
+      );
+      const result = await adminAdjustFollowerTradeQuantity(prisma, {
+        userId,
+        strategyId,
+        symbol,
+        currentSide: currentSideRaw as TradeSide,
+        adjustmentLots: Math.trunc(adjustmentLots),
+      });
+
+      if (!result.ok) {
+        res.status(result.status ?? 422).json({ error: result.error });
+        return;
+      }
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   /** Update per-user multiplier and/or copy-trading isActive for one strategy. */
   async function updateStrategySubscriber(
     req: Request,
@@ -2493,6 +2551,7 @@ export function createAdminController(prisma: PrismaClient) {
     listStrategySubscribers,
     syncStrategyUser,
     granularSyncLiveTrades,
+    adjustFollowerQtyLiveTrade,
     updateStrategySubscriber,
     getGroupedLiveTrades,
   };

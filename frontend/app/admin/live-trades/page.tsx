@@ -10,6 +10,7 @@ import {
   RefreshCw,
   RotateCcw,
   Shield,
+  SlidersHorizontal,
   Target,
   TrendingDown,
   Users,
@@ -21,6 +22,10 @@ import {
   GranularSyncModal,
   type GranularSyncMasterLeg,
 } from "@/components/admin/GranularSyncModal";
+import {
+  AdjustQtyModal,
+  type AdjustQtyTarget,
+} from "@/components/admin/AdjustQtyModal";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -431,6 +436,7 @@ function SubscriberAccordionItem({
   onCloseTrade,
   closingKey,
   onOpenGranularSync,
+  onOpenAdjustQty,
 }: {
   user: SubscriberUser;
   strategyId: string;
@@ -451,6 +457,7 @@ function SubscriberAccordionItem({
     user: SubscriberUser,
     masterPositions: LiveRow[],
   ) => void;
+  onOpenAdjustQty: (target: AdjustQtyTarget) => void;
 }) {
   const totalPnl = sumLivePnl(user.positions);
   const pnlPositive = totalPnl > 0;
@@ -546,8 +553,10 @@ function SubscriberAccordionItem({
               variant="subscriber"
               strategyId={strategyId}
               followerUserId={user.userId}
+              followerUserLabel={displayName}
               onCloseTrade={onCloseTrade}
               closingKey={closingKey}
+              onOpenAdjustQty={onOpenAdjustQty}
             />
           ) : (
             <p className="px-4 py-6 text-sm text-white/45">
@@ -569,6 +578,7 @@ function StrategyLivePanel({
   closingKey,
   onAutoExitSaved,
   onOpenGranularSync,
+  onOpenAdjustQty,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -589,6 +599,7 @@ function StrategyLivePanel({
     user: SubscriberUser,
     masterPositions: LiveRow[],
   ) => void;
+  onOpenAdjustQty: (target: AdjustQtyTarget) => void;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -674,6 +685,7 @@ function StrategyLivePanel({
                 onCloseTrade={onCloseTrade}
                 closingKey={closingKey}
                 onOpenGranularSync={onOpenGranularSync}
+                onOpenAdjustQty={onOpenAdjustQty}
               />
             ))}
           </div>
@@ -932,13 +944,16 @@ function PositionTable({
   variant,
   strategyId,
   followerUserId,
+  followerUserLabel,
   onCloseTrade,
   closingKey,
+  onOpenAdjustQty,
 }: {
   rows: (LiveRow | FollowerRow)[];
   variant: "master" | "follower" | "subscriber";
   strategyId: string;
   followerUserId?: string;
+  followerUserLabel?: string;
   onCloseTrade: (args: {
     strategyId: string;
     userId?: string;
@@ -948,6 +963,7 @@ function PositionTable({
     isMaster: boolean;
   }) => Promise<void>;
   closingKey: string | null;
+  onOpenAdjustQty?: (target: AdjustQtyTarget) => void;
 }) {
   const showSourceColumn = variant !== "subscriber";
   const closeUserId =
@@ -1030,27 +1046,55 @@ function PositionTable({
               </td>
               <td className="px-3 py-2">
                 {lotSize(r.size) > 0 ? (
-                  <button
-                    type="button"
-                    disabled={
-                      closingKey ===
-                      `${strategyId}:${r.token}:${r.side}:${variant === "master" ? "master" : closeUserId ?? "follower"}`
-                    }
-                    onClick={() =>
-                      void onCloseTrade({
-                        strategyId,
-                        userId:
-                          variant === "master" ? undefined : closeUserId,
-                        symbol: r.token,
-                        side: r.side,
-                        size: lotSize(r.size),
-                        isMaster: variant === "master",
-                      })
-                    }
-                    className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Close Trade
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {variant === "subscriber" &&
+                    onOpenAdjustQty &&
+                    followerUserId ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenAdjustQty({
+                            strategyId,
+                            userId: followerUserId,
+                            userLabel:
+                              followerUserLabel?.trim() ||
+                              followerUserId,
+                            symbol: r.token,
+                            currentSide: r.side,
+                            currentLots: lotSize(r.size),
+                          })
+                        }
+                        className="inline-flex items-center gap-1 rounded-md border border-amber-500/45 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-100 transition hover:bg-amber-500/25"
+                      >
+                        <SlidersHorizontal
+                          className="h-3 w-3"
+                          aria-hidden
+                        />
+                        Adjust Qty
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={
+                        closingKey ===
+                        `${strategyId}:${r.token}:${r.side}:${variant === "master" ? "master" : closeUserId ?? "follower"}`
+                      }
+                      onClick={() =>
+                        void onCloseTrade({
+                          strategyId,
+                          userId:
+                            variant === "master" ? undefined : closeUserId,
+                          symbol: r.token,
+                          side: r.side,
+                          size: lotSize(r.size),
+                          isMaster: variant === "master",
+                        })
+                      }
+                      className="rounded-md border border-red-500/45 bg-red-500/15 px-2.5 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Close Trade
+                    </button>
+                  </div>
                 ) : (
                   <span className="text-xs text-white/35">—</span>
                 )}
@@ -1125,6 +1169,9 @@ export default function AdminLiveTradesPage() {
     userLabel: string;
     masterLegs: GranularSyncMasterLeg[];
   } | null>(null);
+  const [adjustQtyTarget, setAdjustQtyTarget] = useState<AdjustQtyTarget | null>(
+    null,
+  );
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1241,6 +1288,10 @@ export default function AdminLiveTradesPage() {
     },
     [],
   );
+
+  const openAdjustQty = useCallback((target: AdjustQtyTarget) => {
+    setAdjustQtyTarget(target);
+  }, []);
 
   const closeTrade = useCallback(
     async (args: {
@@ -1405,6 +1456,7 @@ export default function AdminLiveTradesPage() {
                     onCloseTrade={closeTrade}
                     closingKey={closingKey}
                     onOpenGranularSync={openGranularSync}
+                    onOpenAdjustQty={openAdjustQty}
                     onAutoExitSaved={(message, updated) => {
                       setToast(message);
                       if (updated) {
@@ -1450,6 +1502,24 @@ export default function AdminLiveTradesPage() {
           onError={(message) => setError(message)}
         />
       ) : null}
+
+      <AdjustQtyModal
+        open={adjustQtyTarget != null}
+        target={adjustQtyTarget}
+        onClose={() => setAdjustQtyTarget(null)}
+        apiBase={resolveAdminApiBase()}
+        authToken={
+          typeof window !== "undefined"
+            ? localStorage.getItem("token") ?? ""
+            : ""
+        }
+        onSuccess={(message) => {
+          setToast(message);
+          setError(null);
+          void load({ silent: true });
+        }}
+        onError={(message) => setError(message)}
+      />
     </div>
   );
 }

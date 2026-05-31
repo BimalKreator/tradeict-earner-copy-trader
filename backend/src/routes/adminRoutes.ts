@@ -1269,6 +1269,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.post("/live-trades/granular-sync", adminController.granularSyncLiveTrades);
 
   /**
+   * Admin manual follower lot adjustment on one open leg.
+   * Body: `{ userId, strategyId, symbol, currentSide, adjustmentLots }`
+   */
+  router.post(
+    "/live-trades/adjust-follower-qty",
+    adminController.adjustFollowerQtyLiveTrade,
+  );
+
+  /**
    * Master Delta (India) open positions per strategy via CCXT `fetchOpenPositions` (see `exchangeService.fetchDeltaOpenPositions`).
    * For full master + subscriber matching, use `GET /admin/live-trades/grouped`.
    */

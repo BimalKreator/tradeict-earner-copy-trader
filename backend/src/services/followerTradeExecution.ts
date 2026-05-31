@@ -38,6 +38,7 @@ import {
   recordTradePositionOpen,
   listOpenFollowerBotLegs,
   sumOpenFollowerBotQuantity,
+  trimOpenFollowerBotQuantity,
 } from "./tradePositionService.js";
 
 /** How long to wait after a successful market order before REST position verify. */
@@ -1988,5 +1989,200 @@ export async function executeFollowerTradeWithVerification(
     feeCost: totalFee,
     attempts,
     verified: false,
+  };
+}
+
+export type AdminAdjustFollowerQtyArgs = {
+  strategyId: string;
+  userId: string;
+  symbol: string;
+  currentSide: TradeSide;
+  adjustmentLots: number;
+};
+
+export type AdminAdjustFollowerQtyResult =
+  | {
+      ok: true;
+      strategyId: string;
+      userId: string;
+      symbol: string;
+      currentSide: TradeSide;
+      adjustmentLots: number;
+      previousQuantity: number;
+      newQuantity: number;
+      executeSide: TradeSide;
+      reduceOnly: boolean;
+      orderId?: string;
+    }
+  | { ok: false; error: string; status?: number };
+
+/** Map open-leg side + signed lot delta to exchange order side and reduce-only flag. */
+export function resolveAdminQtyAdjustmentOrder(args: {
+  currentSide: TradeSide;
+  adjustmentLots: number;
+}): { executeSide: TradeSide; reduceOnly: boolean; lots: number } {
+  const lots = Math.abs(Math.trunc(args.adjustmentLots));
+  if (!Number.isFinite(lots) || lots <= 0) {
+    throw new Error("adjustmentLots must be a non-zero integer");
+  }
+  if (args.adjustmentLots > 0) {
+    return { executeSide: args.currentSide, reduceOnly: false, lots };
+  }
+  return {
+    executeSide: args.currentSide === "BUY" ? "SELL" : "BUY",
+    reduceOnly: true,
+    lots,
+  };
+}
+
+/**
+ * Admin manual lot adjustment on one follower leg — market order on Delta + TradePosition update.
+ */
+export async function adminAdjustFollowerTradeQuantity(
+  prisma: PrismaClient,
+  args: AdminAdjustFollowerQtyArgs,
+): Promise<AdminAdjustFollowerQtyResult> {
+  const { strategyId, userId, symbol } = args;
+  const currentSide = args.currentSide;
+  const adjustmentLots = Math.trunc(args.adjustmentLots);
+
+  if (!strategyId || !userId || !symbol.trim()) {
+    return { ok: false, error: "strategyId, userId, and symbol are required", status: 400 };
+  }
+  if (currentSide !== "BUY" && currentSide !== "SELL") {
+    return { ok: false, error: "currentSide must be BUY or SELL", status: 400 };
+  }
+  if (!Number.isFinite(adjustmentLots) || adjustmentLots === 0) {
+    return { ok: false, error: "adjustmentLots must be a non-zero integer", status: 400 };
+  }
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { id: true },
+  });
+  if (!strategy) {
+    return { ok: false, error: "Strategy not found", status: 404 };
+  }
+
+  const sub = await findCopySubscriptionForUser(prisma, { userId, strategyId });
+  if (!sub) {
+    return { ok: false, error: "User is not subscribed to this strategy", status: 404 };
+  }
+
+  const creds = resolveCopySubscriptionCreds(sub);
+  if (!creds) {
+    return { ok: false, error: "No Delta API credentials for this user", status: 400 };
+  }
+
+  const previousQuantity = await sumOpenFollowerBotQuantity(prisma, {
+    strategyId,
+    userId,
+    symbol,
+    side: currentSide,
+  });
+
+  let orderPlan: ReturnType<typeof resolveAdminQtyAdjustmentOrder>;
+  try {
+    orderPlan = resolveAdminQtyAdjustmentOrder({ currentSide, adjustmentLots });
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Invalid adjustment",
+      status: 400,
+    };
+  }
+
+  if (orderPlan.reduceOnly && orderPlan.lots > previousQuantity) {
+    return {
+      ok: false,
+      error:
+        `Cannot reduce ${orderPlan.lots} lots — bot-managed open quantity is ${previousQuantity}`,
+      status: 400,
+    };
+  }
+
+  const clientOrderId = buildClientOrderId({ strategyId, userId, symbol });
+
+  console.log(
+    `[admin-qty-adjust] user=${userId} ${symbol} open=${currentSide} delta=${adjustmentLots} ` +
+      `→ ${orderPlan.executeSide} lots=${orderPlan.lots} reduceOnly=${orderPlan.reduceOnly}`,
+  );
+
+  const orderResult = await executeTrade(
+    creds.apiKey,
+    creds.apiSecret,
+    symbol,
+    orderPlan.executeSide,
+    orderPlan.lots,
+    {
+      ...(orderPlan.reduceOnly ? { reduceOnly: true } : {}),
+      clientOrderId,
+    },
+  );
+
+  if (!orderResult.success) {
+    return {
+      ok: false,
+      error: orderResult.error ?? "Market order failed",
+      status: 502,
+    };
+  }
+
+  let entryPrice = 0;
+  try {
+    const tick = await fetchDeltaTicker(symbol);
+    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+      entryPrice = tick.last;
+    }
+  } catch {
+    /* optional for DB row */
+  }
+
+  if (orderPlan.reduceOnly) {
+    await trimOpenFollowerBotQuantity(prisma, {
+      strategyId,
+      userId,
+      symbol,
+      side: currentSide,
+      reduceBy: orderPlan.lots,
+    });
+  } else {
+    if (entryPrice <= 0) {
+      return {
+        ok: false,
+        error: `Order placed but could not resolve mark price to update TradePosition for ${symbol}`,
+        status: 502,
+      };
+    }
+    await incrementOrRecordFollowerTradePosition(prisma, {
+      strategyId,
+      userId,
+      symbol,
+      side: currentSide,
+      addLots: orderPlan.lots,
+      entryPrice,
+      clientOrderId,
+      exchangeOrderId: orderResult.orderId ?? null,
+    });
+  }
+
+  const newQuantity = Math.max(0, previousQuantity + adjustmentLots);
+
+  await markSubscriptionSynced(prisma, { userId, strategyId }).catch(() => {
+    /* non-fatal */
+  });
+
+  return {
+    ok: true,
+    strategyId,
+    userId,
+    symbol,
+    currentSide,
+    adjustmentLots,
+    previousQuantity,
+    newQuantity,
+    executeSide: orderPlan.executeSide,
+    reduceOnly: orderPlan.reduceOnly,
+    ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
   };
 }
