@@ -9,6 +9,8 @@ import {
 } from "@prisma/client";
 import {
   aggregateUsersAum,
+  ADMIN_DELTA_BALANCE_CONCURRENCY,
+  fetchUserDeltaBalanceForAdmin,
   fetchUserAvailableCapital,
   fetchUserCapitalBreakdown,
   masterApiHealth,
@@ -467,11 +469,6 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
-  /** Per-user Delta balance fetch timeout (admin list — avoid blocking page load). */
-  const ADMIN_DELTA_BALANCE_TIMEOUT_MS = 12_000;
-  /** Max concurrent Delta balance API calls when listing users. */
-  const ADMIN_DELTA_BALANCE_CONCURRENCY = 4;
-
   async function mapWithConcurrency<T, R>(
     items: T[],
     concurrency: number,
@@ -496,31 +493,7 @@ export function createAdminController(prisma: PrismaClient) {
     deltaBalance: number | null;
     deltaConnected: boolean;
   }> {
-    const creds = await resolveUserDeltaCreds(prisma, userId);
-    if (!creds) {
-      return { deltaBalance: null, deltaConnected: false };
-    }
-    try {
-      const breakdown = await Promise.race([
-        fetchUserCapitalBreakdown(prisma, userId),
-        new Promise<never>((_, reject) => {
-          setTimeout(
-            () => reject(new Error("Delta balance fetch timed out")),
-            ADMIN_DELTA_BALANCE_TIMEOUT_MS,
-          );
-        }),
-      ]);
-      return {
-        deltaBalance: breakdown.totalBalance,
-        deltaConnected: true,
-      };
-    } catch (err) {
-      console.warn(
-        `[admin] Delta balance fetch failed userId=${userId}:`,
-        err instanceof Error ? err.message : err,
-      );
-      return { deltaBalance: null, deltaConnected: true };
-    }
+    return fetchUserDeltaBalanceForAdmin(prisma, userId);
   }
 
   /**

@@ -826,6 +826,125 @@ export async function executeTrade(
   }
 }
 
+export type DeltaClientOrderAck = {
+  found: boolean;
+  /** Delta order state: open, pending, closed (filled), cancelled, unknown */
+  state: "open" | "pending" | "filled" | "cancelled" | "unknown";
+  filledSize: number;
+  unfilledSize: number;
+  orderId?: string;
+};
+
+function parseDeltaClientOrderAckRow(
+  row: Record<string, unknown>,
+): DeltaClientOrderAck {
+  const stateRaw = String(row.state ?? "").toLowerCase();
+  const size = Math.abs(numberOrNull(row.size) ?? 0);
+  const unfilled = Math.abs(numberOrNull(row.unfilled_size) ?? 0);
+  const filledSize = Math.max(0, size - unfilled);
+
+  let state: DeltaClientOrderAck["state"] = "unknown";
+  if (stateRaw === "open") state = "open";
+  else if (stateRaw === "pending") state = "pending";
+  else if (stateRaw === "closed" || stateRaw === "filled") state = "filled";
+  else if (stateRaw === "cancelled" || stateRaw === "canceled") {
+    state = "cancelled";
+  }
+
+  const orderIdRaw = row.id;
+  const orderId =
+    orderIdRaw != null && String(orderIdRaw).trim().length > 0
+      ? String(orderIdRaw)
+      : undefined;
+
+  return {
+    found: true,
+    state,
+    filledSize,
+    unfilledSize: unfilled,
+    ...(orderId ? { orderId } : {}),
+  };
+}
+
+/** Lookup order ack by client_order_id — used to avoid double-firing market copies. */
+export async function fetchDeltaOrderAckByClientOrderId(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  clientOrderId: string,
+): Promise<DeltaClientOrderAck> {
+  const empty: DeltaClientOrderAck = {
+    found: false,
+    state: "unknown",
+    filledSize: 0,
+    unfilledSize: 0,
+  };
+  const id = clientOrderId.trim();
+  if (!id) return empty;
+
+  try {
+    const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+    const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+    const exchange = await getAuthClient(apiKey, secret);
+
+    type OrderByClientResponse = {
+      success?: boolean;
+      result?: Record<string, unknown>;
+    };
+
+    try {
+      const response = (await (
+        exchange as InstanceType<typeof ccxt.delta> & {
+          privateGetOrdersClientOrderIdClientOid: (params: {
+            client_oid: string;
+          }) => Promise<OrderByClientResponse>;
+        }
+      ).privateGetOrdersClientOrderIdClientOid({ client_oid: id })) as OrderByClientResponse;
+
+      const row = response?.result;
+      if (row && typeof row === "object") {
+        return parseDeltaClientOrderAckRow(row);
+      }
+    } catch (directErr) {
+      console.warn(
+        `[exchangeService] privateGetOrdersClientOrderIdClientOid failed clientOrderId=${id}:`,
+        directErr instanceof Error ? directErr.message : directErr,
+      );
+    }
+
+    try {
+      const orders = await exchange.fetchOrders(undefined, undefined, 50, {
+        client_order_id: id,
+        clientOrderId: id,
+      });
+      for (const order of orders) {
+        const o = order as unknown as Record<string, unknown>;
+        const oid =
+          String(o.clientOrderId ?? o.client_order_id ?? "").trim() === id
+            ? id
+            : "";
+        if (!oid) continue;
+        const info =
+          o.info != null && typeof o.info === "object"
+            ? (o.info as Record<string, unknown>)
+            : o;
+        return parseDeltaClientOrderAckRow(info);
+      }
+    } catch (fetchErr) {
+      console.warn(
+        `[exchangeService] fetchOrders by clientOrderId failed clientOrderId=${id}:`,
+        fetchErr instanceof Error ? fetchErr.message : fetchErr,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[exchangeService] fetchDeltaOrderAckByClientOrderId failed:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  return empty;
+}
+
 /**
  * Linear swap `contractSize` (base asset per contract) on Delta India, or `1` if unknown.
  * Uses public market metadata only (no API keys required).

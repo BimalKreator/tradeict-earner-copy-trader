@@ -372,44 +372,93 @@ export async function activeStrategiesForUser(
 }
 
 /**
- * Total AUM: sum of Delta **total** USD balance for active users with linked API keys.
- * Excludes platform wallet balances and users without Delta credentials.
+ * Total AUM: sum of live Delta total balances — same source as admin Users list (`deltaBalance`).
  */
 export async function aggregateUsersAum(prisma: PrismaClient): Promise<number> {
-  const activeUsers = await prisma.user.findMany({
-    where: { status: UserStatus.ACTIVE, role: Role.USER },
-    select: { id: true },
-  });
+  return sumAdminUsersDeltaBalances(prisma);
+}
 
-  let total = 0;
-  /** One Delta account may appear on multiple rows — count each key pair once. */
-  const countedCreds = new Set<string>();
+/** Per-user Delta balance fetch timeout (admin list + dashboard AUM). */
+export const ADMIN_DELTA_BALANCE_TIMEOUT_MS = 12_000;
+/** Max concurrent Delta balance API calls for admin aggregation. */
+export const ADMIN_DELTA_BALANCE_CONCURRENCY = 4;
 
-  for (const user of activeUsers) {
-    const creds = await resolveUserDeltaCreds(prisma, user.id);
-    if (!creds) continue;
-
-    const credKey = `${creds.apiKey}::${creds.apiSecret}`;
-    if (countedCreds.has(credKey)) continue;
-    countedCreds.add(credKey);
-
-    try {
-      const breakdown = await fetchDeltaBalanceBreakdownUsd(
-        creds.apiKey,
-        creds.apiSecret,
-      );
-      if (
-        Number.isFinite(breakdown.totalBalance) &&
-        breakdown.totalBalance > 0
-      ) {
-        total += breakdown.totalBalance;
-      }
-    } catch {
-      /* skip — Delta fetch failed for this user */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = nextIndex;
+      nextIndex += 1;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!, i);
     }
   }
+  const workers = Math.min(Math.max(1, concurrency), items.length || 1);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
 
-  return total;
+/** Same live Delta total balance shown on GET /api/admin/users (`deltaBalance`). */
+export async function fetchUserDeltaBalanceForAdmin(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<{ deltaBalance: number | null; deltaConnected: boolean }> {
+  const creds = await resolveUserDeltaCreds(prisma, userId);
+  if (!creds) {
+    return { deltaBalance: null, deltaConnected: false };
+  }
+  try {
+    const breakdown = await Promise.race([
+      fetchUserCapitalBreakdown(prisma, userId),
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error("Delta balance fetch timed out")),
+          ADMIN_DELTA_BALANCE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return {
+      deltaBalance: breakdown.totalBalance,
+      deltaConnected: true,
+    };
+  } catch (err) {
+    console.warn(
+      `[admin-aum] Delta balance fetch failed userId=${userId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { deltaBalance: null, deltaConnected: true };
+  }
+}
+
+/** Sum of `deltaBalance` across all platform users (matches admin Users list column). */
+export async function sumAdminUsersDeltaBalances(
+  prisma: PrismaClient,
+): Promise<number> {
+  const users = await prisma.user.findMany({
+    where: { role: Role.USER },
+    select: { id: true },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const rows = await mapWithConcurrency(
+    users,
+    ADMIN_DELTA_BALANCE_CONCURRENCY,
+    async (user) => fetchUserDeltaBalanceForAdmin(prisma, user.id),
+  );
+
+  return rows.reduce(
+    (sum, row) =>
+      sum +
+      (row.deltaBalance != null && Number.isFinite(row.deltaBalance)
+        ? row.deltaBalance
+        : 0),
+    0,
+  );
 }
 
 async function resolveMarkForOpenTrade(symbol: string): Promise<number | null> {

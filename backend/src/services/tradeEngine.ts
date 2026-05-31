@@ -38,6 +38,7 @@ import {
   followerBotOpenDeficitLots,
   followerEligibleForMasterLegCopy,
   isMasterLegFreshForRestCatchup,
+  masterLegRestPreExistingUnknown,
   parseMasterLegOpenedAt,
   syncMasterCloseToFutureHedgeFollowers,
   reconcileFollowersToEmptyMasterBook,
@@ -58,7 +59,6 @@ import {
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
   markSubscriptionSynced,
-  subscriptionSyncBlocksReconcile,
 } from "./subscriptionSyncService.js";
 import {
   registerSymbolsForLivePrices,
@@ -202,11 +202,14 @@ async function triggerMasterOpenCopy(
     forceRestSync?: boolean;
     adminForceSync?: boolean;
     masterOpenedAt?: Date | null;
+    locallyFirstSeenAt?: Date | null;
+    restPreExistingUnknown?: boolean;
   },
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
+  const isLiveMasterFill = args.source !== "rest";
   const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
   console.log(
     `${logTag} Detected fill on master (API or UI), triggering follower copy for symbol: ${args.symbol} ` +
@@ -247,12 +250,23 @@ async function triggerMasterOpenCopy(
     masterFillKey: args.masterFillKey,
     ...(forceRestSync ? { forceRestSync: true } : {}),
     ...(args.adminForceSync ? { adminForceSync: true } : {}),
+    ...(isLiveMasterFill ? { liveMasterFill: true } : {}),
     ...(args.masterOpenedAt !== undefined
       ? { masterOpenedAt: args.masterOpenedAt }
+      : {}),
+    ...(args.locallyFirstSeenAt !== undefined
+      ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
+      : {}),
+    ...(args.restPreExistingUnknown
+      ? { restPreExistingUnknown: true }
       : {}),
   });
 
   if (tracker) {
+    if (isLiveMasterFill) {
+      const isNewLeg = tracker.isNewLegThisSession(args.symbol, args.side);
+      tracker.noteLegObserved(args.symbol, args.side, null, isNewLeg);
+    }
     const prev = tracker.maxContractsForSymbolSide(args.symbol, args.side);
     tracker.applyMasterLeg({
       symbol: args.symbol,
@@ -271,6 +285,8 @@ async function followersMissingOpenLeg(
   side: TradeSide,
   masterLots: number,
   masterOpenedAt: Date | null,
+  locallyFirstSeenAt: Date | null,
+  restPreExistingUnknown: boolean,
 ): Promise<boolean> {
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   if (subscribers.length === 0) return false;
@@ -278,13 +294,12 @@ async function followersMissingOpenLeg(
   const openSide = side === "BUY" ? "BUY" : "SELL";
 
   for (const sub of subscribers) {
-    if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
-      continue;
-    }
     if (
       !followerEligibleForMasterLegCopy({
         joinedDate: sub.joinedDate,
         masterOpenedAt,
+        locallyFirstSeenAt,
+        restPreExistingUnknown,
       })
     ) {
       continue;
@@ -1122,6 +1137,7 @@ export async function lateJoinMirrorOpenPositionsForSubscriber(
       !followerEligibleForMasterLegCopy({
         joinedDate: sub.joinedDate,
         masterOpenedAt: leader.openedAt,
+        restPreExistingUnknown: !leader.openedAt,
       })
     ) {
       console.log(
@@ -1543,6 +1559,9 @@ async function copyMasterFillToSubscribers(
     forceRestSync?: boolean;
     adminForceSync?: boolean;
     masterOpenedAt?: Date | null;
+    locallyFirstSeenAt?: Date | null;
+    liveMasterFill?: boolean;
+    restPreExistingUnknown?: boolean;
   },
 ): Promise<void> {
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
@@ -1570,8 +1589,15 @@ async function copyMasterFillToSubscribers(
     masterFillKey: args.masterFillKey,
     ...(args.forceRestSync ? { forceRestSync: true } : {}),
     ...(args.adminForceSync ? { adminForceSync: true } : {}),
+    ...(args.liveMasterFill ? { liveMasterFill: true } : {}),
     ...(args.masterOpenedAt !== undefined
       ? { masterOpenedAt: args.masterOpenedAt }
+      : {}),
+    ...(args.locallyFirstSeenAt !== undefined
+      ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
+      : {}),
+    ...(args.restPreExistingUnknown
+      ? { restPreExistingUnknown: true }
       : {}),
   });
 }
@@ -1683,6 +1709,10 @@ class MasterPositionTracker {
   readonly lastOpenMeta = new Map<string, LastOpenMeta>();
   /** legKey → first REST poll time the leg was missing (flat confirmation gate). */
   readonly pendingFlatSince = new Map<string, number>();
+  /** legKey present at REST baseline seed — pre-existing session legs. */
+  readonly legsAtBaseline = new Set<string>();
+  /** legKey → ms when bot first observed open time (exchange or local first-seen). */
+  readonly legOpenedAtMs = new Map<string, number>();
   private restBaselineSeeded = false;
 
   aliasesForSnap(snap: {
@@ -1781,6 +1811,45 @@ class MasterPositionTracker {
   markRestBaselineSeeded(): void {
     this.restBaselineSeeded = true;
   }
+
+  markBaselineLeg(symbol: string, side: TradeSide): void {
+    this.legsAtBaseline.add(masterLegKey(symbol, side));
+  }
+
+  isNewLegThisSession(symbol: string, side: TradeSide): boolean {
+    if (!this.restBaselineSeeded) return true;
+    return !this.legsAtBaseline.has(masterLegKey(symbol, side));
+  }
+
+  noteLegObserved(
+    symbol: string,
+    side: TradeSide,
+    exchangeOpenedAt: Date | null,
+    isNewLeg: boolean,
+  ): void {
+    const lk = masterLegKey(symbol, side);
+    if (exchangeOpenedAt) {
+      const ms = exchangeOpenedAt.getTime();
+      const prev = this.legOpenedAtMs.get(lk);
+      if (prev == null || ms < prev) {
+        this.legOpenedAtMs.set(lk, ms);
+      }
+      return;
+    }
+    if (isNewLeg && !this.legOpenedAtMs.has(lk)) {
+      this.legOpenedAtMs.set(lk, Date.now());
+    }
+  }
+
+  resolveLegOpenedAt(
+    symbol: string,
+    side: TradeSide,
+    exchangeOpenedAt: Date | null,
+  ): Date | null {
+    if (exchangeOpenedAt) return exchangeOpenedAt;
+    const ms = this.legOpenedAtMs.get(masterLegKey(symbol, side));
+    return ms != null && Number.isFinite(ms) ? new Date(ms) : null;
+  }
 }
 
 /**
@@ -1846,6 +1915,8 @@ async function pollMasterPositionsFallback(
           contracts: m.masterContracts,
           avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
         });
+        tracker.markBaselineLeg(m.deltaSymbol, m.side);
+        tracker.noteLegObserved(m.deltaSymbol, m.side, m.openedAt, false);
       }
       tracker.markRestBaselineSeeded();
       console.log(
@@ -1860,7 +1931,26 @@ async function pollMasterPositionsFallback(
       tracker.clearPendingFlat(masterLegKey(m.deltaSymbol, m.side));
 
       if (wasBaselineSeeded) {
-        if (!isMasterLegFreshForRestCatchup(m.openedAt)) {
+        const isNewLeg = tracker.isNewLegThisSession(m.deltaSymbol, m.side);
+        tracker.noteLegObserved(m.deltaSymbol, m.side, m.openedAt, isNewLeg);
+        const locallyFirstSeenAt = tracker.resolveLegOpenedAt(
+          m.deltaSymbol,
+          m.side,
+          m.openedAt,
+        );
+        const restPreExistingUnknown = masterLegRestPreExistingUnknown({
+          isNewLegThisSession: isNewLeg,
+          exchangeOpenedAt: m.openedAt,
+          locallyFirstSeenAt,
+        });
+
+        if (
+          !isMasterLegFreshForRestCatchup(
+            m.openedAt,
+            locallyFirstSeenAt,
+            isNewLeg,
+          )
+        ) {
           continue;
         }
 
@@ -1871,6 +1961,8 @@ async function pollMasterPositionsFallback(
           m.side,
           m.masterContracts,
           m.openedAt,
+          locallyFirstSeenAt,
+          restPreExistingUnknown,
         );
 
         if (missingOnFollowers) {
@@ -1891,6 +1983,8 @@ async function pollMasterPositionsFallback(
               source: "rest",
               forceRestSync: true,
               masterOpenedAt: m.openedAt,
+              locallyFirstSeenAt,
+              restPreExistingUnknown,
             });
           } catch (copyErr) {
             console.error(
@@ -2560,10 +2654,6 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       for (const sub of subs) {
           if (cancelled.value) return;
 
-          if (subscriptionSyncBlocksReconcile(sub.syncStatus)) {
-            continue;
-          }
-
           const creds = resolveSubscriptionCreds(sub);
           if (!creds) {
             console.warn(
@@ -2598,17 +2688,55 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
             if (dbQty < expectedContracts) {
               const masterOpenedAt = master?.openedAt ?? null;
+              const isNewLeg = master
+                ? masterPositionTracker.isNewLegThisSession(
+                    master.deltaSymbol,
+                    master.side,
+                  )
+                : false;
+              if (master) {
+                masterPositionTracker.noteLegObserved(
+                  master.deltaSymbol,
+                  master.side,
+                  master.openedAt,
+                  isNewLeg,
+                );
+              }
+              const locallyFirstSeenAt = master
+                ? masterPositionTracker.resolveLegOpenedAt(
+                    master.deltaSymbol,
+                    master.side,
+                    master.openedAt,
+                  )
+                : null;
+              const restPreExistingUnknown = master
+                ? masterLegRestPreExistingUnknown({
+                    isNewLegThisSession: isNewLeg,
+                    exchangeOpenedAt: master.openedAt,
+                    locallyFirstSeenAt,
+                  })
+                : true;
               if (
                 !master ||
-                !isMasterLegFreshForRestCatchup(masterOpenedAt) ||
+                !isMasterLegFreshForRestCatchup(
+                  masterOpenedAt,
+                  locallyFirstSeenAt,
+                  isNewLeg,
+                ) ||
                 !followerEligibleForMasterLegCopy({
                   joinedDate: sub.joinedDate,
                   masterOpenedAt,
+                  locallyFirstSeenAt,
+                  restPreExistingUnknown,
                 })
               ) {
                 console.log(
                   `[RECONCILE] skip catch-up user ${sub.userId} ${botLeg.symbol} — ` +
-                    `late-join guard (fresh=${isMasterLegFreshForRestCatchup(masterOpenedAt)})`,
+                    `late-join guard (fresh=${isMasterLegFreshForRestCatchup(
+                      masterOpenedAt,
+                      locallyFirstSeenAt,
+                      isNewLeg,
+                    )})`,
                 );
                 continue;
               }
