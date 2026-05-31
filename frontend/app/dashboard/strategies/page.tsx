@@ -196,7 +196,7 @@ export default function StrategySubscriptionLifecyclePage() {
   }
 
   async function submitModal() {
-    if (!modal) return;
+    if (!modal || modal.kind === "checkout") return;
     setSubmitting(true);
     try {
       if (modal.kind === "deploy") {
@@ -205,7 +205,7 @@ export default function StrategySubscriptionLifecyclePage() {
           exchangeAccountId: selectedAccountId,
         });
         setToast("Strategy deployed");
-      } else {
+      } else if (modal.kind === "modify") {
         await patch(`/subscriptions/${modal.sub.strategy.id}/modify`, {
           multiplier: clampMultiplier(multiplier),
         });
