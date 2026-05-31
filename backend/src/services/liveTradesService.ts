@@ -25,8 +25,42 @@ const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
 /** Master poll budget — lite snapshot avoids per-option tickers; keep headroom for many legs. */
 const MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS = 45_000;
 
-/** Successful REST polls reporting explicit size=0 before a master leg is removed from UI. */
+/** Successful REST polls before evicting a master leg (explicit flat or missing from snapshot). */
 const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 3;
+/** Faster eviction when the master book is completely empty on a successful REST read. */
+const MASTER_EMPTY_BOOK_EVICT_POLLS = 1;
+
+function legSideFromKey(key: string): string {
+  const idx = key.lastIndexOf(":");
+  return idx >= 0 ? key.slice(idx + 1).toUpperCase() : "";
+}
+
+function legSymbolFromKey(key: string): string {
+  const idx = key.lastIndexOf(":");
+  return idx >= 0 ? key.slice(0, idx) : key;
+}
+
+function liveLegKeysAlign(a: string, b: string): boolean {
+  if (a === b) return true;
+  const sideA = legSideFromKey(a);
+  const sideB = legSideFromKey(b);
+  if (sideA !== sideB) return false;
+  const symA = legSymbolFromKey(a);
+  const symB = legSymbolFromKey(b);
+  const ca = symA.replace(/[/:]/g, "").toUpperCase();
+  const cb = symB.replace(/[/:]/g, "").toUpperCase();
+  if (ca === cb || ca.endsWith(cb) || cb.endsWith(ca)) return true;
+  return false;
+}
+
+function cacheKeyMatchesExplicitFlat(
+  cacheKey: string,
+  explicitFlatLegKeys: string[],
+): boolean {
+  return explicitFlatLegKeys.some((flatKey) =>
+    liveLegKeysAlign(cacheKey, flatKey),
+  );
+}
 
 type MasterLegCacheEntry = {
   row: LiveTradeRow;
@@ -97,30 +131,28 @@ function mergeMasterLiveTradesCache(
   }
 
   const flatSet = new Set(explicitFlatLegKeys);
+  const pollsRequired =
+    fetched.length === 0
+      ? MASTER_EMPTY_BOOK_EVICT_POLLS
+      : MASTER_EXPLICIT_FLAT_POLLS_REQUIRED;
 
   for (const [key, entry] of [...cache.entries()]) {
     if (fetchedKeys.has(key)) continue;
 
-    if (flatSet.has(key)) {
-      const streak = entry.explicitFlatStreak + 1;
-      if (streak >= MASTER_EXPLICIT_FLAT_POLLS_REQUIRED) {
-        cache.delete(key);
-        console.log(
-          `[live-trades] master leg removed after ${streak} explicit flat REST polls: ${key}`,
-        );
-      } else {
-        cache.set(key, { row: entry.row, explicitFlatStreak: streak });
-        console.log(
-          `[live-trades] master explicit flat ${key} streak=${streak}/${MASTER_EXPLICIT_FLAT_POLLS_REQUIRED}`,
-        );
-      }
-      continue;
-    }
+    const isFlat =
+      flatSet.has(key) || cacheKeyMatchesExplicitFlat(key, explicitFlatLegKeys);
 
-    // Leg missing from a successful response — retain cached row (API lag / parse skip).
-    if (fetched.length === 0 && cache.size > 0) {
+    const streak = entry.explicitFlatStreak + 1;
+    if (streak >= pollsRequired) {
+      cache.delete(key);
       console.log(
-        `[live-trades] master cache hold (empty open snapshot) strategyId=${strategyId} legs=${cache.size}`,
+        `[live-trades] master leg removed after ${streak} flat/missing REST poll(s): ${key}` +
+          (isFlat ? " (explicit flat)" : " (absent from snapshot)"),
+      );
+    } else {
+      cache.set(key, { row: entry.row, explicitFlatStreak: streak });
+      console.log(
+        `[live-trades] master leg flat/missing ${key} streak=${streak}/${pollsRequired}`,
       );
     }
   }
@@ -711,32 +743,12 @@ export async function getAdminLiveTradesByStrategy(
       });
 
       const masterMergedPromise = credentialsPresent
-        ? (async () => {
-            const stale = masterCachedPositions(strat.id);
-            if (stale.length > 0) {
-              void fetchAndMergeMasterLiveTrades(
-                strat.id,
-                strat.masterApiKey!,
-                strat.masterApiSecret!,
-                `master positions background strategy=${strat.id}`,
-                { background: true },
-              ).catch((bgErr) => {
-                console.warn(
-                  `[live-trades] master background refresh failed strategyId=${strat.id}:`,
-                  bgErr instanceof Error ? bgErr.message : bgErr,
-                );
-              });
-              return {
-                positions: stale,
-              };
-            }
-            return fetchAndMergeMasterLiveTrades(
-              strat.id,
-              strat.masterApiKey!,
-              strat.masterApiSecret!,
-              `master positions strategy=${strat.id}`,
-            );
-          })()
+        ? fetchAndMergeMasterLiveTrades(
+            strat.id,
+            strat.masterApiKey!,
+            strat.masterApiSecret!,
+            `master positions strategy=${strat.id}`,
+          )
         : Promise.resolve({
             positions: [] as LiveTradeRow[],
             fetchException: undefined,

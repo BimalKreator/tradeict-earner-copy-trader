@@ -2326,9 +2326,19 @@ export function createAdminController(prisma: PrismaClient) {
         .filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null)
         .map((row) => ({
           symbol: String(row.symbol ?? "").trim(),
-          side: String(row.side ?? "").trim(),
-          addLots: Number(row.addLots),
-        }));
+          side: String(row.side ?? "").trim().toUpperCase(),
+          addLots: Math.floor(Number(row.addLots)),
+        }))
+        .filter(
+          (leg) =>
+            leg.symbol.length > 0 &&
+            (leg.side === "BUY" || leg.side === "SELL") &&
+            leg.addLots > 0,
+        );
+
+      console.log(
+        `[granular-sync] request user=${userId} strategy=${strategyId} legs=${JSON.stringify(legs)}`,
+      );
 
       const { adminGranularSyncFollowerLegs } = await import(
         "../services/followerTradeExecution.js"

@@ -362,7 +362,8 @@ export async function incrementOrRecordFollowerTradePosition(
     exchangeOrderId?: string | null;
   },
 ): Promise<{ id: string } | null> {
-  const add = Math.max(1, Math.floor(Math.abs(args.addLots)));
+  const add = Math.floor(Math.abs(args.addLots));
+  if (!Number.isFinite(add) || add <= 0) return null;
   const openSide = String(args.side).toUpperCase();
 
   const rows = await prisma.tradePosition.findMany({

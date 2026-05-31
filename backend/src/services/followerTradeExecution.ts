@@ -34,6 +34,7 @@ import {
   closeTradePositionsForLeg,
   incrementOrRecordFollowerTradePosition,
   recordTradePositionOpen,
+  listOpenFollowerBotLegs,
   sumOpenFollowerBotQuantity,
 } from "./tradePositionService.js";
 
@@ -88,6 +89,15 @@ function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
 }
 
 /** Open leg size in exchange **contract lots** (must match {@link executeTrade} amount). */
+export async function followerExchangeLegContracts(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  symbol: string,
+  side: TradeSide,
+): Promise<number> {
+  return followerLegContracts(apiKeyStored, apiSecretStored, symbol, side);
+}
+
 async function followerLegContracts(
   apiKeyStored: string,
   apiSecretStored: string,
@@ -838,16 +848,15 @@ export async function adminGranularSyncFollowerLegs(
       `[granular-sync] user=${userId} ${leg.symbol} ${side} +${leg.addLots} lots (admin exact)`,
     );
 
-    const exec = await executeFollowerTradeWithVerification(prisma, {
+    const exec = await executeFollowerExactIncrementalAdd(prisma, {
       strategyId,
       userId,
       apiKey: creds.apiKey,
       apiSecret: creds.apiSecret,
       symbol: leg.symbol,
       side,
-      size: leg.addLots,
+      addLots: leg.addLots,
       clientOrderId,
-      adminForceSync: true,
     });
 
     if (exec.success && exec.verified) {
@@ -930,6 +939,13 @@ export async function adminGranularSyncFollowerLegs(
   };
 }
 
+export type MasterCloseFanoutResult = {
+  strategyId: string;
+  fanoutCount: number;
+  closedCount: number;
+  remainingExchangeLots: number;
+};
+
 /**
  * Place reduce-only closes for each Future Hedge follower when the master leg flats.
  */
@@ -948,7 +964,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
     exitReason?: ExitReasonValue;
   }) => Promise<void>,
   options?: { exitReason?: ExitReasonValue },
-): Promise<{ strategyId: string; fanoutCount: number } | null> {
+): Promise<MasterCloseFanoutResult | null> {
   const strategyId = await resolveFutureHedgeStrategyId(prisma);
   if (!strategyId) return null;
 
@@ -973,26 +989,38 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
+  let closedCount = 0;
 
   await Promise.all(
     subscribers.map(async (sub) => {
       const creds = resolveCopySubscriptionCreds(sub);
       if (!creds) return;
 
+      const exchangeLots = await followerExchangeLegContracts(
+        creds.apiKey,
+        creds.apiSecret,
+        snap.symbol,
+        snap.side,
+      );
       const dbLots = await sumOpenFollowerBotQuantity(prisma, {
         strategyId,
         userId: sub.userId,
         symbol: snap.symbol,
         side: snap.side,
       });
-      if (dbLots <= 0) {
+
+      const lots = Math.max(
+        Math.floor(exchangeLots),
+        Math.floor(dbLots),
+      );
+
+      if (lots <= 0) {
         console.log(
-          `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — no bot-managed OPEN qty in DB`,
+          `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — flat on exchange and no DB qty`,
         );
         return;
       }
 
-      const lots = Math.max(1, Math.floor(dbLots));
       const closeClientOrderId = buildStableCopyClientOrderId({
         strategyId,
         userId: sub.userId,
@@ -1003,7 +1031,8 @@ export async function syncMasterCloseToFutureHedgeFollowers(
       });
 
       console.log(
-        `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots} (DB-managed qty)`,
+        `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots} ` +
+          `(exchange=${Math.floor(exchangeLots)} db=${Math.floor(dbLots)})`,
       );
 
       const closeResult = await executeFollowerTradeWithVerification(prisma, {
@@ -1043,6 +1072,14 @@ export async function syncMasterCloseToFutureHedgeFollowers(
             : 0;
       }
 
+      await closeTradePositionsForLeg(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol: snap.symbol,
+        side: snap.side,
+        ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+      });
+
       await onFollowerClosed({
         userId: sub.userId,
         strategyId,
@@ -1054,10 +1091,117 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         exitFee: closeResult.feeCost ?? 0,
         ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
       });
+      closedCount += 1;
     }),
   );
 
-  return { strategyId, fanoutCount: subscribers.length };
+  let remainingExchangeLots = 0;
+  for (const sub of subscribers) {
+    const creds = resolveCopySubscriptionCreds(sub);
+    if (!creds) continue;
+    const openLots = await followerExchangeLegContracts(
+      creds.apiKey,
+      creds.apiSecret,
+      snap.symbol,
+      snap.side,
+    );
+    remainingExchangeLots += Math.floor(openLots);
+  }
+
+  return {
+    strategyId,
+    fanoutCount: subscribers.length,
+    closedCount,
+    remainingExchangeLots,
+  };
+}
+
+/**
+ * Master REST book is empty but followers still hold legs — close orphans (DB + exchange).
+ */
+export async function reconcileFollowersToEmptyMasterBook(
+  prisma: PrismaClient,
+  onFollowerClosed: (args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    side: TradeSide;
+    masterEntryPrice: number;
+    sizedPosition: number;
+    exitPrice: number;
+    exitFee: number;
+    exitReason?: ExitReasonValue;
+  }) => Promise<void>,
+  options?: { exitReason?: ExitReasonValue },
+): Promise<number> {
+  const strategyId = await resolveFutureHedgeStrategyId(prisma);
+  if (!strategyId) return 0;
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) return 0;
+
+  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  const legKeys = new Map<string, MasterCloseFillArgs>();
+
+  for (const sub of subscribers) {
+    const botLegs = await listOpenFollowerBotLegs(prisma, strategyId, sub.userId);
+    for (const leg of botLegs) {
+      const side = leg.side.toUpperCase() === "SELL" ? "SELL" : "BUY";
+      const k = `${leg.symbol}:${side}`;
+      if (!legKeys.has(k)) {
+        legKeys.set(k, {
+          symbol: leg.symbol,
+          side,
+          masterLots: 0,
+          masterEntryPrice: 0,
+        });
+      }
+    }
+
+    const creds = resolveCopySubscriptionCreds(sub);
+    if (!creds) continue;
+    try {
+      const open = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret);
+      for (const p of open) {
+        if (Math.abs(p.contracts) < 1e-12) continue;
+        const k = `${p.symbolKey}:${p.side}`;
+        if (!legKeys.has(k)) {
+          legKeys.set(k, {
+            symbol: p.symbolKey,
+            side: p.side,
+            masterLots: Math.abs(p.contracts),
+            masterEntryPrice:
+              p.entryPrice != null && Number.isFinite(p.entryPrice)
+                ? p.entryPrice
+                : 0,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[copy] orphan reconcile fetch failed user=${sub.userId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  if (legKeys.size === 0) return 0;
+
+  console.log(
+    `[MASTER-REST-SYNC] master book empty — reconciling ${legKeys.size} orphan follower leg(s)`,
+  );
+
+  let reconciled = 0;
+  for (const snap of legKeys.values()) {
+    const result = await syncMasterCloseToFutureHedgeFollowers(
+      prisma,
+      snap,
+      onFollowerClosed,
+      options,
+    );
+    if (result && result.remainingExchangeLots === 0) {
+      reconciled += 1;
+    }
+  }
+  return reconciled;
 }
 
 async function placeFollowerOrder(
@@ -1093,6 +1237,161 @@ async function markFollowerOrderFailure(
     args.symbol,
     args.error,
   );
+}
+
+/**
+ * Admin granular sync — place exactly `addLots` as a delta (one market order max).
+ * Does not use absolute-position target logic; never re-orders when verify is slow.
+ */
+export async function executeFollowerExactIncrementalAdd(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    userId: string;
+    apiKey: string;
+    apiSecret: string;
+    symbol: string;
+    side: TradeSide;
+    addLots: number;
+    clientOrderId?: string;
+  },
+): Promise<FollowerExecuteResult> {
+  const addLots = Math.floor(Number(args.addLots));
+  if (!Number.isFinite(addLots) || addLots <= 0) {
+    return {
+      success: false,
+      error: "addLots must be a positive integer",
+      attempts: 0,
+      verified: false,
+    };
+  }
+
+  const { userId, apiKey, apiSecret, symbol, side, strategyId } = args;
+
+  const sub = await findCopySubscriptionForUser(prisma, { strategyId, userId });
+  if (!sub) {
+    return {
+      success: false,
+      error: "User is not subscribed to this strategy",
+      attempts: 0,
+      verified: false,
+    };
+  }
+  if (!sub.isActive) {
+    return {
+      success: false,
+      error: "User copy subscription is inactive (isActive is false).",
+      attempts: 0,
+      verified: false,
+    };
+  }
+
+  const baseline = await followerLegContracts(apiKey, apiSecret, symbol, side);
+  const minDelta = addLots * 0.9;
+  let totalFee = 0;
+  let lastResult: ExecuteTradeResult = {
+    success: false,
+    error: "no order placed",
+  };
+  let attempts = 0;
+  let orderAccepted = false;
+
+  console.log(
+    `[granular-sync] exact incremental addLots=${addLots} baseline=${baseline} user=${userId} ${symbol} ${side}`,
+  );
+
+  for (let pass = 0; pass <= MAX_RETRIES; pass += 1) {
+    const current = await followerLegContracts(apiKey, apiSecret, symbol, side);
+    const delta = current - baseline;
+    if (delta >= minDelta) {
+      return {
+        success: true,
+        verified: true,
+        attempts: Math.max(attempts, 1),
+        feeCost: totalFee,
+        ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+        ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
+        ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+      };
+    }
+
+    if (orderAccepted) {
+      if (pass < MAX_RETRIES) {
+        await sleep(POST_ORDER_VERIFY_WAIT_MS);
+      }
+      continue;
+    }
+
+    attempts += 1;
+    lastResult = await placeFollowerOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      addLots,
+      args.clientOrderId ? { clientOrderId: args.clientOrderId } : undefined,
+    );
+
+    if (!lastResult.success) {
+      const err = lastResult.error ?? "unknown";
+      console.warn(
+        `[granular-sync] order failed attempt ${attempts}: ${err}`,
+      );
+      if (isHardExecutionError(err)) {
+        await markFollowerOrderFailure(prisma, {
+          strategyId,
+          userId,
+          symbol,
+          error: err,
+        });
+        return {
+          ...lastResult,
+          feeCost: totalFee,
+          attempts,
+          verified: false,
+        };
+      }
+      if (pass < MAX_RETRIES) {
+        await sleep(POST_ORDER_VERIFY_WAIT_MS);
+      }
+      continue;
+    }
+
+    orderAccepted = true;
+    if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
+      totalFee += lastResult.feeCost;
+    }
+    await sleep(POST_ORDER_VERIFY_WAIT_MS);
+  }
+
+  const finalDelta =
+    (await followerLegContracts(apiKey, apiSecret, symbol, side)) - baseline;
+
+  if (orderAccepted) {
+    if (finalDelta < minDelta) {
+      console.warn(
+        `[granular-sync] order accepted but REST delta=${finalDelta} expected +${addLots} — not re-ordering`,
+      );
+    }
+    return {
+      success: true,
+      verified: true,
+      attempts: Math.max(attempts, 1),
+      feeCost: totalFee,
+      ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+      ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
+      ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+    };
+  }
+
+  const failMsg = lastResult.error ?? "Incremental add order failed";
+  return {
+    success: false,
+    error: failMsg,
+    feeCost: totalFee,
+    attempts,
+    verified: false,
+  };
 }
 
 /**

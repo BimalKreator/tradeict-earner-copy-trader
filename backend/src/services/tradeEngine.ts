@@ -40,6 +40,7 @@ import {
   isMasterLegFreshForRestCatchup,
   parseMasterLegOpenedAt,
   syncMasterCloseToFutureHedgeFollowers,
+  reconcileFollowersToEmptyMasterBook,
   syncMasterOpenFillToFutureHedgeFollowers,
 } from "./followerTradeExecution.js";
 import {
@@ -1585,10 +1586,10 @@ async function notifyMasterFlat(
     masterContracts: number;
   },
   options?: { exitReason?: ExitReasonValue },
-): Promise<void> {
+): Promise<boolean> {
   // Sole entry point for follower closes — call only from pollMasterPositionsFallback.
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
-    return;
+    return false;
   }
 
   const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
@@ -1596,7 +1597,7 @@ async function notifyMasterFlat(
     console.log(
       `[tradeEngine] Ignoring master flat for non-Future-Hedge strategyId=${strategyId}`,
     );
-    return;
+    return false;
   }
 
   const closureOrigin = resolveClosureOrigin(
@@ -1610,7 +1611,7 @@ async function notifyMasterFlat(
   );
 
   try {
-    await syncMasterCloseToFutureHedgeFollowers(
+    const result = await syncMasterCloseToFutureHedgeFollowers(
       prisma,
       {
         symbol: snap.symbol,
@@ -1633,6 +1634,15 @@ async function notifyMasterFlat(
       },
       { exitReason: closureOrigin },
     );
+    if (!result) return false;
+    if (result.remainingExchangeLots > 0) {
+      console.warn(
+        `[EXECUTION] notifyMasterFlat ${snap.symbol} ${snap.side} — ` +
+          `${result.remainingExchangeLots} follower lot(s) still open on exchange; will retry`,
+      );
+      return false;
+    }
+    return true;
   } finally {
     consumeBotInitiatedCloseReason(strategyId, snap.symbol);
   }
@@ -1943,7 +1953,7 @@ async function pollMasterPositionsFallback(
         tracker.clearPendingFlat(lk);
 
         try {
-          await notifyMasterFlat(prisma, strat.id, {
+          const flatOk = await notifyMasterFlat(prisma, strat.id, {
             symbol: meta.symbol,
             side: meta.side,
             masterEntryPrice:
@@ -1952,6 +1962,12 @@ async function pollMasterPositionsFallback(
                 : 0,
             masterContracts: lastContracts,
           });
+          if (!flatOk) {
+            console.warn(
+              `[MASTER-REST-SYNC] follower close incomplete for ${meta.symbol} ${meta.side} — will retry next poll`,
+            );
+            continue;
+          }
         } catch (closeErr) {
           console.error(
             `[MASTER-REST-SYNC] notifyMasterFlat failed ${meta.symbol} ${meta.side}:`,
@@ -1967,6 +1983,38 @@ async function pollMasterPositionsFallback(
             productKey: meta.symbol,
           }),
         );
+      }
+
+      if (masters.length === 0) {
+        try {
+          const reconciled = await reconcileFollowersToEmptyMasterBook(
+            prisma,
+            async (closed) => {
+              await closeFollowerTradeAndRecordPnl(prisma, {
+                userId: closed.userId,
+                strategyId: closed.strategyId,
+                symbol: closed.symbol,
+                side: closed.side,
+                masterEntryPrice: closed.masterEntryPrice,
+                sizedPosition: closed.sizedPosition,
+                exitPrice: closed.exitPrice,
+                exitFee: closed.exitFee,
+                exitReason: closed.exitReason ?? EXIT_REASON.MASTER_CLOSED,
+              });
+            },
+            { exitReason: EXIT_REASON.MASTER_CLOSED },
+          );
+          if (reconciled > 0) {
+            console.log(
+              `[MASTER-REST-SYNC] reconciled ${reconciled} orphan follower leg(s) while master book empty`,
+            );
+          }
+        } catch (reconcileErr) {
+          console.error(
+            "[MASTER-REST-SYNC] orphan follower reconcile failed:",
+            reconcileErr instanceof Error ? reconcileErr.message : reconcileErr,
+          );
+        }
       }
     }
   } catch (err) {

@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type GranularSyncMasterLeg = {
   symbol: string;
@@ -38,6 +38,7 @@ export function GranularSyncModal({
 }: GranularSyncModalProps) {
   const [drafts, setDrafts] = useState<LegDraft[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
 
   const legKey = useCallback(
     (leg: GranularSyncMasterLeg) => `${leg.symbol}:${leg.side}`,
@@ -45,7 +46,11 @@ export function GranularSyncModal({
   );
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      submitLockRef.current = false;
+      setSubmitting(false);
+      return;
+    }
     setDrafts(
       masterLegs.map((leg) => ({
         ...leg,
@@ -54,12 +59,9 @@ export function GranularSyncModal({
     );
   }, [open, masterLegs]);
 
-  const pendingCount = useMemo(
-    () => drafts.filter((d) => d.addLots > 0).length,
-    [drafts],
-  );
+  const handleExecute = useCallback(async () => {
+    if (submitLockRef.current || submitting) return;
 
-  async function handleExecute() {
     const legs = drafts
       .filter((d) => d.addLots > 0)
       .map((d) => ({
@@ -73,7 +75,12 @@ export function GranularSyncModal({
       return;
     }
 
+    submitLockRef.current = true;
     setSubmitting(true);
+
+    const payload = { userId, strategyId, legs };
+    console.log("[granular-sync] payload", JSON.stringify(payload));
+
     try {
       const res = await fetch(`${apiBase}/admin/live-trades/granular-sync`, {
         method: "POST",
@@ -81,27 +88,29 @@ export function GranularSyncModal({
           "Content-Type": "application/json",
           Authorization: `Bearer ${authToken}`,
         },
-        body: JSON.stringify({ userId, strategyId, legs }),
+        body: JSON.stringify(payload),
       });
-      const payload: unknown = await res.json().catch(() => ({}));
+      const responseBody: unknown = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         const msg =
-          typeof payload === "object" && payload !== null
-            ? typeof (payload as { error?: unknown }).error === "string"
-              ? (payload as { error: string }).error
-              : typeof (payload as { syncError?: unknown }).syncError === "string"
-                ? (payload as { syncError: string }).syncError
+          typeof responseBody === "object" && responseBody !== null
+            ? typeof (responseBody as { error?: unknown }).error === "string"
+              ? (responseBody as { error: string }).error
+              : typeof (responseBody as { syncError?: unknown }).syncError ===
+                  "string"
+                ? (responseBody as { syncError: string }).syncError
                 : `Granular sync failed (${res.status})`
             : `Granular sync failed (${res.status})`;
         throw new Error(msg);
       }
 
       const succeeded =
-        typeof payload === "object" &&
-        payload !== null &&
-        typeof (payload as { legsSucceeded?: unknown }).legsSucceeded === "number"
-          ? (payload as { legsSucceeded: number }).legsSucceeded
+        typeof responseBody === "object" &&
+        responseBody !== null &&
+        typeof (responseBody as { legsSucceeded?: unknown }).legsSucceeded ===
+          "number"
+          ? (responseBody as { legsSucceeded: number }).legsSucceeded
           : legs.length;
 
       onSuccess(
@@ -111,9 +120,26 @@ export function GranularSyncModal({
     } catch (e) {
       onError(e instanceof Error ? e.message : "Granular sync failed");
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
-  }
+  }, [
+    apiBase,
+    authToken,
+    drafts,
+    onClose,
+    onError,
+    onSuccess,
+    strategyId,
+    submitting,
+    userId,
+    userLabel,
+  ]);
+
+  const pendingCount = useMemo(
+    () => drafts.filter((d) => d.addLots > 0).length,
+    [drafts],
+  );
 
   if (!open) return null;
 
@@ -231,6 +257,7 @@ export function GranularSyncModal({
             type="button"
             disabled={submitting || masterLegs.length === 0 || pendingCount === 0}
             onClick={() => void handleExecute()}
+            aria-busy={submitting}
             className="inline-flex items-center gap-2 rounded-lg border border-violet-500/45 bg-violet-500/20 px-4 py-2 text-sm font-medium text-violet-100 transition hover:bg-violet-500/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting ? (
