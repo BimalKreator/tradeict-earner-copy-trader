@@ -3,7 +3,11 @@ import {
   type PrismaClient,
   TradePositionStatus,
 } from "@prisma/client";
-import type { TradeSide } from "./exchangeService.js";
+import {
+  isDeltaOptionProductId,
+  isValidDeltaOptionProductSymbol,
+  type TradeSide,
+} from "./exchangeService.js";
 
 function compactSymbolKey(s: string): string {
   return s.replace(/[/:]/g, "").toUpperCase();
@@ -20,11 +24,22 @@ export function tradePositionSymbolsAlign(
   tradeSymbol: string,
   storedSymbol: string,
 ): boolean {
-  const a = compactSymbolKey(tradeSymbol);
-  const b = compactSymbolKey(storedSymbol);
-  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
-  const ba = deltaPairBase(a);
-  const bb = deltaPairBase(b);
+  const a = tradeSymbol.trim();
+  const b = storedSymbol.trim();
+  if (
+    isValidDeltaOptionProductSymbol(a) ||
+    isValidDeltaOptionProductSymbol(b) ||
+    isDeltaOptionProductId(a) ||
+    isDeltaOptionProductId(b)
+  ) {
+    return a.toUpperCase() === b.toUpperCase();
+  }
+
+  const ca = compactSymbolKey(a);
+  const cb = compactSymbolKey(b);
+  if (ca === cb || ca.endsWith(cb) || cb.endsWith(ca)) return true;
+  const ba = deltaPairBase(ca);
+  const bb = deltaPairBase(cb);
   return ba != null && bb != null && ba === bb;
 }
 

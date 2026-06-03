@@ -6,6 +6,7 @@ import {
   fetchDeltaOrderAckByClientOrderId,
   fetchDeltaTicker,
   isDeltaOptionProductId,
+  isValidDeltaOptionProductSymbol,
   type DeltaClientOrderAck,
   type ExecuteTradeResult,
   type TradeSide,
@@ -96,11 +97,22 @@ function deltaPairBase(compactNoSlash: string): string | null {
 }
 
 function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
-  const a = compactSymbolKey(tradeSymbol);
-  const b = compactSymbolKey(positionKey);
-  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
-  const ba = deltaPairBase(a);
-  const bb = deltaPairBase(b);
+  const a = tradeSymbol.trim();
+  const b = positionKey.trim();
+  if (
+    isValidDeltaOptionProductSymbol(a) ||
+    isValidDeltaOptionProductSymbol(b) ||
+    isDeltaOptionProductId(a) ||
+    isDeltaOptionProductId(b)
+  ) {
+    return a.toUpperCase() === b.toUpperCase();
+  }
+
+  const ca = compactSymbolKey(a);
+  const cb = compactSymbolKey(b);
+  if (ca === cb || ca.endsWith(cb) || cb.endsWith(ca)) return true;
+  const ba = deltaPairBase(ca);
+  const bb = deltaPairBase(cb);
   return ba != null && bb != null && ba === bb;
 }
 
@@ -1322,6 +1334,10 @@ async function placeFollowerOrder(
   size: number,
   opts?: { reduceOnly?: boolean; clientOrderId?: string },
 ): Promise<ExecuteTradeResult> {
+  console.log(
+    `[copy] placeFollowerOrder symbol="${symbol.trim()}" side=${side} lots=${size} ` +
+      `reduceOnly=${opts?.reduceOnly === true} clientOrderId=${opts?.clientOrderId ?? "none"}`,
+  );
   try {
     return await executeTrade(apiKey, apiSecret, symbol, side, size, opts);
   } catch (err) {

@@ -560,9 +560,188 @@ export function isDeltaOptionProductId(raw: string): boolean {
   return u.startsWith("C-") || u.startsWith("P-");
 }
 
+/** Valid Delta option id: `C-BTC-64000-260626` (type-underlying-strike-ddmmyy). */
+export function isValidDeltaOptionProductSymbol(raw: string): boolean {
+  const s = raw.trim();
+  if (!isDeltaOptionProductId(s)) return false;
+  return /^(C|P)-[A-Z0-9]+-\d+-\d{6}$/i.test(s);
+}
+
+function marketIdMatches(a: string, b: string): boolean {
+  return a.trim().toUpperCase() === b.trim().toUpperCase();
+}
+
+/**
+ * Strict CCXT market lookup by Delta product id — no fuzzy `exchange.market()` matching.
+ * Options must resolve to the exact strike/expiry id or null.
+ */
+export function findCcxtMarketByExactProductId(
+  exchange: InstanceType<typeof ccxt.delta>,
+  productRef: string,
+): ReturnType<InstanceType<typeof ccxt.delta>["market"]> | null {
+  const ref = productRef.trim();
+  if (!ref) return null;
+
+  const marketsById = exchange.markets_by_id as
+    | Record<string, ReturnType<InstanceType<typeof ccxt.delta>["market"]>>
+    | undefined;
+
+  if (marketsById && typeof marketsById === "object") {
+    if (marketsById[ref]) return marketsById[ref] ?? null;
+    for (const [key, market] of Object.entries(marketsById)) {
+      if (marketIdMatches(key, ref)) return market ?? null;
+    }
+  }
+
+  const markets = exchange.markets;
+  if (markets != null && typeof markets === "object") {
+    for (const market of Object.values(markets)) {
+      if (!market) continue;
+      const id = String(market.id ?? "").trim();
+      if (!id) continue;
+      if (marketIdMatches(id, ref)) return market;
+      const info =
+        market.info != null && typeof market.info === "object"
+          ? (market.info as Record<string, unknown>)
+          : null;
+      const infoProductId = String(
+        info?.product_id ?? info?.productId ?? "",
+      ).trim();
+      if (infoProductId && infoProductId === ref) return market;
+      const infoSymbol = String(
+        info?.symbol ?? info?.product_symbol ?? "",
+      ).trim();
+      if (
+        infoSymbol &&
+        isValidDeltaOptionProductSymbol(infoSymbol) &&
+        marketIdMatches(infoSymbol, ref)
+      ) {
+        return market;
+      }
+    }
+  }
+
+  return null;
+}
+
+export type ResolvedExactDeltaProduct = {
+  /** Canonical Delta product id (e.g. C-BTC-64000-260626). */
+  productId: string;
+  /** CCXT unified symbol for createOrder. */
+  ccxtSymbol: string;
+};
+
+/**
+ * Resolve a WS/REST product reference to the exact Delta option product id.
+ * Returns null when strike cannot be determined — never guess a nearby contract.
+ */
+export function resolveExactDeltaProductFromMarkets(
+  exchange: InstanceType<typeof ccxt.delta>,
+  raw: string,
+): ResolvedExactDeltaProduct | null {
+  const ref = raw.trim();
+  if (!ref) return null;
+
+  if (isValidDeltaOptionProductSymbol(ref)) {
+    const market = findCcxtMarketByExactProductId(exchange, ref);
+    if (!market?.symbol) {
+      console.error(
+        `[exchangeService] option product ${ref} not found in CCXT markets — refusing fuzzy match`,
+      );
+      return null;
+    }
+    const productId = String(market.id ?? ref).trim();
+    if (!isValidDeltaOptionProductSymbol(productId)) {
+      console.error(
+        `[exchangeService] CCXT market id "${productId}" for ref ${ref} is not a valid option id`,
+      );
+      return null;
+    }
+    return { productId, ccxtSymbol: market.symbol };
+  }
+
+  if (/^\d+$/.test(ref)) {
+    const market = findCcxtMarketByExactProductId(exchange, ref);
+    if (!market?.symbol) {
+      console.error(
+        `[exchangeService] numeric product_id ${ref} did not resolve in CCXT markets_by_id`,
+      );
+      return null;
+    }
+    const productId = String(market.id ?? "").trim();
+    if (!isValidDeltaOptionProductSymbol(productId)) {
+      console.error(
+        `[exchangeService] numeric product_id ${ref} mapped to non-option market id=${productId}`,
+      );
+      return null;
+    }
+    return { productId, ccxtSymbol: market.symbol };
+  }
+
+  return null;
+}
+
+/** Extract product id from Delta WS/REST payloads — options prefer `product_symbol` verbatim. */
+export function extractDeltaProductSymbolFromPayload(
+  o: Record<string, unknown>,
+): string {
+  const product =
+    o.product != null && typeof o.product === "object" && !Array.isArray(o.product)
+      ? (o.product as Record<string, unknown>)
+      : null;
+
+  const optionSymbolCandidates: unknown[] = [
+    o.product_symbol,
+    product?.product_symbol,
+    product?.symbol,
+    o.contract_symbol,
+    o.instrument_name,
+    o.derivative_symbol,
+  ];
+
+  for (const c of optionSymbolCandidates) {
+    const s = String(c ?? "").trim();
+    if (s && isValidDeltaOptionProductSymbol(s)) return s;
+  }
+
+  const genericSymbol = String(o.symbol ?? "").trim();
+  if (genericSymbol && isValidDeltaOptionProductSymbol(genericSymbol)) {
+    return genericSymbol;
+  }
+
+  for (const c of optionSymbolCandidates) {
+    const s = String(c ?? "").trim();
+    if (s && !/^\d+$/.test(s)) return s;
+  }
+
+  if (genericSymbol && !/^\d+$/.test(genericSymbol)) return genericSymbol;
+
+  const productId = o.product_id ?? product?.id;
+  if (productId != null) {
+    const pid = String(productId).trim();
+    if (pid) return pid;
+  }
+
+  return "";
+}
+
+export async function resolveCanonicalDeltaProductId(
+  raw: string,
+): Promise<ResolvedExactDeltaProduct | null> {
+  const ref = raw.trim();
+  if (!ref) return null;
+
+  if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
+    const exchange = await getPublicClient();
+    return resolveExactDeltaProductFromMarkets(exchange, ref);
+  }
+
+  return null;
+}
+
 /**
  * After `loadMarkets()`, map a Delta product id or trading label to CCXT unified symbol.
- * Resolves options and perps via `market.id`; falls back to India swap normalization.
+ * Options require an exact markets_by_id hit — no swap/perp fallback.
  */
 export function resolveCcxtSymbol(
   exchange: InstanceType<typeof ccxt.delta>,
@@ -570,6 +749,16 @@ export function resolveCcxtSymbol(
 ): string {
   const raw = tradingSymbol.trim();
   if (!raw) return raw;
+
+  if (isDeltaOptionProductId(raw) || /^\d+$/.test(raw)) {
+    const exact = resolveExactDeltaProductFromMarkets(exchange, raw);
+    if (!exact) {
+      throw new Error(
+        `Cannot resolve exact Delta option product for "${raw}" — refusing to guess strike`,
+      );
+    }
+    return exact.ccxtSymbol;
+  }
 
   const markets = exchange.markets;
   if (markets != null && typeof markets === "object") {
@@ -649,6 +838,33 @@ function resolvePositionMarket(
       contractSize,
     };
   };
+
+  if (isDeltaOptionProductId(productSymbol) || /^\d+$/.test(productSymbol.trim())) {
+    const exact = resolveExactDeltaProductFromMarkets(exchange, productSymbol);
+    if (!exact) {
+      console.warn(
+        `[exchangeService] fetchDeltaOpenPositions: exact option resolve failed product_ref=${productSymbol}`,
+      );
+      return {
+        market: null,
+        unified: productSymbol,
+        symbolKey: isValidDeltaOptionProductSymbol(productSymbol)
+          ? productSymbol
+          : productSymbol,
+        isOption: true,
+        contractSize: fallbackSize,
+      };
+    }
+    const market = findCcxtMarketByExactProductId(exchange, exact.productId);
+    if (market) return fromMarket(market);
+    return {
+      market: null,
+      unified: exact.productId,
+      symbolKey: exact.productId,
+      isOption: true,
+      contractSize: fallbackSize,
+    };
+  }
 
   try {
     return fromMarket(exchange.market(productSymbol));
@@ -738,13 +954,44 @@ export async function executeTrade(
   opts?: { reduceOnly?: boolean; clientOrderId?: string },
 ): Promise<ExecuteTradeResult> {
   const clientOrderId = opts?.clientOrderId?.trim() || undefined;
+  const inputSymbol = symbol.trim();
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
 
     const exchange = await getAuthClient(apiKey, secret);
 
-    const ccxtSymbol = resolveCcxtSymbol(exchange, symbol);
+    let canonicalProductId = inputSymbol;
+    let ccxtSymbol: string;
+    try {
+      if (isDeltaOptionProductId(inputSymbol) || /^\d+$/.test(inputSymbol)) {
+        const exact = resolveExactDeltaProductFromMarkets(exchange, inputSymbol);
+        if (!exact) {
+          const err = `Exact option product resolve failed for "${inputSymbol}" — order not placed`;
+          console.error(`[copy-exec] ${err}`);
+          return { success: false, error: err };
+        }
+        canonicalProductId = exact.productId;
+        ccxtSymbol = exact.ccxtSymbol;
+      } else {
+        ccxtSymbol = resolveCcxtSymbol(exchange, inputSymbol);
+      }
+    } catch (resolveErr) {
+      const err =
+        resolveErr instanceof Error
+          ? resolveErr.message
+          : String(resolveErr);
+      console.error(`[copy-exec] symbol resolve failed input="${inputSymbol}": ${err}`);
+      return { success: false, error: err };
+    }
+
+    console.log(
+      `[copy-exec] createMarketOrder side=${side} lots=${size} ` +
+        `inputSymbol="${inputSymbol}" canonicalProductId="${canonicalProductId}" ` +
+        `ccxtSymbol="${ccxtSymbol}" reduceOnly=${opts?.reduceOnly === true} ` +
+        `clientOrderId=${clientOrderId ?? "none"}`,
+    );
+
     const ccxtSide = side === "BUY" ? "buy" : "sell";
     const params: Record<string, unknown> = {};
     if (opts?.reduceOnly === true) {
@@ -1115,9 +1362,18 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         numberOrNull(info?.size) ??
         numberOrNull(position.contracts);
 
-      const productSymbol = String(
-        position.product_symbol ?? position.product_id ?? "",
-      ).trim();
+      const productSymbolRaw = String(position.product_symbol ?? "").trim();
+      let productSymbol = productSymbolRaw;
+      if (!productSymbol) {
+        const pid = String(position.product_id ?? "").trim();
+        if (pid) {
+          const exact = resolveExactDeltaProductFromMarkets(exchange, pid);
+          productSymbol = exact?.productId ?? pid;
+        }
+      } else if (/^\d+$/.test(productSymbol)) {
+        const exact = resolveExactDeltaProductFromMarkets(exchange, productSymbol);
+        if (exact) productSymbol = exact.productId;
+      }
 
       if (rawSize === null || Math.abs(rawSize) < 1e-12) {
         if (productSymbol) {

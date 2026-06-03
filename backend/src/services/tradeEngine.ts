@@ -3,11 +3,13 @@ import WebSocket from "ws";
 import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
   executeTrade,
+  extractDeltaProductSymbolFromPayload,
   fetchDeltaOpenPositions,
   fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   normalizeDeltaPerpSymbolForCcxt,
+  resolveCanonicalDeltaProductId,
   tradeSideFromSignedSize,
   type DeltaLivePosition,
   type TradeSide,
@@ -214,6 +216,14 @@ async function triggerMasterOpenCopy(
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
+  const canonicalSymbol = await canonicalizeCopySymbol(args.symbol);
+  if (!canonicalSymbol) {
+    return;
+  }
+  if (canonicalSymbol !== args.symbol.trim()) {
+    args = { ...args, symbol: canonicalSymbol };
+  }
+
   const isLiveMasterFill = args.source !== "rest";
   const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
   const skipCopy = args.skipFollowerCopy === true;
@@ -394,11 +404,16 @@ function deltaPairBase(compactNoSlash: string): string | null {
 }
 
 function positionSymbolsAlign(tradeSymbol: string, positionKey: string): boolean {
-  const a = compactSymbolKey(tradeSymbol);
-  const b = compactSymbolKey(positionKey);
-  if (a === b || a.endsWith(b) || b.endsWith(a)) return true;
-  const ba = deltaPairBase(a);
-  const bb = deltaPairBase(b);
+  const a = tradeSymbol.trim();
+  const b = positionKey.trim();
+  if (isDeltaOptionProductId(a) || isDeltaOptionProductId(b)) {
+    return a.toUpperCase() === b.toUpperCase();
+  }
+  const ca = compactSymbolKey(a);
+  const cb = compactSymbolKey(b);
+  if (ca === cb || ca.endsWith(cb) || cb.endsWith(ca)) return true;
+  const ba = deltaPairBase(ca);
+  const bb = deltaPairBase(cb);
   return ba != null && bb != null && ba === bb;
 }
 
@@ -465,23 +480,34 @@ function mergePayloadLayers(raw: unknown): Record<string, unknown> {
 
 /** Delta product id from WS / REST payloads (perps and options). */
 function extractDeltaProductSymbol(o: Record<string, unknown>): string {
-  const product = asRecord(o.product);
-  const productId = o.product_id ?? product?.id;
-  const candidates: unknown[] = [
-    o.product_symbol,
-    o.symbol,
-    o.contract_symbol,
-    o.instrument_name,
-    o.derivative_symbol,
-    product?.symbol,
-    product?.product_symbol,
-    productId != null ? String(productId) : null,
-  ];
-  for (const c of candidates) {
-    const s = String(c ?? "").trim();
-    if (s) return s;
+  return extractDeltaProductSymbolFromPayload(o);
+}
+
+async function canonicalizeCopySymbol(symbol: string): Promise<string | null> {
+  const raw = symbol.trim();
+  if (!raw) return null;
+
+  if (isDeltaOptionProductId(raw) || /^\d+$/.test(raw)) {
+    const resolved = await resolveCanonicalDeltaProductId(raw);
+    if (!resolved) {
+      console.error(
+        `[copy] refuse to copy — exact option product resolve failed for "${raw}"`,
+      );
+      return null;
+    }
+    if (!marketIdMatchesOption(raw, resolved.productId)) {
+      console.warn(
+        `[copy] option symbol canonicalized "${raw}" → "${resolved.productId}"`,
+      );
+    }
+    return resolved.productId;
   }
-  return "";
+
+  return raw;
+}
+
+function marketIdMatchesOption(a: string, b: string): boolean {
+  return a.trim().toUpperCase() === b.trim().toUpperCase();
 }
 
 function orderStateIndicatesFill(state: string): boolean {
