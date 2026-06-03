@@ -70,8 +70,10 @@ import {
   shouldSkipMasterFillCopy,
   shouldSuppressMasterRestCopy,
 } from "./masterNoCopyOrders.js";
+import { MasterFillDedup } from "./masterFillDedup.js";
 import {
   buildClientOrderId,
+  buildStableCopyClientOrderId,
   closeTradePositionsForLeg,
   listOpenFollowerBotLegs,
   recordTradePositionOpen,
@@ -211,6 +213,8 @@ async function triggerMasterOpenCopy(
     locallyFirstSeenAt?: Date | null;
     restPreExistingUnknown?: boolean;
     skipFollowerCopy?: boolean;
+    /** When true, do not bump session tracker (deduped duplicate WS event). */
+    skipTrackerUpdate?: boolean;
   },
   tracker?: MasterPositionTracker,
 ): Promise<void> {
@@ -289,7 +293,11 @@ async function triggerMasterOpenCopy(
     });
   }
 
-  if (tracker && entryPrice != null) {
+  if (
+    tracker &&
+    entryPrice != null &&
+    args.skipTrackerUpdate !== true
+  ) {
     if (isLiveMasterFill) {
       const isNewLeg = tracker.isNewLegThisSession(args.symbol, args.side);
       tracker.noteLegObserved(args.symbol, args.side, null, isNewLeg);
@@ -565,6 +573,8 @@ function extractOrderFillSignal(
   symbol: string;
   side: TradeSide;
   contracts: number;
+  exchangeCumulative: number;
+  orderId: string;
   avgPrice: number | null;
   reduceOnly: boolean;
   clientOrderId: string;
@@ -586,7 +596,6 @@ function extractOrderFillSignal(
 
   const incrementalFill =
     num(o.fill_qty) ??
-    num(o.filled_size) ??
     num(o.last_fill_qty) ??
     num(o.trade_qty) ??
     num(o.exec_qty);
@@ -611,6 +620,11 @@ function extractOrderFillSignal(
 
   if (contracts == null || contracts <= 0) return null;
 
+  const exchangeCumulative =
+    cumulativeFilled != null && cumulativeFilled > 0
+      ? cumulativeFilled
+      : contracts;
+
   const avgPrice =
     num(o.average_fill_price) ??
     num(o.avg_fill_price) ??
@@ -620,8 +634,7 @@ function extractOrderFillSignal(
     num(o.limit_price) ??
     num(o.mark_price);
 
-  const orderIdRaw =
-    o.id ?? o.order_id ?? o.client_order_id ?? o.clientOrderId;
+  const orderIdRaw = o.id ?? o.order_id;
   const orderId =
     orderIdRaw != null ? String(orderIdRaw).trim() : "";
   const clientOrderId = String(
@@ -637,7 +650,17 @@ function extractOrderFillSignal(
       state || "fill",
     ]);
 
-  return { symbol, side, contracts, avgPrice, reduceOnly, clientOrderId, fillKey };
+  return {
+    symbol,
+    side,
+    contracts,
+    exchangeCumulative,
+    orderId,
+    avgPrice,
+    reduceOnly,
+    clientOrderId,
+    fillKey,
+  };
 }
 
 /** `user_trades` / fill stream — common for manual UI market orders. */
@@ -649,6 +672,8 @@ function extractUserTradeFillSignal(
   contracts: number;
   avgPrice: number | null;
   clientOrderId: string;
+  tradeId: string;
+  orderId: string;
   fillKey: string;
 } | null {
   const o = mergePayloadLayers(raw);
@@ -672,23 +697,35 @@ function extractUserTradeFillSignal(
     num(o.average_fill_price) ??
     num(o.avg_fill_price);
 
-  const tradeIdRaw = o.id ?? o.trade_id ?? o.fill_id ?? o.order_id;
+  const tradeIdRaw = o.id ?? o.trade_id ?? o.fill_id;
   const tradeId =
     tradeIdRaw != null ? String(tradeIdRaw).trim() : "";
+  const orderIdRaw = o.order_id ?? o.orderId;
+  const orderId =
+    orderIdRaw != null ? String(orderIdRaw).trim() : "";
   const clientOrderId = String(
     o.client_order_id ?? o.clientOrderId ?? "",
   ).trim();
-  const fillKey =
-    tradeId ||
-    buildMasterFillKey([
-      "user_trade",
-      symbol,
-      side,
-      String(contracts),
-      String(avgPrice ?? 0),
-    ]);
+  const fillKey = tradeId
+    ? `trade:${tradeId}`
+    : buildMasterFillKey([
+        "user_trade",
+        symbol,
+        side,
+        String(contracts),
+        String(avgPrice ?? 0),
+      ]);
 
-  return { symbol, side, contracts, avgPrice, clientOrderId, fillKey };
+  return {
+    symbol,
+    side,
+    contracts,
+    avgPrice,
+    clientOrderId,
+    tradeId,
+    orderId,
+    fillKey,
+  };
 }
 
 async function processMasterOrderFillRecords(
@@ -697,6 +734,7 @@ async function processMasterOrderFillRecords(
   records: unknown[],
   tracker?: MasterPositionTracker,
 ): Promise<void> {
+  const dedup = tracker?.copyDedup;
   for (const r of records) {
     const sig = extractOrderFillSignal(r);
     if (!sig) continue;
@@ -711,21 +749,54 @@ async function processMasterOrderFillRecords(
       continue;
     }
     registerSymbolsForLivePrices([sig.symbol]);
-    const skipCopy = shouldSkipMasterFillCopy({ clientOrderId });
+    const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
+
+    const orderId = sig.orderId || null;
+    const copyPlan =
+      !ncSkip && dedup
+        ? dedup.resolveOrdersChannelCopy({
+            orderId,
+            exchangeCumulative: sig.exchangeCumulative,
+            fallbackIncrement: sig.contracts,
+          })
+        : ncSkip
+          ? null
+          : {
+              qty: sig.contracts,
+              masterFillKey: sig.fillKey,
+            };
+
+    const fanOut = !ncSkip && copyPlan != null;
+    if (!fanOut && dedup && orderId) {
+      console.log(
+        `[MASTER-WS] orders dedup skip copy ${sig.symbol} orderId=${orderId} ` +
+          `(fills-first or delta=0 cumulative=${sig.exchangeCumulative})`,
+      );
+    }
+
     await triggerMasterOpenCopy(
       prisma,
       strategyId,
       {
         symbol: sig.symbol,
         side: sig.side,
-        masterContracts: sig.contracts,
+        masterContracts: fanOut ? copyPlan!.qty : sig.contracts,
         avgPrice: sig.avgPrice,
-        masterFillKey: sig.fillKey,
+        masterFillKey: fanOut ? copyPlan!.masterFillKey : sig.fillKey,
         source: "orders",
-        skipFollowerCopy: skipCopy,
+        skipFollowerCopy: ncSkip || !fanOut,
+        skipTrackerUpdate: !fanOut,
       },
       tracker,
     );
+
+    if (fanOut && copyPlan && dedup) {
+      dedup.recordOrdersChannelCopy({
+        orderId,
+        qty: copyPlan.qty,
+        exchangeCumulative: sig.exchangeCumulative,
+      });
+    }
   }
 }
 
@@ -735,13 +806,30 @@ async function processMasterUserTradeFillRecords(
   records: unknown[],
   tracker?: MasterPositionTracker,
 ): Promise<void> {
+  const dedup = tracker?.copyDedup;
   for (const r of records) {
     const sig = extractUserTradeFillSignal(r);
     if (!sig) continue;
     const clientOrderId =
       sig.clientOrderId || extractClientOrderIdFromPayload(r);
     registerSymbolsForLivePrices([sig.symbol]);
-    const skipCopy = shouldSkipMasterFillCopy({ clientOrderId });
+    const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
+
+    const orderId = sig.orderId || null;
+    const tradeId = sig.tradeId || sig.fillKey;
+    const dedupSkip =
+      !ncSkip &&
+      dedup != null &&
+      dedup.shouldSkipFillsChannelCopy({ tradeId, orderId });
+
+    if (dedupSkip) {
+      console.log(
+        `[MASTER-WS] fills dedup skip copy ${sig.symbol} tradeId=${tradeId} orderId=${orderId ?? "none"} ` +
+          `(orders-first or duplicate trade)`,
+      );
+    }
+
+    const fanOut = !ncSkip && !dedupSkip;
     await triggerMasterOpenCopy(
       prisma,
       strategyId,
@@ -752,10 +840,19 @@ async function processMasterUserTradeFillRecords(
         avgPrice: sig.avgPrice,
         masterFillKey: sig.fillKey,
         source: "fills",
-        skipFollowerCopy: skipCopy,
+        skipFollowerCopy: ncSkip || !fanOut,
+        skipTrackerUpdate: !fanOut,
       },
       tracker,
     );
+
+    if (fanOut && dedup) {
+      dedup.recordFillsChannelCopy({
+        tradeId,
+        orderId,
+        qty: sig.contracts,
+      });
+    }
   }
 }
 
@@ -1785,6 +1882,8 @@ class MasterPositionTracker {
   readonly legsAtBaseline = new Set<string>();
   /** legKey → ms when bot first observed open time (exchange or local first-seen). */
   readonly legOpenedAtMs = new Map<string, number>();
+  /** Cross-channel master fill dedup for live follower fan-out. */
+  readonly copyDedup = new MasterFillDedup();
   private restBaselineSeeded = false;
 
   aliasesForSnap(snap: {
@@ -2577,33 +2676,11 @@ class StrategyMasterSocket {
             `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
           );
 
+          // Positions channel: tracker only — live copy via fills/orders; REST deficit sync catches gaps.
           if (copyEnabled && next > prev) {
-            const increment = next - prev;
-            const entryFromSnap =
-              snap.avgEntry != null && Number.isFinite(snap.avgEntry)
-                ? snap.avgEntry
-                : meta?.avgEntry;
-            const suppressCopy = shouldSuppressMasterRestCopy({
-              strategyId: this.strategyId,
-              symbol: snap.symbol,
-              openSide: snap.side,
-            });
-            const fillKey = `pos:${buildMasterFillKey([
-              snap.symbol,
-              snap.side,
-              String(prev),
-              String(next),
-              String(entryFromSnap ?? 0),
-            ])}`;
-            await triggerMasterOpenCopy(this.prisma, this.strategyId, {
-              symbol: snap.symbol,
-              side: snap.side,
-              masterContracts: increment,
-              avgPrice: entryFromSnap ?? null,
-              masterFillKey: fillKey,
-              source: "positions",
-              skipFollowerCopy: suppressCopy,
-            });
+            console.log(
+              `[tradeEngine WS] positions +${next - prev} ${snap.symbol} ${snap.side} — tracker updated, copy via fills/REST`,
+            );
           }
         }
       }
@@ -2842,16 +2919,54 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               console.log(
                 `[RECONCILE] Bot leg catch-up user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (+${diff})`,
               );
-              const result = await executeTrade(
-                creds.apiKey,
-                creds.apiSecret,
-                botLeg.symbol,
-                botLeg.side as TradeSide,
-                diff,
-              );
-              if (!result.success) {
+              let px =
+                master != null &&
+                Number.isFinite(master.entryPrice) &&
+                master.entryPrice > 0
+                  ? master.entryPrice
+                  : 0;
+              if (px <= 0) {
+                try {
+                  const tick = await fetchDeltaTicker(botLeg.symbol);
+                  if (tick.last != null && Number.isFinite(tick.last)) {
+                    px = tick.last;
+                  }
+                } catch {
+                  /* entry required for verified execution */
+                }
+              }
+              if (px <= 0) {
+                console.warn(
+                  `[RECONCILE] skip catch-up user ${sub.userId} ${botLeg.symbol} — no entry price`,
+                );
+                continue;
+              }
+
+              const reconcileFillKey = `reconcile:${sub.userId}:${botLeg.symbol}:${botLeg.side}:${expectedContracts}`;
+              const clientOrderId = buildStableCopyClientOrderId({
+                strategyId: strat.id,
+                userId: sub.userId,
+                masterFillKey: reconcileFillKey,
+                symbol: botLeg.symbol,
+                side: botLeg.side as TradeSide,
+                leg: "open",
+              });
+
+              const result = await executeFollowerTradeWithVerification(prisma, {
+                strategyId: strat.id,
+                userId: sub.userId,
+                apiKey: creds.apiKey,
+                apiSecret: creds.apiSecret,
+                symbol: botLeg.symbol,
+                side: botLeg.side as TradeSide,
+                size: diff,
+                entryPrice: px,
+                clientOrderId,
+                forceRestSync: true,
+              });
+              if (!result.success || !result.verified) {
                 console.error(
-                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${botLeg.symbol} diff=${diff}: ${result.error ?? "unknown"}`,
+                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${botLeg.symbol} diff=${diff}: ${result.error ?? "not verified"}`,
                 );
                 await markSubscriptionSyncFailed(prisma, {
                   userId: sub.userId,
@@ -2859,32 +2974,21 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                   error: result.error ?? "Reconcile catch-up failed",
                 });
               } else {
-                let px =
-                  master != null &&
-                  Number.isFinite(master.entryPrice) &&
-                  master.entryPrice > 0
-                    ? master.entryPrice
-                    : 0;
-                if (px <= 0) {
-                  try {
-                    const tick = await fetchDeltaTicker(botLeg.symbol);
-                    if (tick.last != null && Number.isFinite(tick.last)) {
-                      px = tick.last;
-                    }
-                  } catch {
-                    /* skip DB record if no price */
-                  }
-                }
-                if (px > 0) {
-                  await recordTradePositionOpen(prisma, {
-                    strategyId: strat.id,
-                    userId: sub.userId,
-                    symbol: botLeg.symbol,
-                    side: botLeg.side,
-                    quantity: diff,
-                    entryPrice: px,
-                  });
-                }
+                const recordedLots = result.verifiedQty ?? diff;
+                await recordTradePositionOpen(prisma, {
+                  strategyId: strat.id,
+                  userId: sub.userId,
+                  symbol: botLeg.symbol,
+                  side: botLeg.side,
+                  quantity: recordedLots,
+                  entryPrice: px,
+                  clientOrderId,
+                  ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
+                });
+                await markSubscriptionSynced(prisma, {
+                  userId: sub.userId,
+                  strategyId: strat.id,
+                });
               }
               continue;
             }
