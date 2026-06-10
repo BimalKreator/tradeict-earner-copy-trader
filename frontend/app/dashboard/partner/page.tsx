@@ -63,6 +63,14 @@ function fmtDate(iso: string): string {
   });
 }
 
+function isLastDayOfUtcMonth(ref: Date = new Date()): boolean {
+  const year = ref.getUTCFullYear();
+  const month = ref.getUTCMonth();
+  const day = ref.getUTCDate();
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return day === lastDay;
+}
+
 function referralSignupUrl(code: string): string {
   const origin =
     typeof window !== "undefined"
@@ -78,12 +86,14 @@ function WalletCard({
   description,
   icon,
   accent,
+  action,
 }: {
   title: string;
   amount: number;
   description: string;
   icon: ReactNode;
   accent: "amber" | "sky" | "emerald";
+  action?: ReactNode;
 }) {
   const accentMap = {
     amber: {
@@ -124,6 +134,7 @@ function WalletCard({
         <div className={`rounded-xl p-2.5 ${accentMap.icon}`}>{icon}</div>
       </div>
       <p className="mt-4 text-sm leading-relaxed text-white/50">{description}</p>
+      {action ? <div className="mt-4">{action}</div> : null}
     </article>
   );
 }
@@ -167,6 +178,14 @@ export default function PartnerDashboardPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [payoutBusy, setPayoutBusy] = useState(false);
+  const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
+    null,
+  );
+
+  const payoutWindowOpen = isLastDayOfUtcMonth();
+  const canRequestPayout =
+    (metrics?.wallets.withdrawable ?? 0) > 0 && payoutWindowOpen;
 
   const designation =
     salesTeamRole != null ? SALES_TEAM_ROLE_LABELS[salesTeamRole] : "Partner";
@@ -221,6 +240,46 @@ export default function PartnerDashboardPage() {
       setError(e instanceof Error ? e.message : "Refresh failed");
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  async function requestPayout() {
+    if (!token || payoutBusy || !canRequestPayout) return;
+    setPayoutBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiBase}/user/partner/request-payout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Payout request failed (${res.status})`;
+        throw new Error(msg);
+      }
+      setToast({
+        type: "ok",
+        text: "Payout request submitted. Our team will process it shortly.",
+      });
+      await loadData();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Payout request failed";
+      setToast({ type: "err", text: msg });
+      setError(msg);
+    } finally {
+      setPayoutBusy(false);
     }
   }
 
@@ -285,11 +344,23 @@ export default function PartnerDashboardPage() {
         </button>
       </header>
 
-      {error && (
+      {toast ? (
+        <div
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            toast.type === "ok"
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+              : "border-red-500/30 bg-red-500/10 text-red-200"
+          }`}
+        >
+          {toast.text}
+        </div>
+      ) : null}
+
+      {error && !toast ? (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
         </div>
-      )}
+      ) : null}
 
       {loading ? (
         <div className="flex justify-center rounded-2xl border border-glassBorder py-24">
@@ -363,9 +434,38 @@ export default function PartnerDashboardPage() {
               <WalletCard
                 title="Withdrawable Revenue"
                 amount={metrics.wallets.withdrawable}
-                description="Ready for payout. Withdrawal requests will be available in a future update."
+                description="Ready for payout. Request on the last UTC day of each month."
                 icon={<Wallet className="h-5 w-5" aria-hidden />}
                 accent="emerald"
+                action={
+                  <div className="group relative">
+                    <button
+                      type="button"
+                      onClick={() => void requestPayout()}
+                      disabled={!canRequestPayout || payoutBusy}
+                      title={
+                        !payoutWindowOpen
+                          ? "Available on the last day of the month"
+                          : metrics.wallets.withdrawable <= 0
+                            ? "No withdrawable balance"
+                            : undefined
+                      }
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {payoutBusy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      ) : null}
+                      Request Payout
+                    </button>
+                    {!canRequestPayout ? (
+                      <p className="mt-2 text-center text-[11px] text-white/35">
+                        {!payoutWindowOpen
+                          ? "Available on the last day of the month"
+                          : "No withdrawable balance yet"}
+                      </p>
+                    ) : null}
+                  </div>
+                }
               />
             </div>
           </section>

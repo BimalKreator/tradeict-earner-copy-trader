@@ -51,6 +51,7 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.get("/invoices", jwtAuth, user.listInvoices);
   router.get("/partner/metrics", jwtAuth, user.getPartnerMetrics);
   router.get("/partner/direct-users", jwtAuth, user.listPartnerDirectUsers);
+  router.post("/partner/request-payout", jwtAuth, user.requestPartnerPayout);
 
   return router;
 }

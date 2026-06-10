@@ -33,6 +33,12 @@ enum SalesTier {
   DIRECTOR
 }
 
+/** Partner monthly payout request lifecycle (Phase 9). */
+enum PayoutRequestStatus {
+  PENDING
+  COMPLETED
+}
+
 enum UserStatus {
   ACTIVE
   SUSPENDED
@@ -149,6 +155,8 @@ model User {
   commissionsEarned    CommissionLedger[]  @relation("CommissionBeneficiary")
   commissionsSourced   CommissionLedger[]  @relation("CommissionSource")
   affiliateUpgradesPerformed AffiliateProfile[] @relation("AffiliateUpgradedBy")
+  payoutRequests       PayoutRequest[]
+  partnerPayoutsCompleted PayoutRequest[]    @relation("PayoutCompletedBy")
 
   @@index([parentId])
   @@index([acquiredById])
@@ -566,6 +574,8 @@ model CommissionLedger {
   pnlRecordId         String?
   /** Set when payment webhook confirms revenue-share settlement (Phase 6). */
   paymentTransactionId String?
+  /** Set when included in a partner payout request (Phase 9). */
+  payoutRequestId     String?
   earnedAt            DateTime               @default(now())
   payableAt           DateTime?
   withdrawableAt      DateTime?
@@ -578,12 +588,34 @@ model CommissionLedger {
   invoice             Invoice?            @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
   pnlRecord           PnLRecord?          @relation(fields: [pnlRecordId], references: [id], onDelete: SetNull)
   paymentTransaction  PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
+  payoutRequest       PayoutRequest?      @relation(fields: [payoutRequestId], references: [id], onDelete: SetNull)
 
   @@index([beneficiaryUserId, status])
+  @@index([payoutRequestId])
   @@index([sourceUserId, profitDate])
   @@index([status, unlockDate])
   @@index([invoiceId])
   @@index([profitDate])
+}
+
+/** Monthly partner commission withdrawal request (Phase 9). */
+model PayoutRequest {
+  id            String              @id @default(uuid())
+  userId        String
+  amount        Float
+  status        PayoutRequestStatus @default(PENDING)
+  requestedAt   DateTime            @default(now())
+  completedAt   DateTime?
+  completedById String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  completedBy       User?              @relation("PayoutCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  commissionLedgers CommissionLedger[]
+
+  @@index([userId, status])
+  @@index([status, requestedAt])
 }
 
 model ArbitrageTrade {

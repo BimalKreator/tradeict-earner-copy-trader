@@ -56,6 +56,10 @@ import {
   upgradeUserToSalesMember,
   type SalesMemberRole,
 } from "../services/affiliateMemberService.js";
+import {
+  completePartnerPayout,
+  listPendingPartnerPayouts,
+} from "../services/affiliatePayoutService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -2778,6 +2782,55 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listPartnerPayouts(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const payouts = await listPendingPartnerPayouts(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json({ payouts });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function completePartnerPayoutHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const rawId = req.params.id;
+      const payoutId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof payoutId !== "string" || !payoutId.trim()) {
+        res.status(400).json({ error: "Payout id is required" });
+        return;
+      }
+
+      const outcome = await completePartnerPayout(
+        prisma,
+        payoutId.trim(),
+        adminUserId,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.json({ ok: true, payoutRequestId: outcome.payoutRequestId });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -2787,6 +2840,8 @@ export function createAdminController(prisma: PrismaClient) {
     searchUsers,
     listTeamMembers,
     upgradeTeamMember,
+    listPartnerPayouts,
+    completePartnerPayout: completePartnerPayoutHandler,
     updateUserProfile,
     patchStrategyAutoExit,
     closeManualTrade,

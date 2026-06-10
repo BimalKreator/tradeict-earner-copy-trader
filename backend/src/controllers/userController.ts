@@ -26,6 +26,7 @@ import {
   getPartnerMetrics,
   listPartnerDirectUsers,
 } from "../services/affiliatePartnerService.js";
+import { requestPartnerPayout } from "../services/affiliatePayoutService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -886,6 +887,34 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function requestPartnerPayoutHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const outcome = await requestPartnerPayout(prisma, userId);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.status(200).json({
+        ok: true,
+        payoutRequestId: outcome.payoutRequestId,
+        amount: outcome.amount,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function listPartnerDirectUsersHandler(
     req: Request,
     res: Response,
@@ -927,5 +956,6 @@ export function createUserController(prisma: PrismaClient) {
     getLiveTradesByStrategy,
     getPartnerMetrics: getPartnerMetricsHandler,
     listPartnerDirectUsers: listPartnerDirectUsersHandler,
+    requestPartnerPayout: requestPartnerPayoutHandler,
   };
 }
