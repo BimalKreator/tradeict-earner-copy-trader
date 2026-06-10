@@ -68,7 +68,7 @@ function parseAuthUser(data: unknown): AuthUser | null {
     id: row.id,
     email: row.email,
     name: typeof row.name === "string" ? row.name : null,
-    role: typeof row.role === "string" ? row.role : "USER",
+    role: typeof row.role === "string" ? row.role.trim().toUpperCase() : "USER",
     mobile: typeof row.mobile === "string" ? row.mobile : null,
     address: typeof row.address === "string" ? row.address : null,
     panNumber: typeof row.panNumber === "string" ? row.panNumber : null,

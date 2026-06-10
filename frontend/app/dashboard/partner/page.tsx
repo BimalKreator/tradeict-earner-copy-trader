@@ -20,11 +20,15 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react
 import {
   NominateMemberModal,
   NominateTeamMemberButton,
-  canNominateTeamMember,
 } from "@/components/partner/NominateMemberModal";
 import { useAuth } from "@/context/AuthContext";
 import { resolveApiBase } from "@/lib/apiBase";
-import { SALES_TEAM_ROLE_LABELS, type SalesTeamRole } from "@/lib/roles";
+import {
+  canNominateMembers,
+  isSalesTeamMember as isSalesTeamRole,
+  SALES_TEAM_ROLE_LABELS,
+  type SalesTeamRole,
+} from "@/lib/roles";
 
 type PartnerWallets = {
   earned: number;
@@ -345,7 +349,7 @@ function NetworkHierarchyRow({
 
 export default function PartnerDashboardPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const { user, token, isSalesTeamMember, salesTeamRole } = useAuth();
+  const { user, token, isSalesTeamMember, salesTeamRole, refreshUser } = useAuth();
 
   const [metrics, setMetrics] = useState<PartnerMetrics | null>(null);
   const [network, setNetwork] = useState<NetworkDetails | null>(null);
@@ -359,29 +363,18 @@ export default function PartnerDashboardPage() {
   );
   const [nominateOpen, setNominateOpen] = useState(false);
 
-  const effectiveRole = useMemo((): SalesTeamRole | null => {
-    if (salesTeamRole) return salesTeamRole;
-    if (user?.role && canNominateTeamMember(user.role)) {
-      return user.role as SalesTeamRole;
-    }
-    const fromNetwork = network?.viewerRole;
-    if (fromNetwork && canNominateTeamMember(fromNetwork)) {
-      return fromNetwork as SalesTeamRole;
-    }
-    return null;
-  }, [salesTeamRole, user?.role, network?.viewerRole]);
-
-  const canNominate = effectiveRole === "DIRECTOR" || effectiveRole === "MANAGER";
+  /** Directors & Managers only — use AuthContext user.role directly. */
+  const canNominate = canNominateMembers(user?.role);
 
   const payoutWindowOpen = isLastDayOfUtcMonth();
   const canRequestPayout =
     (metrics?.wallets.withdrawable ?? 0) > 0 && payoutWindowOpen;
 
   const designation =
-    effectiveRole != null
-      ? SALES_TEAM_ROLE_LABELS[effectiveRole]
-      : salesTeamRole != null
-        ? SALES_TEAM_ROLE_LABELS[salesTeamRole]
+    salesTeamRole != null
+      ? SALES_TEAM_ROLE_LABELS[salesTeamRole]
+      : user?.role && isSalesTeamRole(user.role)
+        ? SALES_TEAM_ROLE_LABELS[user.role as SalesTeamRole]
         : "Partner";
 
   const hierarchyHint = useMemo(() => {
@@ -425,6 +418,12 @@ export default function PartnerDashboardPage() {
     setMetrics((await metricsRes.json()) as PartnerMetrics);
     setNetwork((await networkRes.json()) as NetworkDetails);
   }, [apiBase, token]);
+
+  useEffect(() => {
+    if (token) {
+      void refreshUser();
+    }
+  }, [token, refreshUser]);
 
   useEffect(() => {
     if (!isSalesTeamMember || !token) {
@@ -542,9 +541,6 @@ export default function PartnerDashboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
-          {canNominate ? (
-            <NominateTeamMemberButton onClick={() => setNominateOpen(true)} />
-          ) : null}
           <button
             type="button"
             onClick={() => void handleRefresh()}
@@ -578,64 +574,79 @@ export default function PartnerDashboardPage() {
         </div>
       ) : null}
 
+      <section className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/15 via-violet-500/10 to-transparent p-6 shadow-xl sm:p-8">
+        <div
+          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/20 blur-3xl"
+          aria-hidden
+        />
+        <div className="relative flex flex-col gap-6">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold uppercase tracking-widest text-primary/80">
+                Your referral link
+              </p>
+              {loading && !metrics ? (
+                <div className="mt-3 flex items-center gap-2 text-sm text-white/45">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden />
+                  Loading referral code…
+                </div>
+              ) : (
+                <>
+                  <p className="mt-2 font-mono text-lg font-medium text-white sm:text-xl">
+                    {metrics?.referralCode ?? "—"}
+                  </p>
+                  <p className="mt-2 max-w-xl text-sm text-white/50">
+                    Share this code with traders. When they sign up and subscribe, you
+                    earn commission on their revenue share.
+                  </p>
+                  {metrics?.referralCode ? (
+                    <p className="mt-3 truncate font-mono text-xs text-white/35">
+                      {referralSignupUrl(metrics.referralCode)}
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => void copyReferralLink()}
+              disabled={!metrics?.referralCode}
+              className="inline-flex shrink-0 items-center justify-center gap-2 self-start rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {copied ? (
+                <>
+                  <Check className="h-4 w-4" aria-hidden />
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4" aria-hidden />
+                  Copy Link
+                </>
+              )}
+            </button>
+          </div>
+
+          {canNominate ? (
+            <div className="relative border-t border-white/10 pt-5">
+              <p className="mb-3 text-sm text-white/55">
+                Ready to grow your team? Nominate a subscribed user for admin approval.
+              </p>
+              <NominateTeamMemberButton
+                className="w-full sm:w-auto"
+                onClick={() => setNominateOpen(true)}
+              />
+            </div>
+          ) : null}
+        </div>
+      </section>
+
       {loading ? (
         <div className="flex justify-center rounded-2xl border border-glassBorder py-24">
           <Loader2 className="h-9 w-9 animate-spin text-primary" aria-label="Loading" />
         </div>
       ) : metrics ? (
         <>
-          <section className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/15 via-violet-500/10 to-transparent p-6 shadow-xl sm:p-8">
-            <div
-              className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/20 blur-3xl"
-              aria-hidden
-            />
-            <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-widest text-primary/80">
-                  Your referral link
-                </p>
-                <p className="mt-2 font-mono text-lg font-medium text-white sm:text-xl">
-                  {metrics.referralCode ?? "—"}
-                </p>
-                <p className="mt-2 max-w-xl text-sm text-white/50">
-                  Share this code with traders. When they sign up and subscribe, you
-                  earn commission on their revenue share.
-                </p>
-              </div>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                <button
-                  type="button"
-                  onClick={() => void copyReferralLink()}
-                  disabled={!metrics.referralCode}
-                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {copied ? (
-                    <>
-                      <Check className="h-4 w-4" aria-hidden />
-                      Copied!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-4 w-4" aria-hidden />
-                      Copy Link
-                    </>
-                  )}
-                </button>
-                {canNominate ? (
-                  <NominateTeamMemberButton
-                    variant="secondary"
-                    onClick={() => setNominateOpen(true)}
-                  />
-                ) : null}
-              </div>
-            </div>
-            {metrics.referralCode ? (
-              <p className="relative mt-4 truncate font-mono text-xs text-white/35">
-                {referralSignupUrl(metrics.referralCode)}
-              </p>
-            ) : null}
-          </section>
-
           <section>
             <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-white/40">
               Commission wallets
@@ -731,15 +742,7 @@ export default function PartnerDashboardPage() {
                   <p className="mt-0.5 text-sm text-white/45">{hierarchyHint}</p>
                 </div>
                 {network ? (
-                  <div className="flex flex-col items-stretch gap-3 sm:items-end">
-                    {canNominate ? (
-                      <NominateTeamMemberButton
-                        variant="secondary"
-                        className="w-full sm:w-auto"
-                        onClick={() => setNominateOpen(true)}
-                      />
-                    ) : null}
-                    <div className="flex flex-wrap gap-3 text-xs text-white/45">
+                  <div className="flex flex-wrap gap-3 text-xs text-white/45">
                     <span>
                       Profit:{" "}
                       <span className="font-medium tabular-nums text-white/70">
@@ -758,13 +761,7 @@ export default function PartnerDashboardPage() {
                         {fmtUsd(network.stats.totalRevenuePaid)}
                       </span>
                     </span>
-                    </div>
                   </div>
-                ) : canNominate ? (
-                  <NominateTeamMemberButton
-                    variant="secondary"
-                    onClick={() => setNominateOpen(true)}
-                  />
                 ) : null}
               </div>
             </div>

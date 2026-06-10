@@ -2,6 +2,7 @@
 
 import { Loader2, UserPlus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { canNominateMembers } from "@/lib/roles";
 
 export type NominatedRole = "MANAGER" | "EXECUTIVE";
 
@@ -334,5 +335,5 @@ export function NominateTeamMemberButton({
 }
 
 export function canNominateTeamMember(role: string | null | undefined): boolean {
-  return role === "DIRECTOR" || role === "MANAGER";
+  return canNominateMembers(role);
 }
