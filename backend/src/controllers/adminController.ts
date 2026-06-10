@@ -2740,13 +2740,6 @@ export function createAdminController(prisma: PrismaClient) {
         typeof body.userId === "string" ? body.userId.trim() : "";
       const newRoleRaw =
         typeof body.newRole === "string" ? body.newRole.trim().toUpperCase() : "";
-      const parentId =
-        body.parentId === null || body.parentId === undefined
-          ? null
-          : typeof body.parentId === "string"
-            ? body.parentId.trim()
-            : undefined;
-
       if (!userId) {
         res.status(400).json({ error: "userId is required" });
         return;
@@ -2759,15 +2752,23 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
-      if (parentId === "") {
-        res.status(400).json({ error: "parentId cannot be an empty string" });
+      const newRole = newRoleRaw as SalesMemberRole;
+
+      let parentId: string | null = null;
+      if (body.parentId === null || body.parentId === undefined) {
+        parentId = null;
+      } else if (typeof body.parentId === "string") {
+        const trimmed = body.parentId.trim();
+        parentId = trimmed.length > 0 ? trimmed : null;
+      } else {
+        res.status(400).json({ error: "parentId must be a string or null" });
         return;
       }
 
       const result = await upgradeUserToSalesMember(prisma, {
         userId,
-        newRole: newRoleRaw as SalesMemberRole,
-        parentId: parentId ?? null,
+        newRole,
+        parentId,
         adminUserId,
       });
 

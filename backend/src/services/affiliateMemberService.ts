@@ -104,8 +104,11 @@ export function validateParentForSalesRole(
   newRole: SalesMemberRole,
   parent: { id: string; role: Role } | null,
 ): string | null {
+  // Directors sit at the top of the tree — upline is fully optional.
   if (newRole === Role.DIRECTOR) {
-    if (!parent) return null;
+    if (!parent) {
+      return null;
+    }
     if (parent.role !== Role.DIRECTOR) {
       return "A Director's upline must be another Director";
     }
