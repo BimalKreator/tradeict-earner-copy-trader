@@ -65,6 +65,11 @@ import {
   completePartnerPayout,
   listPendingPartnerPayouts,
 } from "../services/affiliatePayoutService.js";
+import {
+  approveMemberUpgradeRequest,
+  listPendingMemberUpgradeRequests,
+  rejectMemberUpgradeRequest,
+} from "../services/affiliateUpgradeRequestService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -2930,6 +2935,78 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listMemberUpgradeRequests(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const requests = await listPendingMemberUpgradeRequests(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json({ requests });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function approveMemberUpgradeRequestHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const id = typeof req.params.id === "string" ? req.params.id.trim() : "";
+      if (!id) {
+        res.status(400).json({ error: "Request id is required" });
+        return;
+      }
+
+      const outcome = await approveMemberUpgradeRequest(
+        prisma,
+        id,
+        adminUserId,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.json({ ok: true, ...outcome.data });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function rejectMemberUpgradeRequestHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = typeof req.params.id === "string" ? req.params.id.trim() : "";
+      if (!id) {
+        res.status(400).json({ error: "Request id is required" });
+        return;
+      }
+
+      const outcome = await rejectMemberUpgradeRequest(prisma, id);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.json({ ok: true, requestId: outcome.data.id });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -2939,6 +3016,9 @@ export function createAdminController(prisma: PrismaClient) {
     searchUsers,
     listTeamMembers,
     upgradeTeamMember,
+    listMemberUpgradeRequests,
+    approveMemberUpgradeRequest: approveMemberUpgradeRequestHandler,
+    rejectMemberUpgradeRequest: rejectMemberUpgradeRequestHandler,
     getNetworkTree,
     changeUserReferrer,
     deleteUserSafely,

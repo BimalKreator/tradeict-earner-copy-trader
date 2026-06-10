@@ -29,6 +29,11 @@ import {
 } from "../services/affiliatePartnerService.js";
 import { requestPartnerPayout } from "../services/affiliatePayoutService.js";
 import { setUserReferrerByCode } from "../services/affiliateMemberService.js";
+import {
+  createMemberUpgradeRequest,
+  getPartnerNominationOptions,
+} from "../services/affiliateUpgradeRequestService.js";
+import { NominatedSalesRole } from "@prisma/client";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -1011,6 +1016,90 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function getPartnerNominationOptionsHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const options = await getPartnerNominationOptions(prisma, userId);
+      if (!options) {
+        res.status(403).json({ error: "Nomination is available to Directors and Managers only" });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json(options);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function nominatePartnerMemberHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as {
+        targetUserEmail?: unknown;
+        requestedRole?: unknown;
+        assignedParentId?: unknown;
+      };
+
+      const targetUserEmail =
+        typeof body.targetUserEmail === "string" ? body.targetUserEmail : "";
+      const assignedParentId =
+        typeof body.assignedParentId === "string" ? body.assignedParentId : "";
+      const roleRaw =
+        typeof body.requestedRole === "string"
+          ? body.requestedRole.trim().toUpperCase()
+          : "";
+
+      if (!targetUserEmail.trim() || !assignedParentId.trim()) {
+        res.status(400).json({
+          error: "targetUserEmail and assignedParentId are required",
+        });
+        return;
+      }
+
+      if (
+        roleRaw !== NominatedSalesRole.EXECUTIVE &&
+        roleRaw !== NominatedSalesRole.MANAGER
+      ) {
+        res.status(400).json({ error: "requestedRole must be MANAGER or EXECUTIVE" });
+        return;
+      }
+
+      const outcome = await createMemberUpgradeRequest(prisma, userId, {
+        targetUserEmail,
+        requestedRole: roleRaw as NominatedSalesRole,
+        assignedParentId,
+      });
+
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.status(201).json({ ok: true, requestId: outcome.data.id });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
     patchMe,
@@ -1028,6 +1117,8 @@ export function createUserController(prisma: PrismaClient) {
     getPartnerMetrics: getPartnerMetricsHandler,
     listPartnerDirectUsers: listPartnerDirectUsersHandler,
     getPartnerNetworkDetails: getPartnerNetworkDetailsHandler,
+    getPartnerNominationOptions: getPartnerNominationOptionsHandler,
+    nominatePartnerMember: nominatePartnerMemberHandler,
     requestPartnerPayout: requestPartnerPayoutHandler,
     setProfileReferrer,
   };

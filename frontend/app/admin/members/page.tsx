@@ -1,6 +1,15 @@
 "use client";
 
-import { Loader2, RefreshCw, UserPlus, UsersRound, X } from "lucide-react";
+import {
+  Check,
+  ClipboardList,
+  Loader2,
+  RefreshCw,
+  UserPlus,
+  UsersRound,
+  X,
+  XCircle,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const ENV_API_BASE =
@@ -49,11 +58,56 @@ type TeamMember = {
 
 type SalesRole = "EXECUTIVE" | "MANAGER" | "DIRECTOR";
 
+type NominatedRole = "EXECUTIVE" | "MANAGER";
+
+type UpgradeRequestRow = {
+  id: string;
+  targetUserEmail: string;
+  requestedRole: NominatedRole;
+  status: string;
+  createdAt: string;
+  requester: {
+    id: string;
+    name: string | null;
+    email: string;
+    role: string;
+  };
+  assignedParent: {
+    id: string;
+    name: string | null;
+    email: string;
+    role: string;
+  };
+  targetUser: {
+    id: string;
+    name: string | null;
+    email: string;
+    role: string;
+  } | null;
+};
+
 const ROLE_LABELS: Record<SalesRole, string> = {
   EXECUTIVE: "Team Executive",
   MANAGER: "Team Manager",
   DIRECTOR: "Team Director",
 };
+
+const NOMINATED_ROLE_LABELS: Record<NominatedRole, string> = {
+  EXECUTIVE: "Team Executive",
+  MANAGER: "Team Manager",
+};
+
+function fmtRequestDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 const usdFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -72,7 +126,11 @@ function roleBadgeClass(role: string): string {
 export default function AdminMembersPage() {
   const apiBase = useMemo(() => resolveAdminApiBase(), []);
 
+  const [activeTab, setActiveTab] = useState<"members" | "nominations">("members");
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [upgradeRequests, setUpgradeRequests] = useState<UpgradeRequestRow[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
@@ -117,9 +175,30 @@ export default function AdminMembersPage() {
     }
   }, [apiBase]);
 
+  const loadUpgradeRequests = useCallback(async () => {
+    setRequestsLoading(true);
+    try {
+      const res = await fetch(`${apiBase}/admin/upgrade-requests`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`Failed to load requests (${res.status})`);
+      const data = (await res.json()) as { requests?: UpgradeRequestRow[] };
+      setUpgradeRequests(data.requests ?? []);
+    } catch (e) {
+      setToast({
+        type: "err",
+        text: e instanceof Error ? e.message : "Could not load nomination requests",
+      });
+      setUpgradeRequests([]);
+    } finally {
+      setRequestsLoading(false);
+    }
+  }, [apiBase]);
+
   useEffect(() => {
     void loadMembers();
-  }, [loadMembers]);
+    void loadUpgradeRequests();
+  }, [loadMembers, loadUpgradeRequests]);
 
   useEffect(() => {
     if (!toast) return;
@@ -226,6 +305,48 @@ export default function AdminMembersPage() {
     }
   }
 
+  async function handleApproveRequest(id: string) {
+    setActionRequestId(id);
+    try {
+      const res = await fetch(`${apiBase}/admin/upgrade-requests/${encodeURIComponent(id)}/approve`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Approval failed");
+      }
+      setToast({ type: "ok", text: "Nomination approved and user upgraded." });
+      await Promise.all([loadUpgradeRequests(), loadMembers()]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Approval failed";
+      setToast({ type: "err", text: msg });
+    } finally {
+      setActionRequestId(null);
+    }
+  }
+
+  async function handleRejectRequest(id: string) {
+    setActionRequestId(id);
+    try {
+      const res = await fetch(`${apiBase}/admin/upgrade-requests/${encodeURIComponent(id)}/reject`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Reject failed");
+      }
+      setToast({ type: "ok", text: "Nomination rejected." });
+      await loadUpgradeRequests();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Reject failed";
+      setToast({ type: "err", text: msg });
+    } finally {
+      setActionRequestId(null);
+    }
+  }
+
   return (
     <div className="mx-auto w-full min-w-0 max-w-6xl space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -276,6 +397,39 @@ export default function AdminMembersPage() {
         </div>
       ) : null}
 
+      <div className="flex gap-1 rounded-xl border border-glassBorder bg-white/[0.03] p-1">
+        <button
+          type="button"
+          onClick={() => setActiveTab("members")}
+          className={`inline-flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+            activeTab === "members"
+              ? "bg-primary/20 text-primary"
+              : "text-white/55 hover:bg-white/[0.06] hover:text-white/80"
+          }`}
+        >
+          <UsersRound className="h-4 w-4" aria-hidden />
+          Team members
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("nominations")}
+          className={`inline-flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+            activeTab === "nominations"
+              ? "bg-primary/20 text-primary"
+              : "text-white/55 hover:bg-white/[0.06] hover:text-white/80"
+          }`}
+        >
+          <ClipboardList className="h-4 w-4" aria-hidden />
+          Nomination requests
+          {upgradeRequests.length > 0 ? (
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+              {upgradeRequests.length}
+            </span>
+          ) : null}
+        </button>
+      </div>
+
+      {activeTab === "members" ? (
       <div className="glass-card border border-glassBorder overflow-hidden">
         <div className="flex items-center gap-2 border-b border-glassBorder bg-white/[0.03] px-4 py-3">
           <UsersRound className="h-4 w-4 text-primary" aria-hidden />
@@ -356,6 +510,127 @@ export default function AdminMembersPage() {
           </table>
         </div>
       </div>
+      ) : (
+      <div className="glass-card border border-glassBorder overflow-hidden">
+        <div className="flex flex-wrap items-center gap-2 border-b border-glassBorder bg-white/[0.03] px-4 py-3">
+          <ClipboardList className="h-4 w-4 text-primary" aria-hidden />
+          <span className="text-sm font-medium text-white/80">Pending nominations</span>
+          <button
+            type="button"
+            onClick={() => void loadUpgradeRequests()}
+            disabled={requestsLoading}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-white/70 hover:bg-white/10 disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${requestsLoading ? "animate-spin" : ""}`}
+              aria-hidden
+            />
+            Refresh
+          </button>
+        </div>
+        <div className="scroll-table overflow-x-auto">
+          <table className="w-full min-w-[960px] text-left text-sm">
+            <thead className="border-b border-glassBorder bg-white/[0.02]">
+              <tr>
+                <th className="px-4 py-3 font-medium text-white/70">Date</th>
+                <th className="px-4 py-3 font-medium text-white/70">Requester</th>
+                <th className="px-4 py-3 font-medium text-white/70">Target email</th>
+                <th className="px-4 py-3 font-medium text-white/70">Requested role</th>
+                <th className="px-4 py-3 font-medium text-white/70">Upline</th>
+                <th className="px-4 py-3 font-medium text-white/70">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requestsLoading ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-white/45">
+                    <Loader2 className="mx-auto h-6 w-6 animate-spin" aria-hidden />
+                    <span className="mt-2 block">Loading nominations…</span>
+                  </td>
+                </tr>
+              ) : upgradeRequests.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-white/45">
+                    No pending nomination requests.
+                  </td>
+                </tr>
+              ) : (
+                upgradeRequests.map((r) => (
+                  <tr
+                    key={r.id}
+                    className="border-b border-white/[0.06] hover:bg-white/[0.02]"
+                  >
+                    <td className="whitespace-nowrap px-4 py-3 text-white/60">
+                      {fmtRequestDate(r.createdAt)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <p className="font-medium text-white">
+                        {r.requester.name?.trim() || r.requester.email}
+                      </p>
+                      <p className="text-xs text-white/40">
+                        {ROLE_LABELS[r.requester.role as SalesRole] ?? r.requester.role}
+                      </p>
+                    </td>
+                    <td className="px-4 py-3">
+                      <p className="text-white/85">{r.targetUserEmail}</p>
+                      {r.targetUser ? (
+                        <p className="text-xs text-white/40">
+                          {r.targetUser.name?.trim() || "Registered user"}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-amber-300/80">User not found</p>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${roleBadgeClass(r.requestedRole)}`}
+                      >
+                        {NOMINATED_ROLE_LABELS[r.requestedRole]}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <p className="text-white/80">
+                        {r.assignedParent.name?.trim() || r.assignedParent.email}
+                      </p>
+                      <p className="text-xs text-white/40">
+                        {ROLE_LABELS[r.assignedParent.role as SalesRole] ??
+                          r.assignedParent.role}
+                      </p>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={actionRequestId === r.id}
+                          onClick={() => void handleApproveRequest(r.id)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-50"
+                        >
+                          {actionRequestId === r.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                          ) : (
+                            <Check className="h-3.5 w-3.5" aria-hidden />
+                          )}
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actionRequestId === r.id}
+                          onClick={() => void handleRejectRequest(r.id)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/15 disabled:opacity-50"
+                        >
+                          <XCircle className="h-3.5 w-3.5" aria-hidden />
+                          Reject
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      )}
 
       {modalOpen ? (
         <div

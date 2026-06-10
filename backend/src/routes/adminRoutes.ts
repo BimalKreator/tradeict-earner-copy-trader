@@ -97,6 +97,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/members", adminController.listTeamMembers);
   router.post("/members/upgrade", adminController.upgradeTeamMember);
+  router.get("/upgrade-requests", adminController.listMemberUpgradeRequests);
+  router.post(
+    "/upgrade-requests/:id/approve",
+    adminController.approveMemberUpgradeRequest,
+  );
+  router.post(
+    "/upgrade-requests/:id/reject",
+    adminController.rejectMemberUpgradeRequest,
+  );
   router.get("/network-tree", adminController.getNetworkTree);
 
   router.get("/payouts", adminController.listPartnerPayouts);

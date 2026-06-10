@@ -45,6 +45,18 @@ enum AffiliateProfileStatus {
   SUSPENDED
 }
 
+/** Sales role a partner may nominate a user for (Director / Manager requests). */
+enum NominatedSalesRole {
+  MANAGER
+  EXECUTIVE
+}
+
+enum MemberUpgradeRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum UserStatus {
   ACTIVE
   SUSPENDED
@@ -163,6 +175,8 @@ model User {
   affiliateUpgradesPerformed AffiliateProfile[] @relation("AffiliateUpgradedBy")
   payoutRequests       PayoutRequest[]
   partnerPayoutsCompleted PayoutRequest[]    @relation("PayoutCompletedBy")
+  upgradeRequestsSubmitted MemberUpgradeRequest[] @relation("UpgradeRequestRequester")
+  upgradeRequestsAsParent  MemberUpgradeRequest[] @relation("UpgradeRequestAssignedParent")
 
   @@index([parentId])
   @@index([acquiredById])
@@ -550,6 +564,25 @@ model AffiliateProfile {
   upgradedBy   User? @relation("AffiliateUpgradedBy", fields: [upgradedById], references: [id], onDelete: SetNull)
 
   @@index([upgradedById])
+}
+
+/** Partner nomination for admin review before sales-role upgrade. */
+model MemberUpgradeRequest {
+  id               String                     @id @default(uuid())
+  targetUserEmail  String
+  requestedRole    NominatedSalesRole
+  requesterId      String
+  assignedParentId String
+  status           MemberUpgradeRequestStatus @default(PENDING)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+
+  requester      User @relation("UpgradeRequestRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  assignedParent User @relation("UpgradeRequestAssignedParent", fields: [assignedParentId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([requesterId])
+  @@index([targetUserEmail])
 }
 
 /**
