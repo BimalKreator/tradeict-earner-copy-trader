@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  AffiliateProfileStatus,
+  PayoutRequestStatus,
   Role,
   SubscriptionStatus,
   TransactionStatus,
@@ -48,14 +50,19 @@ export async function resolveAffiliateUserIdByReferralCode(
   const profile = await prisma.affiliateProfile.findFirst({
     where: {
       OR: [{ referralCode: code }, { referralCode: normalized }],
+      status: AffiliateProfileStatus.ACTIVE,
     },
     select: {
       userId: true,
-      user: { select: { email: true, status: true } },
+      user: { select: { email: true, status: true, role: true } },
     },
   });
 
-  if (!profile || profile.user.status !== UserStatus.ACTIVE) {
+  if (
+    !profile ||
+    profile.user.status !== UserStatus.ACTIVE ||
+    !isSalesMemberRole(profile.user.role)
+  ) {
     return null;
   }
 
@@ -191,6 +198,7 @@ const memberUserSelect = {
       referralCode: true,
       directAcquiredCount: true,
       networkAum: true,
+      status: true,
       upgradedAt: true,
       upgradedById: true,
     },
@@ -213,6 +221,7 @@ export type AdminMemberRow = {
     referralCode: string;
     directAcquiredCount: number;
     networkAum: number;
+    status: AffiliateProfileStatus;
     upgradedAt: Date;
     upgradedById: string | null;
   } | null;
@@ -314,10 +323,12 @@ export async function upgradeUserToSalesMember(
       create: {
         userId,
         referralCode,
+        status: AffiliateProfileStatus.ACTIVE,
         upgradedById: adminUserId,
         upgradedAt: new Date(),
       },
       update: {
+        status: AffiliateProfileStatus.ACTIVE,
         upgradedById: adminUserId,
         upgradedAt: new Date(),
       },
@@ -347,4 +358,108 @@ export async function upgradeUserToSalesMember(
   });
 
   return { ok: true, member };
+}
+
+/**
+ * When a team member is downgraded to USER, suspend (never delete) their affiliate profile.
+ */
+export async function syncAffiliateProfileOnRoleChange(
+  prisma: PrismaClient,
+  userId: string,
+  previousRole: Role,
+  newRole: Role,
+): Promise<void> {
+  const wasSales = isSalesMemberRole(previousRole);
+  const isSales = isSalesMemberRole(newRole);
+
+  if (wasSales && !isSales) {
+    await prisma.affiliateProfile.updateMany({
+      where: { userId },
+      data: { status: AffiliateProfileStatus.SUSPENDED },
+    });
+    return;
+  }
+
+  if (isSales) {
+    await prisma.affiliateProfile.updateMany({
+      where: { userId },
+      data: { status: AffiliateProfileStatus.ACTIVE },
+    });
+  }
+}
+
+export type UserDeletionBlockReason = {
+  ok: false;
+  status: number;
+  message: string;
+};
+
+export type UserDeletionCheck =
+  | { ok: true }
+  | UserDeletionBlockReason;
+
+/**
+ * Block deletes that would orphan downline members or destroy commission history.
+ */
+export async function assertUserSafeToDelete(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<UserDeletionCheck> {
+  const [
+    asBeneficiary,
+    asSource,
+    pendingPayouts,
+    downlineMembers,
+    acquiredUsers,
+  ] = await Promise.all([
+    prisma.commissionLedger.count({ where: { beneficiaryUserId: userId } }),
+    prisma.commissionLedger.count({ where: { sourceUserId: userId } }),
+    prisma.payoutRequest.count({
+      where: { userId, status: PayoutRequestStatus.PENDING },
+    }),
+    prisma.user.count({
+      where: {
+        parentId: userId,
+        role: { in: [...SALES_MEMBER_ROLES] },
+      },
+    }),
+    prisma.user.count({ where: { acquiredById: userId } }),
+  ]);
+
+  if (asBeneficiary > 0 || asSource > 0) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "User has commission ledger history. Suspend the account instead of deleting.",
+    };
+  }
+
+  if (pendingPayouts > 0) {
+    return {
+      ok: false,
+      status: 409,
+      message: "User has a pending partner payout request.",
+    };
+  }
+
+  if (downlineMembers > 0) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "User has active team members in their downline. Reassign or downgrade them first.",
+    };
+  }
+
+  if (acquiredUsers > 0) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "User has acquired referrals. Suspend the partner profile instead of deleting.",
+    };
+  }
+
+  return { ok: true };
 }

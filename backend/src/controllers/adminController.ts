@@ -51,11 +51,14 @@ import {
 } from "../constants/subscription.js";
 import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
 import {
+  assertUserSafeToDelete,
   listSalesMembers,
   SALES_MEMBER_ROLES,
+  syncAffiliateProfileOnRoleChange,
   upgradeUserToSalesMember,
   type SalesMemberRole,
 } from "../services/affiliateMemberService.js";
+import { buildAdminNetworkTree } from "../services/affiliateNetworkService.js";
 import {
   completePartnerPayout,
   listPendingPartnerPayouts,
@@ -794,6 +797,15 @@ export function createAdminController(prisma: PrismaClient) {
             "Provide at least one of firstName, lastName, email, phone, status, role, or arbitrageSourceUserId",
         });
         return;
+      }
+
+      if (data.role !== undefined && data.role !== existing.role) {
+        await syncAffiliateProfileOnRoleChange(
+          prisma,
+          id,
+          existing.role,
+          data.role,
+        );
       }
 
       const user = await prisma.user.update({
@@ -2782,6 +2794,46 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function getNetworkTree(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const payload = await buildAdminNetworkTree(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json(payload);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function deleteUserSafely(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const id = (Array.isArray(rawId) ? rawId[0] : rawId)?.trim();
+      if (!id) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const check = await assertUserSafeToDelete(prisma, id);
+      if (!check.ok) {
+        res.status(check.status).json({ error: check.message });
+        return;
+      }
+
+      await prisma.user.delete({ where: { id } });
+      res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function listPartnerPayouts(
     req: Request,
     res: Response,
@@ -2840,6 +2892,8 @@ export function createAdminController(prisma: PrismaClient) {
     searchUsers,
     listTeamMembers,
     upgradeTeamMember,
+    getNetworkTree,
+    deleteUserSafely,
     listPartnerPayouts,
     completePartnerPayout: completePartnerPayoutHandler,
     updateUserProfile,

@@ -39,6 +39,12 @@ enum PayoutRequestStatus {
   COMPLETED
 }
 
+/** Partner profile lifecycle — suspended when role is downgraded to USER (Phase 10). */
+enum AffiliateProfileStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 enum UserStatus {
   ACTIVE
   SUSPENDED
@@ -525,18 +531,20 @@ model PnLRecord {
  * Stats are cached for dashboards; authoritative counts can be recomputed from relations.
  */
 model AffiliateProfile {
-  id                    String   @id @default(uuid())
-  userId                String   @unique
+  id                    String                 @id @default(uuid())
+  userId                String                 @unique
   /** Public referral code for acquisition links (Phase 4). */
-  referralCode          String   @unique
+  referralCode          String                 @unique
   /** Users directly acquired by this member (`User.acquiredById`). */
-  directAcquiredCount   Int      @default(0)
+  directAcquiredCount   Int                    @default(0)
   /** Sum of subscribed capital under direct + downline network (USD, cached). */
-  networkAum            Float    @default(0)
-  upgradedAt            DateTime @default(now())
+  networkAum            Float                  @default(0)
+  /** SUSPENDED when team role is downgraded — profile retained for ledger history. */
+  status                AffiliateProfileStatus @default(ACTIVE)
+  upgradedAt            DateTime               @default(now())
   upgradedById          String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
   user         User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   upgradedBy   User? @relation("AffiliateUpgradedBy", fields: [upgradedById], references: [id], onDelete: SetNull)

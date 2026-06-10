@@ -97,6 +97,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/members", adminController.listTeamMembers);
   router.post("/members/upgrade", adminController.upgradeTeamMember);
+  router.get("/network-tree", adminController.getNetworkTree);
 
   router.get("/payouts", adminController.listPartnerPayouts);
   router.post("/payouts/:id/complete", adminController.completePartnerPayout);
@@ -578,15 +579,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.put("/users/:id", adminController.updateUserProfile);
 
-  router.delete("/users/:id", async (req, res, next) => {
-    try {
-      const { id } = req.params;
-      await prisma.user.delete({ where: { id } });
-      res.status(204).send();
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.delete("/users/:id", adminController.deleteUserSafely);
 
   router.get("/strategies", async (_req, res, next) => {
     try {
