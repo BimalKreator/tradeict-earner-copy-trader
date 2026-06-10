@@ -13,12 +13,15 @@ import {
   RefreshCw,
   Timer,
   TrendingUp,
-  UserPlus,
   Users,
   Wallet,
-  X,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  NominateMemberModal,
+  NominateTeamMemberButton,
+  canNominateTeamMember,
+} from "@/components/partner/NominateMemberModal";
 import { useAuth } from "@/context/AuthContext";
 import { resolveApiBase } from "@/lib/apiBase";
 import { SALES_TEAM_ROLE_LABELS, type SalesTeamRole } from "@/lib/roles";
@@ -68,29 +71,6 @@ type NetworkDetails = {
     totalMemberCommissionEarned: number;
     totalMemberCommissionPayable: number;
   };
-};
-
-type NominatedRole = "MANAGER" | "EXECUTIVE";
-
-type NominationUplineOption = {
-  id: string;
-  name: string | null;
-  email: string;
-  role: string;
-  label: string;
-};
-
-type NominationOptions = {
-  requesterRole: string;
-  allowedRoles: NominatedRole[];
-  uplineOptions: NominationUplineOption[];
-  defaultUplineId: string;
-  uplineLocked: boolean;
-};
-
-const NOMINATED_ROLE_LABELS: Record<NominatedRole, string> = {
-  EXECUTIVE: "Team Executive",
-  MANAGER: "Team Manager",
 };
 
 const usdFmt = new Intl.NumberFormat("en-US", {
@@ -377,33 +357,32 @@ export default function PartnerDashboardPage() {
   const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
     null,
   );
-
   const [nominateOpen, setNominateOpen] = useState(false);
-  const [nominateLoading, setNominateLoading] = useState(false);
-  const [nominateSubmitting, setNominateSubmitting] = useState(false);
-  const [nominateError, setNominateError] = useState<string | null>(null);
-  const [nominationOptions, setNominationOptions] =
-    useState<NominationOptions | null>(null);
-  const [nominateEmail, setNominateEmail] = useState("");
-  const [nominateRole, setNominateRole] = useState<NominatedRole>("EXECUTIVE");
-  const [nominateUplineId, setNominateUplineId] = useState("");
 
-  const canNominate =
-    salesTeamRole === "MANAGER" || salesTeamRole === "DIRECTOR";
+  const effectiveRole = useMemo((): SalesTeamRole | null => {
+    if (salesTeamRole) return salesTeamRole;
+    if (user?.role && canNominateTeamMember(user.role)) {
+      return user.role as SalesTeamRole;
+    }
+    const fromNetwork = network?.viewerRole;
+    if (fromNetwork && canNominateTeamMember(fromNetwork)) {
+      return fromNetwork as SalesTeamRole;
+    }
+    return null;
+  }, [salesTeamRole, user?.role, network?.viewerRole]);
 
-  const nominateUplineLocked = useMemo(() => {
-    if (!nominationOptions) return true;
-    if (nominationOptions.uplineLocked) return true;
-    if (nominateRole === "MANAGER") return true;
-    return false;
-  }, [nominationOptions, nominateRole]);
+  const canNominate = effectiveRole === "DIRECTOR" || effectiveRole === "MANAGER";
 
   const payoutWindowOpen = isLastDayOfUtcMonth();
   const canRequestPayout =
     (metrics?.wallets.withdrawable ?? 0) > 0 && payoutWindowOpen;
 
   const designation =
-    salesTeamRole != null ? SALES_TEAM_ROLE_LABELS[salesTeamRole] : "Partner";
+    effectiveRole != null
+      ? SALES_TEAM_ROLE_LABELS[effectiveRole]
+      : salesTeamRole != null
+        ? SALES_TEAM_ROLE_LABELS[salesTeamRole]
+        : "Partner";
 
   const hierarchyHint = useMemo(() => {
     const role = (network?.viewerRole ?? salesTeamRole) as SalesTeamRole | undefined;
@@ -528,95 +507,6 @@ export default function PartnerDashboardPage() {
     }
   }
 
-  async function openNominateModal() {
-    if (!token || !canNominate) return;
-    setNominateOpen(true);
-    setNominateError(null);
-    setNominateEmail("");
-    setNominateLoading(true);
-    try {
-      const res = await fetch(`${apiBase}/user/partner/nomination-options`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const body: unknown = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
-            ? (body as { error: string }).error
-            : `Failed to load nomination options (${res.status})`;
-        throw new Error(msg);
-      }
-      const options = body as NominationOptions;
-      setNominationOptions(options);
-      const defaultRole = options.allowedRoles[0] ?? "EXECUTIVE";
-      setNominateRole(defaultRole);
-      setNominateUplineId(options.defaultUplineId);
-    } catch (e) {
-      setNominateError(
-        e instanceof Error ? e.message : "Could not load nomination form",
-      );
-      setNominationOptions(null);
-    } finally {
-      setNominateLoading(false);
-    }
-  }
-
-  async function submitNomination(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token || !nominationOptions) return;
-
-    const email = nominateEmail.trim();
-    if (!email) {
-      setNominateError("Enter the target user's email address.");
-      return;
-    }
-
-    const uplineId = nominateUplineLocked
-      ? nominationOptions.defaultUplineId
-      : nominateUplineId || nominationOptions.defaultUplineId;
-
-    setNominateSubmitting(true);
-    setNominateError(null);
-    try {
-      const res = await fetch(`${apiBase}/user/partner/nominate-member`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          targetUserEmail: email,
-          requestedRole: nominateRole,
-          assignedParentId: uplineId,
-        }),
-      });
-      const body: unknown = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
-            ? (body as { error: string }).error
-            : `Nomination failed (${res.status})`;
-        throw new Error(msg);
-      }
-      setNominateOpen(false);
-      setToast({
-        type: "ok",
-        text: "Nomination submitted. An admin will review your request shortly.",
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Nomination failed";
-      setNominateError(msg);
-    } finally {
-      setNominateSubmitting(false);
-    }
-  }
-
   if (!isSalesTeamMember) {
     return (
       <div className="mx-auto max-w-lg rounded-xl border border-amber-500/30 bg-amber-500/10 px-6 py-8 text-center">
@@ -653,14 +543,7 @@ export default function PartnerDashboardPage() {
 
         <div className="flex flex-wrap items-center gap-2 self-start">
           {canNominate ? (
-            <button
-              type="button"
-              onClick={() => void openNominateModal()}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90"
-            >
-              <UserPlus className="h-4 w-4" aria-hidden />
-              Nominate Team Member
-            </button>
+            <NominateTeamMemberButton onClick={() => setNominateOpen(true)} />
           ) : null}
           <button
             type="button"
@@ -719,24 +602,32 @@ export default function PartnerDashboardPage() {
                   earn commission on their revenue share.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void copyReferralLink()}
-                disabled={!metrics.referralCode}
-                className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-4 w-4" aria-hidden />
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-4 w-4" aria-hidden />
-                    Copy Link
-                  </>
-                )}
-              </button>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <button
+                  type="button"
+                  onClick={() => void copyReferralLink()}
+                  disabled={!metrics.referralCode}
+                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="h-4 w-4" aria-hidden />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-4 w-4" aria-hidden />
+                      Copy Link
+                    </>
+                  )}
+                </button>
+                {canNominate ? (
+                  <NominateTeamMemberButton
+                    variant="secondary"
+                    onClick={() => setNominateOpen(true)}
+                  />
+                ) : null}
+              </div>
             </div>
             {metrics.referralCode ? (
               <p className="relative mt-4 truncate font-mono text-xs text-white/35">
@@ -840,7 +731,15 @@ export default function PartnerDashboardPage() {
                   <p className="mt-0.5 text-sm text-white/45">{hierarchyHint}</p>
                 </div>
                 {network ? (
-                  <div className="flex flex-wrap gap-3 text-xs text-white/45">
+                  <div className="flex flex-col items-stretch gap-3 sm:items-end">
+                    {canNominate ? (
+                      <NominateTeamMemberButton
+                        variant="secondary"
+                        className="w-full sm:w-auto"
+                        onClick={() => setNominateOpen(true)}
+                      />
+                    ) : null}
+                    <div className="flex flex-wrap gap-3 text-xs text-white/45">
                     <span>
                       Profit:{" "}
                       <span className="font-medium tabular-nums text-white/70">
@@ -859,7 +758,13 @@ export default function PartnerDashboardPage() {
                         {fmtUsd(network.stats.totalRevenuePaid)}
                       </span>
                     </span>
+                    </div>
                   </div>
+                ) : canNominate ? (
+                  <NominateTeamMemberButton
+                    variant="secondary"
+                    onClick={() => setNominateOpen(true)}
+                  />
                 ) : null}
               </div>
             </div>
@@ -907,146 +812,14 @@ export default function PartnerDashboardPage() {
         </>
       ) : null}
 
-      {nominateOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="nominate-member-title"
-        >
-          <div className="glass-card max-h-[90vh] w-full max-w-lg overflow-y-auto border border-glassBorder p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2
-                  id="nominate-member-title"
-                  className="text-lg font-semibold text-white"
-                >
-                  Nominate team member
-                </h2>
-                <p className="mt-1 text-sm text-white/50">
-                  Submit a user for admin approval. They must have an active
-                  strategy subscription before upgrade.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setNominateOpen(false)}
-                className="rounded-lg border border-white/10 p-2 text-white/60 hover:bg-white/10 hover:text-white"
-                aria-label="Close"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            {nominateLoading ? (
-              <div className="flex justify-center py-16">
-                <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden />
-              </div>
-            ) : nominationOptions ? (
-              <form
-                onSubmit={(e) => void submitNomination(e)}
-                className="mt-6 space-y-4"
-              >
-                {nominateError ? (
-                  <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-                    {nominateError}
-                  </p>
-                ) : null}
-
-                <label className="block">
-                  <span className="text-xs font-medium text-white/60">
-                    Target user email
-                  </span>
-                  <input
-                    type="email"
-                    value={nominateEmail}
-                    onChange={(e) => setNominateEmail(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2.5 text-sm text-white outline-none ring-primary/30 placeholder:text-white/30 focus:ring-2"
-                    placeholder="trader@example.com"
-                    autoComplete="off"
-                    required
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="text-xs font-medium text-white/60">
-                    Role to assign
-                  </span>
-                  <select
-                    value={nominateRole}
-                    onChange={(e) => {
-                      const role = e.target.value as NominatedRole;
-                      setNominateRole(role);
-                      if (role === "MANAGER") {
-                        setNominateUplineId(nominationOptions.defaultUplineId);
-                      }
-                    }}
-                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2.5 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                  >
-                    {nominationOptions.allowedRoles.map((role) => (
-                      <option key={role} value={role}>
-                        {NOMINATED_ROLE_LABELS[role]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="block">
-                  <span className="text-xs font-medium text-white/60">
-                    Assign upline
-                    {nominateUplineLocked ? " — locked to you" : ""}
-                  </span>
-                  <select
-                    value={
-                      nominateUplineLocked
-                        ? nominationOptions.defaultUplineId
-                        : nominateUplineId
-                    }
-                    onChange={(e) => setNominateUplineId(e.target.value)}
-                    disabled={nominateUplineLocked}
-                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2.5 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {(nominateRole === "MANAGER"
-                      ? nominationOptions.uplineOptions.filter(
-                          (o) => o.id === nominationOptions.defaultUplineId,
-                        )
-                      : nominationOptions.uplineOptions
-                    ).map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setNominateOpen(false)}
-                    className="rounded-lg border border-white/15 px-4 py-2 text-sm text-white/75 hover:bg-white/10"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={nominateSubmitting}
-                    className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
-                  >
-                    {nominateSubmitting ? (
-                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                    ) : null}
-                    Submit nomination
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <p className="mt-6 text-sm text-red-200">
-                {nominateError ?? "Could not load nomination form."}
-              </p>
-            )}
-          </div>
-        </div>
-      ) : null}
+      <NominateMemberModal
+        open={nominateOpen}
+        apiBase={apiBase}
+        token={token}
+        onClose={() => setNominateOpen(false)}
+        onSuccess={(text) => setToast({ type: "ok", text })}
+        onError={(text) => setToast({ type: "err", text })}
+      />
     </div>
   );
 }
