@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect } from "react";
-import { X } from "lucide-react";
+import { useEffect, useMemo } from "react";
+import { Briefcase, X } from "lucide-react";
 import { BrandLogo } from "@/components/BrandLogo";
+import { useAuth } from "@/context/AuthContext";
 
-const links = [
+const baseLinks = [
   { href: "/dashboard", label: "Home" },
   { href: "/dashboard/analytics", label: "Analytics" },
   { href: "/dashboard/strategies", label: "Strategies" },
@@ -18,7 +19,13 @@ const links = [
   { href: "/dashboard/wallet", label: "Wallet" },
   { href: "/dashboard/support", label: "Support" },
   { href: "/dashboard/settings", label: "Settings" },
-];
+] as const;
+
+const partnerLink = {
+  href: "/dashboard/partner",
+  label: "Partner Dashboard",
+  icon: Briefcase,
+} as const;
 
 type DashboardSidebarProps = {
   mobileOpen: boolean;
@@ -27,6 +34,16 @@ type DashboardSidebarProps = {
 
 export function DashboardSidebar({ mobileOpen, onClose }: DashboardSidebarProps) {
   const pathname = usePathname();
+  const { isSalesTeamMember } = useAuth();
+
+  const links = useMemo(() => {
+    if (!isSalesTeamMember) return [...baseLinks];
+    return [
+      baseLinks[0],
+      partnerLink,
+      ...baseLinks.slice(1),
+    ];
+  }, [isSalesTeamMember]);
 
   useEffect(() => {
     onClose();
@@ -55,7 +72,10 @@ export function DashboardSidebar({ mobileOpen, onClose }: DashboardSidebarProps)
         </button>
       </div>
       <nav className="flex flex-1 flex-col gap-1">
-        {links.map(({ href, label }) => {
+        {links.map((item) => {
+          const href = item.href;
+          const label = item.label;
+          const Icon = "icon" in item ? item.icon : null;
           const active =
             href === "/dashboard"
               ? pathname === "/dashboard"
@@ -71,7 +91,10 @@ export function DashboardSidebar({ mobileOpen, onClose }: DashboardSidebarProps)
                   : "text-white/70 hover:bg-white/5 hover:text-white"
               }`}
             >
-              {label}
+              <span className="inline-flex items-center gap-2">
+                {Icon ? <Icon className="h-4 w-4 shrink-0" aria-hidden /> : null}
+                {label}
+              </span>
             </Link>
           );
         })}

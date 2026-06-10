@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
+import { isSalesTeamMember, type SalesTeamRole } from "@/lib/roles";
 
 const TOKEN_STORAGE_KEY = "token";
 
@@ -17,6 +18,7 @@ export type AuthUser = {
   id: string;
   email: string;
   name: string | null;
+  /** USER | ADMIN | EXECUTIVE | MANAGER | DIRECTOR */
   role: string;
   mobile?: string | null;
   address?: string | null;
@@ -31,6 +33,9 @@ type AuthContextValue = {
   isAuthenticated: boolean;
   token: string | null;
   user: AuthUser | null;
+  /** True when role is EXECUTIVE, MANAGER, or DIRECTOR. */
+  isSalesTeamMember: boolean;
+  salesTeamRole: SalesTeamRole | null;
   setSession: (token: string, user?: AuthUser | null) => void;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -187,17 +192,22 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
     setUser(null);
   }, []);
 
+  const salesTeamRole =
+    user && isSalesTeamMember(user.role) ? user.role : null;
+
   const value = useMemo<AuthContextValue>(
     () => ({
       isLoading,
       isAuthenticated: Boolean(user),
       token,
       user,
+      isSalesTeamMember: salesTeamRole != null,
+      salesTeamRole,
       setSession,
       logout,
       refreshUser,
     }),
-    [isLoading, token, user, setSession, logout, refreshUser],
+    [isLoading, token, user, salesTeamRole, setSession, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

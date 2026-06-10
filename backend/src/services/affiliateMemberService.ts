@@ -5,6 +5,7 @@ import {
   TransactionStatus,
   type PrismaClient,
 } from "@prisma/client";
+import { sendWelcomeToTeamMemberEmail } from "./emailService.js";
 
 export const SALES_MEMBER_ROLES = [
   Role.EXECUTIVE,
@@ -198,7 +199,7 @@ export async function upgradeUserToSalesMember(
 
   const target = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, role: true },
+    select: { id: true, email: true, name: true, role: true },
   });
   if (!target) {
     return { ok: false, status: 404, error: "User not found" };
@@ -278,6 +279,20 @@ export async function upgradeUserToSalesMember(
   if (!member) {
     return { ok: false, status: 500, error: "Upgrade succeeded but member could not be loaded" };
   }
+
+  const referralForEmail =
+    member.affiliateProfile?.referralCode ?? referralCode;
+  void sendWelcomeToTeamMemberEmail(
+    target.email,
+    target.name?.trim() || target.email,
+    newRole,
+    referralForEmail,
+  ).catch((err) => {
+    console.error(
+      `[affiliate] welcome email failed userId=${userId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
 
   return { ok: true, member };
 }

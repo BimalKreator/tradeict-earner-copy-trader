@@ -450,6 +450,166 @@ export async function sendBroadcastNotificationEmail(
   });
 }
 
+export type TeamMemberRoleLabel =
+  | "Team Executive"
+  | "Team Manager"
+  | "Team Director";
+
+export function teamMemberRoleLabel(
+  role: "EXECUTIVE" | "MANAGER" | "DIRECTOR",
+): TeamMemberRoleLabel {
+  if (role === "MANAGER") return "Team Manager";
+  if (role === "DIRECTOR") return "Team Director";
+  return "Team Executive";
+}
+
+function partnerDashboardUrl(): string {
+  const base = (process.env.FRONTEND_URL ?? "http://localhost:3000").replace(
+    /\/$/,
+    "",
+  );
+  return `${base}/dashboard/partner`;
+}
+
+function buildWelcomeTeamMemberText(args: {
+  userName: string;
+  designation: TeamMemberRoleLabel;
+  referralCode: string;
+}): string {
+  return [
+    "TradeICT Earner",
+    "",
+    `Dear ${args.userName},`,
+    "",
+    "Welcome to the TradeICT Earner Sales Team.",
+    "",
+    `Your designation: ${args.designation}`,
+    `Your referral code: ${args.referralCode}`,
+    "",
+    "A new Partner Dashboard is now available in your account. Sign in to view your network stats, referral tools, and commission wallets.",
+    "",
+    `Partner Dashboard: ${partnerDashboardUrl()}`,
+    "",
+    "We're excited to have you on the team.",
+    "",
+    "Best regards,",
+    "The TradeICT Earner Team",
+    "Tradeict AI Private Limited",
+  ].join("\n");
+}
+
+function buildWelcomeTeamMemberHtml(args: {
+  userName: string;
+  designation: TeamMemberRoleLabel;
+  referralCode: string;
+}): string {
+  const safeName = escapeHtml(args.userName);
+  const safeDesignation = escapeHtml(args.designation);
+  const safeCode = escapeHtml(args.referralCode);
+  const dashboardUrl = escapeHtml(partnerDashboardUrl());
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to the Sales Team — TradeICT Earner</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0f172a;-webkit-font-smoothing:antialiased;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0f172a;background-image:radial-gradient(ellipse 120% 80% at 50% -20%, rgba(10,132,255,0.14), transparent 55%);padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;margin:0 auto;">
+          <tr>
+            <td style="padding-bottom:28px;text-align:center;">
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:13px;font-weight:600;letter-spacing:0.22em;text-transform:uppercase;color:#38bdf8;">TradeICT</div>
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#f8fafc;margin-top:6px;">TradeICT Earner</div>
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:13px;color:#94a3b8;margin-top:6px;">Sales &amp; Partner Program</div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:linear-gradient(155deg, rgba(30,41,59,0.95) 0%, rgba(15,23,42,0.98) 100%);border-radius:16px;border:1px solid rgba(56,189,248,0.22);box-shadow:0 24px 48px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);overflow:hidden;">
+                <tr>
+                  <td style="padding:36px 32px 32px 32px;">
+                    <p style="margin:0 0 16px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:15px;line-height:1.65;color:#cbd5e1;">
+                      Dear <strong style="color:#f1f5f9;">${safeName}</strong>,
+                    </p>
+                    <p style="margin:0 0 24px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:15px;line-height:1.65;color:#cbd5e1;">
+                      Congratulations — you have been welcomed to the <strong style="color:#f8fafc;">TradeICT Earner Sales Team</strong>. Your partner account is now active.
+                    </p>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;border-collapse:collapse;background:rgba(15,23,42,0.6);border-radius:12px;border:1px solid rgba(56,189,248,0.18);overflow:hidden;">
+                      <tr>
+                        <td style="padding:14px 18px;border-bottom:1px solid rgba(51,65,85,0.8);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:13px;color:#94a3b8;width:42%;">Designation</td>
+                        <td style="padding:14px 18px;border-bottom:1px solid rgba(51,65,85,0.8);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:15px;font-weight:600;color:#38bdf8;">${safeDesignation}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:14px 18px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:13px;color:#94a3b8;">Referral code</td>
+                        <td style="padding:14px 18px;font-family:'SF Mono',Monaco,'Cascadia Code',Consolas,monospace;font-size:16px;font-weight:700;letter-spacing:0.08em;color:#34d399;">${safeCode}</td>
+                      </tr>
+                    </table>
+                    <p style="margin:0 0 20px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:15px;line-height:1.65;color:#cbd5e1;">
+                      A new <strong style="color:#f8fafc;">Partner Dashboard</strong> is now available in your account. Use it to track your network, acquired users, and commission wallets as the program rolls out.
+                    </p>
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 8px auto;">
+                      <tr>
+                        <td align="center" style="border-radius:10px;background:linear-gradient(180deg, #0a84ff 0%, #0066cc 100%);box-shadow:0 8px 24px rgba(10,132,255,0.35);">
+                          <a href="${dashboardUrl}" style="display:inline-block;padding:14px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;">Open Partner Dashboard</a>
+                        </td>
+                      </tr>
+                    </table>
+                    <p style="margin:16px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:12px;line-height:1.5;color:#64748b;text-align:center;">
+                      Or sign in at TradeICT Earner and select <em style="color:#94a3b8;">Partner Dashboard</em> from your sidebar.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding-top:28px;text-align:center;">
+              <p style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:11px;color:#475569;letter-spacing:0.04em;">
+                © TradeICT Earner · Tradeict AI Private Limited
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
+ * Welcome email when an admin upgrades a user to Executive, Manager, or Director.
+ */
+export async function sendWelcomeToTeamMemberEmail(
+  userEmail: string,
+  userName: string,
+  newRole: "EXECUTIVE" | "MANAGER" | "DIRECTOR",
+  referralCode: string,
+): Promise<void> {
+  const designation = teamMemberRoleLabel(newRole);
+  const displayName = userName.trim() || userEmail.split("@")[0] || "Partner";
+  const transport = createMailTransport();
+  await transport.sendMail({
+    from: getFromAddress(),
+    to: userEmail,
+    subject: `Welcome to the TradeICT Earner Sales Team — ${designation}`,
+    text: buildWelcomeTeamMemberText({
+      userName: displayName,
+      designation,
+      referralCode,
+    }),
+    html: buildWelcomeTeamMemberHtml({
+      userName: displayName,
+      designation,
+      referralCode,
+    }),
+  });
+}
+
 export async function sendPasswordResetLinkEmail(
   to: string,
   resetLink: string,
