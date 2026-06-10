@@ -34,6 +34,7 @@ import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import { initArbitrageEngine } from "./services/arbitrageEngine.js";
 import { initBillingCronJobs } from "./services/billingService.js";
+import { initAffiliateCommissionCronJobs } from "./services/affiliateCommissionService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
 import {
   initTelegramBot,
@@ -88,6 +89,7 @@ void (async () => {
 })();
 
 initBillingCronJobs(prisma);
+initAffiliateCommissionCronJobs(prisma);
 initArbitrageEngine(prisma);
 initTelegramBot(prisma);
 initTelegramCronJobs(prisma);

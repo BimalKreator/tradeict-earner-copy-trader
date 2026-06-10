@@ -1,3 +1,4 @@
+import cron from "node-cron";
 import {
   CommissionLedgerStatus,
   InvoiceStatus,
@@ -398,4 +399,49 @@ export async function triggerMarkCommissionsAsPayable(
       err instanceof Error ? err.message : err,
     );
   }
+}
+
+/**
+ * Move PAYABLE commissions past their 30-day unlock window to WITHDRAWABLE.
+ */
+export async function processMaturedCommissions(
+  prisma: PrismaClient,
+): Promise<{ updated: number }> {
+  const now = new Date();
+  const result = await prisma.commissionLedger.updateMany({
+    where: {
+      status: CommissionLedgerStatus.PAYABLE,
+      unlockDate: { lte: now },
+    },
+    data: {
+      status: CommissionLedgerStatus.WITHDRAWABLE,
+      withdrawableAt: now,
+    },
+  });
+
+  console.log(
+    `[affiliate-cron] Processed ${result.count} matured commissions to WITHDRAWABLE state.`,
+  );
+
+  return { updated: result.count };
+}
+
+/** Daily UTC job — matures PAYABLE → WITHDRAWABLE after unlockDate. */
+export function initAffiliateCommissionCronJobs(prisma: PrismaClient): void {
+  cron.schedule(
+    "5 0 * * *",
+    () => {
+      void processMaturedCommissions(prisma).catch((err) => {
+        console.error(
+          "[affiliate-cron] Maturity run failed:",
+          err instanceof Error ? err.message : err,
+        );
+      });
+    },
+    { timezone: "Etc/UTC" },
+  );
+
+  console.log(
+    "[affiliate-cron] Cron: commission maturity @ 00:05 UTC daily",
+  );
 }
