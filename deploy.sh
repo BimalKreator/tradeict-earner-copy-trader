@@ -103,13 +103,19 @@ if [ "${SKIP_FRONTEND:-0}" != "1" ]; then
   npm run build
 
   # Sanity check: confirm the new pages were compiled
-  for p in dashboard/billing dashboard/trades admin/revenue; do
+  for p in dashboard/billing dashboard/trades dashboard/partner admin/revenue; do
     if [ -d ".next/server/app/$p" ]; then
       ok "frontend route /$p compiled"
     else
       warn "frontend route /$p MISSING from .next/ — page may not be on this revision"
     fi
   done
+
+  if grep -rq "Nominate Team Member" .next 2>/dev/null; then
+    ok "partner nominate UI found in .next build"
+  else
+    warn "Nominate Team Member string MISSING from .next/ — partner nominate button may not be deployed"
+  fi
 
   cd "$REPO_ROOT"
 fi

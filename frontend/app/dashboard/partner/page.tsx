@@ -363,8 +363,16 @@ export default function PartnerDashboardPage() {
   );
   const [nominateOpen, setNominateOpen] = useState(false);
 
-  /** Directors & Managers only — use AuthContext user.role directly. */
-  const canNominate = canNominateMembers(user?.role);
+  /** Directors & Managers only — never hide when header already shows Team Director/Manager. */
+  const canNominate = useMemo(() => {
+    if (salesTeamRole === "DIRECTOR" || salesTeamRole === "MANAGER") {
+      return true;
+    }
+    if (canNominateMembers(user?.role) || canNominateMembers(network?.viewerRole)) {
+      return true;
+    }
+    return false;
+  }, [salesTeamRole, user?.role, network?.viewerRole]);
 
   const payoutWindowOpen = isLastDayOfUtcMonth();
   const canRequestPayout =
@@ -541,6 +549,12 @@ export default function PartnerDashboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
+          {canNominate ? (
+            <NominateTeamMemberButton
+              variant="secondary"
+              onClick={() => setNominateOpen(true)}
+            />
+          ) : null}
           <button
             type="button"
             onClick={() => void handleRefresh()}
@@ -607,35 +621,43 @@ export default function PartnerDashboardPage() {
                 </>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => void copyReferralLink()}
-              disabled={!metrics?.referralCode}
-              className="inline-flex shrink-0 items-center justify-center gap-2 self-start rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {copied ? (
-                <>
-                  <Check className="h-4 w-4" aria-hidden />
-                  Copied!
-                </>
-              ) : (
-                <>
-                  <Copy className="h-4 w-4" aria-hidden />
-                  Copy Link
-                </>
-              )}
-            </button>
+            <div className="flex w-full flex-col gap-3 sm:w-auto sm:min-w-[280px]">
+              <button
+                type="button"
+                onClick={() => void copyReferralLink()}
+                disabled={!metrics?.referralCode}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {copied ? (
+                  <>
+                    <Check className="h-4 w-4" aria-hidden />
+                    Copied!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-4 w-4" aria-hidden />
+                    Copy Link
+                  </>
+                )}
+              </button>
+              {canNominate ? (
+                <NominateTeamMemberButton
+                  className="w-full"
+                  onClick={() => setNominateOpen(true)}
+                />
+              ) : null}
+            </div>
           </div>
 
           {canNominate ? (
-            <div className="relative border-t border-white/10 pt-5">
-              <p className="mb-3 text-sm text-white/55">
-                Ready to grow your team? Nominate a subscribed user for admin approval.
+            <div className="relative rounded-xl border border-violet-500/25 bg-violet-500/10 px-4 py-4 sm:px-5">
+              <p className="text-sm font-medium text-violet-100">
+                Grow your downline
               </p>
-              <NominateTeamMemberButton
-                className="w-full sm:w-auto"
-                onClick={() => setNominateOpen(true)}
-              />
+              <p className="mt-1 text-xs leading-relaxed text-white/50">
+                Nominate a user who already has an active strategy subscription.
+                An admin will review and approve the upgrade.
+              </p>
             </div>
           ) : null}
         </div>
@@ -741,7 +763,15 @@ export default function PartnerDashboardPage() {
                   </h2>
                   <p className="mt-0.5 text-sm text-white/45">{hierarchyHint}</p>
                 </div>
-                {network ? (
+                <div className="flex flex-col gap-3 sm:items-end">
+                  {canNominate ? (
+                    <NominateTeamMemberButton
+                      variant="secondary"
+                      className="shrink-0 self-start sm:self-auto"
+                      onClick={() => setNominateOpen(true)}
+                    />
+                  ) : null}
+                  {network ? (
                   <div className="flex flex-wrap gap-3 text-xs text-white/45">
                     <span>
                       Profit:{" "}
@@ -763,6 +793,7 @@ export default function PartnerDashboardPage() {
                     </span>
                   </div>
                 ) : null}
+                </div>
               </div>
             </div>
 

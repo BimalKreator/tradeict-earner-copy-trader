@@ -10,7 +10,11 @@ import {
   type ReactNode,
 } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
-import { isSalesTeamMember, type SalesTeamRole } from "@/lib/roles";
+import {
+  isSalesTeamMember,
+  normalizeUserRole,
+  type SalesTeamRole,
+} from "@/lib/roles";
 
 const TOKEN_STORAGE_KEY = "token";
 
@@ -192,8 +196,11 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
     setUser(null);
   }, []);
 
-  const salesTeamRole =
-    user && isSalesTeamMember(user.role) ? user.role : null;
+  const salesTeamRole = useMemo((): SalesTeamRole | null => {
+    if (!user?.role) return null;
+    const normalized = normalizeUserRole(user.role);
+    return isSalesTeamMember(normalized) ? (normalized as SalesTeamRole) : null;
+  }, [user?.role]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
