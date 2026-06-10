@@ -22,6 +22,10 @@ import {
 } from "../utils/exportService.js";
 import { applyNoStoreCacheHeaders } from "./adminController.js";
 import { getUserLiveTradesByStrategy } from "../services/liveTradesService.js";
+import {
+  getPartnerMetrics,
+  listPartnerDirectUsers,
+} from "../services/affiliatePartnerService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -857,6 +861,56 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function getPartnerMetricsHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const metrics = await getPartnerMetrics(prisma, userId);
+      if (!metrics) {
+        res.status(403).json({ error: "Partner access required" });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json(metrics);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listPartnerDirectUsersHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const users = await listPartnerDirectUsers(prisma, userId);
+      if (!users) {
+        res.status(403).json({ error: "Partner access required" });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json({ users });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
     patchMe,
@@ -871,5 +925,7 @@ export function createUserController(prisma: PrismaClient) {
     exportTrades,
     exportTransactions,
     getLiveTradesByStrategy,
+    getPartnerMetrics: getPartnerMetricsHandler,
+    listPartnerDirectUsers: listPartnerDirectUsersHandler,
   };
 }

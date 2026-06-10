@@ -435,6 +435,47 @@ export async function fetchUserDeltaBalanceForAdmin(
   }
 }
 
+/** Live Delta total balances for a set of user ids (partner network AUM, direct-user table). */
+export async function fetchDeltaBalancesForUserIds(
+  prisma: PrismaClient,
+  userIds: string[],
+): Promise<Map<string, { deltaBalance: number | null; deltaConnected: boolean }>> {
+  if (userIds.length === 0) return new Map();
+
+  const rows = await mapWithConcurrency(
+    userIds,
+    ADMIN_DELTA_BALANCE_CONCURRENCY,
+    async (userId) => ({
+      userId,
+      ...(await fetchUserDeltaBalanceForAdmin(prisma, userId)),
+    }),
+  );
+
+  return new Map(
+    rows.map((row) => [
+      row.userId,
+      {
+        deltaBalance: row.deltaBalance,
+        deltaConnected: row.deltaConnected,
+      },
+    ]),
+  );
+}
+
+export async function sumDeltaBalancesForUserIds(
+  prisma: PrismaClient,
+  userIds: string[],
+): Promise<number> {
+  const balances = await fetchDeltaBalancesForUserIds(prisma, userIds);
+  let sum = 0;
+  for (const row of balances.values()) {
+    if (row.deltaBalance != null && Number.isFinite(row.deltaBalance)) {
+      sum += row.deltaBalance;
+    }
+  }
+  return sum;
+}
+
 /** Sum of `deltaBalance` across all platform users (matches admin Users list column). */
 export async function sumAdminUsersDeltaBalances(
   prisma: PrismaClient,
