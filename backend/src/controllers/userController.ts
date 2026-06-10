@@ -1044,7 +1044,7 @@ export function createUserController(prisma: PrismaClient) {
   async function nominatePartnerMemberHandler(
     req: Request,
     res: Response,
-    next: NextFunction,
+    _next: NextFunction,
   ): Promise<void> {
     try {
       const userId = req.userId;
@@ -1096,7 +1096,14 @@ export function createUserController(prisma: PrismaClient) {
 
       res.status(201).json({ ok: true, requestId: outcome.data.id });
     } catch (err) {
-      next(err);
+      console.error("[POST /api/user/partner/nominate-member] unhandled error:", err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Nomination failed";
+      res.status(500).json({ error: message });
     }
   }
 

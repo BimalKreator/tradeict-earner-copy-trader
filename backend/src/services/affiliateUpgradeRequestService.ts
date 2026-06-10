@@ -1,6 +1,7 @@
 import {
   MemberUpgradeRequestStatus,
   NominatedSalesRole,
+  Prisma,
   Role,
   type PrismaClient,
 } from "@prisma/client";
@@ -57,6 +58,48 @@ type ServiceOk<T> = { ok: true; data: T };
 
 function normalizeEmail(raw: string): string {
   return raw.trim().toLowerCase();
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return "Unexpected error";
+}
+
+function mapPrismaError(err: unknown): ServiceError | null {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError)) {
+    return null;
+  }
+
+  switch (err.code) {
+    case "P2002":
+      return {
+        ok: false,
+        status: 400,
+        error: "A pending nomination already exists for this user",
+      };
+    case "P2003":
+      return {
+        ok: false,
+        status: 400,
+        error: "Invalid requester or upline reference",
+      };
+    case "P2021":
+      return {
+        ok: false,
+        status: 503,
+        error:
+          "MemberUpgradeRequest table is missing. Run `npx prisma migrate deploy` on the server.",
+      };
+    case "P2025":
+      return { ok: false, status: 404, error: "Record not found" };
+    default:
+      return {
+        ok: false,
+        status: 500,
+        error: err.message,
+      };
+  }
 }
 
 function uplineLabel(user: {
@@ -217,99 +260,127 @@ export async function createMemberUpgradeRequest(
   requesterId: string,
   args: CreateNominationArgs,
 ): Promise<ServiceOk<{ id: string }> | ServiceError> {
-  const email = normalizeEmail(args.targetUserEmail);
-  if (!email || !email.includes("@")) {
-    return { ok: false, status: 400, error: "A valid target user email is required" };
-  }
+  try {
+    const email = normalizeEmail(args.targetUserEmail);
+    if (!email || !email.includes("@")) {
+      return {
+        ok: false,
+        status: 400,
+        error: "A valid target user email is required",
+      };
+    }
 
-  const requester = await prisma.user.findUnique({
-    where: { id: requesterId },
-    select: { id: true, role: true, email: true },
-  });
-  if (!requester) {
-    return { ok: false, status: 404, error: "Requester not found" };
-  }
+    const requester = await prisma.user.findUnique({
+      where: { id: requesterId },
+      select: { id: true, role: true, email: true },
+    });
+    if (!requester) {
+      return { ok: false, status: 404, error: "Requester not found" };
+    }
 
-  if (requester.role !== Role.MANAGER && requester.role !== Role.DIRECTOR) {
+    if (requester.role !== Role.MANAGER && requester.role !== Role.DIRECTOR) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Only Directors and Managers may submit nominations",
+      };
+    }
+
+    const roleRaw = args.requestedRole;
+    if (
+      roleRaw !== NominatedSalesRole.EXECUTIVE &&
+      roleRaw !== NominatedSalesRole.MANAGER
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        error: "requestedRole must be MANAGER or EXECUTIVE",
+      };
+    }
+
+    const assignedParentId = args.assignedParentId.trim();
+    if (!assignedParentId) {
+      return { ok: false, status: 400, error: "assignedParentId is required" };
+    }
+
+    const assignment = await validateNominationAssignment(
+      prisma,
+      requester,
+      roleRaw,
+      assignedParentId,
+    );
+    if (!assignment.ok) return assignment;
+
+    const target = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true, email: true, role: true },
+    });
+    if (!target) {
+      return { ok: false, status: 404, error: "User not found" };
+    }
+    if (target.role === Role.ADMIN) {
+      return { ok: false, status: 400, error: "Admin accounts cannot be nominated" };
+    }
+    if (isSalesMemberRole(target.role)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "User is already a team member",
+      };
+    }
+    if (target.id === requesterId) {
+      return { ok: false, status: 400, error: "You cannot nominate yourself" };
+    }
+
+    const existingPending = await prisma.memberUpgradeRequest.findFirst({
+      where: {
+        targetUserEmail: { equals: email, mode: "insensitive" },
+        status: MemberUpgradeRequestStatus.PENDING,
+      },
+      select: { id: true },
+    });
+    if (existingPending) {
+      return {
+        ok: false,
+        status: 400,
+        error: "A pending nomination already exists for this user",
+      };
+    }
+
+    const parent = await prisma.user.findUnique({
+      where: { id: assignment.data.assignedParentId },
+      select: { id: true },
+    });
+    if (!parent) {
+      return { ok: false, status: 400, error: "Assigned upline was not found" };
+    }
+
+    const row = await prisma.memberUpgradeRequest.create({
+      data: {
+        targetUserEmail: email,
+        requestedRole: roleRaw,
+        requesterId,
+        assignedParentId: assignment.data.assignedParentId,
+        status: MemberUpgradeRequestStatus.PENDING,
+      },
+      select: { id: true },
+    });
+
+    return { ok: true, data: { id: row.id } };
+  } catch (err) {
+    console.error("[createMemberUpgradeRequest] full error:", err);
+
+    const prismaMapped = mapPrismaError(err);
+    if (prismaMapped) {
+      return prismaMapped;
+    }
+
     return {
       ok: false,
-      status: 403,
-      error: "Only Directors and Managers may submit nominations",
+      status: 500,
+      error: errorMessage(err),
     };
   }
-
-  const roleRaw = args.requestedRole;
-  if (
-    roleRaw !== NominatedSalesRole.EXECUTIVE &&
-    roleRaw !== NominatedSalesRole.MANAGER
-  ) {
-    return { ok: false, status: 400, error: "requestedRole must be MANAGER or EXECUTIVE" };
-  }
-
-  const assignment = await validateNominationAssignment(
-    prisma,
-    requester,
-    roleRaw,
-    args.assignedParentId.trim(),
-  );
-  if (!assignment.ok) return assignment;
-
-  const target = await prisma.user.findFirst({
-    where: { email: { equals: email, mode: "insensitive" } },
-    select: { id: true, email: true, role: true },
-  });
-  if (!target) {
-    return { ok: false, status: 404, error: "No user found with that email address" };
-  }
-  if (target.role === Role.ADMIN) {
-    return { ok: false, status: 400, error: "Admin accounts cannot be nominated" };
-  }
-  if (isSalesMemberRole(target.role)) {
-    return {
-      ok: false,
-      status: 409,
-      error: "User is already a team member",
-    };
-  }
-  if (target.id === requesterId) {
-    return { ok: false, status: 400, error: "You cannot nominate yourself" };
-  }
-
-  const existingPending = await prisma.memberUpgradeRequest.findFirst({
-    where: {
-      targetUserEmail: email,
-      status: MemberUpgradeRequestStatus.PENDING,
-    },
-    select: { id: true },
-  });
-  if (existingPending) {
-    return {
-      ok: false,
-      status: 409,
-      error: "A pending nomination already exists for this user",
-    };
-  }
-
-  const parent = await prisma.user.findUnique({
-    where: { id: assignment.data.assignedParentId },
-    select: { id: true },
-  });
-  if (!parent) {
-    return { ok: false, status: 400, error: "Assigned upline was not found" };
-  }
-
-  const row = await prisma.memberUpgradeRequest.create({
-    data: {
-      targetUserEmail: email,
-      requestedRole: roleRaw,
-      requesterId,
-      assignedParentId: assignment.data.assignedParentId,
-      status: MemberUpgradeRequestStatus.PENDING,
-    },
-    select: { id: true },
-  });
-
-  return { ok: true, data: { id: row.id } };
 }
 
 export async function listPendingMemberUpgradeRequests(
