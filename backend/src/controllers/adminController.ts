@@ -50,6 +50,12 @@ import {
   MIN_SUBSCRIPTION_MULTIPLIER,
 } from "../constants/subscription.js";
 import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
+import {
+  listSalesMembers,
+  SALES_MEMBER_ROLES,
+  upgradeUserToSalesMember,
+  type SalesMemberRole,
+} from "../services/affiliateMemberService.js";
 
 function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
   if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
@@ -2674,6 +2680,104 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listTeamMembers(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const members = await listSalesMembers(prisma);
+      res.json({
+        members: members.map((m) => ({
+          id: m.id,
+          name: m.name,
+          email: m.email,
+          role: m.role,
+          parentId: m.parentId,
+          parent: m.parent,
+          affiliateProfile: m.affiliateProfile,
+          directAcquiredCount: m.affiliateProfile?.directAcquiredCount ?? 0,
+          networkAum: m.affiliateProfile?.networkAum ?? 0,
+          referralCode: m.affiliateProfile?.referralCode ?? null,
+          upgradedAt: m.affiliateProfile?.upgradedAt ?? null,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function upgradeTeamMember(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as Record<string, unknown>;
+      const userId =
+        typeof body.userId === "string" ? body.userId.trim() : "";
+      const newRoleRaw =
+        typeof body.newRole === "string" ? body.newRole.trim().toUpperCase() : "";
+      const parentId =
+        body.parentId === null || body.parentId === undefined
+          ? null
+          : typeof body.parentId === "string"
+            ? body.parentId.trim()
+            : undefined;
+
+      if (!userId) {
+        res.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      if (!SALES_MEMBER_ROLES.includes(newRoleRaw as SalesMemberRole)) {
+        res.status(400).json({
+          error: "newRole must be EXECUTIVE, MANAGER, or DIRECTOR",
+        });
+        return;
+      }
+
+      if (parentId === "") {
+        res.status(400).json({ error: "parentId cannot be an empty string" });
+        return;
+      }
+
+      const result = await upgradeUserToSalesMember(prisma, {
+        userId,
+        newRole: newRoleRaw as SalesMemberRole,
+        parentId: parentId ?? null,
+        adminUserId,
+      });
+
+      if (!result.ok) {
+        res.status(result.status).json({ error: result.error });
+        return;
+      }
+
+      const m = result.member;
+      res.status(200).json({
+        ok: true,
+        member: {
+          id: m.id,
+          name: m.name,
+          email: m.email,
+          role: m.role,
+          parentId: m.parentId,
+          parent: m.parent,
+          affiliateProfile: m.affiliateProfile,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -2681,6 +2785,8 @@ export function createAdminController(prisma: PrismaClient) {
     listUsersMinimal,
     listUsersForAdmin,
     searchUsers,
+    listTeamMembers,
+    upgradeTeamMember,
     updateUserProfile,
     patchStrategyAutoExit,
     closeManualTrade,

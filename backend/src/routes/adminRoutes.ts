@@ -95,6 +95,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/users/list", adminController.listUsersMinimal);
   router.get("/users/search", adminController.searchUsers);
 
+  router.get("/members", adminController.listTeamMembers);
+  router.post("/members/upgrade", adminController.upgradeTeamMember);
+
   router.get("/users", adminController.listUsersForAdmin);
 
   router.get("/users/:id/management", async (req, res, next) => {

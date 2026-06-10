@@ -17,6 +17,7 @@ import {
   Settings,
   Tag,
   Users,
+  UsersRound,
   Wallet,
   X,
 } from "lucide-react";
@@ -25,6 +26,7 @@ const links = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
   { href: "/admin/users", label: "Users", icon: Users },
+  { href: "/admin/members", label: "Members", icon: UsersRound },
   { href: "/admin/strategies", label: "Strategies", icon: LineChart },
   { href: "/admin/coupons", label: "Coupons", icon: Tag },
   { href: "/admin/notifications", label: "Notifications", icon: Bell },
