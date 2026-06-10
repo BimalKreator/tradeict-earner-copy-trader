@@ -24,6 +24,7 @@ import { applyNoStoreCacheHeaders } from "./adminController.js";
 import { getUserLiveTradesByStrategy } from "../services/liveTradesService.js";
 import {
   getPartnerMetrics,
+  getPartnerNetworkDetails,
   listPartnerDirectUsers,
 } from "../services/affiliatePartnerService.js";
 import { requestPartnerPayout } from "../services/affiliatePayoutService.js";
@@ -985,6 +986,31 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function getPartnerNetworkDetailsHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const payload = await getPartnerNetworkDetails(prisma, userId);
+      if (!payload) {
+        res.status(403).json({ error: "Partner access required" });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json(payload);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
     patchMe,
@@ -1001,6 +1027,7 @@ export function createUserController(prisma: PrismaClient) {
     getLiveTradesByStrategy,
     getPartnerMetrics: getPartnerMetricsHandler,
     listPartnerDirectUsers: listPartnerDirectUsersHandler,
+    getPartnerNetworkDetails: getPartnerNetworkDetailsHandler,
     requestPartnerPayout: requestPartnerPayoutHandler,
     setProfileReferrer,
   };

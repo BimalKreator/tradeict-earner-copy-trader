@@ -3,8 +3,11 @@
 import {
   Briefcase,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Crown,
+  GitBranch,
   Loader2,
   Lock,
   RefreshCw,
@@ -16,7 +19,7 @@ import {
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { resolveApiBase } from "@/lib/apiBase";
-import { SALES_TEAM_ROLE_LABELS } from "@/lib/roles";
+import { SALES_TEAM_ROLE_LABELS, type SalesTeamRole } from "@/lib/roles";
 
 type PartnerWallets = {
   earned: number;
@@ -31,14 +34,38 @@ type PartnerMetrics = {
   wallets: PartnerWallets;
 };
 
-type DirectUser = {
+type UserFinancials = {
+  totalProfitGenerated: number;
+  totalRevenueShareDue: number;
+  totalRevenuePaid: number;
+  memberCommissionEarned: number;
+  memberCommissionPayable: number;
+};
+
+type NetworkNode = {
   id: string;
   name: string | null;
   email: string;
-  joinedAt: string;
-  strategyStatus: string;
-  currentBalance: number | null;
-  deltaConnected: boolean;
+  role: string;
+  nodeType: "member" | "user";
+  depth: number;
+  joinedAt: string | null;
+  financials: UserFinancials | null;
+  children: NetworkNode[];
+};
+
+type NetworkDetails = {
+  viewerRole: string;
+  tree: NetworkNode[];
+  stats: {
+    totalTeamMembers: number;
+    totalUsers: number;
+    totalProfitGenerated: number;
+    totalRevenueShareDue: number;
+    totalRevenuePaid: number;
+    totalMemberCommissionEarned: number;
+    totalMemberCommissionPayable: number;
+  };
 };
 
 const usdFmt = new Intl.NumberFormat("en-US", {
@@ -53,7 +80,8 @@ function fmtUsd(n: number | null | undefined): string {
   return usdFmt.format(Math.max(0, n));
 }
 
-function fmtDate(iso: string): string {
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString(undefined, {
@@ -78,6 +106,32 @@ function referralSignupUrl(code: string): string {
       : (process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/$/, "") ??
         "https://tradeict.com");
   return `${origin}/signup?ref=${encodeURIComponent(code)}`;
+}
+
+function roleBadgeClass(role: string): string {
+  if (role === "DIRECTOR") {
+    return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
+  }
+  if (role === "MANAGER") {
+    return "bg-sky-500/15 text-sky-200 ring-sky-500/30";
+  }
+  if (role === "EXECUTIVE") {
+    return "bg-emerald-500/15 text-emerald-200 ring-emerald-500/30";
+  }
+  return "bg-white/10 text-white/70 ring-white/20";
+}
+
+function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
+  if (nodeType === "user") return "Trader";
+  if (role === "DIRECTOR") return "Director";
+  if (role === "MANAGER") return "Manager";
+  if (role === "EXECUTIVE") return "Executive";
+  return role;
+}
+
+function countDescendantUsers(node: NetworkNode): number {
+  if (node.nodeType === "user") return 1;
+  return node.children.reduce((sum, child) => sum + countDescendantUsers(child), 0);
 }
 
 function WalletCard({
@@ -168,12 +222,126 @@ function StatCard({
   );
 }
 
+function UserFinancialCells({ financials }: { financials: UserFinancials }) {
+  return (
+    <>
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-white/75 lg:table-cell xl:px-5">
+        {fmtUsd(financials.totalProfitGenerated)}
+      </td>
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-white/75 lg:table-cell xl:px-5">
+        {fmtUsd(financials.totalRevenueShareDue)}
+      </td>
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-emerald-200/90 lg:table-cell xl:px-5">
+        {fmtUsd(financials.totalRevenuePaid)}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums xl:px-5">
+        <span className="text-amber-200/90">
+          {fmtUsd(financials.memberCommissionEarned)}
+        </span>
+        <span className="text-white/30"> / </span>
+        <span className="text-sky-200/90">
+          {fmtUsd(financials.memberCommissionPayable)}
+        </span>
+      </td>
+    </>
+  );
+}
+
+function NetworkHierarchyRow({
+  node,
+  defaultExpanded,
+}: {
+  node: NetworkNode;
+  defaultExpanded: boolean;
+}) {
+  const hasChildren = node.children.length > 0;
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const indent = node.depth * 18;
+  const descendantUsers = countDescendantUsers(node);
+
+  return (
+    <>
+      <tr className="border-b border-glassBorder/60 transition hover:bg-white/[0.02]">
+        <td className="px-4 py-3.5 xl:px-5" style={{ paddingLeft: `${16 + indent}px` }}>
+          <div className="flex min-w-0 items-center gap-2">
+            {hasChildren ? (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="shrink-0 rounded-md p-1 text-white/45 transition hover:bg-white/10 hover:text-white"
+                aria-expanded={expanded}
+                aria-label={expanded ? "Collapse" : "Expand"}
+              >
+                {expanded ? (
+                  <ChevronDown className="h-4 w-4" aria-hidden />
+                ) : (
+                  <ChevronRight className="h-4 w-4" aria-hidden />
+                )}
+              </button>
+            ) : (
+              <span className="inline-block w-6 shrink-0" aria-hidden />
+            )}
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="truncate font-medium text-white">
+                  {node.name?.trim() || node.email}
+                </p>
+                <span
+                  className={`inline-flex shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${roleBadgeClass(node.role)}`}
+                >
+                  {roleLabel(node.role, node.nodeType)}
+                </span>
+              </div>
+              {node.name?.trim() ? (
+                <p className="mt-0.5 truncate text-xs text-white/40">{node.email}</p>
+              ) : null}
+              {node.nodeType === "member" ? (
+                <p className="mt-1 text-[11px] text-white/35">
+                  {descendantUsers} trader{descendantUsers === 1 ? "" : "s"} in branch
+                  {hasChildren
+                    ? ` · ${node.children.length} direct report${node.children.length === 1 ? "" : "s"}`
+                    : ""}
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-white/35">
+                  Joined {fmtDate(node.joinedAt)}
+                </p>
+              )}
+            </div>
+          </div>
+        </td>
+
+        {node.nodeType === "user" && node.financials ? (
+          <UserFinancialCells financials={node.financials} />
+        ) : (
+          <td
+            colSpan={4}
+            className="px-4 py-3 text-right text-xs text-white/25 xl:px-5"
+          >
+            —
+          </td>
+        )}
+      </tr>
+
+      {hasChildren && expanded
+        ? node.children.map((child) => (
+            <NetworkHierarchyRow
+              key={child.id}
+              node={child}
+              defaultExpanded={child.depth < 1}
+            />
+          ))
+        : null}
+    </>
+  );
+}
+
 export default function PartnerDashboardPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
   const { user, token, isSalesTeamMember, salesTeamRole } = useAuth();
 
   const [metrics, setMetrics] = useState<PartnerMetrics | null>(null);
-  const [directUsers, setDirectUsers] = useState<DirectUser[]>([]);
+  const [network, setNetwork] = useState<NetworkDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,13 +358,27 @@ export default function PartnerDashboardPage() {
   const designation =
     salesTeamRole != null ? SALES_TEAM_ROLE_LABELS[salesTeamRole] : "Partner";
 
+  const hierarchyHint = useMemo(() => {
+    const role = (network?.viewerRole ?? salesTeamRole) as SalesTeamRole | undefined;
+    if (role === "DIRECTOR") {
+      return "Managers → Executives → Traders across your full downline";
+    }
+    if (role === "MANAGER") {
+      return "Your Executives and their traders, plus your direct referrals";
+    }
+    if (role === "EXECUTIVE") {
+      return "Traders who signed up with your referral code";
+    }
+    return "Your partner network";
+  }, [network?.viewerRole, salesTeamRole]);
+
   const loadData = useCallback(async () => {
     if (!token) throw new Error("Not signed in");
 
     const headers = { Authorization: `Bearer ${token}` };
-    const [metricsRes, usersRes] = await Promise.all([
+    const [metricsRes, networkRes] = await Promise.all([
       fetch(`${apiBase}/user/partner/metrics`, { headers }),
-      fetch(`${apiBase}/user/partner/direct-users`, { headers }),
+      fetch(`${apiBase}/user/partner/network-details`, { headers }),
     ]);
 
     if (!metricsRes.ok) {
@@ -206,13 +388,16 @@ export default function PartnerDashboardPage() {
           : `Failed to load partner metrics (${metricsRes.status})`,
       );
     }
-    if (!usersRes.ok) {
-      throw new Error(`Failed to load direct users (${usersRes.status})`);
+    if (!networkRes.ok) {
+      throw new Error(
+        networkRes.status === 403
+          ? "Partner access required"
+          : `Failed to load network details (${networkRes.status})`,
+      );
     }
 
     setMetrics((await metricsRes.json()) as PartnerMetrics);
-    const usersBody = (await usersRes.json()) as { users: DirectUser[] };
-    setDirectUsers(usersBody.users ?? []);
+    setNetwork((await networkRes.json()) as NetworkDetails);
   }, [apiBase, token]);
 
   useEffect(() => {
@@ -470,74 +655,101 @@ export default function PartnerDashboardPage() {
             </div>
           </section>
 
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard
-              label="Direct users acquired"
-              value={String(metrics.directAcquiredCount)}
-              sub="Traders who signed up with your referral code"
+              label="Team members"
+              value={String(network?.stats.totalTeamMembers ?? 0)}
+              sub="Managers & executives in your downline"
+              icon={<GitBranch className="h-6 w-6" aria-hidden />}
+            />
+            <StatCard
+              label="Network traders"
+              value={String(network?.stats.totalUsers ?? metrics.directAcquiredCount)}
+              sub="All acquired users in your hierarchy"
               icon={<Users className="h-6 w-6" aria-hidden />}
             />
             <StatCard
               label="Network AUM"
               value={fmtUsd(metrics.networkAum)}
-              sub="Live Delta balances across your direct referrals"
+              sub="Live Delta balances across direct referrals"
               icon={<TrendingUp className="h-6 w-6" aria-hidden />}
+            />
+            <StatCard
+              label="Your commission"
+              value={`${fmtUsd(network?.stats.totalMemberCommissionEarned ?? 0)} / ${fmtUsd(network?.stats.totalMemberCommissionPayable ?? 0)}`}
+              sub="Earned / Payable from network traders"
+              icon={<Wallet className="h-6 w-6" aria-hidden />}
             />
           </section>
 
           <section className="glass-card overflow-hidden border border-glassBorder">
             <div className="border-b border-glassBorder bg-white/[0.03] px-5 py-4 sm:px-6">
-              <h2 className="text-lg font-semibold text-white">Direct users</h2>
-              <p className="mt-0.5 text-sm text-white/45">
-                Everyone who joined through your referral link
-              </p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">
+                    Network Hierarchy & Revenue
+                  </h2>
+                  <p className="mt-0.5 text-sm text-white/45">{hierarchyHint}</p>
+                </div>
+                {network ? (
+                  <div className="flex flex-wrap gap-3 text-xs text-white/45">
+                    <span>
+                      Profit:{" "}
+                      <span className="font-medium tabular-nums text-white/70">
+                        {fmtUsd(network.stats.totalProfitGenerated)}
+                      </span>
+                    </span>
+                    <span>
+                      Revenue due:{" "}
+                      <span className="font-medium tabular-nums text-white/70">
+                        {fmtUsd(network.stats.totalRevenueShareDue)}
+                      </span>
+                    </span>
+                    <span>
+                      Paid:{" "}
+                      <span className="font-medium tabular-nums text-emerald-200/90">
+                        {fmtUsd(network.stats.totalRevenuePaid)}
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
-            {directUsers.length === 0 ? (
+            {!network || network.tree.length === 0 ? (
               <div className="px-6 py-14 text-center text-sm text-white/45">
-                No direct referrals yet. Share your link to start building your network.
+                No network traders yet. Share your referral link to grow your hierarchy.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-glassBorder bg-white/[0.02] text-xs uppercase tracking-wider text-white/40">
+                <table className="min-w-[920px] w-full text-left text-sm">
+                  <thead className="border-b border-glassBorder bg-white/[0.02] text-[11px] uppercase tracking-wider text-white/40">
                     <tr>
-                      <th className="px-5 py-3 font-medium sm:px-6">User</th>
-                      <th className="px-5 py-3 font-medium sm:px-6">Joined</th>
-                      <th className="px-5 py-3 font-medium sm:px-6">Strategy</th>
-                      <th className="px-5 py-3 font-medium text-right sm:px-6">
-                        Delta balance
+                      <th className="px-4 py-3 font-medium xl:px-5">Member / Trader</th>
+                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                        Total Profit
+                      </th>
+                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                        App Revenue Share
+                      </th>
+                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                        Revenue Paid
+                      </th>
+                      <th className="px-4 py-3 text-right font-medium xl:px-5">
+                        Your Commission
+                        <span className="mt-0.5 block text-[10px] font-normal normal-case tracking-normal text-white/30">
+                          Earned / Payable
+                        </span>
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-glassBorder/80">
-                    {directUsers.map((row) => (
-                      <tr
-                        key={row.id}
-                        className="transition hover:bg-white/[0.02]"
-                      >
-                        <td className="px-5 py-4 sm:px-6">
-                          <p className="font-medium text-white">
-                            {row.name?.trim() || "—"}
-                          </p>
-                          <p className="mt-0.5 text-xs text-white/45">{row.email}</p>
-                        </td>
-                        <td className="whitespace-nowrap px-5 py-4 text-white/70 sm:px-6">
-                          {fmtDate(row.joinedAt)}
-                        </td>
-                        <td className="max-w-[200px] px-5 py-4 text-white/65 sm:max-w-xs sm:px-6">
-                          {row.strategyStatus}
-                        </td>
-                        <td className="whitespace-nowrap px-5 py-4 text-right tabular-nums sm:px-6">
-                          {row.currentBalance != null ? (
-                            <span className="text-white">{fmtUsd(row.currentBalance)}</span>
-                          ) : row.deltaConnected ? (
-                            <span className="text-white/35">Unavailable</span>
-                          ) : (
-                            <span className="text-white/35">Not connected</span>
-                          )}
-                        </td>
-                      </tr>
+                  <tbody>
+                    {network.tree.map((root) => (
+                      <NetworkHierarchyRow
+                        key={root.id}
+                        node={root}
+                        defaultExpanded
+                      />
                     ))}
                   </tbody>
                 </table>
