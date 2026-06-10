@@ -9,7 +9,7 @@ type AdminHeaderProps = {
 
 export function AdminHeader({ onMenuClick }: AdminHeaderProps) {
   return (
-    <header className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-glassBorder bg-white/[0.03] px-4 py-3">
+    <header className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-glassBorder bg-white/[0.03] px-3 py-2.5 sm:mb-6 sm:px-4 sm:py-3">
       <div className="flex min-w-0 items-center gap-3">
         <button
           type="button"

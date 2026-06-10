@@ -58,3 +58,16 @@ body {
   overscroll-behavior-x: contain;
   touch-action: pan-x pan-y;
 }
+
+/** Admin main content — contain wide tables/charts on small screens. */
+.admin-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.admin-content .scroll-table,
+.admin-content .overflow-x-auto {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}

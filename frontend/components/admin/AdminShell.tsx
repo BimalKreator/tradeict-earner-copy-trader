@@ -26,7 +26,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   }, [isMobileOpen]);
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-background">
       <AdminSidebar isMobileOpen={isMobileOpen} onClose={closeMobile} />
 
       {isMobileOpen ? (
@@ -38,9 +38,13 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
         />
       ) : null}
 
-      <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6 md:p-8 lg:p-10">
-        <AdminHeader onMenuClick={openMobile} />
-        {children}
+      <main className="min-w-0 flex-1 w-full max-w-full overflow-x-hidden overflow-y-auto p-4 sm:p-6 md:p-8 lg:p-10">
+        <div className="mx-auto w-full min-w-0 max-w-full">
+          <AdminHeader onMenuClick={openMobile} />
+          <div className="admin-content w-full min-w-0 max-w-full overflow-x-hidden">
+            {children}
+          </div>
+        </div>
       </main>
     </div>
   );

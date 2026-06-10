@@ -227,8 +227,8 @@ export default function AdminPayoutsPage() {
             No pending partner payout requests.
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
+          <div className="scroll-table w-full overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-sm">
               <thead className="border-b border-glassBorder bg-white/[0.03] text-xs uppercase tracking-wider text-white/40">
                 <tr>
                   <th className="px-5 py-3 font-medium sm:px-6">Partner</th>

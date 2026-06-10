@@ -76,7 +76,7 @@ export default function AdminDashboardPage() {
   }, [headers]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-8">
+    <div className="mx-auto w-full min-w-0 max-w-7xl space-y-8">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
           Admin Command Center

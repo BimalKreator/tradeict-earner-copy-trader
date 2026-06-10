@@ -227,7 +227,7 @@ export default function AdminNetworkPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="w-full min-w-0 space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-4">
           <div className="rounded-xl border border-violet-500/30 bg-violet-500/10 p-3">
