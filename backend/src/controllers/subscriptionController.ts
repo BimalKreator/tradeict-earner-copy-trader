@@ -11,6 +11,7 @@ import {
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
 import { logUserActivity } from "../services/userActivityService.js";
+import { triggerAffiliateCommissionDistribution } from "../services/affiliateCommissionService.js";
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
 export async function recordTradePnl(
@@ -40,7 +41,7 @@ export async function recordTradePnl(
 
   const commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
 
-  await prisma.pnLRecord.create({
+  const row = await prisma.pnLRecord.create({
     data: {
       userId: args.userId,
       strategyId: args.strategyId,
@@ -48,6 +49,15 @@ export async function recordTradePnl(
       commissionAmount,
     },
   });
+
+  if (commissionAmount > 0 && args.tradeProfit > 0) {
+    void triggerAffiliateCommissionDistribution(prisma, {
+      sourceUserId: args.userId,
+      pnlRecordId: row.id,
+      appRevenueBase: commissionAmount,
+      profitDate: row.timestamp,
+    });
+  }
 }
 
 export function createSubscriptionController(prisma: PrismaClient) {
