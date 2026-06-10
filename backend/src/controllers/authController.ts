@@ -13,6 +13,10 @@ import {
   setAuthCookie,
   signAuthToken,
 } from "../utils/authToken.js";
+import {
+  incrementAffiliateDirectAcquiredCount,
+  resolveAffiliateUserIdByReferralCode,
+} from "../services/affiliateMemberService.js";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const BCRYPT_ROUNDS = 12;
@@ -172,6 +176,8 @@ export function createAuthController(prisma: PrismaClient) {
       const password =
         typeof body.password === "string" ? body.password : "";
       const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+      const referralCode =
+        typeof body.referralCode === "string" ? body.referralCode.trim() : "";
 
       if (!name || !email || !mobile || !password || !otp) {
         res.status(400).json({
@@ -218,6 +224,14 @@ export function createAuthController(prisma: PrismaClient) {
 
       const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
+      const acquiredById = referralCode
+        ? await resolveAffiliateUserIdByReferralCode(
+            prisma,
+            referralCode,
+            email,
+          )
+        : null;
+
       await prisma.$transaction(async (tx) => {
         await tx.user.create({
           data: {
@@ -226,8 +240,12 @@ export function createAuthController(prisma: PrismaClient) {
             name,
             mobile,
             role: Role.USER,
+            ...(acquiredById ? { acquiredById } : {}),
           },
         });
+        if (acquiredById) {
+          await incrementAffiliateDirectAcquiredCount(tx, acquiredById);
+        }
         await tx.otpRecord.delete({ where: { id: record.id } });
       });
 

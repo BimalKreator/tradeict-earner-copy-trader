@@ -3,6 +3,8 @@ import {
   Role,
   SubscriptionStatus,
   TransactionStatus,
+  UserStatus,
+  type Prisma,
   type PrismaClient,
 } from "@prisma/client";
 import { sendWelcomeToTeamMemberEmail } from "./emailService.js";
@@ -24,6 +26,56 @@ export function isSalesMemberRole(role: Role): role is SalesMemberRole {
     role === Role.MANAGER ||
     role === Role.DIRECTOR
   );
+}
+
+function normalizeReferralCodeInput(raw: string): string {
+  return raw.trim().toUpperCase();
+}
+
+/**
+ * Resolve a public referral code to the affiliate's user id (signup acquisition).
+ * Returns null when code is missing, unknown, inactive affiliate, or self-referral.
+ */
+export async function resolveAffiliateUserIdByReferralCode(
+  prisma: PrismaClient,
+  referralCode: string | null | undefined,
+  signupEmail?: string,
+): Promise<string | null> {
+  const code = referralCode?.trim();
+  if (!code) return null;
+
+  const normalized = normalizeReferralCodeInput(code);
+  const profile = await prisma.affiliateProfile.findFirst({
+    where: {
+      OR: [{ referralCode: code }, { referralCode: normalized }],
+    },
+    select: {
+      userId: true,
+      user: { select: { email: true, status: true } },
+    },
+  });
+
+  if (!profile || profile.user.status !== UserStatus.ACTIVE) {
+    return null;
+  }
+
+  const emailNorm = signupEmail?.trim().toLowerCase();
+  if (emailNorm && profile.user.email.toLowerCase() === emailNorm) {
+    return null;
+  }
+
+  return profile.userId;
+}
+
+/** Bump direct acquisition counter after a referred user signs up. */
+export async function incrementAffiliateDirectAcquiredCount(
+  tx: Prisma.TransactionClient,
+  affiliateUserId: string,
+): Promise<void> {
+  await tx.affiliateProfile.update({
+    where: { userId: affiliateUserId },
+    data: { directAcquiredCount: { increment: 1 } },
+  });
 }
 
 /** At least one deployed copy subscription; paid strategies require an approved gateway payment. */

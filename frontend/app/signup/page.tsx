@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "details" | "otp";
@@ -29,8 +29,19 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [referralCode, setReferralCode] = useState("");
+  const [referralLockedFromUrl, setReferralLockedFromUrl] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const ref = new URLSearchParams(window.location.search).get("ref")?.trim();
+    if (ref) {
+      setReferralCode(ref);
+      setReferralLockedFromUrl(true);
+    }
+  }, []);
 
   async function handleDetailsSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -72,6 +83,9 @@ export default function SignupPage() {
           mobile: mobile.trim(),
           password,
           otp: otp.trim(),
+          ...(referralCode.trim()
+            ? { referralCode: referralCode.trim() }
+            : {}),
         }),
       });
       if (!res.ok) {
@@ -173,6 +187,37 @@ export default function SignupPage() {
               />
             </label>
 
+            <label className="block">
+              <span className="text-xs font-medium text-white/60">
+                Referral code{" "}
+                <span className="font-normal text-white/40">(optional)</span>
+              </span>
+              <input
+                type="text"
+                name="referralCode"
+                autoComplete="off"
+                value={referralCode}
+                onChange={(e) => {
+                  if (!referralLockedFromUrl) {
+                    setReferralCode(e.target.value);
+                  }
+                }}
+                readOnly={referralLockedFromUrl}
+                disabled={loading}
+                className={`mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/30 placeholder:text-white/35 focus:ring-2 disabled:opacity-50 ${
+                  referralLockedFromUrl
+                    ? "cursor-default border-primary/25 bg-primary/5 font-mono tracking-wide text-primary/90"
+                    : ""
+                }`}
+                placeholder="TICT-PARTNER-A1B2C3"
+              />
+              {referralLockedFromUrl ? (
+                <p className="mt-1.5 text-xs text-primary/70">
+                  Applied from your partner link — this code cannot be changed.
+                </p>
+              ) : null}
+            </label>
+
             <div className="pt-1">
               <label className="flex cursor-pointer gap-3 rounded-lg border border-glassBorder bg-white/[0.03] p-4 transition hover:bg-white/[0.06]">
                 <input
@@ -222,6 +267,17 @@ export default function SignupPage() {
               <span className="font-medium text-white">{fullName.trim()}</span>
               <br />
               <span className="text-white/55">{email.trim().toLowerCase()}</span>
+              {referralCode.trim() ? (
+                <>
+                  <br />
+                  <span className="text-white/45">
+                    Referral:{" "}
+                    <span className="font-mono text-primary/80">
+                      {referralCode.trim()}
+                    </span>
+                  </span>
+                </>
+              ) : null}
             </p>
 
             <label className="block">
