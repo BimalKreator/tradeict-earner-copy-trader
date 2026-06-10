@@ -6,6 +6,7 @@ import {
   TradeStatus,
 } from "@prisma/client";
 import cron from "node-cron";
+import { triggerMarkCommissionsAsPayable } from "./affiliateCommissionService.js";
 
 /** Days a generated invoice has before it goes OVERDUE and pauses the subscription. */
 const INVOICE_DUE_DAYS = 5;
@@ -371,6 +372,7 @@ export async function generateMonthlyInvoices(
     const dueDate = new Date(Date.now() + INVOICE_DUE_DAYS * MS_PER_DAY);
 
     try {
+      let autoPaidInvoiceId: string | null = null;
       const autoPaid = await prisma.$transaction(async (tx) => {
         const invoice = await tx.invoice.create({
           data: {
@@ -409,11 +411,17 @@ export async function generateMonthlyInvoices(
           where: { id: invoice.id },
           data: { status: InvoiceStatus.PAID },
         });
+        autoPaidInvoiceId = invoice.id;
         return true;
       });
 
       invoicesCreated += 1;
-      if (autoPaid) invoicesAutoPaid += 1;
+      if (autoPaid) {
+        invoicesAutoPaid += 1;
+        if (autoPaidInvoiceId) {
+          void triggerMarkCommissionsAsPayable(prisma, autoPaidInvoiceId, null);
+        }
+      }
     } catch (err) {
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&

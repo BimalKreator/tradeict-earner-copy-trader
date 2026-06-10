@@ -1,7 +1,9 @@
 import {
   CommissionLedgerStatus,
+  InvoiceStatus,
   Role,
   SalesTier,
+  type Prisma,
   type PrismaClient,
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
@@ -276,6 +278,123 @@ export async function triggerAffiliateCommissionDistribution(
   } catch (err) {
     console.error(
       `[affiliateCommission] distribution failed sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** UTC calendar month bounds for invoice `month` (1–12) / `year`. */
+function invoiceMonthRange(
+  month: number,
+  year: number,
+): { start: Date; end: Date } {
+  const start = new Date(Date.UTC(year, month - 1, 1));
+  const end = new Date(Date.UTC(year, month, 1));
+  return { start, end };
+}
+
+/**
+ * PnL rows whose app revenue share is covered by a (user, strategy, month) invoice.
+ */
+export async function resolvePnlRecordIdsForInvoice(
+  prisma: PrismaClient,
+  invoice: {
+    userId: string;
+    strategyId: string;
+    month: number;
+    year: number;
+  },
+): Promise<string[]> {
+  const { start, end } = invoiceMonthRange(invoice.month, invoice.year);
+  const rows = await prisma.pnLRecord.findMany({
+    where: {
+      userId: invoice.userId,
+      strategyId: invoice.strategyId,
+      commissionAmount: { gt: 0 },
+      timestamp: { gte: start, lt: end },
+    },
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Move EARNED partner commissions to PAYABLE when the trader pays their invoice.
+ * Matches ledger rows via `pnlRecordId` for the invoice billing month; falls back to
+ * `profitDate` within the same month when no PnL rows are linked.
+ */
+export async function markCommissionsAsPayable(
+  prisma: PrismaClient,
+  invoiceId: string,
+  paymentTransactionId: string | null,
+): Promise<{ updated: number }> {
+  const invoice = await prisma.invoice.findUnique({
+    where: { id: invoiceId },
+    select: {
+      id: true,
+      userId: true,
+      strategyId: true,
+      month: true,
+      year: true,
+      status: true,
+    },
+  });
+
+  if (!invoice || invoice.status !== InvoiceStatus.PAID) {
+    return { updated: 0 };
+  }
+
+  const pnlRecordIds = await resolvePnlRecordIdsForInvoice(prisma, invoice);
+  const { start, end } = invoiceMonthRange(invoice.month, invoice.year);
+
+  const where: Prisma.CommissionLedgerWhereInput = {
+    sourceUserId: invoice.userId,
+    status: CommissionLedgerStatus.EARNED,
+    invoiceId: null,
+  };
+
+  if (pnlRecordIds.length > 0) {
+    where.pnlRecordId = { in: pnlRecordIds };
+  } else {
+    where.profitDate = { gte: start, lt: end };
+  }
+
+  const payableAt = new Date();
+  const result = await prisma.commissionLedger.updateMany({
+    where,
+    data: {
+      status: CommissionLedgerStatus.PAYABLE,
+      payableAt,
+      invoiceId: invoice.id,
+      ...(paymentTransactionId
+        ? { paymentTransactionId }
+        : {}),
+    },
+  });
+
+  return { updated: result.count };
+}
+
+/** Async hook after invoice PAID — must not throw to payment / billing callers. */
+export async function triggerMarkCommissionsAsPayable(
+  prisma: PrismaClient,
+  invoiceId: string,
+  paymentTransactionId: string | null,
+): Promise<void> {
+  try {
+    const { updated } = await markCommissionsAsPayable(
+      prisma,
+      invoiceId,
+      paymentTransactionId,
+    );
+    if (updated > 0) {
+      console.log(
+        `[affiliate-webhook] marked ${updated} commission row(s) PAYABLE invoice=${invoiceId}`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[affiliate-webhook] error marking payable invoice=${invoiceId}:`,
       err instanceof Error ? err.message : err,
     );
   }

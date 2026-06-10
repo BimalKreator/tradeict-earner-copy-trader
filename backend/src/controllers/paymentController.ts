@@ -23,6 +23,7 @@ import {
 } from "../services/paymentFeeService.js";
 import { getPgFeePercent, getUsdInrRate } from "../services/settingsService.js";
 import { sendPaymentReceiptEmails } from "../utils/emailService.js";
+import { triggerMarkCommissionsAsPayable } from "../services/affiliateCommissionService.js";
 
 const DEFAULT_CURRENCY = "INR";
 
@@ -496,7 +497,7 @@ export function createPaymentController(prisma: PrismaClient) {
           return;
         }
 
-        await prisma.paymentTransaction.create({
+        const paymentRow = await prisma.paymentTransaction.create({
           data: {
             userId,
             method: "RAZORPAY",
@@ -509,7 +510,14 @@ export function createPaymentController(prisma: PrismaClient) {
             razorpayPaymentId: paymentId,
             status: TransactionStatus.APPROVED,
           },
+          select: { id: true },
         });
+
+        void triggerMarkCommissionsAsPayable(
+          prisma,
+          outcome.invoiceId,
+          paymentRow.id,
+        );
 
         void sendPaymentReceiptEmails({
           userName: user.name ?? user.email,

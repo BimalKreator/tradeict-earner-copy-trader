@@ -6,6 +6,7 @@ import {
   getCurrentMonthBillingForUser,
   payInvoiceFromWallet,
 } from "../services/billingService.js";
+import { triggerMarkCommissionsAsPayable } from "../services/affiliateCommissionService.js";
 
 /**
  * Billing routes for the High-Water Mark (Cumulative Monthly PnL)
@@ -116,6 +117,8 @@ export function createBillingRoutes(prisma: PrismaClient): Router {
         res.status(outcome.status).json({ error: outcome.message });
         return;
       }
+
+      void triggerMarkCommissionsAsPayable(prisma, outcome.invoiceId, null);
 
       res.json({
         ok: true,
