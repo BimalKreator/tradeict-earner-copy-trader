@@ -1,11 +1,28 @@
 "use client";
 
-import { KeyRound, Loader2, PlugZap, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  Info,
+  KeyRound,
+  Loader2,
+  PlugZap,
+  Server,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+const SERVER_IP =
+  process.env.NEXT_PUBLIC_SERVER_IP?.trim() || "SERVER_IP_HERE";
+
+const DELTA_API_GUIDE_URL =
+  "https://www.delta.exchange/support/api-trading/";
 
 function resolveApiBase(): string {
   if (ENV_API_BASE) return ENV_API_BASE;
@@ -22,6 +39,128 @@ type ExchangeAccountRow = {
   createdAt: string;
 };
 
+const SETUP_STEPS = [
+  {
+    title: "Enable 2FA Security",
+    body: (
+      <>
+        Log in to your Delta Exchange account. Go to{" "}
+        <strong className="font-semibold text-white/90">Security</strong> settings
+        and enable <strong className="font-semibold text-white/90">2-Factor Authentication (2FA)</strong>{" "}
+        using an Authenticator app. This is required before generating API keys.
+      </>
+    ),
+  },
+  {
+    title: "Navigate to API Keys",
+    body: (
+      <>
+        Go to the <strong className="font-semibold text-white/90">API</strong> section
+        from your account menu and click on{" "}
+        <strong className="font-semibold text-white/90">Create New API Key</strong>.
+      </>
+    ),
+  },
+  {
+    title: "Whitelist Our Server IP",
+    body: (
+      <>
+        Copy the server IP address provided above and paste it into the{" "}
+        <strong className="font-semibold text-white/90">IP Whitelist</strong> box on
+        Delta. This ensures strict security, allowing only our system to execute
+        trades.
+      </>
+    ),
+  },
+  {
+    title: "Enable Trading Permissions",
+    body: (
+      <>
+        By default, the <strong className="font-semibold text-white/90">Trading</strong>{" "}
+        permission is unchecked. You{" "}
+        <strong className="font-semibold text-white/90">MUST</strong> check the box
+        next to <strong className="font-semibold text-white/90">Trading</strong> to
+        allow the bot to place trades for you. Leave{" "}
+        <strong className="font-semibold text-white/90">Withdrawal</strong> unchecked
+        for your safety.
+      </>
+    ),
+  },
+  {
+    title: "Generate & Securely Copy",
+    body: (
+      <>
+        Click <strong className="font-semibold text-white/90">Create</strong>, verify
+        with your 2FA code, and your keys will be generated. Immediately copy both
+        the <strong className="font-semibold text-white/90">API Key</strong> and the{" "}
+        <strong className="font-semibold text-white/90">API Secret</strong>.
+      </>
+    ),
+    note: "Delta will only show your API Secret once. If you lose it, you will need to generate a new key.",
+  },
+] as const;
+
+function DeltaSetupGuide() {
+  return (
+    <div className="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.04] to-transparent p-5 md:p-6">
+      <div className="flex items-start gap-3">
+        <div className="rounded-xl border border-primary/30 bg-primary/10 p-2.5">
+          <ShieldCheck className="h-5 w-5 text-primary" aria-hidden />
+        </div>
+        <div>
+          <h3 className="text-base font-semibold text-white">
+            How to generate your Delta Exchange API Keys
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-white/45">
+            Follow these steps on Delta before pasting your credentials below.
+          </p>
+        </div>
+      </div>
+
+      <ol className="mt-6 space-y-5">
+        {SETUP_STEPS.map((step, index) => (
+          <li key={step.title} className="flex gap-4">
+            <span
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/15 text-xs font-bold text-primary"
+              aria-hidden
+            >
+              {index + 1}
+            </span>
+            <div className="min-w-0 flex-1 pt-0.5">
+              <p className="text-sm font-semibold text-white">{step.title}</p>
+              <p className="mt-1.5 text-sm leading-relaxed text-white/60">
+                {step.body}
+              </p>
+              {"note" in step && step.note ? (
+                <div className="mt-3 flex gap-2.5 rounded-lg border border-sky-500/25 bg-sky-500/10 px-3.5 py-3 text-xs leading-relaxed text-sky-100/90">
+                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" aria-hidden />
+                  <p>
+                    <span className="font-semibold text-sky-100">Note:</span>{" "}
+                    {step.note}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      <p className="mt-6 border-t border-white/[0.06] pt-5 text-sm text-white/50">
+        Need more help?{" "}
+        <a
+          href={DELTA_API_GUIDE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 font-medium text-primary/90 transition hover:text-primary"
+        >
+          Read the official Delta Exchange API Guide
+          <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+        </a>
+      </p>
+    </div>
+  );
+}
+
 export default function DashboardSettingsPage() {
   const [accounts, setAccounts] = useState<ExchangeAccountRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,6 +175,7 @@ export default function DashboardSettingsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [ipCopied, setIpCopied] = useState(false);
   const [toast, setToast] = useState<{
     message: string;
     variant: "success" | "error";
@@ -87,6 +227,23 @@ export default function DashboardSettingsPage() {
     void loadAccounts();
   }, [loadAccounts]);
 
+  async function handleCopyServerIp() {
+    try {
+      await navigator.clipboard.writeText(SERVER_IP);
+      setIpCopied(true);
+      setToast({
+        message: "Server IP copied to clipboard.",
+        variant: "success",
+      });
+      setTimeout(() => setIpCopied(false), 2200);
+    } catch {
+      setToast({
+        message: "Could not copy — please select and copy the IP manually.",
+        variant: "error",
+      });
+    }
+  }
+
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
@@ -132,6 +289,10 @@ export default function DashboardSettingsPage() {
       setApiKey("");
       setApiSecret("");
       setExchange("Delta");
+      setToast({
+        message: "API key saved successfully.",
+        variant: "success",
+      });
       await loadAccounts();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Add failed");
@@ -276,8 +437,9 @@ export default function DashboardSettingsPage() {
         <h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">
           Settings
         </h1>
-        <p className="mt-2 text-sm text-white/55">
-          Manage Delta Exchange API credentials used when you subscribe to strategies.
+        <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/55">
+          Connect your Delta Exchange account securely. Whitelist our server IP,
+          enable trading permissions, then save your API credentials below.
         </p>
       </header>
 
@@ -295,121 +457,184 @@ export default function DashboardSettingsPage() {
           </h2>
         </div>
         <p className="mt-2 text-xs text-white/45">
-          Stored as exchange accounts (nickname + keys). Secrets are not shown again after saving.
-          Use a dedicated API key with minimal permissions where possible.
+          Secrets are encrypted and never shown again after saving. Use a
+          dedicated key with trading enabled and withdrawals disabled.
         </p>
+
+        <div className="mt-6 rounded-2xl border border-emerald-500/25 bg-gradient-to-r from-emerald-500/[0.08] to-transparent p-4 md:p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5">
+                <Server className="h-5 w-5 text-emerald-300" aria-hidden />
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-emerald-200/80">
+                  Server IP for Delta whitelist
+                </p>
+                <p className="mt-1 text-xs text-white/45">
+                  Paste this into the IP Whitelist field when creating your API key.
+                </p>
+              </div>
+            </div>
+            <div className="flex w-full min-w-0 items-center gap-2 sm:max-w-md">
+              <input
+                type="text"
+                readOnly
+                value={SERVER_IP}
+                aria-label="Server IP address for Delta whitelist"
+                className="min-w-0 flex-1 rounded-xl border border-emerald-500/30 bg-black/40 px-4 py-3 font-mono text-sm font-semibold tracking-wide text-emerald-100 outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void handleCopyServerIp()}
+                className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/15 px-4 py-3 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/25"
+              >
+                {ipCopied ? (
+                  <Check className="h-4 w-4" aria-hidden />
+                ) : (
+                  <Copy className="h-4 w-4" aria-hidden />
+                )}
+                {ipCopied ? "Copied" : "Copy"}
+              </button>
+            </div>
+          </div>
+        </div>
 
         {loading ? (
           <div className="mt-10 flex justify-center py-12">
             <Loader2 className="h-10 w-10 animate-spin text-primary" aria-hidden />
           </div>
         ) : (
-          <>
-            {accounts.length > 0 ? (
-              <ul className="mt-8 divide-y divide-white/[0.06] rounded-xl border border-white/[0.08] bg-black/20">
-                {accounts.map((a) => (
-                  <li
-                    key={a.id}
-                    className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div>
-                      <p className="font-medium text-white">{a.nickname}</p>
-                      <p className="mt-1 text-xs text-white/45">
-                        {a.exchange} · added{" "}
-                        {new Date(a.createdAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                      <button
-                        type="button"
-                        disabled={testingId === a.id}
-                        onClick={() => void handleTestConnection(a.id)}
-                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/15 disabled:opacity-50"
-                      >
-                        <PlugZap className="h-4 w-4" aria-hidden />
-                        {testingId === a.id ? "Testing…" : "Test connection"}
-                      </button>
-                    <button
-                      type="button"
-                      disabled={deletingId === a.id}
-                      onClick={() => void handleDelete(a.id)}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-500/35 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 transition hover:bg-red-500/15 disabled:opacity-50"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden />
-                      {deletingId === a.id ? "Removing…" : "Remove"}
-                    </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-8 rounded-lg border border-white/[0.08] bg-black/20 px-4 py-6 text-center text-sm text-white/50">
-                No API keys yet. Add one below to link copy-trading subscriptions.
-              </p>
-            )}
+          <div className="mt-8 grid gap-8 xl:grid-cols-5 xl:gap-10">
+            <aside className="xl:col-span-2">
+              <DeltaSetupGuide />
+            </aside>
 
-            <form className="mt-10 space-y-5 border-t border-white/[0.06] pt-10" onSubmit={handleAdd}>
-              <h3 className="text-sm font-semibold text-white">Add API key</h3>
-              {formError && (
-                <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                  {formError}
+            <div className="space-y-8 xl:col-span-3">
+              {accounts.length > 0 ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-white">
+                    Saved credentials
+                  </h3>
+                  <ul className="mt-4 divide-y divide-white/[0.06] rounded-xl border border-white/[0.08] bg-black/20">
+                    {accounts.map((a) => (
+                      <li
+                        key={a.id}
+                        className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <p className="font-medium text-white">{a.nickname}</p>
+                          <p className="mt-1 text-xs text-white/45">
+                            {a.exchange} · added{" "}
+                            {new Date(a.createdAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                          <button
+                            type="button"
+                            disabled={testingId === a.id}
+                            onClick={() => void handleTestConnection(a.id)}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/15 disabled:opacity-50"
+                          >
+                            <PlugZap className="h-4 w-4" aria-hidden />
+                            {testingId === a.id ? "Testing…" : "Test connection"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingId === a.id}
+                            onClick={() => void handleDelete(a.id)}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-500/35 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 transition hover:bg-red-500/15 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden />
+                            {deletingId === a.id ? "Removing…" : "Remove"}
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
+              ) : (
+                <p className="rounded-xl border border-white/[0.08] bg-black/20 px-4 py-6 text-center text-sm text-white/50">
+                  No API keys yet. Complete the guide on the left, then add your
+                  credentials below.
+                </p>
               )}
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Nickname</span>
-                <input
-                  type="text"
-                  value={nickname}
-                  onChange={(e) => setNickname(e.target.value)}
-                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
-                  placeholder="e.g. Main Delta"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Exchange</span>
-                <input
-                  type="text"
-                  value={exchange}
-                  onChange={(e) => setExchange(e.target.value)}
-                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
-                  placeholder="Delta"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">API key</span>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
-                  placeholder="Paste API key"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">API secret</span>
-                <input
-                  type="password"
-                  value={apiSecret}
-                  onChange={(e) => setApiSecret(e.target.value)}
-                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
-                  placeholder="Paste API secret"
-                  autoComplete="off"
-                />
-              </label>
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={adding}
-                  className="rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
-                >
-                  {adding ? "Saving…" : "Save API key"}
-                </button>
-              </div>
-            </form>
-          </>
+
+              <form
+                className="space-y-5 rounded-2xl border border-white/[0.08] bg-black/20 p-5 md:p-6"
+                onSubmit={handleAdd}
+              >
+                <div>
+                  <h3 className="text-sm font-semibold text-white">
+                    Add API key
+                  </h3>
+                  <p className="mt-1 text-xs text-white/45">
+                    Paste the key and secret from Delta after whitelisting our IP.
+                  </p>
+                </div>
+
+                {formError && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                    {formError}
+                  </div>
+                )}
+
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Nickname</span>
+                  <input
+                    type="text"
+                    value={nickname}
+                    onChange={(e) => setNickname(e.target.value)}
+                    className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
+                    placeholder="e.g. Main Delta"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">Exchange</span>
+                  <input
+                    type="text"
+                    value={exchange}
+                    onChange={(e) => setExchange(e.target.value)}
+                    className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
+                    placeholder="Delta"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">API key</span>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
+                    placeholder="Paste API key from Delta"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">API secret</span>
+                  <input
+                    type="password"
+                    value={apiSecret}
+                    onChange={(e) => setApiSecret(e.target.value)}
+                    className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 focus:ring-2"
+                    placeholder="Paste API secret (shown once on Delta)"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="submit"
+                    disabled={adding}
+                    className="rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
+                  >
+                    {adding ? "Saving…" : "Save API key"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
       </section>
 
