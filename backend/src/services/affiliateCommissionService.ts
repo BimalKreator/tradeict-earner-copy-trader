@@ -104,17 +104,39 @@ function capTotalCommissionRate(
 }
 
 /**
- * Build commission % slices from the acquiring partner up the `parentId` chain.
+ * First upline partner id used to start the commission chain for a profit event.
+ * - USER: referred-by partner (`acquiredById`)
+ * - EXECUTIVE / MANAGER: hierarchy upline (`parentId`) — their own trading pays upline
+ * - DIRECTOR: no upline commissions
+ */
+export function resolveCommissionChainEntryId(source: {
+  role: Role;
+  acquiredById: string | null;
+  parentId: string | null;
+}): string | null {
+  if (source.role === Role.USER) {
+    return source.acquiredById?.trim() || null;
+  }
+  if (source.role === Role.EXECUTIVE || source.role === Role.MANAGER) {
+    return source.parentId?.trim() || null;
+  }
+  return null;
+}
+
+/**
+ * Build commission % slices from the chain-entry partner up the `parentId` chain.
  * Rates are % of app revenue share (not gross trade PnL).
+ *
+ * @param chainEntryId — `acquiredById` for USER traders, `parentId` for EXECUTIVE/MANAGER traders
  */
 export async function resolveCommissionChain(
   prisma: PrismaClient,
-  acquiredById: string | null,
+  chainEntryId: string | null,
 ): Promise<CommissionChainSlice[]> {
-  if (!acquiredById?.trim()) return [];
+  if (!chainEntryId?.trim()) return [];
 
   const direct = await prisma.user.findUnique({
-    where: { id: acquiredById.trim() },
+    where: { id: chainEntryId.trim() },
     select: { id: true, role: true, parentId: true },
   });
 
@@ -202,13 +224,18 @@ export async function distributeRevenueShareCommissions(
 
   const source = await prisma.user.findUnique({
     where: { id: args.sourceUserId },
-    select: { acquiredById: true },
+    select: { role: true, acquiredById: true, parentId: true },
   });
-  if (!source?.acquiredById) {
+  if (!source) {
     return { created: 0, skipped: 0 };
   }
 
-  const chain = await resolveCommissionChain(prisma, source.acquiredById);
+  const chainEntryId = resolveCommissionChainEntryId(source);
+  if (!chainEntryId) {
+    return { created: 0, skipped: 0 };
+  }
+
+  const chain = await resolveCommissionChain(prisma, chainEntryId);
   if (chain.length === 0) {
     return { created: 0, skipped: 0 };
   }

@@ -207,7 +207,8 @@ export type PartnerNetworkNode = {
   nodeType: "member" | "user";
   depth: number;
   joinedAt: string | null;
-  financials: PartnerNetworkUserFinancials | null;
+  /** Personal trading stats; member rows include their own account revenue. */
+  financials: PartnerNetworkUserFinancials;
   children: PartnerNetworkNode[];
 };
 
@@ -364,6 +365,7 @@ function toMemberNode(
   member: MemberRow,
   depth: number,
   children: PartnerNetworkNode[],
+  financials: PartnerNetworkUserFinancials,
 ): PartnerNetworkNode {
   return {
     id: member.id,
@@ -373,7 +375,7 @@ function toMemberNode(
     nodeType: "member",
     depth,
     joinedAt: null,
-    financials: null,
+    financials,
     children,
   };
 }
@@ -518,7 +520,12 @@ function buildExecutiveSubtree(
     .map((u) =>
       toUserNode(u, depth + 1, financialsByUserId.get(u.id) ?? emptyUserFinancials()),
     );
-  return toMemberNode(executive, depth, userChildren);
+  return toMemberNode(
+    executive,
+    depth,
+    userChildren,
+    financialsByUserId.get(executive.id) ?? emptyUserFinancials(),
+  );
 }
 
 function buildPartnerNetworkTree(
@@ -592,7 +599,14 @@ function buildPartnerNetworkTree(
             financialsByUserId.get(u.id) ?? emptyUserFinancials(),
           ),
         );
-      tree.push(toMemberNode(manager, 0, [...executiveNodes, ...directUsers]));
+      tree.push(
+        toMemberNode(
+          manager,
+          0,
+          [...executiveNodes, ...directUsers],
+          financialsByUserId.get(manager.id) ?? emptyUserFinancials(),
+        ),
+      );
     }
 
     for (const executive of directExecutives) {
@@ -634,10 +648,12 @@ export async function getPartnerNetworkDetails(
     userId,
     viewer.role,
   );
+  const memberIds = members.map((m) => m.id);
   const userIds = users.map((u) => u.id);
+  const networkTraderIds = [...memberIds, ...userIds];
   const financialsByUserId = await loadUserFinancialMaps(
     prisma,
-    userIds,
+    networkTraderIds,
     userId,
   );
 
@@ -650,8 +666,8 @@ export async function getPartnerNetworkDetails(
   );
 
   const aggregate = emptyUserFinancials();
-  for (const user of users) {
-    const fin = financialsByUserId.get(user.id) ?? emptyUserFinancials();
+  for (const traderId of networkTraderIds) {
+    const fin = financialsByUserId.get(traderId) ?? emptyUserFinancials();
     Object.assign(aggregate, sumUserFinancials(aggregate, fin));
   }
 

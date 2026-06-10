@@ -50,7 +50,7 @@ type NetworkNode = {
   nodeType: "member" | "user";
   depth: number;
   joinedAt: string | null;
-  financials: UserFinancials | null;
+  financials: UserFinancials;
   children: NetworkNode[];
 };
 
@@ -132,6 +132,14 @@ function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
 function countDescendantUsers(node: NetworkNode): number {
   if (node.nodeType === "user") return 1;
   return node.children.reduce((sum, child) => sum + countDescendantUsers(child), 0);
+}
+
+function hasPersonalTradingActivity(financials: UserFinancials): boolean {
+  return (
+    financials.totalProfitGenerated > 0 ||
+    financials.totalRevenueShareDue > 0 ||
+    financials.totalRevenuePaid > 0
+  );
 }
 
 function WalletCard({
@@ -257,7 +265,6 @@ function NetworkHierarchyRow({
   const hasChildren = node.children.length > 0;
   const [expanded, setExpanded] = useState(defaultExpanded);
   const indent = node.depth * 18;
-  const descendantUsers = countDescendantUsers(node);
 
   return (
     <>
@@ -297,9 +304,13 @@ function NetworkHierarchyRow({
               ) : null}
               {node.nodeType === "member" ? (
                 <p className="mt-1 text-[11px] text-white/35">
-                  {descendantUsers} trader{descendantUsers === 1 ? "" : "s"} in branch
+                  {countDescendantUsers(node)} referred trader
+                  {countDescendantUsers(node) === 1 ? "" : "s"} in branch
                   {hasChildren
                     ? ` · ${node.children.length} direct report${node.children.length === 1 ? "" : "s"}`
+                    : ""}
+                  {hasPersonalTradingActivity(node.financials)
+                    ? " · personal trading account"
                     : ""}
                 </p>
               ) : (
@@ -311,16 +322,7 @@ function NetworkHierarchyRow({
           </div>
         </td>
 
-        {node.nodeType === "user" && node.financials ? (
-          <UserFinancialCells financials={node.financials} />
-        ) : (
-          <td
-            colSpan={4}
-            className="px-4 py-3 text-right text-xs text-white/25 xl:px-5"
-          >
-            —
-          </td>
-        )}
+        <UserFinancialCells financials={node.financials} />
       </tr>
 
       {hasChildren && expanded
