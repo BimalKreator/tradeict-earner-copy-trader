@@ -22,6 +22,12 @@ function resolveApiBase(): string {
   return "";
 }
 
+function authHeaders(): HeadersInit {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 type NetworkNode = {
   id: string;
   name: string | null;
@@ -36,8 +42,11 @@ type NetworkNode = {
   children: NetworkNode[];
 };
 
+type NetworkNodeFlat = Omit<NetworkNode, "children">;
+
 type NetworkPayload = {
   tree: NetworkNode[];
+  flat?: NetworkNodeFlat[];
   stats: {
     totalMembers: number;
     totalAcquired: number;
@@ -71,6 +80,65 @@ function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
   return role;
 }
 
+/** Rebuild tree from flat list when API tree is empty but members exist. */
+function buildTreeFromFlat(flat: NetworkNodeFlat[]): NetworkNode[] {
+  const members = flat.filter((n) => n.nodeType === "member");
+  const acquired = flat.filter((n) => n.nodeType === "acquired");
+  const map = new Map<string, NetworkNode>();
+
+  for (const m of members) {
+    map.set(m.id, { ...m, children: [] });
+  }
+
+  const attached = new Set<string>();
+  for (const m of members) {
+    const node = map.get(m.id)!;
+    if (m.parentId && m.parentId !== m.id && map.has(m.parentId)) {
+      map.get(m.parentId)!.children.push(node);
+      attached.add(m.id);
+    }
+  }
+
+  const roots: NetworkNode[] = [];
+  for (const m of members) {
+    if (!attached.has(m.id)) {
+      roots.push(map.get(m.id)!);
+    }
+  }
+
+  if (roots.length === 0 && members.length > 0) {
+    roots.push(...map.values());
+  }
+
+  for (const a of acquired) {
+    if (a.acquiredById && map.has(a.acquiredById)) {
+      map.get(a.acquiredById)!.children.push({ ...a, children: [] });
+    }
+  }
+
+  return roots;
+}
+
+function normalizePayload(raw: NetworkPayload): NetworkPayload {
+  let tree = Array.isArray(raw.tree) ? raw.tree : [];
+  const flat = Array.isArray(raw.flat) ? raw.flat : [];
+
+  if (tree.length === 0 && flat.length > 0) {
+    tree = buildTreeFromFlat(flat);
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[network-tree] payload", {
+      treeRoots: tree.length,
+      flatRows: flat.length,
+      stats: raw.stats,
+      tree,
+    });
+  }
+
+  return { ...raw, tree, flat };
+}
+
 function NetworkTreeNodeRow({
   node,
   depth,
@@ -82,7 +150,6 @@ function NetworkTreeNodeRow({
 }) {
   const hasChildren = node.children.length > 0;
   const [expanded, setExpanded] = useState(defaultExpanded);
-
   const indent = depth * 20;
 
   return (
@@ -175,18 +242,20 @@ function NetworkTreeNodeRow({
 
 export default function AdminNetworkPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
   const [data, setData] = useState<NetworkPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadSucceeded, setLoadSucceeded] = useState(false);
 
   const load = useCallback(async () => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) throw new Error("Not signed in");
+
     const res = await fetch(`${apiBase}/admin/network-tree`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: authHeaders(),
     });
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => ({}));
@@ -199,8 +268,11 @@ export default function AdminNetworkPage() {
           : `Failed to load network (${res.status})`;
       throw new Error(msg);
     }
-    setData((await res.json()) as NetworkPayload);
-  }, [apiBase, token]);
+
+    const payload = normalizePayload((await res.json()) as NetworkPayload);
+    setData(payload);
+    setLoadSucceeded(true);
+  }, [apiBase]);
 
   useEffect(() => {
     void (async () => {
@@ -208,6 +280,7 @@ export default function AdminNetworkPage() {
         await load();
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load network tree");
+        setLoadSucceeded(false);
       } finally {
         setLoading(false);
       }
@@ -221,10 +294,13 @@ export default function AdminNetworkPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");
+      setLoadSucceeded(false);
     } finally {
       setRefreshing(false);
     }
   }
+
+  const treeEmpty = !data || data.tree.length === 0;
 
   return (
     <div className="w-full min-w-0 space-y-6">
@@ -303,9 +379,11 @@ export default function AdminNetworkPage() {
           <div className="flex justify-center py-20">
             <Loader2 className="h-8 w-8 animate-spin text-primary" aria-label="Loading" />
           </div>
-        ) : !data || data.tree.length === 0 ? (
+        ) : treeEmpty ? (
           <div className="px-6 py-16 text-center text-sm text-white/45">
-            No partner network nodes yet. Upgrade users to team members to build the tree.
+            {loadSucceeded
+              ? "No network data available. Please assign hierarchy."
+              : "No partner network nodes yet. Upgrade users to team members to build the tree."}
           </div>
         ) : (
           <ul className="divide-y divide-glassBorder/40">

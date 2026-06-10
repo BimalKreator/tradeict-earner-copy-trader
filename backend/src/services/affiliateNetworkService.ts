@@ -41,8 +41,7 @@ const ROLE_SORT: Record<string, number> = {
 };
 
 function sortNodes(a: AdminNetworkTreeNode, b: AdminNetworkTreeNode): number {
-  const roleDiff =
-    (ROLE_SORT[a.role] ?? 99) - (ROLE_SORT[b.role] ?? 99);
+  const roleDiff = (ROLE_SORT[a.role] ?? 99) - (ROLE_SORT[b.role] ?? 99);
   if (roleDiff !== 0) return roleDiff;
   if (a.nodeType !== b.nodeType) {
     return a.nodeType === "member" ? -1 : 1;
@@ -63,6 +62,51 @@ function flattenTree(
   }
   return out;
 }
+
+function sortTreeRecursive(nodes: AdminNetworkTreeNode[]): void {
+  nodes.sort(sortNodes);
+  for (const node of nodes) {
+    sortTreeRecursive(node.children);
+  }
+}
+
+/**
+ * Link sales members by `parentId`. Roots = no upline, missing upline, or self-parent.
+ * If every node is nested (cycle), fall back to all members at root level.
+ */
+function assembleMemberHierarchy(
+  memberNodes: Map<string, AdminNetworkTreeNode>,
+): AdminNetworkTreeNode[] {
+  const attachedAsChild = new Set<string>();
+
+  for (const [memberId, node] of memberNodes) {
+    const parentId = node.parentId;
+    if (
+      parentId &&
+      parentId !== memberId &&
+      memberNodes.has(parentId)
+    ) {
+      memberNodes.get(parentId)!.children.push(node);
+      attachedAsChild.add(memberId);
+    }
+  }
+
+  const roots: AdminNetworkTreeNode[] = [];
+  for (const [memberId, node] of memberNodes) {
+    if (!attachedAsChild.has(memberId)) {
+      roots.push(node);
+    }
+  }
+
+  if (roots.length === 0 && memberNodes.size > 0) {
+    return [...memberNodes.values()].sort(sortNodes);
+  }
+
+  return roots.sort(sortNodes);
+}
+
+/** Alias for admin controller / routes. */
+export const getNetworkTree = buildAdminNetworkTree;
 
 export async function buildAdminNetworkTree(
   prisma: PrismaClient,
@@ -104,10 +148,21 @@ export async function buildAdminNetworkTree(
     }),
   ]);
 
-  const acquiredBalances = await fetchDeltaBalancesForUserIds(
-    prisma,
-    acquiredUsers.map((u) => u.id),
-  );
+  let acquiredBalances = new Map<
+    string,
+    { deltaBalance: number | null; deltaConnected: boolean }
+  >();
+  try {
+    acquiredBalances = await fetchDeltaBalancesForUserIds(
+      prisma,
+      acquiredUsers.map((u) => u.id),
+    );
+  } catch (err) {
+    console.warn(
+      "[network-tree] Delta balance fetch skipped:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 
   const memberNodes = new Map<string, AdminNetworkTreeNode>();
 
@@ -127,12 +182,14 @@ export async function buildAdminNetworkTree(
     });
   }
 
+  const roots = assembleMemberHierarchy(memberNodes);
+
   for (const acquired of acquiredUsers) {
     const acquirerId = acquired.acquiredById;
-    if (!acquirerId || !memberNodes.has(acquirerId)) continue;
+    if (!acquirerId) continue;
 
     const balance = acquiredBalances.get(acquired.id);
-    memberNodes.get(acquirerId)!.children.push({
+    const acquiredNode: AdminNetworkTreeNode = {
       id: acquired.id,
       name: acquired.name,
       email: acquired.email,
@@ -147,29 +204,25 @@ export async function buildAdminNetworkTree(
           : 0,
       affiliateStatus: null,
       children: [],
-    });
-  }
+    };
 
-  const roots: AdminNetworkTreeNode[] = [];
-
-  for (const node of memberNodes.values()) {
-    node.children.sort(sortNodes);
-
-    if (node.parentId && memberNodes.has(node.parentId)) {
-      memberNodes.get(node.parentId)!.children.push(node);
-    } else {
-      roots.push(node);
+    const acquirer = memberNodes.get(acquirerId);
+    if (acquirer) {
+      acquirer.children.push(acquiredNode);
     }
   }
 
-  roots.sort(sortNodes);
+  sortTreeRecursive(roots);
 
   const flat = flattenTree(roots);
-  const totalMembers = flat.filter((n) => n.nodeType === "member").length;
-  const totalAcquired = flat.filter((n) => n.nodeType === "acquired").length;
-  const totalNetworkAum = flat
-    .filter((n) => n.nodeType === "member")
-    .reduce((sum, n) => sum + n.networkAum, 0);
+  const totalMembers = members.length;
+  const totalAcquired = acquiredUsers.filter((u) =>
+    u.acquiredById ? memberNodes.has(u.acquiredById) : false,
+  ).length;
+  const totalNetworkAum = members.reduce(
+    (sum, m) => sum + (m.affiliateProfile?.networkAum ?? 0),
+    0,
+  );
 
   return {
     tree: roots,
