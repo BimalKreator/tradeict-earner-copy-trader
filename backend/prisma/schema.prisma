@@ -12,6 +12,25 @@ datasource db {
 enum Role {
   ADMIN
   USER
+  EXECUTIVE
+  MANAGER
+  DIRECTOR
+}
+
+/** Partner commission wallet state machine (Earned → Payable → Withdrawable). */
+enum CommissionLedgerStatus {
+  EARNED
+  PAYABLE
+  WITHDRAWABLE
+  /** Set when included in an approved monthly payout (Phase 9). */
+  WITHDRAWN
+}
+
+/** Which sales tier earned a commission row (snapshot at distribution time). */
+enum SalesTier {
+  EXECUTIVE
+  MANAGER
+  DIRECTOR
 }
 
 enum UserStatus {
@@ -80,6 +99,10 @@ model User {
   panNumber     String?
   aadhaarNumber String?
   role          Role                @default(USER)
+  /** Immediate upline in the sales hierarchy (Executive→Manager, Manager→Director). */
+  parentId      String?
+  /** Team member who referred/acquired this user (set at signup — Phase 4). */
+  acquiredById  String?
   status             UserStatus          @default(ACTIVE)
   /** When true, copy engine skips this user even if subscriptions are ACTIVE. */
   copyTradingPaused  Boolean             @default(false)
@@ -118,6 +141,18 @@ model User {
   arbitrageSourceFollowers User[]            @relation("ArbitrageSource")
   tickets              Ticket[]
   ticketMessages       TicketMessage[]
+  parent               User?               @relation("SalesHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  directReports        User[]              @relation("SalesHierarchy")
+  acquiredBy           User?               @relation("UserAcquisition", fields: [acquiredById], references: [id], onDelete: SetNull)
+  acquiredUsers        User[]              @relation("UserAcquisition")
+  affiliateProfile     AffiliateProfile?
+  commissionsEarned    CommissionLedger[]  @relation("CommissionBeneficiary")
+  commissionsSourced   CommissionLedger[]  @relation("CommissionSource")
+  affiliateUpgradesPerformed AffiliateProfile[] @relation("AffiliateUpgradedBy")
+
+  @@index([parentId])
+  @@index([acquiredById])
+  @@index([role])
 }
 
 model OtpRecord {
@@ -381,8 +416,9 @@ model PaymentTransaction {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  depositRequest DepositRequest? @relation(fields: [depositRequestId], references: [id])
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  depositRequest     DepositRequest?    @relation(fields: [depositRequestId], references: [id])
+  commissionLedgers  CommissionLedger[]
 
   @@index([userId, createdAt])
   @@index([status])
@@ -455,8 +491,9 @@ model Invoice {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
-  user     User     @relation(fields: [userId], references: [id])
-  strategy Strategy @relation(fields: [strategyId], references: [id])
+  user              User               @relation(fields: [userId], references: [id])
+  strategy          Strategy           @relation(fields: [strategyId], references: [id])
+  commissionLedgers CommissionLedger[]
 
   @@unique([userId, strategyId, month, year])
   @@index([status])
@@ -470,8 +507,83 @@ model PnLRecord {
   commissionAmount Float
   timestamp        DateTime @default(now())
 
-  user     User     @relation(fields: [userId], references: [id])
-  strategy Strategy @relation(fields: [strategyId], references: [id])
+  user              User               @relation(fields: [userId], references: [id])
+  strategy          Strategy           @relation(fields: [strategyId], references: [id])
+  commissionLedgers CommissionLedger[]
+}
+
+/**
+ * Partner / IB profile — one row per upgraded team member (Executive, Manager, Director).
+ * Stats are cached for dashboards; authoritative counts can be recomputed from relations.
+ */
+model AffiliateProfile {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  /** Public referral code for acquisition links (Phase 4). */
+  referralCode          String   @unique
+  /** Users directly acquired by this member (`User.acquiredById`). */
+  directAcquiredCount   Int      @default(0)
+  /** Sum of subscribed capital under direct + downline network (USD, cached). */
+  networkAum            Float    @default(0)
+  upgradedAt            DateTime @default(now())
+  upgradedById          String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user         User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  upgradedBy   User? @relation("AffiliateUpgradedBy", fields: [upgradedById], references: [id], onDelete: SetNull)
+
+  @@index([upgradedById])
+}
+
+/**
+ * Immutable commission accrual ledger for the partner program.
+ * Amounts flow: EARNED (profit booked) → PAYABLE (user paid revenue share) → WITHDRAWABLE (30d+).
+ */
+model CommissionLedger {
+  id                  String                 @id @default(uuid())
+  /** Calendar date of the source user's booked profit (UTC day). */
+  profitDate          DateTime               @db.Date
+  /** Trader whose revenue share generated this commission. */
+  sourceUserId        String
+  /** Team member receiving the commission cut. */
+  beneficiaryUserId   String
+  amount              Float
+  /** App revenue-share $ this row was calculated from (e.g. $15 of user's due). */
+  appRevenueBase      Float
+  /** Rate applied at distribution (e.g. 5 = 5%). */
+  commissionRate      Float
+  /** Sales tier of beneficiary at accrual time. */
+  beneficiaryTier     SalesTier
+  status              CommissionLedgerStatus @default(EARNED)
+  /** profitDate + 30 days — earliest withdrawable after PAYABLE. */
+  unlockDate          DateTime
+  /** Prevents double-distribution for the same profit event × beneficiary. */
+  idempotencyKey      String                 @unique
+  /** Set when source user pays invoice / revenue share (Phase 6). */
+  invoiceId           String?
+  /** Optional link to the PnL / profit event that triggered accrual (Phase 5). */
+  pnlRecordId         String?
+  /** Set when payment webhook confirms revenue-share settlement (Phase 6). */
+  paymentTransactionId String?
+  earnedAt            DateTime               @default(now())
+  payableAt           DateTime?
+  withdrawableAt      DateTime?
+  withdrawnAt         DateTime?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  sourceUser          User                @relation("CommissionSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
+  beneficiaryUser     User                @relation("CommissionBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Cascade)
+  invoice             Invoice?            @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  pnlRecord           PnLRecord?          @relation(fields: [pnlRecordId], references: [id], onDelete: SetNull)
+  paymentTransaction  PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([beneficiaryUserId, status])
+  @@index([sourceUserId, profitDate])
+  @@index([status, unlockDate])
+  @@index([invoiceId])
+  @@index([profitDate])
 }
 
 model ArbitrageTrade {
