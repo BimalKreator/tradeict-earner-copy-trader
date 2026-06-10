@@ -54,6 +54,7 @@ import {
   assertUserSafeToDelete,
   listSalesMembers,
   SALES_MEMBER_ROLES,
+  normalizeUpgradeParentId,
   syncAffiliateProfileOnRoleChange,
   upgradeUserToSalesMember,
   type SalesMemberRole,
@@ -2754,16 +2755,18 @@ export function createAdminController(prisma: PrismaClient) {
 
       const newRole = newRoleRaw as SalesMemberRole;
 
-      let parentId: string | null = null;
-      if (body.parentId === null || body.parentId === undefined) {
-        parentId = null;
-      } else if (typeof body.parentId === "string") {
-        const trimmed = body.parentId.trim();
-        parentId = trimmed.length > 0 ? trimmed : null;
-      } else {
+      if (
+        body.parentId !== null &&
+        body.parentId !== undefined &&
+        typeof body.parentId !== "string"
+      ) {
         res.status(400).json({ error: "parentId must be a string or null" });
         return;
       }
+
+      const parentId = normalizeUpgradeParentId(
+        typeof body.parentId === "string" ? body.parentId : body.parentId,
+      );
 
       const result = await upgradeUserToSalesMember(prisma, {
         userId,

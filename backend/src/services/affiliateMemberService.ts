@@ -100,6 +100,23 @@ export async function userHasActivePaidStrategySubscription(
   return activeSub != null;
 }
 
+/** Normalize upline id from admin upgrade payloads — never query junk sentinels. */
+export function normalizeUpgradeParentId(
+  raw: string | null | undefined,
+): string | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const trimmed = String(raw).trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.toLowerCase() === "none") {
+    return null;
+  }
+  return trimmed;
+}
+
 export function validateParentForSalesRole(
   newRole: SalesMemberRole,
   parent: { id: string; role: Role } | null,
@@ -238,10 +255,7 @@ export async function upgradeUserToSalesMember(
   args: UpgradeMemberArgs,
 ): Promise<UpgradeMemberResult> {
   const { userId, newRole, adminUserId } = args;
-  const parentId =
-    args.parentId === undefined || args.parentId === ""
-      ? null
-      : String(args.parentId).trim();
+  const parentId = normalizeUpgradeParentId(args.parentId);
 
   const target = await prisma.user.findUnique({
     where: { id: userId },
@@ -263,7 +277,7 @@ export async function upgradeUserToSalesMember(
   }
 
   let parent: { id: string; role: Role } | null = null;
-  if (parentId) {
+  if (parentId !== null) {
     if (parentId === userId) {
       return { ok: false, status: 400, error: "A user cannot be their own upline" };
     }
