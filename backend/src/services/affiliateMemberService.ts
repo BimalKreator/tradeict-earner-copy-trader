@@ -4,7 +4,6 @@ import {
   PayoutRequestStatus,
   Role,
   SubscriptionStatus,
-  TransactionStatus,
   UserStatus,
   type Prisma,
   type PrismaClient,
@@ -85,7 +84,7 @@ export async function incrementAffiliateDirectAcquiredCount(
   });
 }
 
-/** At least one deployed copy subscription; paid strategies require an approved gateway payment. */
+/** At least one active deployed copy subscription (includes 100% coupon activations). */
 export async function userHasActivePaidStrategySubscription(
   prisma: PrismaClient,
   userId: string,
@@ -96,26 +95,9 @@ export async function userHasActivePaidStrategySubscription(
       isActive: true,
       status: SubscriptionStatus.ACTIVE,
     },
-    include: {
-      strategy: { select: { monthlyFee: true } },
-    },
-  });
-  if (!activeSub) {
-    return false;
-  }
-
-  if (activeSub.strategy.monthlyFee <= 0) {
-    return true;
-  }
-
-  const approvedPayment = await prisma.paymentTransaction.findFirst({
-    where: {
-      userId,
-      status: TransactionStatus.APPROVED,
-    },
     select: { id: true },
   });
-  return approvedPayment != null;
+  return activeSub != null;
 }
 
 export function validateParentForSalesRole(
