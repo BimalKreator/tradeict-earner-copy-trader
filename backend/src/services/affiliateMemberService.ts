@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 import {
   AffiliateProfileStatus,
   PayoutRequestStatus,
@@ -84,6 +84,222 @@ export async function incrementAffiliateDirectAcquiredCount(
   });
 }
 
+/** Decrement when a user is reassigned or unlinked from an affiliate. */
+export async function decrementAffiliateDirectAcquiredCount(
+  tx: Prisma.TransactionClient,
+  affiliateUserId: string,
+): Promise<void> {
+  const profile = await tx.affiliateProfile.findUnique({
+    where: { userId: affiliateUserId },
+    select: { directAcquiredCount: true },
+  });
+  if (!profile || profile.directAcquiredCount <= 0) {
+    return;
+  }
+  await tx.affiliateProfile.update({
+    where: { userId: affiliateUserId },
+    data: { directAcquiredCount: { decrement: 1 } },
+  });
+}
+
+export type SetUserReferrerOutcome =
+  | {
+      ok: true;
+      referrer: { name: string | null; referralCode: string };
+    }
+  | { ok: false; status: number; error: string };
+
+/** Profile self-service: attach referrer by public code (once only). */
+export async function setUserReferrerByCode(
+  prisma: PrismaClient,
+  userId: string,
+  referralCodeRaw: string,
+): Promise<SetUserReferrerOutcome> {
+  const referralCode = referralCodeRaw?.trim();
+  if (!referralCode) {
+    return { ok: false, status: 400, error: "referralCode is required" };
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, acquiredById: true },
+  });
+  if (!user) {
+    return { ok: false, status: 404, error: "User not found" };
+  }
+  if (user.acquiredById) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Referrer is already set for this account",
+    };
+  }
+
+  const affiliateUserId = await resolveAffiliateUserIdByReferralCode(
+    prisma,
+    referralCode,
+    user.email,
+  );
+  if (!affiliateUserId) {
+    return { ok: false, status: 400, error: "Invalid or inactive referral code" };
+  }
+
+  const affiliate = await prisma.user.findUnique({
+    where: { id: affiliateUserId },
+    select: {
+      name: true,
+      affiliateProfile: { select: { referralCode: true } },
+    },
+  });
+  if (!affiliate?.affiliateProfile) {
+    return { ok: false, status: 400, error: "Invalid or inactive referral code" };
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: userId },
+      data: { acquiredById: affiliateUserId },
+    });
+    await incrementAffiliateDirectAcquiredCount(tx, affiliateUserId);
+  });
+
+  return {
+    ok: true,
+    referrer: {
+      name: affiliate.name,
+      referralCode: affiliate.affiliateProfile.referralCode,
+    },
+  };
+}
+
+export type ChangeUserReferrerOutcome =
+  | {
+      ok: true;
+      acquiredById: string | null;
+      referrer: {
+        id: string;
+        name: string | null;
+        email: string;
+        referralCode: string | null;
+      } | null;
+    }
+  | { ok: false; status: number; error: string };
+
+/** Admin: assign, change, or clear a user's referrer (acquiredById). */
+export async function changeUserAcquiredBy(
+  prisma: PrismaClient,
+  userId: string,
+  newAcquiredById: string | null,
+): Promise<ChangeUserReferrerOutcome> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, acquiredById: true },
+  });
+  if (!user) {
+    return { ok: false, status: 404, error: "User not found" };
+  }
+
+  const nextId =
+    newAcquiredById === undefined || newAcquiredById === ""
+      ? null
+      : String(newAcquiredById).trim();
+
+  if (nextId === user.acquiredById) {
+    const current = nextId
+      ? await prisma.user.findUnique({
+          where: { id: nextId },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            affiliateProfile: { select: { referralCode: true } },
+          },
+        })
+      : null;
+    return {
+      ok: true,
+      acquiredById: nextId,
+      referrer: current
+        ? {
+            id: current.id,
+            name: current.name,
+            email: current.email,
+            referralCode: current.affiliateProfile?.referralCode ?? null,
+          }
+        : null,
+    };
+  }
+
+  if (nextId === userId) {
+    return { ok: false, status: 400, error: "A user cannot refer themselves" };
+  }
+
+  if (nextId) {
+    const affiliate = await prisma.user.findUnique({
+      where: { id: nextId },
+      select: { id: true, role: true, affiliateProfile: { select: { status: true } } },
+    });
+    if (!affiliate) {
+      return { ok: false, status: 400, error: "Selected team member was not found" };
+    }
+    if (!isSalesMemberRole(affiliate.role)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Referrer must be a team member (Executive, Manager, or Director)",
+      };
+    }
+    if (
+      !affiliate.affiliateProfile ||
+      affiliate.affiliateProfile.status !== AffiliateProfileStatus.ACTIVE
+    ) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Selected team member does not have an active partner profile",
+      };
+    }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (user.acquiredById && user.acquiredById !== nextId) {
+      await decrementAffiliateDirectAcquiredCount(tx, user.acquiredById);
+    }
+    await tx.user.update({
+      where: { id: userId },
+      data: { acquiredById: nextId },
+    });
+    if (nextId && nextId !== user.acquiredById) {
+      await incrementAffiliateDirectAcquiredCount(tx, nextId);
+    }
+  });
+
+  const referrer = nextId
+    ? await prisma.user.findUnique({
+        where: { id: nextId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          affiliateProfile: { select: { referralCode: true } },
+        },
+      })
+    : null;
+
+  return {
+    ok: true,
+    acquiredById: nextId,
+    referrer: referrer
+      ? {
+          id: referrer.id,
+          name: referrer.name,
+          email: referrer.email,
+          referralCode: referrer.affiliateProfile?.referralCode ?? null,
+        }
+      : null,
+  };
+}
+
 /** At least one active deployed copy subscription (includes 100% coupon activations). */
 export async function userHasActivePaidStrategySubscription(
   prisma: PrismaClient,
@@ -152,20 +368,15 @@ export function validateParentForSalesRole(
   return null;
 }
 
-function referralCodeBase(email: string): string {
-  const local = email.split("@")[0] ?? "MEMBER";
-  const cleaned = local.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-  return (cleaned || "MEMBER").slice(0, 8);
-}
-
+/** Public partner code format: `TE` + exactly six digits (e.g. TE102938). */
 export async function generateUniqueReferralCode(
   prisma: PrismaClient,
-  userId: string,
-  email: string,
+  _userId: string,
+  _email: string,
 ): Promise<string> {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const nonce = randomBytes(3).toString("hex").toUpperCase();
-    const code = `TICT-${referralCodeBase(email)}-${nonce}`;
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const digits = String(randomInt(0, 1_000_000)).padStart(6, "0");
+    const code = `TE${digits}`;
     const hit = await prisma.affiliateProfile.findUnique({
       where: { referralCode: code },
       select: { id: true },
@@ -173,12 +384,7 @@ export async function generateUniqueReferralCode(
     if (!hit) return code;
   }
 
-  const fallback = createHash("md5")
-    .update(`${userId}:${Date.now()}`)
-    .digest("hex")
-    .slice(0, 10)
-    .toUpperCase();
-  return `TICT-${fallback}`;
+  throw new Error("Could not generate a unique referral code");
 }
 
 const memberUserSelect = {

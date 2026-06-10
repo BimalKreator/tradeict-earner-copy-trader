@@ -14,6 +14,8 @@ type Me = {
   address: string | null;
   panNumber: string | null;
   aadhaarNumber: string | null;
+  acquiredById?: string | null;
+  referrer?: { name: string | null; referralCode: string } | null;
   pendingApprovalFields?: string[];
 };
 
@@ -26,6 +28,10 @@ export default function DashboardProfilePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [referralInput, setReferralInput] = useState("");
+  const [referrerSaving, setReferrerSaving] = useState(false);
+  const [referrerSuccess, setReferrerSuccess] = useState(false);
+  const [referrerError, setReferrerError] = useState<string | null>(null);
   const [unauthorized, setUnauthorized] = useState(false);
 
   const token =
@@ -77,6 +83,58 @@ export default function DashboardProfilePage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void load();
   }, [load]);
+
+  async function handleSetReferrer(e: React.FormEvent) {
+    e.preventDefault();
+    setReferrerError(null);
+    setReferrerSuccess(false);
+    if (!token) {
+      setUnauthorized(true);
+      return;
+    }
+    const code = referralInput.trim();
+    if (!code) {
+      setReferrerError("Enter a referral code.");
+      return;
+    }
+    setReferrerSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/user/profile/set-referrer`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ referralCode: code }),
+      });
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Save failed (${res.status})`;
+        throw new Error(msg);
+      }
+      const row = body as {
+        referrer?: { name: string | null; referralCode: string };
+      };
+      if (row.referrer) {
+        setMe((prev) =>
+          prev ? { ...prev, acquiredById: "linked", referrer: row.referrer } : prev,
+        );
+      }
+      await load();
+      setReferralInput("");
+      setReferrerSuccess(true);
+    } catch (err) {
+      setReferrerError(err instanceof Error ? err.message : "Could not save referrer");
+    } finally {
+      setReferrerSaving(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -160,6 +218,72 @@ export default function DashboardProfilePage() {
           </div>
         </div>
       </header>
+
+      <section className="glass-card border border-glassBorder p-6 md:p-8">
+        <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-white/45">
+          Referrer
+        </h2>
+        {loading ? (
+          <div className="mb-8 flex justify-center py-8">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden />
+          </div>
+        ) : me?.referrer || me?.acquiredById ? (
+          <div className="mb-8 rounded-lg border border-white/[0.08] bg-black/25 px-4 py-4">
+            <p className="text-xs font-medium uppercase tracking-wider text-white/40">
+              Referred by
+            </p>
+            <p className="mt-2 text-sm font-medium text-white">
+              {me.referrer?.name?.trim() || "Team member"}
+            </p>
+            <p className="mt-1 font-mono text-sm text-primary/90">
+              {me.referrer?.referralCode ?? "—"}
+            </p>
+            <p className="mt-3 text-xs leading-relaxed text-white/45">
+              To change your referrer, please raise a ticket in{" "}
+              <Link href="/dashboard/support" className="text-primary hover:underline">
+                Support
+              </Link>
+              .
+            </p>
+          </div>
+        ) : (
+          <form
+            onSubmit={handleSetReferrer}
+            className="mb-8 max-w-lg space-y-4 rounded-lg border border-white/[0.08] bg-black/25 px-4 py-4"
+          >
+            <p className="text-sm text-white/55">
+              Have a partner referral code? Enter it once to link your account.
+            </p>
+            {referrerError && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {referrerError}
+              </div>
+            )}
+            {referrerSuccess && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                Referrer saved successfully.
+              </div>
+            )}
+            <label className="block">
+              <span className="text-xs font-medium text-white/60">Referral code</span>
+              <input
+                type="text"
+                value={referralInput}
+                onChange={(e) => setReferralInput(e.target.value.toUpperCase())}
+                placeholder="TE102938"
+                className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 font-mono text-sm uppercase text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={referrerSaving}
+              className="rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
+            >
+              {referrerSaving ? "Saving…" : "Save"}
+            </button>
+          </form>
+        )}
+      </section>
 
       <section className="glass-card border border-glassBorder p-6 md:p-8">
         {loading ? (

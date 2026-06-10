@@ -9,6 +9,13 @@ import { Loader2, Pencil, X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+type AcquiredByUser = {
+  id: string;
+  name: string | null;
+  email: string;
+  referralCode: string | null;
+};
+
 type UserState = {
   id: string;
   email: string;
@@ -24,6 +31,16 @@ type UserState = {
   cryptoCapitalPerTradePercent?: number;
   arbitrageSourceUserId?: string | null;
   arbitrageSourceUser?: ArbitrageSourceUser | null;
+  acquiredById?: string | null;
+  acquiredBy?: AcquiredByUser | null;
+};
+
+type TeamMemberOption = {
+  id: string;
+  name: string | null;
+  email: string;
+  role: string;
+  referralCode: string | null;
 };
 
 type ArbitrageSourceUser = {
@@ -46,7 +63,10 @@ type ArbitrageWithdrawal = {
 };
 
 type ManagementPayload = {
-  user: UserState;
+  user: UserState & {
+    acquiredById?: string | null;
+    acquiredBy?: AcquiredByUser | null;
+  };
   deltaApiKey: { id: string; nickname: string; apiKey: string; apiSecret: string } | null;
   exchangeAccount:
     | {
@@ -157,6 +177,11 @@ export default function AdminUserDetails({
   const [editEmail, setEditEmail] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editStatus, setEditStatus] = useState<"ACTIVE" | "SUSPENDED">("ACTIVE");
+  const [editAcquiredById, setEditAcquiredById] = useState("");
+  const [referrerSearch, setReferrerSearch] = useState("");
+  const [teamMemberOptions, setTeamMemberOptions] = useState<TeamMemberOption[]>(
+    [],
+  );
   const [savingProfile, setSavingProfile] = useState(false);
 
   const authHeaders = useMemo(() => {
@@ -181,6 +206,7 @@ export default function AdminUserDetails({
           headers: authHeaders,
         }),
         fetch(`${API_BASE}/admin/users`, { headers: authHeaders }),
+        fetch(`${API_BASE}/admin/members`, { headers: authHeaders }),
       ]);
 
       const mgRes = results[0].status === "fulfilled" ? results[0].value : null;
@@ -191,6 +217,7 @@ export default function AdminUserDetails({
       const reqRes = results[5].status === "fulfilled" ? results[5].value : null;
       const wdRes = results[6].status === "fulfilled" ? results[6].value : null;
       const usersRes = results[7].status === "fulfilled" ? results[7].value : null;
+      const membersRes = results[8].status === "fulfilled" ? results[8].value : null;
 
       if (!mgRes?.ok) {
         throw new Error("Failed to load user details.");
@@ -250,7 +277,10 @@ export default function AdminUserDetails({
         ...mg.user,
         arbitrageSourceUserId: mg.user.arbitrageSourceUserId ?? null,
         arbitrageSourceUser: mg.user.arbitrageSourceUser ?? null,
+        acquiredById: mg.user.acquiredById ?? null,
+        acquiredBy: mg.user.acquiredBy ?? null,
       });
+      setEditAcquiredById(mg.user.acquiredById ?? "");
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
       setCopyTradingPausedDraft(Boolean(mg.user.copyTradingPaused));
       setCryptoArbitrageEnabledDraft(Boolean(mg.user.cryptoArbitrageEnabled));
@@ -303,6 +333,33 @@ export default function AdminUserDetails({
         );
       } else {
         setAdminUserOptions([]);
+      }
+
+      if (membersRes?.ok) {
+        const membersBody = (await membersRes.json()) as {
+          members?: Array<{
+            id: string;
+            name: string | null;
+            email: string;
+            role: string;
+            referralCode: string | null;
+          }>;
+        };
+        setTeamMemberOptions(
+          Array.isArray(membersBody.members)
+            ? membersBody.members
+                .filter((m) => m.id !== userId)
+                .map((m) => ({
+                  id: m.id,
+                  name: m.name,
+                  email: m.email,
+                  role: m.role,
+                  referralCode: m.referralCode,
+                }))
+            : [],
+        );
+      } else {
+        setTeamMemberOptions([]);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load page.");
@@ -742,8 +799,19 @@ export default function AdminUserDetails({
     setEditEmail(user.email);
     setEditPhone(user.mobile ?? "");
     setEditStatus(user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
+    setEditAcquiredById(user.acquiredById ?? "");
+    setReferrerSearch("");
     setEditOpen(true);
   }
+
+  const filteredTeamMembers = useMemo(() => {
+    const q = referrerSearch.trim().toLowerCase();
+    if (!q) return teamMemberOptions;
+    return teamMemberOptions.filter((m) => {
+      const label = `${m.name ?? ""} ${m.email} ${m.referralCode ?? ""} ${m.role}`.toLowerCase();
+      return label.includes(q);
+    });
+  }, [teamMemberOptions, referrerSearch]);
 
   async function saveProfile(): Promise<void> {
     setSavingProfile(true);
@@ -770,6 +838,27 @@ export default function AdminUserDetails({
         };
       };
       if (!res.ok) throw new Error(body.error ?? "Failed to update profile.");
+
+      const priorReferrerId = user?.acquiredById ?? "";
+      const nextReferrerId = editAcquiredById.trim();
+      if (nextReferrerId !== priorReferrerId) {
+        const refRes = await fetch(
+          `${API_BASE}/admin/users/${userId}/change-referrer`,
+          {
+            method: "POST",
+            headers: { ...authHeaders, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              acquiredById: nextReferrerId.length > 0 ? nextReferrerId : null,
+            }),
+          },
+        );
+        const refBody = (await refRes.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        if (!refRes.ok) {
+          throw new Error(refBody.error ?? "Failed to update referrer.");
+        }
+      }
 
       if (body.user) {
         const fullName = [body.user.firstName, body.user.lastName]
@@ -973,6 +1062,45 @@ export default function AdminUserDetails({
                       <option value="SUSPENDED">Suspended</option>
                     </select>
                   </label>
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <p className="text-sm font-medium text-white">
+                      Referrer (Acquired By)
+                    </p>
+                    <p className="mt-1 text-xs text-white/45">
+                      Assign or change which team member referred this user.
+                    </p>
+                    <input
+                      type="search"
+                      value={referrerSearch}
+                      onChange={(e) => setReferrerSearch(e.target.value)}
+                      placeholder="Search team members…"
+                      className="mt-3 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                    <select
+                      value={editAcquiredById}
+                      onChange={(e) => setEditAcquiredById(e.target.value)}
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                    >
+                      <option value="">None (no referrer)</option>
+                      {filteredTeamMembers.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {(m.name?.trim() || m.email) +
+                            (m.referralCode ? ` · ${m.referralCode}` : "") +
+                            ` · ${m.role}`}
+                        </option>
+                      ))}
+                    </select>
+                    {user?.acquiredBy ? (
+                      <p className="mt-2 text-xs text-white/45">
+                        Current: {user.acquiredBy.name?.trim() || user.acquiredBy.email}
+                        {user.acquiredBy.referralCode
+                          ? ` (${user.acquiredBy.referralCode})`
+                          : ""}
+                      </p>
+                    ) : (
+                      <p className="mt-2 text-xs text-white/45">Current: none</p>
+                    )}
+                  </div>
                   <div className="flex justify-end gap-2 pt-2">
                     <button
                       type="button"

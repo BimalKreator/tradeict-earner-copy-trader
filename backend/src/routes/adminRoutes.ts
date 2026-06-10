@@ -123,6 +123,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           cryptoBalance: true,
           cryptoCapitalPerTradePercent: true,
           arbitrageSourceUserId: true,
+          acquiredById: true,
+          acquiredBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              affiliateProfile: { select: { referralCode: true } },
+            },
+          },
           arbitrageSourceUser: {
             select: { id: true, email: true, name: true },
           },
@@ -164,6 +173,16 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
           arbitrageSourceUserId: user.arbitrageSourceUserId,
           arbitrageSourceUser: user.arbitrageSourceUser,
+          acquiredById: user.acquiredById,
+          acquiredBy: user.acquiredBy
+            ? {
+                id: user.acquiredBy.id,
+                name: user.acquiredBy.name,
+                email: user.acquiredBy.email,
+                referralCode:
+                  user.acquiredBy.affiliateProfile?.referralCode ?? null,
+              }
+            : null,
         },
         deltaApiKey: user.deltaApiKeys[0] ?? null,
         exchangeAccount: user.exchangeAccounts[0] ?? null,
@@ -578,6 +597,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   router.put("/users/:id", adminController.updateUserProfile);
+  router.post(
+    "/users/:id/change-referrer",
+    adminController.changeUserReferrer,
+  );
 
   router.delete("/users/:id", adminController.deleteUserSafely);
 

@@ -209,7 +209,7 @@ export default function SignupPage() {
                     ? "cursor-default border-primary/25 bg-primary/5 font-mono tracking-wide text-primary/90"
                     : ""
                 }`}
-                placeholder="TICT-PARTNER-A1B2C3"
+                placeholder="TE102938"
               />
               {referralLockedFromUrl ? (
                 <p className="mt-1.5 text-xs text-primary/70">

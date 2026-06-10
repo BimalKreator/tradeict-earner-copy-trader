@@ -27,6 +27,7 @@ import {
   listPartnerDirectUsers,
 } from "../services/affiliatePartnerService.js";
 import { requestPartnerPayout } from "../services/affiliatePayoutService.js";
+import { setUserReferrerByCode } from "../services/affiliateMemberService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -170,6 +171,13 @@ export function createUserController(prisma: PrismaClient) {
           aadhaarNumber: true,
           role: true,
           status: true,
+          acquiredById: true,
+          acquiredBy: {
+            select: {
+              name: true,
+              affiliateProfile: { select: { referralCode: true } },
+            },
+          },
         },
       });
 
@@ -187,7 +195,17 @@ export function createUserController(prisma: PrismaClient) {
       if (pending?.address != null) pendingFields.push("address");
       if (pending?.panNumber != null) pendingFields.push("panNumber");
       if (pending?.aadhaarNumber != null) pendingFields.push("aadhaarNumber");
-      res.json({ ...user, pendingApprovalFields: pendingFields });
+
+      const referrer =
+        user.acquiredById && user.acquiredBy?.affiliateProfile
+          ? {
+              name: user.acquiredBy.name,
+              referralCode: user.acquiredBy.affiliateProfile.referralCode,
+            }
+          : null;
+
+      const { acquiredBy: _acquiredBy, ...rest } = user;
+      res.json({ ...rest, referrer, pendingApprovalFields: pendingFields });
     } catch (err) {
       next(err);
     }
@@ -915,6 +933,33 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function setProfileReferrer(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { referralCode?: unknown };
+      const referralCode =
+        typeof body.referralCode === "string" ? body.referralCode : "";
+      const outcome = await setUserReferrerByCode(prisma, userId, referralCode);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.json({ ok: true, referrer: outcome.referrer });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function listPartnerDirectUsersHandler(
     req: Request,
     res: Response,
@@ -957,5 +1002,6 @@ export function createUserController(prisma: PrismaClient) {
     getPartnerMetrics: getPartnerMetricsHandler,
     listPartnerDirectUsers: listPartnerDirectUsersHandler,
     requestPartnerPayout: requestPartnerPayoutHandler,
+    setProfileReferrer,
   };
 }

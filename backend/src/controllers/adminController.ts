@@ -52,6 +52,7 @@ import {
 import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
 import {
   assertUserSafeToDelete,
+  changeUserAcquiredBy,
   listSalesMembers,
   SALES_MEMBER_ROLES,
   normalizeUpgradeParentId,
@@ -2812,6 +2813,48 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function changeUserReferrer(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const userId = (Array.isArray(rawId) ? rawId[0] : rawId)?.trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const body = req.body as { acquiredById?: unknown };
+      let acquiredById: string | null = null;
+      if (body.acquiredById === null || body.acquiredById === undefined) {
+        acquiredById = null;
+      } else if (typeof body.acquiredById === "string") {
+        const trimmed = body.acquiredById.trim();
+        acquiredById = trimmed.length > 0 ? trimmed : null;
+      } else {
+        res.status(400).json({ error: "acquiredById must be a string or null" });
+        return;
+      }
+
+      const outcome = await changeUserAcquiredBy(prisma, userId, acquiredById);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json({
+        ok: true,
+        acquiredById: outcome.acquiredById,
+        referrer: outcome.referrer,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function deleteUserSafely(
     req: Request,
     res: Response,
@@ -2897,6 +2940,7 @@ export function createAdminController(prisma: PrismaClient) {
     listTeamMembers,
     upgradeTeamMember,
     getNetworkTree,
+    changeUserReferrer,
     deleteUserSafely,
     listPartnerPayouts,
     completePartnerPayout: completePartnerPayoutHandler,
