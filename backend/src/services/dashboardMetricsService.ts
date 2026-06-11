@@ -11,16 +11,7 @@ import {
   type DeltaBalanceBreakdown,
   fetchDeltaAvailableBalanceUsd,
   fetchDeltaBalanceBreakdownUsd,
-  fetchDeltaSwapContractSize,
-  fetchDeltaTicker,
-  type TradeSide,
 } from "./exchangeService.js";
-import {
-  deltaContractSizeFallback,
-  estimateLivePnlUsd,
-  resolveLiveMarkPrice,
-} from "./liveMarkPriceCache.js";
-import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 
 export type { DeltaBalanceBreakdown };
@@ -47,6 +38,68 @@ export function endOfUtcDay(ref = new Date()): Date {
 
 export function startOfUtcMonth(ref = new Date()): Date {
   return new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), 1));
+}
+
+/** Calendar day boundary for dashboard PnL (Delta India users — default IST). */
+export const DASHBOARD_PNL_DAY_TIMEZONE =
+  process.env.DASHBOARD_PNL_DAY_TIMEZONE?.trim() || "Asia/Kolkata";
+
+function timeZoneOffsetMs(at: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(at);
+
+  const pick = (type: string) =>
+    Number(parts.find((p) => p.type === type)?.value ?? "0");
+
+  const asUtc = Date.UTC(
+    pick("year"),
+    pick("month") - 1,
+    pick("day"),
+    pick("hour"),
+    pick("minute"),
+    pick("second"),
+  );
+  return asUtc - at.getTime();
+}
+
+/** UTC instant when the calendar day containing `ref` begins in `timeZone`. */
+export function startOfDayInTimeZone(
+  ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
+): Date {
+  const ymd = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(ref);
+  const parts = ymd.split("-").map((x) => Number(x));
+  const year = parts[0] ?? NaN;
+  const month = parts[1] ?? NaN;
+  const day = parts[2] ?? NaN;
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return startOfUtcDay(ref);
+  }
+  const utcMidnightGuess = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  const offset = timeZoneOffsetMs(new Date(utcMidnightGuess), timeZone);
+  return new Date(utcMidnightGuess - offset);
+}
+
+/** Exclusive upper bound for today's window in `timeZone` (start of next calendar day). */
+export function endOfDayInTimeZone(
+  ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
+): Date {
+  const start = startOfDayInTimeZone(ref, timeZone);
+  return startOfDayInTimeZone(new Date(start.getTime() + 36 * 3_600_000), timeZone);
 }
 
 export function realizedTradePnl(trade: {
@@ -576,82 +629,25 @@ export async function sumAdminUsersDeltaBalances(
   );
 }
 
-async function resolveMarkForOpenTrade(symbol: string): Promise<number | null> {
-  registerSymbolsForLivePrices([symbol]);
-  const cached = resolveLiveMarkPrice(symbol);
-  if (cached != null && cached > 0) return cached;
-  try {
-    const tick = await fetchDeltaTicker(symbol);
-    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
-      return tick.last;
-    }
-  } catch {
-    /* fallback below */
-  }
-  return null;
-}
-
-/** Realized (closed today) + unrealized on OPEN copy trades using live marks. */
+/** Realized PnL booked today — sum of `PnLRecord.profitAmount` in the dashboard day window (IST by default). */
 export async function computeTodaysPnl(
   prisma: PrismaClient,
   userId: string,
   ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
 ): Promise<number> {
-  const dayStart = startOfUtcDay(ref);
+  const dayStart = startOfDayInTimeZone(ref, timeZone);
+  const dayEnd = endOfDayInTimeZone(ref, timeZone);
 
-  const closedToday = await prisma.trade.findMany({
+  const agg = await prisma.pnLRecord.aggregate({
     where: {
       userId,
-      status: TradeStatus.CLOSED,
-      updatedAt: { gte: dayStart },
+      timestamp: { gte: dayStart, lt: dayEnd },
     },
-    select: { tradePnl: true, pnl: true },
-  });
-  const realizedToday = closedToday.reduce(
-    (sum, t) => sum + realizedTradePnl(t),
-    0,
-  );
-
-  const openTrades = await prisma.trade.findMany({
-    where: { userId, status: TradeStatus.OPEN },
-    select: {
-      symbol: true,
-      side: true,
-      entryPrice: true,
-      size: true,
-    },
+    _sum: { profitAmount: true },
   });
 
-  let unrealizedLive = 0;
-  for (const trade of openTrades) {
-    if (!Number.isFinite(trade.entryPrice) || trade.entryPrice <= 0) continue;
-
-    const mark = await resolveMarkForOpenTrade(trade.symbol);
-    if (mark == null) continue;
-
-    const side: TradeSide =
-      String(trade.side).toUpperCase() === "SELL" ? "SELL" : "BUY";
-    const contracts = Math.abs(trade.size);
-    if (contracts < 1e-12) continue;
-
-    let contractSize = deltaContractSizeFallback(trade.symbol);
-    try {
-      contractSize = await fetchDeltaSwapContractSize(trade.symbol);
-    } catch {
-      /* keep fallback */
-    }
-
-    unrealizedLive += estimateLivePnlUsd({
-      symbolKey: trade.symbol,
-      side,
-      entryPrice: trade.entryPrice,
-      contracts,
-      markPrice: mark,
-      contractSize,
-    });
-  }
-
-  return realizedToday + unrealizedLive;
+  return agg._sum.profitAmount ?? 0;
 }
 
 export async function systemClosedPnlSince(

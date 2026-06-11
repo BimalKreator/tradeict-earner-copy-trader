@@ -425,6 +425,11 @@ async function prefetchOptionTickerQuotes(
   const exchange = await getPublicClient();
   await Promise.all(
     unique.map(async (sym) => {
+      if (isDeltaOptionProductId(sym) || /^\d+$/.test(sym)) {
+        const rest = await fetchDeltaTickerFromRestApi(sym);
+        cache.set(sym, { bid: rest.bid, ask: rest.ask });
+        return;
+      }
       try {
         const ccxtSymbol = resolveCcxtSymbol(exchange, sym);
         const ticker = await exchange.fetchTicker(ccxtSymbol);
@@ -1707,15 +1712,75 @@ export async function fetchDeltaMarkPrice(
 }
 
 /**
+ * Delta India public REST ticker — CCXT omits most live option contracts.
+ * GET /v2/tickers/{symbol}
+ */
+async function fetchDeltaTickerFromRestApi(
+  productRef: string,
+): Promise<{ last: number | null; bid: number | null; ask: number | null }> {
+  const ref = productRef.trim();
+  if (!ref) return { last: null, bid: null, ask: null };
+
+  try {
+    const { data } = await axios.get<{ success?: boolean; result?: unknown }>(
+      `${DELTA_INDIA_API_BASE}/v2/tickers/${encodeURIComponent(ref)}`,
+      { timeout: 20_000 },
+    );
+    if (data?.success !== true || data.result == null) {
+      return { last: null, bid: null, ask: null };
+    }
+
+    const row = Array.isArray(data.result) ? data.result[0] : data.result;
+    if (!row || typeof row !== "object") {
+      return { last: null, bid: null, ask: null };
+    }
+
+    const r = row as Record<string, unknown>;
+    const last =
+      numberOrNull(r.close) ??
+      numberOrNull(r.mark_price) ??
+      numberOrNull(r.spot_price);
+    const bid = numberOrNull(r.best_bid) ?? numberOrNull(r.bid);
+    const ask = numberOrNull(r.best_ask) ?? numberOrNull(r.ask);
+    return { last, bid, ask };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[exchangeService] fetchDeltaTickerFromRestApi failed ref=${ref}:`,
+      msg,
+    );
+    return { last: null, bid: null, ask: null };
+  }
+}
+
+/**
  * Public last traded price — for slippage checks only (not for unrealized PnL).
- * Uses Delta India via {@link initializeDeltaClient}. Returns `{ last: null }` on any failure.
+ * Options: Delta REST first (CCXT loadMarkets omits live contracts).
+ * Returns `{ last: null }` on any failure.
  */
 export async function fetchDeltaTicker(
   symbol: string,
 ): Promise<{ last: number | null }> {
+  const ref = symbol.trim();
+  if (!ref) return { last: null };
+
+  if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
+    const rest = await fetchDeltaTickerFromRestApi(ref);
+    if (rest.last != null && Number.isFinite(rest.last) && rest.last > 0) {
+      return { last: rest.last };
+    }
+    const mid =
+      rest.bid != null && rest.ask != null && rest.bid > 0 && rest.ask > 0
+        ? (rest.bid + rest.ask) / 2
+        : rest.bid ?? rest.ask;
+    if (mid != null && Number.isFinite(mid) && mid > 0) {
+      return { last: mid };
+    }
+  }
+
   try {
     const exchange = await getPublicClient();
-    const ccxtSymbol = resolveCcxtSymbol(exchange, symbol);
+    const ccxtSymbol = resolveCcxtSymbol(exchange, ref);
     try {
       const ticker = await exchange.fetchTicker(ccxtSymbol);
       const raw =

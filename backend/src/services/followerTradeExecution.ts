@@ -1101,16 +1101,28 @@ export async function adminGranularSyncFollowerLegs(
       /* fallback below */
     }
     if (entryPrice <= 0) {
-      const err = `Could not resolve market price for ${leg.symbol}`;
-      results.push({
-        symbol: leg.symbol,
-        side: leg.side,
-        addLots: leg.addLots,
-        success: false,
-        error: err,
+      const masterLeg = await prisma.tradePosition.findFirst({
+        where: {
+          strategyId,
+          isMaster: true,
+          status: TradePositionStatus.OPEN,
+          symbol: leg.symbol,
+          side: leg.side,
+        },
+        select: { entryPrice: true },
       });
-      errors.push(err);
-      break;
+      if (
+        masterLeg?.entryPrice != null &&
+        Number.isFinite(masterLeg.entryPrice) &&
+        masterLeg.entryPrice > 0
+      ) {
+        entryPrice = masterLeg.entryPrice;
+      }
+    }
+    if (entryPrice <= 0) {
+      console.warn(
+        `[granular-sync] no quote for ${leg.symbol} — placing REST order anyway (ledger price from fill)`,
+      );
     }
 
     const clientOrderId = buildClientOrderId({
@@ -1135,13 +1147,24 @@ export async function adminGranularSyncFollowerLegs(
     });
 
     if (exec.success && exec.verified) {
+      const ledgerEntryPrice =
+        exec.fillPrice != null && Number.isFinite(exec.fillPrice) && exec.fillPrice > 0
+          ? exec.fillPrice
+          : entryPrice > 0
+            ? entryPrice
+            : 0;
+      if (ledgerEntryPrice <= 0) {
+        console.warn(
+          `[granular-sync] ${leg.symbol} filled but no entry price — using 0 for ledger`,
+        );
+      }
       await incrementOrRecordFollowerTradePosition(prisma, {
         strategyId,
         userId,
         symbol: leg.symbol,
         side,
         addLots: leg.addLots,
-        entryPrice,
+        entryPrice: ledgerEntryPrice,
         clientOrderId,
         ...(exec.orderId ? { exchangeOrderId: exec.orderId } : {}),
       });
@@ -1151,7 +1174,7 @@ export async function adminGranularSyncFollowerLegs(
         symbol: leg.symbol,
         side,
         size: leg.addLots,
-        entryPrice,
+        entryPrice: ledgerEntryPrice,
         status: TradeStatus.OPEN,
         tradingFee: exec.feeCost ?? 0,
         clientOrderId,
@@ -1601,6 +1624,7 @@ export async function executeFollowerExactIncrementalAdd(
         attempts: Math.max(attempts, 1),
         feeCost: totalFee,
         ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+        ...(lastResult.fillPrice != null ? { fillPrice: lastResult.fillPrice } : {}),
         ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
         ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
       };
@@ -1670,6 +1694,7 @@ export async function executeFollowerExactIncrementalAdd(
       attempts: Math.max(attempts, 1),
       feeCost: totalFee,
       ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
+      ...(lastResult.fillPrice != null ? { fillPrice: lastResult.fillPrice } : {}),
       ...(args.clientOrderId ? { clientOrderId: args.clientOrderId } : {}),
       ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
     };
