@@ -677,7 +677,15 @@ export function createUserController(prisma: PrismaClient) {
         exitReason: r.exitReason,
       }));
 
-      res.json({ trades });
+      const booked = await computeUserBookedPnlAndRevenueDue(prisma, userId, null);
+
+      res.json({
+        trades,
+        summary: {
+          netPnl: booked.grossBookedPnl,
+          appRevenue: booked.revenueSharingDue,
+        },
+      });
     } catch (err) {
       next(err);
     }

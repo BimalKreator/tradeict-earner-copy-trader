@@ -296,6 +296,26 @@ export async function distributeRevenueShareCommissions(
   return { created, skipped };
 }
 
+/** Remove unpaid EARNED partner commissions when trader net PnL is not positive. */
+export async function voidPendingEarnedCommissionsForSourceUser(
+  prisma: PrismaClient,
+  sourceUserId: string,
+): Promise<number> {
+  const result = await prisma.commissionLedger.deleteMany({
+    where: {
+      sourceUserId,
+      status: CommissionLedgerStatus.EARNED,
+      invoiceId: null,
+    },
+  });
+  if (result.count > 0) {
+    console.log(
+      `[affiliateCommission] voided ${result.count} EARNED row(s) sourceUser=${sourceUserId} — net PnL ≤ 0`,
+    );
+  }
+  return result.count;
+}
+
 /** Fire-and-forget wrapper — must not throw to callers. */
 export async function triggerAffiliateCommissionDistribution(
   prisma: PrismaClient,

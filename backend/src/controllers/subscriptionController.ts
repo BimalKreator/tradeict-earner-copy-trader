@@ -11,7 +11,11 @@ import {
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
 import { logUserActivity } from "../services/userActivityService.js";
-import { triggerAffiliateCommissionDistribution } from "../services/affiliateCommissionService.js";
+import {
+  triggerAffiliateCommissionDistribution,
+  voidPendingEarnedCommissionsForSourceUser,
+} from "../services/affiliateCommissionService.js";
+import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
 export async function recordTradePnl(
@@ -39,7 +43,12 @@ export async function recordTradePnl(
     return;
   }
 
-  const commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
+  const booked = await computeUserBookedPnlAndRevenueDue(prisma, args.userId, null);
+
+  let commissionAmount = 0;
+  if (booked.grossBookedPnl > 0 && args.tradeProfit > 0) {
+    commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
+  }
 
   const row = await prisma.pnLRecord.create({
     data: {
@@ -50,7 +59,12 @@ export async function recordTradePnl(
     },
   });
 
-  if (commissionAmount > 0 && args.tradeProfit > 0) {
+  if (booked.grossBookedPnl <= 0) {
+    await voidPendingEarnedCommissionsForSourceUser(prisma, args.userId);
+    return;
+  }
+
+  if (commissionAmount > 0) {
     void triggerAffiliateCommissionDistribution(prisma, {
       sourceUserId: args.userId,
       pnlRecordId: row.id,

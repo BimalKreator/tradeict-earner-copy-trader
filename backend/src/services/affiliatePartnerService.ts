@@ -10,6 +10,7 @@ import {
   fetchDeltaBalancesForUserIds,
   strategyShortName,
   sumDeltaBalancesForUserIds,
+  computeUsersBookedPnlAndRevenueDue,
 } from "./dashboardMetricsService.js";
 
 export type PartnerWalletTotals = {
@@ -282,23 +283,8 @@ async function loadUserFinancialMaps(
     map.set(id, emptyUserFinancials());
   }
 
-  const [netPnlGroups, commissionPnlGroups, invoiceDueGroups, invoicePaidGroups, commissionGroups] =
-    await Promise.all([
-      prisma.pnLRecord.groupBy({
-        by: ["userId"],
-        where: { userId: { in: userIds } },
-        _sum: { profitAmount: true },
-      }),
-      prisma.pnLRecord.groupBy({
-        by: ["userId"],
-        where: { userId: { in: userIds }, profitAmount: { gt: 0 } },
-        _sum: { commissionAmount: true },
-      }),
-      prisma.invoice.groupBy({
-        by: ["userId"],
-        where: { userId: { in: userIds } },
-        _sum: { amountDue: true },
-      }),
+  const [bookedByUser, invoicePaidGroups, commissionGroups] = await Promise.all([
+      computeUsersBookedPnlAndRevenueDue(prisma, userIds, null),
       prisma.invoice.groupBy({
         by: ["userId"],
         where: { userId: { in: userIds }, status: InvoiceStatus.PAID },
@@ -314,21 +300,14 @@ async function loadUserFinancialMaps(
       }),
     ]);
 
-  for (const row of netPnlGroups) {
-    const fin = map.get(row.userId)!;
-    fin.totalProfitGenerated = row._sum.profitAmount ?? 0;
-  }
-
-  for (const row of commissionPnlGroups) {
-    const fin = map.get(row.userId)!;
-    fin.totalRevenueShareDue = row._sum.commissionAmount ?? 0;
-  }
-
-  for (const row of invoiceDueGroups) {
-    const fin = map.get(row.userId)!;
-    if (fin.totalRevenueShareDue <= 0) {
-      fin.totalRevenueShareDue = row._sum.amountDue ?? 0;
-    }
+  for (const userId of userIds) {
+    const booked = bookedByUser.get(userId) ?? {
+      grossBookedPnl: 0,
+      revenueSharingDue: 0,
+    };
+    const fin = map.get(userId)!;
+    fin.totalProfitGenerated = booked.grossBookedPnl;
+    fin.totalRevenueShareDue = booked.revenueSharingDue;
   }
 
   for (const row of invoicePaidGroups) {
@@ -338,6 +317,10 @@ async function loadUserFinancialMaps(
 
   for (const row of commissionGroups) {
     const fin = map.get(row.sourceUserId)!;
+    const booked = bookedByUser.get(row.sourceUserId);
+    if (booked != null && booked.grossBookedPnl <= 0) {
+      continue;
+    }
     const amount = row._sum.amount ?? 0;
     if (row.status === CommissionLedgerStatus.EARNED) {
       fin.memberCommissionEarned += amount;

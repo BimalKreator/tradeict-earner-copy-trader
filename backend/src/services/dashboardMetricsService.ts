@@ -236,11 +236,101 @@ export type BookedPnlAndRevenueDue = {
   /** Sum of realized PnL on CLOSED trades in the window (ignores open/floating). */
   grossBookedPnl: number;
   /**
-   * Per-strategy: max(0, net booked PnL) × profitShare%.
-   * Losses reduce net booked; if net ≤ 0 for a strategy, its due is $0.
+   * Per-strategy: max(0, net booked PnL) × profitShare%, summed across strategies.
+   * Zero when overall gross booked PnL ≤ 0 (losses net out app revenue).
    */
   revenueSharingDue: number;
 };
+
+type ClosedTradePnlRow = {
+  strategyId: string;
+  tradePnl: number;
+  pnl: number | null;
+};
+
+/** Pure net PnL + app revenue from closed trade rows (same rules as user dashboard). */
+export function computeBookedPnlAndRevenueDueFromTrades(
+  trades: ClosedTradePnlRow[],
+  profitShareByStrategyId: Map<string, number>,
+): BookedPnlAndRevenueDue {
+  let grossBookedPnl = 0;
+  const pnlByStrategy = new Map<string, number>();
+
+  for (const t of trades) {
+    const pnl = realizedTradePnl(t);
+    grossBookedPnl += pnl;
+    pnlByStrategy.set(
+      t.strategyId,
+      (pnlByStrategy.get(t.strategyId) ?? 0) + pnl,
+    );
+  }
+
+  if (pnlByStrategy.size === 0 || grossBookedPnl <= 0) {
+    return { grossBookedPnl, revenueSharingDue: 0 };
+  }
+
+  let revenueSharingDue = 0;
+  for (const [strategyId, netBooked] of pnlByStrategy) {
+    if (netBooked <= 0) continue;
+    const pct = profitShareByStrategyId.get(strategyId) ?? 0;
+    revenueSharingDue += netBooked * (pct / 100);
+  }
+
+  return { grossBookedPnl, revenueSharingDue };
+}
+
+/**
+ * Batch all-time booked PnL + app revenue for many users (partner network tree).
+ */
+export async function computeUsersBookedPnlAndRevenueDue(
+  prisma: PrismaClient,
+  userIds: string[],
+  since: Date | null = null,
+): Promise<Map<string, BookedPnlAndRevenueDue>> {
+  const out = new Map<string, BookedPnlAndRevenueDue>();
+  for (const id of userIds) {
+    out.set(id, { grossBookedPnl: 0, revenueSharingDue: 0 });
+  }
+  if (userIds.length === 0) return out;
+
+  const trades = await prisma.trade.findMany({
+    where: {
+      userId: { in: userIds },
+      status: TradeStatus.CLOSED,
+      ...(since ? { createdAt: { gte: since } } : {}),
+    },
+    select: { userId: true, strategyId: true, tradePnl: true, pnl: true },
+  });
+
+  if (trades.length === 0) return out;
+
+  const strategyIds = [...new Set(trades.map((t) => t.strategyId))];
+  const strategies = await prisma.strategy.findMany({
+    where: { id: { in: strategyIds } },
+    select: { id: true, profitShare: true },
+  });
+  const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
+
+  const tradesByUser = new Map<string, ClosedTradePnlRow[]>();
+  for (const t of trades) {
+    const list = tradesByUser.get(t.userId) ?? [];
+    list.push({
+      strategyId: t.strategyId,
+      tradePnl: t.tradePnl,
+      pnl: t.pnl,
+    });
+    tradesByUser.set(t.userId, list);
+  }
+
+  for (const [userId, userTrades] of tradesByUser) {
+    out.set(
+      userId,
+      computeBookedPnlAndRevenueDueFromTrades(userTrades, sharePctById),
+    );
+  }
+
+  return out;
+}
 
 /**
  * Gross booked PnL and revenue-sharing due from CLOSED trades only.
@@ -260,33 +350,17 @@ export async function computeUserBookedPnlAndRevenueDue(
     select: { strategyId: true, tradePnl: true, pnl: true },
   });
 
-  let grossBookedPnl = 0;
-  const pnlByStrategy = new Map<string, number>();
-
-  for (const t of trades) {
-    const pnl = realizedTradePnl(t);
-    grossBookedPnl += pnl;
-    pnlByStrategy.set(t.strategyId, (pnlByStrategy.get(t.strategyId) ?? 0) + pnl);
-  }
-
-  if (pnlByStrategy.size === 0) {
+  if (trades.length === 0) {
     return { grossBookedPnl: 0, revenueSharingDue: 0 };
   }
 
   const strategies = await prisma.strategy.findMany({
-    where: { id: { in: [...pnlByStrategy.keys()] } },
+    where: { id: { in: [...new Set(trades.map((t) => t.strategyId))] } },
     select: { id: true, profitShare: true },
   });
   const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
 
-  let revenueSharingDue = 0;
-  for (const [strategyId, netBooked] of pnlByStrategy) {
-    if (netBooked <= 0) continue;
-    const pct = sharePctById.get(strategyId) ?? 0;
-    revenueSharingDue += netBooked * (pct / 100);
-  }
-
-  return { grossBookedPnl, revenueSharingDue };
+  return computeBookedPnlAndRevenueDueFromTrades(trades, sharePctById);
 }
 
 /** Calendar-month subscription fee renewal — days until next joinedDate anniversary. */
