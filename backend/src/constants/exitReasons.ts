@@ -11,6 +11,7 @@ export const EXIT_REASON = {
   NO_API_CREDENTIALS: "No API Credentials (Failed)",
   EXECUTION_FAILED: "Execution Failed",
   RECONCILE_GHOST: "Master Closed (Reconcile)",
+  DUMMY_INJECT: "Admin Dummy Trade (Test)",
 } as const;
 
 export type ExitReasonValue = (typeof EXIT_REASON)[keyof typeof EXIT_REASON];

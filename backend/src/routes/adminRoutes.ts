@@ -40,6 +40,7 @@ import {
   clearDeltaAuthClientCache,
   testDeltaIndiaConnection,
 } from "../services/exchangeService.js";
+import { injectDummyTrade } from "../services/dummyTradeInjectorService.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -92,6 +93,56 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });
+  });
+
+  /**
+   * POST /api/admin/debug/inject-dummy-trade
+   * Admin-only — simulate a closed trade for PnL + commission testing (no exchange).
+   */
+  router.post("/debug/inject-dummy-trade", async (req, res, next) => {
+    try {
+      const body = req.body as {
+        userId?: unknown;
+        strategyId?: unknown;
+        grossPnl?: unknown;
+        symbol?: unknown;
+      };
+
+      const userId =
+        typeof body.userId === "string" ? body.userId.trim() : "";
+      const strategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      const symbol = typeof body.symbol === "string" ? body.symbol.trim() : "";
+      const grossPnl =
+        typeof body.grossPnl === "number"
+          ? body.grossPnl
+          : typeof body.grossPnl === "string"
+            ? Number.parseFloat(body.grossPnl)
+            : NaN;
+
+      const result = await injectDummyTrade(prisma, {
+        userId,
+        strategyId,
+        grossPnl,
+        symbol,
+      });
+
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof Error) {
+        const msg = err.message;
+        if (
+          msg.includes("required") ||
+          msg.includes("not found") ||
+          msg.includes("finite") ||
+          msg.includes("Failed to create")
+        ) {
+          res.status(400).json({ error: msg });
+          return;
+        }
+      }
+      next(err);
+    }
   });
   router.get("/dashboard-stats", adminController.getDashboardStats);
   router.get("/transactions", adminController.listTransactions);

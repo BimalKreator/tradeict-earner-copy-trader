@@ -337,6 +337,8 @@ model Trade {
   exitReason      String?
   /** Stable id for copy dedup (master fill × follower leg). */
   clientOrderId   String?     @unique
+  /** Admin-injected test trade — no exchange execution. */
+  isDummy         Boolean     @default(false)
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @default(now()) @updatedAt
 
@@ -547,6 +549,8 @@ model PnLRecord {
   strategyId       String
   profitAmount     Float
   commissionAmount Float
+  /** Admin-injected test PnL — triggers same commission path without exchange. */
+  isDummy          Boolean  @default(false)
   timestamp        DateTime @default(now())
 
   user              User               @relation(fields: [userId], references: [id])

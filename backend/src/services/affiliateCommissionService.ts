@@ -308,6 +308,10 @@ export async function distributeRevenueShareCommissions(
 ): Promise<{ created: number; skipped: number }> {
   const appRevenueBase = args.appRevenueBase;
   if (!Number.isFinite(appRevenueBase) || appRevenueBase <= 0) {
+    console.log(
+      `[affiliateCommission] skip distribution sourceUser=${args.sourceUserId} ` +
+        `pnlRecord=${args.pnlRecordId} — appRevenueBase<=0 (${appRevenueBase})`,
+    );
     return { created: 0, skipped: 0 };
   }
 
@@ -316,13 +320,33 @@ export async function distributeRevenueShareCommissions(
     select: { role: true, acquiredById: true, parentId: true },
   });
   if (!source) {
+    console.warn(
+      `[affiliateCommission] skip distribution — source user not found id=${args.sourceUserId}`,
+    );
     return { created: 0, skipped: 0 };
   }
 
   const chain = await resolveCommissionChain(prisma, source);
   if (chain.length === 0) {
+    console.log(
+      `[affiliateCommission] no commission chain sourceUser=${args.sourceUserId} ` +
+        `role=${source.role} acquiredById=${source.acquiredById ?? "none"} ` +
+        `parentId=${source.parentId ?? "none"} appRevenueBase=$${appRevenueBase.toFixed(2)}`,
+    );
     return { created: 0, skipped: 0 };
   }
+
+  console.log(
+    `[affiliateCommission] calculating commissions sourceUser=${args.sourceUserId} ` +
+      `pnlRecord=${args.pnlRecordId} appRevenueBase=$${appRevenueBase.toFixed(2)} ` +
+      `chainLen=${chain.length} ` +
+      chain
+        .map(
+          (s) =>
+            `partner=${s.beneficiaryUserId} tier=${s.beneficiaryTier} rate=${s.commissionRate}%`,
+        )
+        .join(" | "),
+  );
 
   const profitDate = startOfUtcDay(args.profitDate);
   const unlockDate = new Date(profitDate);
@@ -341,7 +365,7 @@ export async function distributeRevenueShareCommissions(
       const idempotencyKey = `${args.pnlRecordId}:${slice.beneficiaryUserId}:EARNED`;
 
       try {
-        await tx.commissionLedger.create({
+        const row = await tx.commissionLedger.create({
           data: {
             profitDate,
             sourceUserId: args.sourceUserId,
@@ -357,12 +381,23 @@ export async function distributeRevenueShareCommissions(
           },
         });
         created += 1;
+        console.log(
+          `[affiliateCommission] ledger insert id=${row.id} status=EARNED ` +
+            `partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
+            `rate=${slice.commissionRate}% tier=${slice.beneficiaryTier} ` +
+            `sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId}`,
+        );
       } catch (err) {
         if (
           err instanceof PrismaClientKnownRequestError &&
           err.code === "P2002"
         ) {
           skipped += 1;
+          console.log(
+            `[affiliateCommission] ledger skip duplicate status=EARNED ` +
+              `partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
+              `sourceUser=${args.sourceUserId} key=${idempotencyKey}`,
+          );
           continue;
         }
         throw err;

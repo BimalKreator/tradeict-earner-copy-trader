@@ -12,10 +12,18 @@ import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
 import { logUserActivity } from "../services/userActivityService.js";
 import {
+  distributeRevenueShareCommissions,
   triggerAffiliateCommissionDistribution,
   voidPendingEarnedCommissionsForSourceUser,
 } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
+
+export type RecordTradePnlResult = {
+  pnlRecordId: string;
+  commissionAmount: number;
+  commissionsCreated: number;
+  commissionsSkipped: number;
+};
 
 /** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
 export async function recordTradePnl(
@@ -24,11 +32,14 @@ export async function recordTradePnl(
     userId: string;
     strategyId: string;
     tradeProfit: number;
+    isDummy?: boolean;
+    /** When true, await affiliate ledger inserts (admin dummy-trade injector). */
+    awaitCommissionDistribution?: boolean;
   },
-): Promise<void> {
+): Promise<RecordTradePnlResult | null> {
   if (!Number.isFinite(args.tradeProfit)) {
     console.warn("[recordTradePnl] skip: tradeProfit is not finite");
-    return;
+    return null;
   }
 
   const strategy = await prisma.strategy.findUnique({
@@ -40,13 +51,13 @@ export async function recordTradePnl(
     console.warn(
       `[recordTradePnl] skip: strategy not found (${args.strategyId})`,
     );
-    return;
+    return null;
   }
 
   const booked = await computeUserBookedPnlAndRevenueDue(prisma, args.userId, null);
 
   let commissionAmount = 0;
-  if (booked.grossPnl > 0 && args.tradeProfit > 0) {
+  if (args.tradeProfit > 0 && strategy.profitShare > 0) {
     commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
   }
 
@@ -56,22 +67,52 @@ export async function recordTradePnl(
       strategyId: args.strategyId,
       profitAmount: args.tradeProfit,
       commissionAmount,
+      isDummy: args.isDummy === true,
     },
   });
 
+  if (args.isDummy === true) {
+    console.log(
+      `[recordTradePnl] dummy PnLRecord id=${row.id} user=${args.userId} ` +
+        `profit=$${args.tradeProfit.toFixed(2)} appRevenue=$${commissionAmount.toFixed(4)}`,
+    );
+  }
+
   if (booked.grossPnl <= 0) {
     await voidPendingEarnedCommissionsForSourceUser(prisma, args.userId);
-    return;
+    return {
+      pnlRecordId: row.id,
+      commissionAmount,
+      commissionsCreated: 0,
+      commissionsSkipped: 0,
+    };
   }
 
   if (commissionAmount > 0) {
-    void triggerAffiliateCommissionDistribution(prisma, {
+    const distArgs = {
       sourceUserId: args.userId,
       pnlRecordId: row.id,
       appRevenueBase: commissionAmount,
       profitDate: row.timestamp,
-    });
+    };
+    if (args.awaitCommissionDistribution === true) {
+      const dist = await distributeRevenueShareCommissions(prisma, distArgs);
+      return {
+        pnlRecordId: row.id,
+        commissionAmount,
+        commissionsCreated: dist.created,
+        commissionsSkipped: dist.skipped,
+      };
+    }
+    void triggerAffiliateCommissionDistribution(prisma, distArgs);
   }
+
+  return {
+    pnlRecordId: row.id,
+    commissionAmount,
+    commissionsCreated: 0,
+    commissionsSkipped: 0,
+  };
 }
 
 export function createSubscriptionController(prisma: PrismaClient) {

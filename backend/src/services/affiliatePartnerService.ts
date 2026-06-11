@@ -319,11 +319,8 @@ async function loadUserFinancialMaps(
   }
 
   for (const row of commissionGroups) {
-    const fin = map.get(row.sourceUserId)!;
-    const booked = bookedByUser.get(row.sourceUserId);
-    if (booked != null && booked.grossPnl <= 0) {
-      continue;
-    }
+    const fin = map.get(row.sourceUserId);
+    if (!fin) continue;
     const amount = row._sum.amount ?? 0;
     if (row.status === CommissionLedgerStatus.EARNED) {
       fin.memberCommissionEarned += amount;
@@ -646,11 +643,10 @@ export async function getPartnerNetworkDetails(
   const memberIds = members.map((m) => m.id);
   const userIds = users.map((u) => u.id);
   const networkTraderIds = [...memberIds, ...userIds];
-  const financialsByUserId = await loadUserFinancialMaps(
-    prisma,
-    networkTraderIds,
-    userId,
-  );
+  const [financialsByUserId, viewerCommissionWallets] = await Promise.all([
+    loadUserFinancialMaps(prisma, networkTraderIds, userId),
+    sumCommissionWalletsByStatus(prisma, userId),
+  ]);
 
   const tree = buildPartnerNetworkTree(
     userId,
@@ -675,8 +671,11 @@ export async function getPartnerNetworkDetails(
       totalProfitGenerated: aggregate.totalProfitGenerated,
       totalRevenueShareDue: aggregate.totalRevenueShareDue,
       totalRevenuePaid: aggregate.totalRevenuePaid,
-      totalMemberCommissionEarned: aggregate.memberCommissionEarned,
-      totalMemberCommissionPayable: aggregate.memberCommissionPayable,
+      /** Viewer as beneficiary — all EARNED ledger rows (authoritative). */
+      totalMemberCommissionEarned: viewerCommissionWallets.earned,
+      /** PAYABLE + WITHDRAWABLE rows for the viewer. */
+      totalMemberCommissionPayable:
+        viewerCommissionWallets.payable + viewerCommissionWallets.withdrawable,
     },
   };
 }
