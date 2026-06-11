@@ -143,20 +143,31 @@ export async function recordTradePositionOpen(
     where: { clientOrderId },
     select: { id: true, clientOrderId: true, status: true },
   });
-  if (existing) {
-    if (existing.status === TradePositionStatus.OPEN) {
-      return { id: existing.id, clientOrderId: existing.clientOrderId };
-    }
-    console.warn(
-      `[tradePosition] clientOrderId already CLOSED — skip reopen id=${existing.id}`,
-    );
-    return null;
-  }
-
   const qty = Math.abs(args.quantity);
   if (!Number.isFinite(qty) || qty <= 0) return null;
   const entry = args.entryPrice;
   if (!Number.isFinite(entry) || entry <= 0) return null;
+
+  if (existing) {
+    if (existing.status === TradePositionStatus.OPEN) {
+      return { id: existing.id, clientOrderId: existing.clientOrderId };
+    }
+    const reopened = await prisma.tradePosition.update({
+      where: { id: existing.id },
+      data: {
+        status: TradePositionStatus.OPEN,
+        quantity: qty,
+        entryPrice: entry,
+        symbol: args.symbol,
+        side: String(args.side).toUpperCase(),
+      },
+      select: { id: true, clientOrderId: true },
+    });
+    console.log(
+      `[tradePosition] REOPEN ${isMaster ? "master" : `user=${args.userId}`} strategyId=${args.strategyId} ${args.symbol} ${args.side} qty=${qty} clientOrderId=${clientOrderId}`,
+    );
+    return reopened;
+  }
 
   const row = await prisma.tradePosition.create({
     data: {

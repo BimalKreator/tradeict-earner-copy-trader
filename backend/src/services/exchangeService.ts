@@ -1798,6 +1798,18 @@ async function fetchDeltaMarginedPositionSnapshotInner(
     exchange = await getAuthClient(apiKey, secret);
   }
 
+  const openOptionRefs = collectOpenOptionProductSymbols(rawList);
+  for (const ref of openOptionRefs) {
+    try {
+      await hydrateExactDeltaOptionOnExchange(exchange, ref);
+    } catch (hydrateErr) {
+      console.warn(
+        `[exchangeService] option hydrate before position parse failed ${ref}:`,
+        hydrateErr instanceof Error ? hydrateErr.message : hydrateErr,
+      );
+    }
+  }
+
   const optionTickerCache = lite
     ? await prefetchOptionTickerQuotes(collectOpenOptionProductSymbols(rawList))
     : new Map<string, OptionTickerQuote>();

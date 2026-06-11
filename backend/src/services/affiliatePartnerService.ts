@@ -282,12 +282,17 @@ async function loadUserFinancialMaps(
     map.set(id, emptyUserFinancials());
   }
 
-  const [pnlGroups, invoiceDueGroups, invoicePaidGroups, commissionGroups] =
+  const [netPnlGroups, commissionPnlGroups, invoiceDueGroups, invoicePaidGroups, commissionGroups] =
     await Promise.all([
       prisma.pnLRecord.groupBy({
         by: ["userId"],
+        where: { userId: { in: userIds } },
+        _sum: { profitAmount: true },
+      }),
+      prisma.pnLRecord.groupBy({
+        by: ["userId"],
         where: { userId: { in: userIds }, profitAmount: { gt: 0 } },
-        _sum: { profitAmount: true, commissionAmount: true },
+        _sum: { commissionAmount: true },
       }),
       prisma.invoice.groupBy({
         by: ["userId"],
@@ -309,9 +314,13 @@ async function loadUserFinancialMaps(
       }),
     ]);
 
-  for (const row of pnlGroups) {
+  for (const row of netPnlGroups) {
     const fin = map.get(row.userId)!;
     fin.totalProfitGenerated = row._sum.profitAmount ?? 0;
+  }
+
+  for (const row of commissionPnlGroups) {
+    const fin = map.get(row.userId)!;
     fin.totalRevenueShareDue = row._sum.commissionAmount ?? 0;
   }
 

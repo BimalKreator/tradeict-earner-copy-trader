@@ -253,7 +253,9 @@ function orderAckPending(ack: DeltaClientOrderAck): boolean {
 function orderAckFilledQty(ack: DeltaClientOrderAck): number {
   if (!ack.found) return 0;
   if (ack.filledSize > 0) return ack.filledSize;
-  if (ack.state === "filled") return ack.filledSize;
+  if (ack.state === "filled" && ack.unfilledSize <= 0) {
+    return ack.filledSize;
+  }
   return 0;
 }
 
@@ -292,15 +294,15 @@ async function recordVerifiedFollowerOpen(
     clientOrderId?: string;
     exchangeOrderId?: string | null;
   },
-): Promise<void> {
+): Promise<boolean> {
   if (
     !args.strategyId ||
     args.entryPrice == null ||
     !Number.isFinite(args.entryPrice)
   ) {
-    return;
+    return false;
   }
-  await recordTradePositionOpen(prisma, {
+  const row = await recordTradePositionOpen(prisma, {
     strategyId: args.strategyId,
     userId: args.userId,
     symbol: args.symbol,
@@ -312,6 +314,7 @@ async function recordVerifiedFollowerOpen(
       ? { exchangeOrderId: args.exchangeOrderId }
       : {}),
   });
+  return row != null;
 }
 
 function buildOpenExecuteSuccess(
@@ -1900,7 +1903,7 @@ export async function executeFollowerTradeWithVerification(
       if (dbQty < minFilled) {
         return null;
       }
-      await recordVerifiedFollowerOpen(prisma, {
+      const persisted = await recordVerifiedFollowerOpen(prisma, {
         userId: args.userId,
         symbol,
         side,
@@ -1912,6 +1915,12 @@ export async function executeFollowerTradeWithVerification(
         ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
         exchangeOrderId: ack?.orderId ?? lastResult.orderId ?? null,
       });
+      if (!persisted) {
+        console.warn(
+          `[RETRY_LOOP] exchange/ack ok (${exchangeLots}/${targetContracts}, ack=${ackFilled}) but DB open failed user=${userId} ${symbol}`,
+        );
+        return null;
+      }
       return buildOpenExecuteSuccess({
         lastResult: {
           ...lastResult,
