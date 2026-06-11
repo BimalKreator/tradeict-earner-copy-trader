@@ -98,8 +98,17 @@ function sideToneClass(side: string): string {
   return "bg-white/10 text-white/70";
 }
 
+type TradeSummary = {
+  grossPnl: number;
+  appRevenue: number;
+  netEarnedPnl: number;
+  /** @deprecated use netEarnedPnl */
+  netPnl?: number;
+};
+
 export default function DashboardTradesPage() {
   const [rows, setRows] = useState<TradeRow[]>([]);
+  const [summary, setSummary] = useState<TradeSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,7 +146,16 @@ export default function DashboardTradesPage() {
         Array.isArray((data as { trades: unknown }).trades)
           ? ((data as { trades: TradeRow[] }).trades)
           : [];
+      const apiSummary =
+        typeof data === "object" &&
+        data !== null &&
+        "summary" in data &&
+        typeof (data as { summary: unknown }).summary === "object" &&
+        (data as { summary: TradeSummary | null }).summary !== null
+          ? (data as { summary: TradeSummary }).summary
+          : null;
       setRows(list);
+      setSummary(apiSummary);
       if (!silent) {
         setError(null);
         setUnauthorized(false);
@@ -202,17 +220,34 @@ export default function DashboardTradesPage() {
     }
   }, [fromDate, toDate]);
 
-  const totalPnl = rows.reduce((acc, r) => {
+  const closedRows = rows.filter((r) => r.status === "CLOSED");
+  const fallbackGrossPnl = closedRows.reduce((acc, r) => {
     const v = realizedPnl(r);
     return acc + (v ?? 0);
   }, 0);
-  const totalTradingFee = rows.reduce(
-    (acc, r) => acc + (Number.isFinite(r.tradingFee) ? r.tradingFee : 0),
-    0,
-  );
-  const totalRevenueShare = rows.reduce(
+  const fallbackAppRevenue = closedRows.reduce(
     (acc, r) =>
       acc + (Number.isFinite(r.revenueShareAmt) ? r.revenueShareAmt : 0),
+    0,
+  );
+  const grossPnl =
+    summary != null && Number.isFinite(summary.grossPnl)
+      ? summary.grossPnl
+      : fallbackGrossPnl;
+  const appRevenue =
+    summary != null && Number.isFinite(summary.appRevenue)
+      ? summary.appRevenue
+      : fallbackAppRevenue;
+  const netEarnedPnl =
+    summary != null && Number.isFinite(summary.netEarnedPnl)
+      ? summary.netEarnedPnl
+      : summary != null &&
+          summary.netPnl != null &&
+          Number.isFinite(summary.netPnl)
+        ? summary.netPnl
+        : grossPnl - appRevenue;
+  const totalTradingFee = rows.reduce(
+    (acc, r) => acc + (Number.isFinite(r.tradingFee) ? r.tradingFee : 0),
     0,
   );
 
@@ -290,7 +325,7 @@ export default function DashboardTradesPage() {
       </header>
 
       {!loading && rows.length > 0 ? (
-        <section className="grid gap-4 sm:grid-cols-4">
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
               Trades
@@ -301,12 +336,39 @@ export default function DashboardTradesPage() {
           </div>
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Net PnL
+              Gross PnL
             </p>
             <p
-              className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(totalPnl)}`}
+              className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(grossPnl)}`}
             >
-              {fmtPnl(totalPnl)}
+              {fmtPnl(grossPnl)}
+            </p>
+            <p className="mt-1 text-xs text-white/40">
+              Before app revenue share
+            </p>
+          </div>
+          <div className="glass-card border border-glassBorder p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
+              App Revenue
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-amber-200/90 tabular-nums">
+              {fmtFee(appRevenue)}
+            </p>
+            <p className="mt-1 text-xs text-white/40">
+              Profit share retained by platform
+            </p>
+          </div>
+          <div className="glass-card border border-glassBorder p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
+              Net Earned PnL
+            </p>
+            <p
+              className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(netEarnedPnl)}`}
+            >
+              {fmtPnl(netEarnedPnl)}
+            </p>
+            <p className="mt-1 text-xs text-white/40">
+              Gross − app revenue
             </p>
           </div>
           <div className="glass-card border border-glassBorder p-5">
@@ -315,14 +377,6 @@ export default function DashboardTradesPage() {
             </p>
             <p className="mt-2 text-2xl font-semibold text-white/90 tabular-nums">
               {fmtFee(totalTradingFee)}
-            </p>
-          </div>
-          <div className="glass-card border border-glassBorder p-5">
-            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Revenue Share
-            </p>
-            <p className="mt-2 text-2xl font-semibold text-white/90 tabular-nums">
-              {fmtFee(totalRevenueShare)}
             </p>
           </div>
         </section>

@@ -1,11 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Loader2, Save, Shield } from "lucide-react";
+import { AlertTriangle, Loader2, Save, Shield, UsersRound } from "lucide-react";
 import { usePlatformConfig } from "@/context/PlatformConfigContext";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+type PartnerCommissionRates = {
+  maxTotalPct: number;
+  executiveDirectPct: number;
+  managerUnderExecutivePct: number;
+  directorUnderExecutivePct: number;
+  managerDirectPct: number;
+  directorUnderManagerPct: number;
+  directorDirectPct: number;
+};
+
+const DEFAULT_PARTNER_RATES: PartnerCommissionRates = {
+  maxTotalPct: 8,
+  executiveDirectPct: 5,
+  managerUnderExecutivePct: 2,
+  directorUnderExecutivePct: 1,
+  managerDirectPct: 6,
+  directorUnderManagerPct: 2,
+  directorDirectPct: 8,
+};
 
 export default function AdminSettingsPage() {
   const { refresh: refreshPlatformConfig } = usePlatformConfig();
@@ -20,6 +40,10 @@ export default function AdminSettingsPage() {
   const [savingPayment, setSavingPayment] = useState(false);
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [savingMaintenance, setSavingMaintenance] = useState(false);
+  const [partnerRates, setPartnerRates] = useState<PartnerCommissionRates>(
+    DEFAULT_PARTNER_RATES,
+  );
+  const [savingPartnerCommission, setSavingPartnerCommission] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -28,17 +52,57 @@ export default function AdminSettingsPage() {
     setError(null);
     try {
       const token = localStorage.getItem("token");
-      const res = await fetch(`${API_BASE}/admin/settings/payment`, {
-        headers: { Authorization: `Bearer ${token ?? ""}` },
-      });
-      if (!res.ok) throw new Error(`Failed to load settings (${res.status})`);
-      const data = (await res.json()) as {
+      const [paymentRes, partnerRes] = await Promise.all([
+        fetch(`${API_BASE}/admin/settings/payment`, {
+          headers: { Authorization: `Bearer ${token ?? ""}` },
+        }),
+        fetch(`${API_BASE}/admin/settings/partner-commission`, {
+          headers: { Authorization: `Bearer ${token ?? ""}` },
+        }),
+      ]);
+      if (!paymentRes.ok) {
+        throw new Error(`Failed to load settings (${paymentRes.status})`);
+      }
+      const data = (await paymentRes.json()) as {
         pgFeePercent?: number;
         usdInrRate?: number;
         allowedEmailDomains?: string;
         maintenanceMode?: boolean;
         maintenanceMessage?: string | null;
       };
+      if (partnerRes.ok) {
+        const partnerData = (await partnerRes.json()) as Partial<PartnerCommissionRates>;
+        setPartnerRates({
+          maxTotalPct:
+            typeof partnerData.maxTotalPct === "number"
+              ? partnerData.maxTotalPct
+              : DEFAULT_PARTNER_RATES.maxTotalPct,
+          executiveDirectPct:
+            typeof partnerData.executiveDirectPct === "number"
+              ? partnerData.executiveDirectPct
+              : DEFAULT_PARTNER_RATES.executiveDirectPct,
+          managerUnderExecutivePct:
+            typeof partnerData.managerUnderExecutivePct === "number"
+              ? partnerData.managerUnderExecutivePct
+              : DEFAULT_PARTNER_RATES.managerUnderExecutivePct,
+          directorUnderExecutivePct:
+            typeof partnerData.directorUnderExecutivePct === "number"
+              ? partnerData.directorUnderExecutivePct
+              : DEFAULT_PARTNER_RATES.directorUnderExecutivePct,
+          managerDirectPct:
+            typeof partnerData.managerDirectPct === "number"
+              ? partnerData.managerDirectPct
+              : DEFAULT_PARTNER_RATES.managerDirectPct,
+          directorUnderManagerPct:
+            typeof partnerData.directorUnderManagerPct === "number"
+              ? partnerData.directorUnderManagerPct
+              : DEFAULT_PARTNER_RATES.directorUnderManagerPct,
+          directorDirectPct:
+            typeof partnerData.directorDirectPct === "number"
+              ? partnerData.directorDirectPct
+              : DEFAULT_PARTNER_RATES.directorDirectPct,
+        });
+      }
       if (typeof data.pgFeePercent === "number") {
         setPgFeePercent(String(data.pgFeePercent));
       }
@@ -146,6 +210,77 @@ export default function AdminSettingsPage() {
       return;
     }
     await saveSettings({ pgFeePercent: fee, usdInrRate: fx }, "payment");
+  }
+
+  function updatePartnerRate(
+    key: keyof PartnerCommissionRates,
+    value: string,
+  ): void {
+    const n = Number.parseFloat(value);
+    setPartnerRates((prev) => ({
+      ...prev,
+      [key]: Number.isFinite(n) ? n : 0,
+    }));
+  }
+
+  async function handleSavePartnerCommission(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setSavingPartnerCommission(true);
+    try {
+      const parsed: PartnerCommissionRates = {
+        maxTotalPct: Number.parseFloat(String(partnerRates.maxTotalPct)),
+        executiveDirectPct: Number.parseFloat(
+          String(partnerRates.executiveDirectPct),
+        ),
+        managerUnderExecutivePct: Number.parseFloat(
+          String(partnerRates.managerUnderExecutivePct),
+        ),
+        directorUnderExecutivePct: Number.parseFloat(
+          String(partnerRates.directorUnderExecutivePct),
+        ),
+        managerDirectPct: Number.parseFloat(String(partnerRates.managerDirectPct)),
+        directorUnderManagerPct: Number.parseFloat(
+          String(partnerRates.directorUnderManagerPct),
+        ),
+        directorDirectPct: Number.parseFloat(
+          String(partnerRates.directorDirectPct),
+        ),
+      };
+      for (const [key, val] of Object.entries(parsed)) {
+        if (!Number.isFinite(val) || val < 0 || val > 100) {
+          throw new Error(`${key} must be between 0 and 100`);
+        }
+      }
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_BASE}/admin/settings/partner-commission`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token ?? ""}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(parsed),
+      });
+      const data: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data === "object" && data && "error" in data
+            ? String((data as { error: string }).error)
+            : `Save failed (${res.status})`,
+        );
+      }
+      setSuccess(
+        "Partner commission rates updated. New rates apply to future profit events only.",
+      );
+      void load();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Could not save partner commission rates",
+      );
+    } finally {
+      setSavingPartnerCommission(false);
+    }
   }
 
   async function handleSaveSecurity(e: React.FormEvent) {
@@ -328,6 +463,181 @@ export default function AdminSettingsPage() {
               </button>
             </form>
           </div>
+          </div>
+
+          <div className="glass-card border border-glassBorder p-6 md:p-8">
+            <div className="flex items-center gap-2">
+              <UsersRound className="h-5 w-5 text-violet-400" aria-hidden />
+              <h2 className="text-lg font-semibold text-white">
+                Partner commission rates
+              </h2>
+            </div>
+            <p className="mt-1 text-sm text-white/55">
+              Percent of <strong className="font-medium text-white/75">app revenue</strong>{" "}
+              (not gross trade PnL) paid to each tier when a referred trader books profit.
+              Example: $3.42 gross × 50% app share = $1.71 app revenue → Executive 5% =
+              $0.09, Manager 2% = $0.03, Director 1% = $0.02.
+            </p>
+            <form onSubmit={handleSavePartnerCommission} className="mt-6 space-y-6">
+              <div>
+                <h3 className="text-sm font-medium text-white/80">
+                  Executive acquired the trader (most common)
+                </h3>
+                <div className="mt-3 grid gap-4 sm:grid-cols-3">
+                  <label className="block text-sm text-white/70">
+                    Executive (direct)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      required
+                      value={partnerRates.executiveDirectPct}
+                      onChange={(e) =>
+                        updatePartnerRate("executiveDirectPct", e.target.value)
+                      }
+                      disabled={savingPartnerCommission}
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                    />
+                  </label>
+                  <label className="block text-sm text-white/70">
+                    Manager (upline)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      required
+                      value={partnerRates.managerUnderExecutivePct}
+                      onChange={(e) =>
+                        updatePartnerRate(
+                          "managerUnderExecutivePct",
+                          e.target.value,
+                        )
+                      }
+                      disabled={savingPartnerCommission}
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                    />
+                  </label>
+                  <label className="block text-sm text-white/70">
+                    Director (upline)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      required
+                      value={partnerRates.directorUnderExecutivePct}
+                      onChange={(e) =>
+                        updatePartnerRate(
+                          "directorUnderExecutivePct",
+                          e.target.value,
+                        )
+                      }
+                      disabled={savingPartnerCommission}
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                <div>
+                  <h3 className="text-sm font-medium text-white/80">
+                    Manager acquired the trader
+                  </h3>
+                  <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                    <label className="block text-sm text-white/70">
+                      Manager (direct)
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.01}
+                        required
+                        value={partnerRates.managerDirectPct}
+                        onChange={(e) =>
+                          updatePartnerRate("managerDirectPct", e.target.value)
+                        }
+                        disabled={savingPartnerCommission}
+                        className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                      />
+                    </label>
+                    <label className="block text-sm text-white/70">
+                      Director (upline)
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.01}
+                        required
+                        value={partnerRates.directorUnderManagerPct}
+                        onChange={(e) =>
+                          updatePartnerRate(
+                            "directorUnderManagerPct",
+                            e.target.value,
+                          )
+                        }
+                        disabled={savingPartnerCommission}
+                        className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-white/80">
+                    Director acquired the trader
+                  </h3>
+                  <label className="mt-3 block text-sm text-white/70">
+                    Director (direct)
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      required
+                      value={partnerRates.directorDirectPct}
+                      onChange={(e) =>
+                        updatePartnerRate("directorDirectPct", e.target.value)
+                      }
+                      disabled={savingPartnerCommission}
+                      className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <label className="block max-w-xs text-sm text-white/70">
+                Max total per event (%)
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  required
+                  value={partnerRates.maxTotalPct}
+                  onChange={(e) => updatePartnerRate("maxTotalPct", e.target.value)}
+                  disabled={savingPartnerCommission}
+                  className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                />
+              </label>
+              <p className="text-xs text-white/45">
+                If tier rates sum above the cap, all slices are scaled down proportionally.
+                Changes apply to new profit bookings only — existing ledger rows are unchanged.
+              </p>
+              <button
+                type="submit"
+                disabled={savingPartnerCommission}
+                className="inline-flex items-center gap-2 rounded-lg border border-violet-500/40 bg-violet-500/15 px-5 py-2.5 text-sm font-medium text-violet-100 hover:bg-violet-500/25 disabled:opacity-50"
+              >
+                {savingPartnerCommission ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                {savingPartnerCommission ? "Saving…" : "Save partner commission rates"}
+              </button>
+            </form>
           </div>
         </div>
       )}

@@ -89,6 +89,19 @@ function fmtUsd(n: number | null | undefined): string {
   return usdFmt.format(Math.max(0, n));
 }
 
+/** Signed USD for net PnL — losses display as negative values. */
+function fmtSignedUsd(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const sign = n < 0 ? "-" : "";
+  return `${sign}${usdFmt.format(Math.abs(n))}`;
+}
+
+function pnlToneClass(n: number): string {
+  if (n > 0) return "text-emerald-200/90";
+  if (n < 0) return "text-red-300/90";
+  return "text-white/75";
+}
+
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -145,7 +158,7 @@ function countDescendantUsers(node: NetworkNode): number {
 
 function hasPersonalTradingActivity(financials: UserFinancials): boolean {
   return (
-    financials.totalProfitGenerated > 0 ||
+    financials.totalProfitGenerated !== 0 ||
     financials.totalRevenueShareDue > 0 ||
     financials.totalRevenuePaid > 0
   );
@@ -242,8 +255,8 @@ function StatCard({
 function UserFinancialCells({ financials }: { financials: UserFinancials }) {
   return (
     <>
-      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-white/75 lg:table-cell xl:px-5">
-        {fmtUsd(financials.totalProfitGenerated)}
+      <td className={`hidden whitespace-nowrap px-4 py-3 text-right tabular-nums lg:table-cell xl:px-5 ${pnlToneClass(financials.totalProfitGenerated)}`}>
+        {fmtSignedUsd(financials.totalProfitGenerated)}
       </td>
       <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-white/75 lg:table-cell xl:px-5">
         {fmtUsd(financials.totalRevenueShareDue)}
@@ -748,8 +761,16 @@ export default function PartnerDashboardPage() {
             />
             <StatCard
               label="Your commission"
-              value={`${fmtUsd(network?.stats.totalMemberCommissionEarned ?? 0)} / ${fmtUsd(network?.stats.totalMemberCommissionPayable ?? 0)}`}
-              sub="Earned / Payable from network traders"
+              value={`${fmtUsd(
+                metrics?.wallets.earned ??
+                  network?.stats.totalMemberCommissionEarned ??
+                  0,
+              )} / ${fmtUsd(
+                metrics != null
+                  ? metrics.wallets.payable + metrics.wallets.withdrawable
+                  : (network?.stats.totalMemberCommissionPayable ?? 0),
+              )}`}
+              sub="Earned (EARNED) / Payable (PAYABLE + WITHDRAWABLE)"
               icon={<Wallet className="h-6 w-6" aria-hidden />}
             />
           </section>
@@ -774,13 +795,15 @@ export default function PartnerDashboardPage() {
                   {network ? (
                   <div className="flex flex-wrap gap-3 text-xs text-white/45">
                     <span>
-                      Profit:{" "}
-                      <span className="font-medium tabular-nums text-white/70">
-                        {fmtUsd(network.stats.totalProfitGenerated)}
+                      Gross profit:{" "}
+                      <span
+                        className={`font-medium tabular-nums ${pnlToneClass(network.stats.totalProfitGenerated)}`}
+                      >
+                        {fmtSignedUsd(network.stats.totalProfitGenerated)}
                       </span>
                     </span>
                     <span>
-                      Revenue due:{" "}
+                      App revenue:{" "}
                       <span className="font-medium tabular-nums text-white/70">
                         {fmtUsd(network.stats.totalRevenueShareDue)}
                       </span>
@@ -808,10 +831,10 @@ export default function PartnerDashboardPage() {
                     <tr>
                       <th className="px-4 py-3 font-medium xl:px-5">Member / Trader</th>
                       <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
-                        Total Profit
+                        Gross Profit
                       </th>
                       <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
-                        App Revenue Share
+                        App Revenue
                       </th>
                       <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
                         Revenue Paid

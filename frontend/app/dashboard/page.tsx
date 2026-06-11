@@ -27,6 +27,10 @@ type DashboardOverview = {
   todayPnlPercent: number;
   monthlyPnl: number;
   monthlyPnlPercent: number;
+  grossPnlAllTime?: number;
+  grossPnlMonth?: number;
+  appRevenueAllTime?: number;
+  appRevenueMonth?: number;
   grossBookedPnlMonth?: number;
   revenueSharingDue: number;
   availableCapital: number;
@@ -194,11 +198,13 @@ export default function DashboardPage() {
                   <span className={pnlTone(data.monthlyPnlPercent)}>
                     {fmtPct(data.monthlyPnlPercent)} of capital
                   </span>
-                  {typeof data.grossBookedPnlMonth === "number" &&
-                  data.grossBookedPnlMonth !== data.monthlyPnl ? (
+                  {typeof (data.grossPnlMonth ?? data.grossBookedPnlMonth) ===
+                    "number" &&
+                  (data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0) !==
+                    data.monthlyPnl ? (
                     <p className="text-xs text-slate-500">
-                      Gross booked {fmtUsd(data.grossBookedPnlMonth)} − share{" "}
-                      {fmtUsd(data.revenueSharingDue)}
+                      Gross {fmtUsd(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}{" "}
+                      − app revenue {fmtUsd(data.revenueSharingDue)}
                     </p>
                   ) : null}
                 </div>
@@ -237,7 +243,7 @@ export default function DashboardPage() {
                 data.revenueSharingDue > 0 ? (
                   <div className="flex flex-col gap-2">
                     <span className="text-xs text-slate-500">
-                      Profit share on net booked PnL this month
+                      App revenue share on gross booked PnL this month
                     </span>
                     <Link
                       href="/dashboard/billing"

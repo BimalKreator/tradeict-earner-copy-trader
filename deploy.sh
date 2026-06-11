@@ -103,7 +103,7 @@ if [ "${SKIP_FRONTEND:-0}" != "1" ]; then
   npm run build
 
   # Sanity check: confirm the new pages were compiled
-  for p in dashboard/billing dashboard/trades dashboard/partner admin/revenue; do
+  for p in dashboard/billing dashboard/trades dashboard/partner admin/revenue admin/debug/inject-trade; do
     if [ -d ".next/server/app/$p" ]; then
       ok "frontend route /$p compiled"
     else

@@ -19,6 +19,7 @@ import {
   Radio,
   Settings,
   Tag,
+  TestTube2,
   Users,
   UsersRound,
   Wallet,
@@ -82,6 +83,17 @@ const navGroups: NavGroup[] = [
       { href: "/admin/notifications", label: "Notifications", icon: Bell },
       { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
       { href: "/admin/settings", label: "Settings", icon: Settings },
+    ],
+  },
+  {
+    id: "debug",
+    label: "Debug Tools",
+    items: [
+      {
+        href: "/admin/debug/inject-trade",
+        label: "Inject Trade",
+        icon: TestTube2,
+      },
     ],
   },
 ];
