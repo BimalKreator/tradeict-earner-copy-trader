@@ -104,10 +104,8 @@ function capTotalCommissionRate(
 }
 
 /**
- * First upline partner id used to start the commission chain for a profit event.
- * - USER: referred-by partner (`acquiredById`)
- * - EXECUTIVE / MANAGER: hierarchy upline (`parentId`) — their own trading pays upline
- * - DIRECTOR: no upline commissions
+ * First upline partner id — used only for logging/diagnostics.
+ * Commission resolution uses {@link resolveCommissionChain} with the full source profile.
  */
 export function resolveCommissionChainEntryId(source: {
   role: Role;
@@ -123,21 +121,12 @@ export function resolveCommissionChainEntryId(source: {
   return null;
 }
 
-/**
- * Build commission % slices from the chain-entry partner up the `parentId` chain.
- * Rates are % of app revenue share (not gross trade PnL).
- *
- * @param chainEntryId — `acquiredById` for USER traders, `parentId` for EXECUTIVE/MANAGER traders
- */
-export async function resolveCommissionChain(
+/** USER path — partner who acquired the trader gets "direct" tier rates + upline. */
+async function resolveCommissionChainFromAcquirer(
   prisma: PrismaClient,
-  chainEntryId: string | null,
-  rates?: PartnerCommissionRates,
+  chainEntryId: string,
+  cfg: PartnerCommissionRates,
 ): Promise<CommissionChainSlice[]> {
-  if (!chainEntryId?.trim()) return [];
-
-  const cfg = rates ?? (await getPartnerCommissionRates(prisma));
-
   const direct = await prisma.user.findUnique({
     where: { id: chainEntryId.trim() },
     select: { id: true, role: true, parentId: true },
@@ -207,6 +196,100 @@ export async function resolveCommissionChain(
   );
 }
 
+/**
+ * EXECUTIVE / MANAGER trading their own account — pay upline via `parentId` only.
+ * The trader never receives commission on their own PnL; rates are upline tiers,
+ * not "direct acquisition" tiers (e.g. Director gets 2%, not 8%, when Manager trades).
+ */
+async function resolveCommissionChainFromPartnerSelfTrade(
+  prisma: PrismaClient,
+  source: {
+    role: Role;
+    parentId: string | null;
+  },
+  cfg: PartnerCommissionRates,
+): Promise<CommissionChainSlice[]> {
+  const ancestors = await loadAncestorChain(
+    prisma,
+    source.parentId?.trim() || null,
+  );
+  const slices: CommissionChainSlice[] = [];
+
+  if (source.role === Role.EXECUTIVE) {
+    const manager = findFirstAncestorWithRole(ancestors, Role.MANAGER);
+    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+
+    if (manager) {
+      slices.push({
+        beneficiaryUserId: manager.id,
+        commissionRate: cfg.managerUnderExecutivePct,
+        beneficiaryTier: SalesTier.MANAGER,
+      });
+    }
+
+    if (director) {
+      const directorRate = manager
+        ? cfg.directorUnderExecutivePct
+        : cfg.managerUnderExecutivePct + cfg.directorUnderExecutivePct;
+      slices.push({
+        beneficiaryUserId: director.id,
+        commissionRate: directorRate,
+        beneficiaryTier: SalesTier.DIRECTOR,
+      });
+    }
+  } else if (source.role === Role.MANAGER) {
+    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+    if (director) {
+      slices.push({
+        beneficiaryUserId: director.id,
+        commissionRate: cfg.directorUnderManagerPct,
+        beneficiaryTier: SalesTier.DIRECTOR,
+      });
+    }
+  }
+
+  return capTotalCommissionRate(
+    mergeDuplicateBeneficiaries(slices),
+    cfg.maxTotalPct,
+  );
+}
+
+export type CommissionChainSource = {
+  role: Role;
+  acquiredById: string | null;
+  parentId: string | null;
+};
+
+/**
+ * Build commission % slices for any trading account holder.
+ * - USER: `acquiredById` partner chain (direct + upline rates)
+ * - EXECUTIVE / MANAGER: `parentId` upline only (self-trade rates)
+ * - DIRECTOR / ADMIN: no partner commissions
+ */
+export async function resolveCommissionChain(
+  prisma: PrismaClient,
+  source: CommissionChainSource,
+  rates?: PartnerCommissionRates,
+): Promise<CommissionChainSlice[]> {
+  const cfg = rates ?? (await getPartnerCommissionRates(prisma));
+
+  if (source.role === Role.ADMIN || source.role === Role.DIRECTOR) {
+    return [];
+  }
+
+  if (source.role === Role.USER) {
+    const entry = source.acquiredById?.trim() || null;
+    if (!entry) return [];
+    return resolveCommissionChainFromAcquirer(prisma, entry, cfg);
+  }
+
+  if (source.role === Role.EXECUTIVE || source.role === Role.MANAGER) {
+    return resolveCommissionChainFromPartnerSelfTrade(prisma, source, cfg);
+  }
+
+  return [];
+}
+
 export type DistributeRevenueShareCommissionsArgs = {
   sourceUserId: string;
   pnlRecordId: string;
@@ -236,12 +319,7 @@ export async function distributeRevenueShareCommissions(
     return { created: 0, skipped: 0 };
   }
 
-  const chainEntryId = resolveCommissionChainEntryId(source);
-  if (!chainEntryId) {
-    return { created: 0, skipped: 0 };
-  }
-
-  const chain = await resolveCommissionChain(prisma, chainEntryId);
+  const chain = await resolveCommissionChain(prisma, source);
   if (chain.length === 0) {
     return { created: 0, skipped: 0 };
   }
