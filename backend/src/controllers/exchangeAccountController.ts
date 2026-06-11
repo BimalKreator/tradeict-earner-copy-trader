@@ -1,7 +1,10 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { initializeDeltaClient } from "../services/exchangeService.js";
-import { decryptDeltaSecret, encryptDeltaSecret } from "../utils/encryption.js";
+import {
+  decryptDeltaSecretOrPlain,
+  normalizeStoredDeltaSecret,
+} from "../utils/encryption.js";
 
 const listSelect = {
   id: true,
@@ -77,8 +80,8 @@ export function createExchangeAccountController(prisma: PrismaClient) {
           userId,
           nickname,
           exchange,
-          apiKey: encryptDeltaSecret(apiKey),
-          apiSecret: encryptDeltaSecret(apiSecret),
+          apiKey: normalizeStoredDeltaSecret(apiKey),
+          apiSecret: normalizeStoredDeltaSecret(apiSecret),
         },
         select: listSelect,
       });
@@ -160,8 +163,15 @@ export function createExchangeAccountController(prisma: PrismaClient) {
       }
 
       try {
-        const apiKey = decryptDeltaSecret(account.apiKey);
-        const secret = decryptDeltaSecret(account.apiSecret);
+        const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
+        const secret = decryptDeltaSecretOrPlain(account.apiSecret);
+        if (!apiKey || !secret) {
+          res.json({
+            success: false,
+            error: "Could not decrypt stored API credentials",
+          });
+          return;
+        }
         const exchange = initializeDeltaClient(apiKey, secret);
         await exchange.loadMarkets();
         await exchange.fetchBalance();

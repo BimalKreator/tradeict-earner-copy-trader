@@ -39,16 +39,11 @@ function hardSanitizeKey(s: string): string {
   return s.replace(/[^\x21-\x7E]+/g, "").trim();
 }
 
-/**
- * Decrypted strings that are not real API keys (e.g. produced by a wrong
- * `PROCESS_ENCRYPTION_KEY` causing CryptoJS to emit garbage UTF-8) tend to
- * contain bytes outside the alphanumeric / common-symbol set used by Delta
- * keys. Treat anything that is not an ASCII alphanumeric / `-_+/=:` token
- * as suspicious and refuse to use it as a credential.
- */
-function looksLikeApiCredential(s: string): boolean {
-  if (s.length < 8) return false;
-  return /^[A-Za-z0-9_\-+/=:.]+$/.test(s);
+/** Minimum length for a Delta API key / secret after sanitization. */
+const MIN_CREDENTIAL_LEN = 8;
+
+function isUsableCredential(s: string): boolean {
+  return s.length >= MIN_CREDENTIAL_LEN && /^[\x21-\x7E]+$/.test(s);
 }
 
 function isCryptoJsAesCiphertext(stored: string): boolean {
@@ -58,39 +53,40 @@ function isCryptoJsAesCiphertext(stored: string): boolean {
 /**
  * Decrypt stored Delta credentials, or return sanitized plaintext (legacy rows).
  *
- * Hardening:
- *   - Strips every non printable-ASCII byte from both candidate values so
- *     the resulting string is guaranteed valid in HTTP headers.
- *   - If decryption produces output that does not look like an API key (e.g.
- *     because PROCESS_ENCRYPTION_KEY changed between encrypt and decrypt),
- *     we fall back to the sanitized plaintext rather than passing garbage
- *     to CCXT.
+ * Must stay aligned with {@link decryptDeltaSecret} used by "Test connection" —
+ * if AES decrypt succeeds, the sanitized plaintext is returned even when the
+ * secret contains punctuation outside `[A-Za-z0-9_\-+/=:.]` (e.g. `!@#%`).
  */
 export function decryptDeltaSecretOrPlain(stored: string): string {
   if (!stored) return "";
-  const plain = hardSanitizeKey(stored);
+  const trimmed = stored.trim();
 
+  let decryptFailed = false;
   let decrypted = "";
   try {
-    decrypted = hardSanitizeKey(decryptDeltaSecret(stored));
+    decrypted = hardSanitizeKey(decryptDeltaSecret(trimmed));
   } catch {
+    decryptFailed = true;
     decrypted = "";
   }
 
-  if (decrypted && looksLikeApiCredential(decrypted)) return decrypted;
-  if (plain && looksLikeApiCredential(plain) && !isCryptoJsAesCiphertext(stored)) {
-    return plain;
+  if (isUsableCredential(decrypted)) {
+    return decrypted;
   }
-  if (isCryptoJsAesCiphertext(stored)) {
+
+  const plainLegacy = hardSanitizeKey(trimmed);
+  if (isUsableCredential(plainLegacy) && !isCryptoJsAesCiphertext(trimmed)) {
+    return plainLegacy;
+  }
+
+  if (isCryptoJsAesCiphertext(trimmed) && decryptFailed) {
     console.error(
-      "[encryption] Delta credential appears AES-encrypted but decryption failed — " +
+      "[encryption] Delta credential is AES-encrypted but decryption failed — " +
         "verify PROCESS_ENCRYPTION_KEY matches the key used when the API key was saved",
     );
-    return "";
   }
-  // last-resort: return whichever is non-empty so callers can detect the
-  // failure (Delta will reject with `invalid_api_key`, which we surface).
-  return decrypted || plain;
+
+  return "";
 }
 
 /** Mask a stored key for admin UI (never return full secrets in JSON). */
