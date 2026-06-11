@@ -10,6 +10,11 @@ import {
   setPgFeePercent,
   setUsdInrRate,
 } from "../services/settingsService.js";
+import {
+  getPartnerCommissionRates,
+  setPartnerCommissionRates,
+  type PartnerCommissionRates,
+} from "../services/partnerCommissionConfigService.js";
 
 export function createSettingsController(prisma: PrismaClient) {
   async function getPaymentSettings(
@@ -187,5 +192,78 @@ export function createSettingsController(prisma: PrismaClient) {
     }
   }
 
-  return { getPaymentSettings, updatePaymentSettings, getPublicPlatform };
+  async function getPartnerCommissionSettings(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rates = await getPartnerCommissionRates(prisma);
+      res.json(rates);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  function parseOptionalRate(
+    raw: unknown,
+    field: string,
+  ): number | undefined {
+    if (raw === undefined) return undefined;
+    const n =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string"
+          ? Number.parseFloat(raw)
+          : NaN;
+    if (!Number.isFinite(n)) {
+      throw new Error(`${field} must be a number`);
+    }
+    return n;
+  }
+
+  async function updatePartnerCommissionSettings(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const input: Partial<PartnerCommissionRates> = {};
+
+      const fields: (keyof PartnerCommissionRates)[] = [
+        "maxTotalPct",
+        "executiveDirectPct",
+        "managerUnderExecutivePct",
+        "directorUnderExecutivePct",
+        "managerDirectPct",
+        "directorUnderManagerPct",
+        "directorDirectPct",
+      ];
+
+      for (const field of fields) {
+        const parsed = parseOptionalRate(body[field], field);
+        if (parsed !== undefined) {
+          input[field] = parsed;
+        }
+      }
+
+      const rates = await setPartnerCommissionRates(prisma, input);
+      res.json({ ok: true, ...rates });
+    } catch (err) {
+      if (err instanceof Error) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      next(err);
+    }
+  }
+
+  return {
+    getPaymentSettings,
+    updatePaymentSettings,
+    getPublicPlatform,
+    getPartnerCommissionSettings,
+    updatePartnerCommissionSettings,
+  };
 }

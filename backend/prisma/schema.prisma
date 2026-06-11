@@ -425,6 +425,20 @@ model SystemSettings {
   usdInrRate          Float    @default(83)
   maintenanceMode     Boolean  @default(false)
   maintenanceMessage  String?
+  /** Max total partner commission % of app revenue per profit event (scale-down cap). */
+  partnerMaxCommissionPct       Float @default(8)
+  /** Executive directly acquired the trader (USER) — % of app revenue. */
+  partnerExecutiveDirectPct     Float @default(5)
+  /** Manager upline when Executive acquired the trader. */
+  partnerManagerUnderExecPct    Float @default(2)
+  /** Director upline when Executive acquired the trader (and Manager exists). */
+  partnerDirectorUnderExecPct   Float @default(1)
+  /** Manager is chain entry (acquired trader or Manager's own trade upline). */
+  partnerManagerDirectPct       Float @default(6)
+  /** Director upline when Manager is chain entry. */
+  partnerDirectorUnderMgrPct    Float @default(2)
+  /** Director is chain entry (acquired trader). */
+  partnerDirectorDirectPct      Float @default(8)
   updatedAt           DateTime @updatedAt
 }
 

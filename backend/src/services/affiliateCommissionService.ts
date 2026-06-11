@@ -13,16 +13,15 @@ import {
   isSalesMemberRole,
   type SalesMemberRole,
 } from "./affiliateMemberService.js";
+import {
+  DEFAULT_PARTNER_COMMISSION_RATES,
+  getPartnerCommissionRates,
+  type PartnerCommissionRates,
+} from "./partnerCommissionConfigService.js";
 
-/** Max partner commission as % of app revenue share for one profit event. */
-export const MAX_PARTNER_COMMISSION_RATE_PCT = 8;
-
-const EXECUTIVE_DIRECT_RATE = 5;
-const MANAGER_UNDER_EXECUTIVE_RATE = 2;
-const DIRECTOR_UNDER_EXECUTIVE_RATE = 1;
-const MANAGER_DIRECT_RATE = 6;
-const DIRECTOR_UNDER_MANAGER_RATE = 2;
-const DIRECTOR_DIRECT_RATE = 8;
+/** Default max partner commission % — overridden by admin SystemSettings. */
+export const MAX_PARTNER_COMMISSION_RATE_PCT =
+  DEFAULT_PARTNER_COMMISSION_RATES.maxTotalPct;
 
 export type CommissionChainSlice = {
   beneficiaryUserId: string;
@@ -91,12 +90,13 @@ function mergeDuplicateBeneficiaries(
 
 function capTotalCommissionRate(
   slices: CommissionChainSlice[],
+  maxTotalPct: number,
 ): CommissionChainSlice[] {
   const total = slices.reduce((sum, s) => sum + s.commissionRate, 0);
-  if (total <= MAX_PARTNER_COMMISSION_RATE_PCT) {
+  if (total <= maxTotalPct) {
     return slices;
   }
-  const scale = MAX_PARTNER_COMMISSION_RATE_PCT / total;
+  const scale = maxTotalPct / total;
   return slices.map((s) => ({
     ...s,
     commissionRate: Math.round(s.commissionRate * scale * 1e6) / 1e6,
@@ -132,8 +132,11 @@ export function resolveCommissionChainEntryId(source: {
 export async function resolveCommissionChain(
   prisma: PrismaClient,
   chainEntryId: string | null,
+  rates?: PartnerCommissionRates,
 ): Promise<CommissionChainSlice[]> {
   if (!chainEntryId?.trim()) return [];
+
+  const cfg = rates ?? (await getPartnerCommissionRates(prisma));
 
   const direct = await prisma.user.findUnique({
     where: { id: chainEntryId.trim() },
@@ -150,7 +153,7 @@ export async function resolveCommissionChain(
   if (direct.role === Role.EXECUTIVE) {
     slices.push({
       beneficiaryUserId: direct.id,
-      commissionRate: EXECUTIVE_DIRECT_RATE,
+      commissionRate: cfg.executiveDirectPct,
       beneficiaryTier: SalesTier.EXECUTIVE,
     });
 
@@ -160,15 +163,15 @@ export async function resolveCommissionChain(
     if (manager) {
       slices.push({
         beneficiaryUserId: manager.id,
-        commissionRate: MANAGER_UNDER_EXECUTIVE_RATE,
+        commissionRate: cfg.managerUnderExecutivePct,
         beneficiaryTier: SalesTier.MANAGER,
       });
     }
 
     if (director) {
       const directorRate = manager
-        ? DIRECTOR_UNDER_EXECUTIVE_RATE
-        : MANAGER_UNDER_EXECUTIVE_RATE + DIRECTOR_UNDER_EXECUTIVE_RATE;
+        ? cfg.directorUnderExecutivePct
+        : cfg.managerUnderExecutivePct + cfg.directorUnderExecutivePct;
       slices.push({
         beneficiaryUserId: director.id,
         commissionRate: directorRate,
@@ -178,7 +181,7 @@ export async function resolveCommissionChain(
   } else if (direct.role === Role.MANAGER) {
     slices.push({
       beneficiaryUserId: direct.id,
-      commissionRate: MANAGER_DIRECT_RATE,
+      commissionRate: cfg.managerDirectPct,
       beneficiaryTier: SalesTier.MANAGER,
     });
 
@@ -186,19 +189,22 @@ export async function resolveCommissionChain(
     if (director) {
       slices.push({
         beneficiaryUserId: director.id,
-        commissionRate: DIRECTOR_UNDER_MANAGER_RATE,
+        commissionRate: cfg.directorUnderManagerPct,
         beneficiaryTier: SalesTier.DIRECTOR,
       });
     }
   } else if (direct.role === Role.DIRECTOR) {
     slices.push({
       beneficiaryUserId: direct.id,
-      commissionRate: DIRECTOR_DIRECT_RATE,
+      commissionRate: cfg.directorDirectPct,
       beneficiaryTier: SalesTier.DIRECTOR,
     });
   }
 
-  return capTotalCommissionRate(mergeDuplicateBeneficiaries(slices));
+  return capTotalCommissionRate(
+    mergeDuplicateBeneficiaries(slices),
+    cfg.maxTotalPct,
+  );
 }
 
 export type DistributeRevenueShareCommissionsArgs = {

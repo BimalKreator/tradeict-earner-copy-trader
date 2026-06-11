@@ -81,6 +81,14 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/settings/payment", settings.getPaymentSettings);
   router.put("/settings/payment", settings.updatePaymentSettings);
+  router.get(
+    "/settings/partner-commission",
+    settings.getPartnerCommissionSettings,
+  );
+  router.put(
+    "/settings/partner-commission",
+    settings.updatePartnerCommissionSettings,
+  );
 
   router.get("/engine-status", (_req, res) => {
     res.json({ status: "running" });
