@@ -894,9 +894,9 @@ type CcxtOptionMarket = {
 
 function tickSizeToPricePrecision(tickSize: number): number {
   if (!Number.isFinite(tickSize) || tickSize <= 0) return 1;
-  if (tickSize >= 1) return 0;
+  if (tickSize >= 1) return 1;
   const frac = String(tickSize).split(".")[1];
-  return frac ? frac.length : 1;
+  return Math.max(1, frac ? frac.length : 1);
 }
 
 function buildCcxtOptionMarketFromDeltaProduct(

@@ -115,6 +115,39 @@ const MASTER_REST_POLL_MS = 2_000;
 const MASTER_FLAT_CONFIRM_MS = 4_000;
 /** Debounce immediate REST poll triggered by WS position deltas. */
 const MASTER_REST_IMMEDIATE_DEBOUNCE_MS = 350;
+/** Do not re-trigger REST force-copy for the same master leg within this window. */
+const REST_FORCE_COPY_COOLDOWN_MS = 20_000;
+
+const restForceCopyLastAttempt = new Map<string, number>();
+
+function restForceCopyCooldownKey(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): string {
+  return `${strategyId}|${symbol}|${side}`;
+}
+
+function restForceCopyOnCooldown(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): boolean {
+  const key = restForceCopyCooldownKey(strategyId, symbol, side);
+  const last = restForceCopyLastAttempt.get(key) ?? 0;
+  return Date.now() - last < REST_FORCE_COPY_COOLDOWN_MS;
+}
+
+function markRestForceCopyAttempt(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): void {
+  restForceCopyLastAttempt.set(
+    restForceCopyCooldownKey(strategyId, symbol, side),
+    Date.now(),
+  );
+}
 
 let masterRestPollDebounce: ReturnType<typeof setTimeout> | null = null;
 let masterRestPollContext: {
@@ -367,12 +400,16 @@ async function followersMissingOpenLeg(
     }
 
     const expectedLots = followerLotsFromMaster(masterLots, sub);
+    const creds = resolveSubscriptionCreds(sub);
     const deficitLots = await followerBotOpenDeficitLots(prisma, {
       strategyId,
       userId: sub.userId,
       symbol,
       side: openSide,
       targetLots: expectedLots,
+      ...(creds
+        ? { apiKey: creds.apiKey, apiSecret: creds.apiSecret }
+        : {}),
     });
     if (deficitLots > 0) {
       console.log(
@@ -2182,6 +2219,13 @@ async function pollMasterPositionsFallback(
         );
 
         if (missingOnFollowers) {
+          if (
+            restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side)
+          ) {
+            continue;
+          }
+          markRestForceCopyAttempt(strat.id, m.deltaSymbol, m.side);
+
           const legKey = masterLegKey(m.deltaSymbol, m.side);
           const fillKey = `force-rest:${buildMasterFillKey([
             m.deltaSymbol,

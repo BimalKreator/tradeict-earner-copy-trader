@@ -73,7 +73,8 @@ export function buildClientOrderId(args: {
 
 /**
  * Deterministic client order id for one follower leg per master fill/close event.
- * Reused across exchange retries so duplicate market orders are rejected/idempotent.
+ * OPEN legs ignore `masterFillKey` so REST force-sync polls cannot mint duplicate ids.
+ * CLOSE legs still key off the master close event for idempotency.
  */
 export function buildStableCopyClientOrderId(args: {
   strategyId: string;
@@ -85,6 +86,10 @@ export function buildStableCopyClientOrderId(args: {
 }): string {
   const sym = compactSymbolKey(args.symbol).slice(0, 24);
   const side = String(args.side).toUpperCase();
+  if (args.leg === "open") {
+    const raw = [args.strategyId, args.userId, "open", sym, side].join("|");
+    return hashClientOrderId(raw);
+  }
   const raw = [
     args.strategyId,
     args.userId,

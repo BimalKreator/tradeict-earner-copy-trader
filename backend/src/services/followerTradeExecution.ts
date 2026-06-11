@@ -50,9 +50,69 @@ import {
   registerPendingMasterNoCopyOrderId,
 } from "./masterNoCopyOrders.js";
 
-/** How long to wait after a successful market order before REST position verify. */
-const POST_ORDER_VERIFY_WAIT_MS = 2_500;
-const MAX_RETRIES = 5;
+/** REST poll interval while waiting for Delta to confirm fill qty (5–20s window). */
+const POST_ORDER_VERIFY_WAIT_MS = 5_000;
+const MAX_OPEN_CONFIRM_POLLS = 4;
+const COPY_LEG_CONFIRM_MS = POST_ORDER_VERIFY_WAIT_MS * MAX_OPEN_CONFIRM_POLLS;
+const GRANULAR_SYNC_MAX_RETRIES = 5;
+
+const copyLegExecutionChains = new Map<string, Promise<void>>();
+const followerCopyInflightUntil = new Map<string, number>();
+
+function copyLegLockKey(args: {
+  userId: string;
+  strategyId?: string;
+  symbol: string;
+  side: TradeSide | string;
+}): string {
+  const sym = args.symbol.replace(/[/:]/g, "").toUpperCase();
+  return `${args.userId}|${args.strategyId ?? "none"}|${sym}|${String(args.side).toUpperCase()}`;
+}
+
+async function withCopyLegExecutionLock<T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = copyLegExecutionChains.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  copyLegExecutionChains.set(
+    key,
+    prev.then(() => gate),
+  );
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (copyLegExecutionChains.get(key) === gate) {
+      copyLegExecutionChains.delete(key);
+    }
+  }
+}
+
+export function markFollowerCopyInflight(
+  args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    side: TradeSide | string;
+  },
+  untilMs = Date.now() + COPY_LEG_CONFIRM_MS,
+): void {
+  followerCopyInflightUntil.set(copyLegLockKey(args), untilMs);
+}
+
+export function isFollowerCopyInflight(args: {
+  userId: string;
+  strategyId: string;
+  symbol: string;
+  side: TradeSide | string;
+}): boolean {
+  return (followerCopyInflightUntil.get(copyLegLockKey(args)) ?? 0) > Date.now();
+}
 
 const HARD_ERROR_PATTERNS = [
   "INSUFFICIENT_MARGIN",
@@ -131,8 +191,12 @@ async function followerLegContracts(
   apiSecretStored: string,
   symbol: string,
   side: TradeSide,
+  options?: { skipCache?: boolean },
 ): Promise<number> {
-  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
+  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored, {
+    lite: true,
+    ...(options?.skipCache === true ? { skipCache: true } : {}),
+  });
   let max = 0;
   for (const p of positions) {
     if (!symbolsAlign(symbol, p.symbolKey)) continue;
@@ -334,7 +398,7 @@ async function followerFillAlreadyCopied(
 
 /**
  * How many follower contract lots are still missing vs target (0 = synced).
- * Uses bot-managed TradePosition qty only — not legacy Trade rows.
+ * Uses max(bot DB qty, exchange REST qty) so lagging DB rows cannot trigger refires.
  */
 export async function followerBotOpenDeficitLots(
   prisma: PrismaClient,
@@ -344,10 +408,23 @@ export async function followerBotOpenDeficitLots(
     symbol: string;
     side: TradeSide | string;
     targetLots: number;
+    apiKey?: string;
+    apiSecret?: string;
   },
 ): Promise<number> {
   const target = Math.max(0, Math.floor(args.targetLots));
   if (target <= 0) return 0;
+
+  if (
+    isFollowerCopyInflight({
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.symbol,
+      side: args.side,
+    })
+  ) {
+    return 0;
+  }
 
   const botQty = await sumOpenFollowerBotQuantity(prisma, {
     strategyId: args.strategyId,
@@ -355,8 +432,39 @@ export async function followerBotOpenDeficitLots(
     symbol: args.symbol,
     side: args.side,
   });
-  if (botQty >= target) return 0;
-  return Math.max(1, target - Math.floor(botQty));
+
+  let exchangeLots = 0;
+  if (args.apiKey?.trim() && args.apiSecret?.trim()) {
+    try {
+      exchangeLots = Math.floor(
+        await followerLegContracts(
+          args.apiKey,
+          args.apiSecret,
+          String(args.symbol),
+          args.side as TradeSide,
+          { skipCache: true },
+        ),
+      );
+    } catch (err) {
+      console.warn(
+        `[copy-deficit] REST position read failed user=${args.userId} ${args.symbol}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  const effective = Math.max(botQty, exchangeLots);
+  if (effective >= target) {
+    if (exchangeLots > target) {
+      console.warn(
+        `[copy-deficit] overfill user=${args.userId} ${args.symbol} ${args.side} ` +
+          `exchange=${exchangeLots} db=${botQty} target=${target} — blocking new orders`,
+      );
+    }
+    return 0;
+  }
+
+  return Math.max(1, target - Math.floor(effective));
 }
 
 /** REST poll may only open a master leg for followers if it opened within this window. */
@@ -703,12 +811,19 @@ export async function forceSyncMasterOpenToFollowers(
       }
 
       const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
+      const credsForDeficit = resolveCopySubscriptionCreds(sub);
       const deficitLots = await followerBotOpenDeficitLots(prisma, {
         strategyId,
         userId: sub.userId,
         symbol: fill.symbol,
         side: fill.side,
         targetLots: expectedLots,
+        ...(credsForDeficit
+          ? {
+              apiKey: credsForDeficit.apiKey,
+              apiSecret: credsForDeficit.apiSecret,
+            }
+          : {}),
       });
       if (deficitLots > 0) {
         pending.push({ sub, lots: deficitLots });
@@ -1473,7 +1588,7 @@ export async function executeFollowerExactIncrementalAdd(
     `[granular-sync] exact incremental addLots=${addLots} baseline=${baseline} user=${userId} ${symbol} ${side}`,
   );
 
-  for (let pass = 0; pass <= MAX_RETRIES; pass += 1) {
+  for (let pass = 0; pass <= GRANULAR_SYNC_MAX_RETRIES; pass += 1) {
     const current = await followerLegContracts(apiKey, apiSecret, symbol, side);
     const delta = current - baseline;
     if (delta >= minDelta) {
@@ -1489,7 +1604,7 @@ export async function executeFollowerExactIncrementalAdd(
     }
 
     if (orderAccepted) {
-      if (pass < MAX_RETRIES) {
+      if (pass < GRANULAR_SYNC_MAX_RETRIES) {
         await sleep(POST_ORDER_VERIFY_WAIT_MS);
       }
       continue;
@@ -1524,7 +1639,7 @@ export async function executeFollowerExactIncrementalAdd(
           verified: false,
         };
       }
-      if (pass < MAX_RETRIES) {
+      if (pass < GRANULAR_SYNC_MAX_RETRIES) {
         await sleep(POST_ORDER_VERIFY_WAIT_MS);
       }
       continue;
@@ -1568,7 +1683,7 @@ export async function executeFollowerExactIncrementalAdd(
 }
 
 /**
- * Execute → wait → verify → poll (up to {@link MAX_RETRIES}).
+ * Execute → single fire → REST confirm poll (5s × 4 = 20s max).
  * Opens replicate the master leg direction verbatim (`side` = master BUY/SELL).
  * Reduce-only closes use the opposite exchange side to flatten an existing leg.
  */
@@ -1754,291 +1869,251 @@ export async function executeFollowerTradeWithVerification(
         })
       : undefined);
 
-  let orderSubmitted = false;
+  const legLockKey = copyLegLockKey({
+    userId: args.userId,
+    ...(args.strategyId ? { strategyId: args.strategyId } : {}),
+    symbol,
+    side,
+  });
 
-  const tryFinalizeVerifiedOpen = async (
-    exchangeLots: number,
-    ack?: DeltaClientOrderAck,
-  ): Promise<FollowerExecuteResult | null> => {
-    const ackFilled = ack ? orderAckFilledQty(ack) : 0;
-    const dbQty = resolvedDbOpenQty(targetContracts, exchangeLots, ackFilled);
-    if (dbQty < minFilled) {
-      return null;
-    }
-    await recordVerifiedFollowerOpen(prisma, {
+  if (args.strategyId) {
+    markFollowerCopyInflight({
       userId: args.userId,
+      strategyId: args.strategyId,
       symbol,
       side,
-      quantity: dbQty,
-      ...(args.strategyId ? { strategyId: args.strategyId } : {}),
-      ...(args.entryPrice != null && Number.isFinite(args.entryPrice)
-        ? { entryPrice: args.entryPrice }
-        : {}),
-      ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
-      exchangeOrderId: ack?.orderId ?? lastResult.orderId ?? null,
     });
-    return buildOpenExecuteSuccess({
-      lastResult: {
-        ...lastResult,
-        ...(ack?.orderId ? { orderId: ack.orderId } : {}),
-      },
-      ...(openClientOrderId ? { openClientOrderId } : {}),
-      feeCost: totalFee,
-      attempts: Math.max(attempts, 1),
-      verifiedQty: dbQty,
-    });
-  };
+  }
 
-  for (let retry = 0; retry < MAX_RETRIES; retry += 1) {
-    const existingBefore = await followerLegContracts(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-    );
-    const preVerified = await tryFinalizeVerifiedOpen(existingBefore);
+  return withCopyLegExecutionLock(legLockKey, async () => {
+    const tryFinalizeVerifiedOpen = async (
+      exchangeLots: number,
+      ack?: DeltaClientOrderAck,
+    ): Promise<FollowerExecuteResult | null> => {
+      if (exchangeLots > targetContracts) {
+        console.warn(
+          `[RETRY_LOOP] overfill user=${userId} ${symbol} exchange=${exchangeLots} target=${targetContracts} — capping DB at target`,
+        );
+      }
+      const ackFilled = ack ? orderAckFilledQty(ack) : 0;
+      const dbQty = resolvedDbOpenQty(targetContracts, exchangeLots, ackFilled);
+      if (dbQty < minFilled) {
+        return null;
+      }
+      await recordVerifiedFollowerOpen(prisma, {
+        userId: args.userId,
+        symbol,
+        side,
+        quantity: dbQty,
+        ...(args.strategyId ? { strategyId: args.strategyId } : {}),
+        ...(args.entryPrice != null && Number.isFinite(args.entryPrice)
+          ? { entryPrice: args.entryPrice }
+          : {}),
+        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+        exchangeOrderId: ack?.orderId ?? lastResult.orderId ?? null,
+      });
+      return buildOpenExecuteSuccess({
+        lastResult: {
+          ...lastResult,
+          ...(ack?.orderId ? { orderId: ack.orderId } : {}),
+        },
+        ...(openClientOrderId ? { openClientOrderId } : {}),
+        feeCost: totalFee,
+        attempts: Math.max(attempts, 1),
+        verifiedQty: dbQty,
+      });
+    };
+
+    let exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
+      skipCache: true,
+    });
+    const preVerified = await tryFinalizeVerifiedOpen(exchangeLots);
     if (preVerified) {
       console.log(
-        `[RETRY_LOOP] Already filled (${existingBefore}/${targetContracts} contracts) before attempt ${retry + 1}.`,
+        `[RETRY_LOOP] Already synced (${exchangeLots}/${targetContracts} contracts) via REST — no order.`,
       );
       return preVerified;
     }
 
-    if (orderSubmitted && openClientOrderId) {
-      const ack = await fetchDeltaOrderAckByClientOrderId(
+    let orderSubmitted = false;
+    if (openClientOrderId) {
+      const existingAck = await fetchDeltaOrderAckByClientOrderId(
         apiKey,
         apiSecret,
         openClientOrderId,
       );
-      if (orderAckPending(ack) || orderAckFilledQty(ack) > 0) {
+      if (orderAckPending(existingAck) || orderAckFilledQty(existingAck) > 0) {
+        orderSubmitted = true;
         console.log(
-          `[RETRY_LOOP] clientOrderId=${openClientOrderId} state=${ack.state} filled=${ack.filledSize} — not refiring`,
+          `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} state=${existingAck.state} filled=${existingAck.filledSize} — poll only`,
         );
-        const positionLots = await followerLegContracts(
-          apiKey,
-          apiSecret,
-          symbol,
-          side,
-        );
-        const finalized = await tryFinalizeVerifiedOpen(
-          Math.max(positionLots, existingBefore),
-          ack,
-        );
-        if (finalized) {
-          return finalized;
-        }
-        console.log(
-          `[RETRY_LOOP] Order ${openClientOrderId} still ${ack.state} filled=${ack.filledSize} — waiting ${POST_ORDER_VERIFY_WAIT_MS}ms before re-check`,
-        );
-        await sleep(POST_ORDER_VERIFY_WAIT_MS);
-        continue;
       }
     }
 
-    if (orderSubmitted) {
+    if (!orderSubmitted) {
+      const orderSize = Math.max(1, targetContracts - Math.floor(exchangeLots));
+      attempts = 1;
       console.log(
-        `[RETRY_LOOP] Order already submitted clientOrderId=${openClientOrderId ?? "none"} — polling position only`,
+        `[RETRY_LOOP] Single fire user ${userId} ${symbol} orderSize=${orderSize} ` +
+          `(rest=${exchangeLots}, target=${targetContracts}) clientOrderId=${openClientOrderId ?? "none"}`,
       );
-      await sleep(POST_ORDER_VERIFY_WAIT_MS);
-      continue;
+
+      lastResult = await placeFollowerOrder(
+        apiKey,
+        apiSecret,
+        symbol,
+        side,
+        orderSize,
+        openClientOrderId ? { clientOrderId: openClientOrderId } : undefined,
+      );
+
+      if (!lastResult.success) {
+        const err = lastResult.error ?? "unknown";
+        console.warn(`[RETRY_LOOP] executeTrade failed (single fire): ${err}`);
+        if (openClientOrderId) {
+          const ack = await fetchDeltaOrderAckByClientOrderId(
+            apiKey,
+            apiSecret,
+            openClientOrderId,
+          );
+          if (orderAckPending(ack) || orderAckFilledQty(ack) > 0) {
+            console.log(
+              `[RETRY_LOOP] Place rejected but order live on exchange (${ack.state}) — poll only`,
+            );
+            orderSubmitted = true;
+          }
+        }
+        if (!orderSubmitted && isHardExecutionError(err)) {
+          await markFollowerOrderFailure(prisma, {
+            strategyId: args.strategyId,
+            userId,
+            symbol,
+            error: err,
+          });
+          return {
+            ...lastResult,
+            feeCost: totalFee,
+            attempts,
+            verified: false,
+          };
+        }
+      } else {
+        if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
+          totalFee += lastResult.feeCost;
+        }
+      }
+      orderSubmitted = true;
     }
 
-    const orderSize = Math.max(
-      1,
-      targetContracts - Math.floor(existingBefore),
-    );
-
-    attempts += 1;
-    console.log(
-      `[RETRY_LOOP] Execute attempt ${retry + 1}/${MAX_RETRIES} user ${userId} ${symbol} — orderSize=${orderSize} (existing=${existingBefore}, target=${targetContracts}) clientOrderId=${openClientOrderId ?? "none"}`,
-    );
-
-    lastResult = await placeFollowerOrder(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-      orderSize,
-      openClientOrderId ? { clientOrderId: openClientOrderId } : undefined,
-    );
-
-    if (!lastResult.success) {
-      const err = lastResult.error ?? "unknown";
-      console.warn(
-        `[RETRY_LOOP] executeTrade failed attempt ${retry + 1}/${MAX_RETRIES}: ${err}`,
+    for (let poll = 0; poll < MAX_OPEN_CONFIRM_POLLS; poll += 1) {
+      console.log(
+        `[RETRY_LOOP] REST confirm poll ${poll + 1}/${MAX_OPEN_CONFIRM_POLLS} ` +
+          `(wait ${POST_ORDER_VERIFY_WAIT_MS}ms) user ${userId} ${symbol}`,
       );
+      await sleep(POST_ORDER_VERIFY_WAIT_MS);
+
+      exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
+        skipCache: true,
+      });
+
+      let ack: DeltaClientOrderAck | undefined;
       if (openClientOrderId) {
-        const ack = await fetchDeltaOrderAckByClientOrderId(
+        ack = await fetchDeltaOrderAckByClientOrderId(
           apiKey,
           apiSecret,
           openClientOrderId,
         );
-        if (orderAckPending(ack) || orderAckFilledQty(ack) > 0) {
-          console.log(
-            `[RETRY_LOOP] Place rejected but clientOrderId=${openClientOrderId} exists on exchange (${ack.state}) — not refiring`,
-          );
-          orderSubmitted = true;
-          await sleep(POST_ORDER_VERIFY_WAIT_MS);
-          continue;
-        }
       }
-      if (isHardExecutionError(err)) {
-        await markFollowerOrderFailure(prisma, {
-          strategyId: args.strategyId,
-          userId,
-          symbol,
-          error: err,
-        });
-        return {
-          ...lastResult,
-          feeCost: totalFee,
-          attempts,
-          verified: false,
-        };
+
+      const verified = await tryFinalizeVerifiedOpen(exchangeLots, ack);
+      if (verified) {
+        console.log(
+          `[RETRY_LOOP] Verified via REST (${exchangeLots}/${targetContracts}) poll ${poll + 1}.`,
+        );
+        return verified;
       }
-      continue;
+
+      if (ack && orderAckPending(ack)) {
+        console.log(
+          `[RETRY_LOOP] Order pending clientOrderId=${openClientOrderId} filled=${ack.filledSize} — continue polling`,
+        );
+        continue;
+      }
     }
 
-    orderSubmitted = true;
-
-    if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
-      totalFee += lastResult.feeCost;
-    }
-
-    console.log(
-      `[RETRY_LOOP] Order accepted; waiting ${POST_ORDER_VERIFY_WAIT_MS}ms before verify (user ${userId}, ${symbol})`,
-    );
-    await sleep(POST_ORDER_VERIFY_WAIT_MS);
-
-    let ackAfter: DeltaClientOrderAck | undefined;
+    exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
+      skipCache: true,
+    });
+    let finalAck: DeltaClientOrderAck | undefined;
     if (openClientOrderId) {
-      ackAfter = await fetchDeltaOrderAckByClientOrderId(
+      finalAck = await fetchDeltaOrderAckByClientOrderId(
         apiKey,
         apiSecret,
         openClientOrderId,
       );
     }
-
-    const existingAfter = await followerLegContracts(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-    );
-    const postVerified = await tryFinalizeVerifiedOpen(
-      existingAfter,
-      ackAfter,
-    );
-    if (postVerified) {
-      console.log(
-        `[RETRY_LOOP] Verified after wait (${existingAfter}/${targetContracts} contracts) on attempt ${retry + 1}.`,
-      );
-      return postVerified;
+    const restFinalized = await tryFinalizeVerifiedOpen(exchangeLots, finalAck);
+    if (restFinalized) {
+      return restFinalized;
     }
 
-    console.log(
-      `[RETRY_LOOP] Position not verified yet (${existingAfter}/${targetContracts} contracts, ackFilled=${ackAfter ? orderAckFilledQty(ackAfter) : 0}) after ${POST_ORDER_VERIFY_WAIT_MS}ms — will poll (no refire while order live).`,
-    );
-  }
-
-  if (orderSubmitted && openClientOrderId) {
-    const ack = await fetchDeltaOrderAckByClientOrderId(
-      apiKey,
-      apiSecret,
-      openClientOrderId,
-    );
-    const positionLots = await followerLegContracts(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-    );
-    const ackFinalized = await tryFinalizeVerifiedOpen(positionLots, ack);
-    if (ackFinalized) {
-      console.log(
-        `[RETRY_LOOP] Final ack verify clientOrderId=${openClientOrderId} state=${ack.state} filled=${ack.filledSize}`,
-      );
-      return ackFinalized;
-    }
-    if (orderAckPending(ack)) {
-      console.warn(
-        `[RETRY_LOOP] Order still pending clientOrderId=${openClientOrderId} filled=${ack.filledSize} — not marking verified (REST/force-sync will catch up)`,
-      );
-    }
-  }
-
-  const finalContracts = await followerLegContracts(
-    apiKey,
-    apiSecret,
-    symbol,
-    side,
-  );
-  const restFinalized = await tryFinalizeVerifiedOpen(finalContracts);
-  if (restFinalized) {
-    return restFinalized;
-  }
-
-  if (isOptionLeg && lastResult.success && openClientOrderId) {
-    const ack = await fetchDeltaOrderAckByClientOrderId(
-      apiKey,
-      apiSecret,
-      openClientOrderId,
-    );
-    const ackFilled = orderAckFilledQty(ack);
-    const dbQty = resolvedDbOpenQty(targetContracts, finalContracts, ackFilled);
-    if (dbQty >= minFilled) {
-      console.warn(
-        `[RETRY_LOOP] Option ${symbol} REST lag — using order ack filled=${ackFilled} position=${finalContracts}`,
-      );
-      if (
-        args.strategyId &&
-        args.entryPrice != null &&
-        Number.isFinite(args.entryPrice)
-      ) {
-        await recordTradePositionOpen(prisma, {
-          strategyId: args.strategyId,
-          userId: args.userId,
-          symbol,
-          side,
-          quantity: dbQty,
-          entryPrice: args.entryPrice,
+    if (isOptionLeg && orderSubmitted && openClientOrderId && finalAck) {
+      const ackFilled = orderAckFilledQty(finalAck);
+      const dbQty = resolvedDbOpenQty(targetContracts, exchangeLots, ackFilled);
+      if (dbQty >= minFilled) {
+        console.warn(
+          `[RETRY_LOOP] Option ${symbol} REST lag — ack filled=${ackFilled} position=${exchangeLots}`,
+        );
+        if (
+          args.strategyId &&
+          args.entryPrice != null &&
+          Number.isFinite(args.entryPrice)
+        ) {
+          await recordTradePositionOpen(prisma, {
+            strategyId: args.strategyId,
+            userId: args.userId,
+            symbol,
+            side,
+            quantity: dbQty,
+            entryPrice: args.entryPrice,
+            ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+            ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
+          });
+        }
+        return {
+          success: true,
+          ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
           ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
-          ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
-        });
+          feeCost: totalFee,
+          ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
+          attempts,
+          verified: true,
+          verifiedQty: dbQty,
+        };
       }
-      return {
-        success: true,
-        ...(lastResult.orderId != null ? { orderId: lastResult.orderId } : {}),
-        ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
-        feeCost: totalFee,
-        ...(lastResult.raw !== undefined ? { raw: lastResult.raw } : {}),
-        attempts,
-        verified: true,
-        verifiedQty: dbQty,
-      };
     }
-  }
 
-  const failMsg =
-    lastResult.error ??
-    `Position not verified after ${MAX_RETRIES} execute→wait→verify cycles (${finalContracts}/${targetContracts} contracts)`;
-  console.error(
-    `[RETRY_LOOP] Exhausted retries for user ${userId} on ${symbol}: ${failMsg}`,
-  );
-  await markFollowerOrderFailure(prisma, {
-    strategyId: args.strategyId,
-    userId,
-    symbol,
-    error: failMsg,
+    const failMsg =
+      lastResult.error ??
+      `Position not verified after ${COPY_LEG_CONFIRM_MS}ms REST polling (${exchangeLots}/${targetContracts} contracts)`;
+    console.error(
+      `[RETRY_LOOP] Confirm window exhausted for user ${userId} on ${symbol}: ${failMsg}`,
+    );
+    await markFollowerOrderFailure(prisma, {
+      strategyId: args.strategyId,
+      userId,
+      symbol,
+      error: failMsg,
+    });
+
+    return {
+      success: false,
+      error: failMsg,
+      feeCost: totalFee,
+      attempts,
+      verified: false,
+    };
   });
-
-  return {
-    success: false,
-    error: failMsg,
-    feeCost: totalFee,
-    attempts,
-    verified: false,
-  };
 }
 
 export type AdminAdjustFollowerQtyArgs = {
