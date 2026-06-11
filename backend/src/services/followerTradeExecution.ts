@@ -51,8 +51,8 @@ import {
 } from "./masterNoCopyOrders.js";
 
 /** How long to wait after a successful market order before REST position verify. */
-const POST_ORDER_VERIFY_WAIT_MS = 8_000;
-const MAX_RETRIES = 3;
+const POST_ORDER_VERIFY_WAIT_MS = 2_500;
+const MAX_RETRIES = 5;
 
 const HARD_ERROR_PATTERNS = [
   "INSUFFICIENT_MARGIN",

@@ -1,11 +1,188 @@
 import axios from "axios";
 import ccxt from "ccxt";
+import { createHmac } from "node:crypto";
 import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
 
 /** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
 const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
+
+/** Delta India REST auth — METHOD + timestamp + path + query + body (see Delta API docs). */
+function deltaIndiaRestSignature(
+  secret: string,
+  method: string,
+  timestampSec: string,
+  path: string,
+  queryString: string,
+  body: string,
+): string {
+  return createHmac("sha256", secret)
+    .update(`${method}${timestampSec}${path}${queryString}${body}`)
+    .digest("hex");
+}
+
+async function deltaIndiaSignedRequest<T>(args: {
+  apiKey: string;
+  secret: string;
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  query?: Record<string, string>;
+  body?: Record<string, unknown>;
+}): Promise<T> {
+  const timestampSec = Math.floor(Date.now() / 1000).toString();
+  const queryString = args.query
+    ? `?${new URLSearchParams(args.query).toString()}`
+    : "";
+  const bodyStr =
+    args.body && args.method !== "GET" ? JSON.stringify(args.body) : "";
+  const signature = deltaIndiaRestSignature(
+    args.secret,
+    args.method,
+    timestampSec,
+    args.path,
+    queryString,
+    bodyStr,
+  );
+
+  const { data } = await axios.request<T & { success?: boolean; error?: unknown }>({
+    method: args.method,
+    url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "api-key": args.apiKey,
+      timestamp: timestampSec,
+      signature,
+    },
+    data: bodyStr.length > 0 ? bodyStr : undefined,
+    timeout: 25_000,
+  });
+
+  const row = data as { success?: boolean; error?: unknown };
+  if (row.success === false) {
+    const errMsg =
+      typeof row.error === "object" && row.error !== null && "code" in row.error
+        ? JSON.stringify(row.error)
+        : String(row.error ?? "Delta REST request failed");
+    throw new Error(errMsg);
+  }
+
+  return data;
+}
+
+async function resolveDeltaProductNumericId(
+  productRef: string,
+): Promise<{ symbol: string; productId: number; contractSize: number } | null> {
+  const row = await fetchDeltaProductFromRestApi(productRef);
+  if (!row) return null;
+
+  const symbol = String(row.symbol ?? "").trim();
+  const productId = Number(row.id);
+  if (!symbol || !Number.isFinite(productId) || productId <= 0) return null;
+
+  const contractValue = Number(row.contract_value ?? 0.001);
+  const contractSize =
+    Number.isFinite(contractValue) && contractValue > 0 ? contractValue : 0.001;
+
+  return { symbol, productId, contractSize };
+}
+
+/**
+ * Place a market order via Delta India REST (bypasses CCXT market catalogue).
+ * Preferred for BTC options — CCXT loadMarkets often omits live option contracts.
+ */
+async function executeDeltaMarketOrderViaRest(
+  apiKey: string,
+  secret: string,
+  productRef: string,
+  side: TradeSide,
+  size: number,
+  opts?: { reduceOnly?: boolean; clientOrderId?: string },
+): Promise<ExecuteTradeResult> {
+  const lots = Math.max(1, Math.floor(Math.abs(size)));
+  const resolved = await resolveDeltaProductNumericId(productRef);
+  if (!resolved) {
+    return {
+      success: false,
+      error: `Delta REST could not resolve product "${productRef}"`,
+    };
+  }
+
+  const body: Record<string, unknown> = {
+    product_id: resolved.productId,
+    size: lots,
+    side: side === "BUY" ? "buy" : "sell",
+    order_type: "market_order",
+  };
+  if (opts?.reduceOnly === true) body.reduce_only = true;
+  const clientOrderId = opts?.clientOrderId?.trim();
+  if (clientOrderId) body.client_order_id = clientOrderId;
+
+  try {
+    const response = await deltaIndiaSignedRequest<{
+      result?: Record<string, unknown>;
+    }>({
+      apiKey,
+      secret,
+      method: "POST",
+      path: "/v2/orders",
+      body,
+    });
+
+    const order = response.result;
+    if (!order || typeof order !== "object") {
+      return { success: false, error: "Delta REST order returned empty result" };
+    }
+
+    const fillPrice =
+      numberOrNull(order.average_fill_price) ??
+      numberOrNull(order.average_price) ??
+      numberOrNull(order.price);
+    const feeCost =
+      numberOrNull(order.paid_commission) ??
+      numberOrNull(order.commission) ??
+      (fillPrice != null && fillPrice > 0
+        ? lots * resolved.contractSize * fillPrice * 0.0005
+        : 0);
+
+    const orderIdRaw = order.id;
+    const orderId =
+      orderIdRaw != null && String(orderIdRaw).trim()
+        ? String(orderIdRaw)
+        : undefined;
+
+    return {
+      success: true,
+      ...(orderId ? { orderId } : {}),
+      ...(clientOrderId ? { clientOrderId } : {}),
+      ...(fillPrice != null && fillPrice > 0 ? { fillPrice } : {}),
+      feeCost: Number.isFinite(feeCost) ? Math.max(0, feeCost!) : 0,
+      raw: order,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[copy-exec] Delta REST market order failed product=${resolved.symbol} lots=${lots}:`,
+      message,
+    );
+    return { success: false, error: message };
+  }
+}
+
+/** Authenticated margined positions via Delta REST — no CCXT loadMarkets required. */
+async function fetchMarginedPositionsViaRest(
+  apiKey: string,
+  secret: string,
+): Promise<unknown[]> {
+  const response = await deltaIndiaSignedRequest<{ result?: unknown[] }>({
+    apiKey,
+    secret,
+    method: "GET",
+    path: "/v2/positions/margined",
+  });
+  return Array.isArray(response.result) ? response.result : [];
+}
 
 /**
  * Single factory for `ccxt.delta`: swap markets, rate limit, and **Delta India** REST URLs
@@ -98,6 +275,7 @@ async function getAuthClient(
 /** Drop cached CCXT clients after master credentials change. */
 export function clearDeltaAuthClientCache(): void {
   _authClientCache.clear();
+  _optionMarketCache.clear();
 }
 
 export type TradeSide = "BUY" | "SELL";
@@ -466,8 +644,8 @@ export type FetchMarginedSnapshotOptions = {
   skipCache?: boolean;
 };
 
-/** One margined snapshot per account at a time; 8s TTL avoids duplicate Delta REST under load. */
-const MARGINED_SNAPSHOT_TTL_MS = 8_000;
+/** One margined snapshot per account at a time; 4s TTL avoids duplicate Delta REST under load. */
+const MARGINED_SNAPSHOT_TTL_MS = 4_000;
 const marginedSnapshotCache = new Map<
   string,
   { at: number; snapshot: DeltaMarginedPositionSnapshot }
@@ -681,6 +859,233 @@ export function resolveExactDeltaProductFromMarkets(
   return null;
 }
 
+/** In-memory cache — CCXT loadMarkets() omits many live BTC options on Delta India. */
+const _optionMarketCache = new Map<string, CcxtOptionMarket>();
+
+function isCryptoJsAesCiphertext(stored: string): boolean {
+  return stored.trim().startsWith("U2Fsd");
+}
+
+type CcxtOptionMarket = {
+  id: string;
+  symbol: string;
+  base: string;
+  quote: string;
+  settle: string;
+  type: "option";
+  spot: boolean;
+  margin: boolean;
+  swap: boolean;
+  future: boolean;
+  option: boolean;
+  active: boolean;
+  contract: boolean;
+  linear: boolean;
+  contractSize: number;
+  strike?: number;
+  expiry?: number;
+  precision: { amount: number; price: number };
+  limits: {
+    amount: { min: number; max: number | undefined };
+    price: { min: number; max: number | undefined };
+  };
+  info: Record<string, unknown>;
+};
+
+function tickSizeToPricePrecision(tickSize: number): number {
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return 1;
+  if (tickSize >= 1) return 0;
+  const frac = String(tickSize).split(".")[1];
+  return frac ? frac.length : 1;
+}
+
+function buildCcxtOptionMarketFromDeltaProduct(
+  row: Record<string, unknown>,
+): CcxtOptionMarket | null {
+  const productId = String(row.symbol ?? "").trim();
+  if (!isValidDeltaOptionProductSymbol(productId)) return null;
+
+  const contractValue = Number(row.contract_value ?? 0.001);
+  const contractSize =
+    Number.isFinite(contractValue) && contractValue > 0 ? contractValue : 0.001;
+  const strikeRaw = Number(row.strike_price ?? NaN);
+  const strike = Number.isFinite(strikeRaw) && strikeRaw > 0 ? strikeRaw : undefined;
+  const settlementTime = String(row.settlement_time ?? "");
+  const expiryParsed = expiryMsFromSettlement(settlementTime);
+  const expiry =
+    expiryParsed != null && Number.isFinite(expiryParsed) ? expiryParsed : undefined;
+  const underlying =
+    row.underlying_asset != null && typeof row.underlying_asset === "object"
+      ? (row.underlying_asset as Record<string, unknown>)
+      : null;
+  const quoting =
+    row.quoting_asset != null && typeof row.quoting_asset === "object"
+      ? (row.quoting_asset as Record<string, unknown>)
+      : null;
+  const base = String(underlying?.symbol ?? "BTC").trim() || "BTC";
+  const quote = String(quoting?.symbol ?? "USD").trim() || "USD";
+  const tickSize = Number(row.tick_size ?? 0.1);
+  const state = String(row.state ?? "live").trim().toLowerCase();
+
+  return {
+    id: productId,
+    symbol: productId,
+    base,
+    quote,
+    settle: quote,
+    type: "option",
+    spot: false,
+    margin: false,
+    swap: false,
+    future: false,
+    option: true,
+    active: state === "live" || state === "operational",
+    contract: true,
+    linear: true,
+    contractSize,
+    ...(strike != null ? { strike } : {}),
+    ...(expiry != null ? { expiry } : {}),
+    precision: {
+      amount: 0,
+      price: tickSizeToPricePrecision(tickSize),
+    },
+    limits: {
+      amount: { min: 1, max: undefined },
+      price: {
+        min: Number.isFinite(tickSize) && tickSize > 0 ? tickSize : 0.1,
+        max: undefined,
+      },
+    },
+    info: row,
+  };
+}
+
+function registerOptionMarketOnExchange(
+  exchange: InstanceType<typeof ccxt.delta>,
+  market: CcxtOptionMarket,
+): void {
+  const ex = exchange as InstanceType<typeof ccxt.delta> & {
+    markets?: Record<string, CcxtOptionMarket>;
+    markets_by_id?: Record<string, CcxtOptionMarket>;
+  };
+
+  if (ex.markets == null || typeof ex.markets !== "object") {
+    ex.markets = {};
+  }
+  ex.markets[market.symbol] = market;
+
+  if (ex.markets_by_id == null || typeof ex.markets_by_id !== "object") {
+    ex.markets_by_id = {};
+  }
+  ex.markets_by_id[market.id] = market;
+  ex.markets_by_id[market.symbol] = market;
+
+  const numericId = String(market.info.id ?? "").trim();
+  if (numericId) {
+    ex.markets_by_id[numericId] = market;
+  }
+}
+
+/**
+ * Delta India public REST — CCXT loadMarkets() often omits live option contracts.
+ * GET /v2/products/{symbol|numeric_id}
+ */
+async function fetchDeltaProductFromRestApi(
+  productRef: string,
+): Promise<Record<string, unknown> | null> {
+  const ref = productRef.trim();
+  if (!ref) return null;
+
+  try {
+    const { data } = await axios.get<{ success?: boolean; result?: unknown }>(
+      `${DELTA_INDIA_API_BASE}/v2/products/${encodeURIComponent(ref)}`,
+      { timeout: 20_000 },
+    );
+    if (
+      data?.success === true &&
+      data.result != null &&
+      typeof data.result === "object" &&
+      !Array.isArray(data.result)
+    ) {
+      return data.result as Record<string, unknown>;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[exchangeService] fetchDeltaProductFromRestApi failed ref=${ref}: ${msg}`,
+    );
+  }
+
+  return null;
+}
+
+function cacheOptionMarket(productRef: string, market: CcxtOptionMarket): void {
+  const keys = new Set<string>([
+    productRef.trim().toUpperCase(),
+    market.id.toUpperCase(),
+    market.symbol.toUpperCase(),
+  ]);
+  const numericId = String(market.info.id ?? "").trim();
+  if (numericId) keys.add(numericId);
+  for (const key of keys) {
+    if (key) _optionMarketCache.set(key, market);
+  }
+}
+
+/**
+ * Hydrate a single option contract into the CCXT exchange instance from Delta REST.
+ * Required because CCXT `loadMarkets()` with defaultType=swap skips most options.
+ */
+export async function hydrateExactDeltaOptionOnExchange(
+  exchange: InstanceType<typeof ccxt.delta>,
+  productRef: string,
+): Promise<ResolvedExactDeltaProduct | null> {
+  const ref = productRef.trim();
+  if (!ref) return null;
+
+  const fromCcxt = resolveExactDeltaProductFromMarkets(exchange, ref);
+  if (fromCcxt) return fromCcxt;
+
+  const cacheKey = ref.toUpperCase();
+  const cachedMarket = _optionMarketCache.get(cacheKey);
+  if (cachedMarket) {
+    registerOptionMarketOnExchange(exchange, cachedMarket);
+    return {
+      productId: cachedMarket.id,
+      ccxtSymbol: cachedMarket.symbol,
+    };
+  }
+
+  const row = await fetchDeltaProductFromRestApi(ref);
+  if (!row) {
+    console.error(
+      `[exchangeService] option product ${ref} not found via CCXT or Delta REST`,
+    );
+    return null;
+  }
+
+  const market = buildCcxtOptionMarketFromDeltaProduct(row);
+  if (!market) {
+    console.error(
+      `[exchangeService] REST product ${ref} is not a valid option symbol (symbol=${String(row.symbol ?? "")})`,
+    );
+    return null;
+  }
+
+  registerOptionMarketOnExchange(exchange, market);
+  cacheOptionMarket(ref, market);
+
+  const resolved: ResolvedExactDeltaProduct = {
+    productId: market.id,
+    ccxtSymbol: market.symbol,
+  };
+
+  console.log(
+    `[exchangeService] hydrated option market from REST: ${resolved.productId} → ccxt=${resolved.ccxtSymbol}`,
+  );
+  return resolved;
+}
+
 /** Extract product id from Delta WS/REST payloads — options prefer `product_symbol` verbatim. */
 export function extractDeltaProductSymbolFromPayload(
   o: Record<string, unknown>,
@@ -727,13 +1132,16 @@ export function extractDeltaProductSymbolFromPayload(
 
 export async function resolveCanonicalDeltaProductId(
   raw: string,
+  exchange?: InstanceType<typeof ccxt.delta>,
 ): Promise<ResolvedExactDeltaProduct | null> {
   const ref = raw.trim();
   if (!ref) return null;
 
   if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
-    const exchange = await getPublicClient();
-    return resolveExactDeltaProductFromMarkets(exchange, ref);
+    const ex = exchange ?? (await getPublicClient());
+    const fromCcxt = resolveExactDeltaProductFromMarkets(ex, ref);
+    if (fromCcxt) return fromCcxt;
+    return hydrateExactDeltaOptionOnExchange(ex, ref);
   }
 
   return null;
@@ -958,14 +1366,47 @@ export async function executeTrade(
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
+    if (!apiKey || !secret) {
+      return {
+        success: false,
+        error: "Invalid or undecryptable Delta API credentials",
+      };
+    }
+
+    const isOptionOrder =
+      isDeltaOptionProductId(inputSymbol) || /^\d+$/.test(inputSymbol);
+
+    // Options: Delta REST first (CCXT loadMarkets omits most live contracts).
+    if (isOptionOrder) {
+      const restResult = await executeDeltaMarketOrderViaRest(
+        apiKey,
+        secret,
+        inputSymbol,
+        side,
+        size,
+        opts,
+      );
+      if (restResult.success) {
+        console.log(
+          `[copy-exec] REST market order ok symbol="${inputSymbol}" lots=${size} orderId=${restResult.orderId ?? "none"}`,
+        );
+        return restResult;
+      }
+      console.warn(
+        `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
+      );
+    }
 
     const exchange = await getAuthClient(apiKey, secret);
 
     let canonicalProductId = inputSymbol;
     let ccxtSymbol: string;
     try {
-      if (isDeltaOptionProductId(inputSymbol) || /^\d+$/.test(inputSymbol)) {
-        const exact = resolveExactDeltaProductFromMarkets(exchange, inputSymbol);
+      if (isOptionOrder) {
+        let exact = resolveExactDeltaProductFromMarkets(exchange, inputSymbol);
+        if (!exact) {
+          exact = await hydrateExactDeltaOptionOnExchange(exchange, inputSymbol);
+        }
         if (!exact) {
           const err = `Exact option product resolve failed for "${inputSymbol}" — order not placed`;
           console.error(`[copy-exec] ${err}`);
@@ -1017,7 +1458,7 @@ export async function executeTrade(
     } catch (orderErr) {
       const message =
         orderErr instanceof Error ? orderErr.message : String(orderErr);
-      console.log(message);
+      console.warn(`[copy-exec] CCXT createOrder failed: ${message}`);
       return {
         success: false,
         error: message,
@@ -1320,26 +1761,42 @@ async function fetchDeltaMarginedPositionSnapshotInner(
   const lite = options?.lite !== false;
   const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
   const secret = decryptDeltaSecretOrPlain(apiSecretStored);
-
-  const exchange = await getAuthClient(apiKey, secret);
-
-  type MarginedResponse = { result?: unknown[] };
-  let response: MarginedResponse;
-  try {
-    response = (await (
-      exchange as InstanceType<typeof ccxt.delta> & {
-        privateGetPositionsMargined: (params?: object) => Promise<MarginedResponse>;
-      }
-    ).privateGetPositionsMargined()) as MarginedResponse;
-  } catch (err) {
-    console.warn(
-      `[exchangeService] privateGetPositionsMargined failed:`,
-      err instanceof Error ? err.message : err,
-    );
-    throw err;
+  if (!apiKey || !secret) {
+    throw new Error("Invalid or undecryptable Delta API credentials");
   }
 
-  const rawList = Array.isArray(response?.result) ? response.result : [];
+  type MarginedResponse = { result?: unknown[] };
+  let rawList: unknown[] = [];
+  let exchange: InstanceType<typeof ccxt.delta> | null = null;
+
+  try {
+    rawList = await fetchMarginedPositionsViaRest(apiKey, secret);
+  } catch (restErr) {
+    console.warn(
+      `[exchangeService] REST /v2/positions/margined failed — CCXT fallback:`,
+      restErr instanceof Error ? restErr.message : restErr,
+    );
+    exchange = await getAuthClient(apiKey, secret);
+    let response: MarginedResponse;
+    try {
+      response = (await (
+        exchange as InstanceType<typeof ccxt.delta> & {
+          privateGetPositionsMargined: (params?: object) => Promise<MarginedResponse>;
+        }
+      ).privateGetPositionsMargined()) as MarginedResponse;
+    } catch (err) {
+      console.warn(
+        `[exchangeService] privateGetPositionsMargined failed:`,
+        err instanceof Error ? err.message : err,
+      );
+      throw err;
+    }
+    rawList = Array.isArray(response?.result) ? response.result : [];
+  }
+
+  if (!exchange) {
+    exchange = await getAuthClient(apiKey, secret);
+  }
 
   const optionTickerCache = lite
     ? await prefetchOptionTickerQuotes(collectOpenOptionProductSymbols(rawList))

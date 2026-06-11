@@ -102,7 +102,7 @@ const HEARTBEAT_WATCHDOG_MS = 35_000;
 const MIN_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
 /** How often to (re)attach private WS for strategies with active subs + master keys. */
-const ROSTER_SYNC_MS = 15_000;
+const ROSTER_SYNC_MS = 8_000;
 /** How often to reconcile DB OPEN trades against master REST positions (safety net). */
 const SAFETY_RECONCILE_MS = 30_000;
 /** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
@@ -110,9 +110,35 @@ const AUTO_EXIT_CHECK_MS = 1_000;
 /** Align follower contract counts with master × multiplier (REST safety net). */
 const POSITION_QTY_RECONCILE_MS = 60_000;
 /** Poll master REST positions to catch manual UI fills missed by private WS. */
-const MASTER_REST_POLL_MS = 5_000;
+const MASTER_REST_POLL_MS = 2_000;
 /** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
-const MASTER_FLAT_CONFIRM_MS = 10_000;
+const MASTER_FLAT_CONFIRM_MS = 4_000;
+/** Debounce immediate REST poll triggered by WS position deltas. */
+const MASTER_REST_IMMEDIATE_DEBOUNCE_MS = 350;
+
+let masterRestPollDebounce: ReturnType<typeof setTimeout> | null = null;
+let masterRestPollContext: {
+  prisma: PrismaClient;
+  tracker: MasterPositionTracker;
+  cancelled: { value: boolean };
+} | null = null;
+
+function requestImmediateMasterRestPoll(reason: string): void {
+  const ctx = masterRestPollContext;
+  if (!ctx || ctx.cancelled.value) return;
+
+  if (masterRestPollDebounce != null) {
+    clearTimeout(masterRestPollDebounce);
+  }
+
+  masterRestPollDebounce = setTimeout(() => {
+    masterRestPollDebounce = null;
+    const active = masterRestPollContext;
+    if (!active || active.cancelled.value) return;
+    console.log(`[MASTER-REST-SYNC] immediate poll (${reason})`);
+    scheduleMasterRestPoll(active.prisma, active.tracker, active.cancelled);
+  }, MASTER_REST_IMMEDIATE_DEBOUNCE_MS);
+}
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
   const prehash = `GET${timestampSec}${WS_AUTH_PATH}`;
@@ -2546,6 +2572,7 @@ class StrategyMasterSocket {
         `[tradeEngine WS] authenticated — subscribed orders/positions/user_trades strategyId=${this.strategyId}`,
       );
       void this.seedPositionMapsFromRest();
+      requestImmediateMasterRestPoll("ws-auth-ready");
       return;
     }
 
@@ -2555,9 +2582,9 @@ class StrategyMasterSocket {
       const orderAction = String(msg.action ?? "").toLowerCase();
       if (orderAction === "delete" || orderAction === "closed") {
         console.warn(
-          `[tradeEngine WS] orders ${orderAction} ignored strategyId=${this.strategyId} — ` +
-            `REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
+          `[tradeEngine WS] orders ${orderAction} strategyId=${this.strategyId} — scheduling immediate REST flat check`,
         );
+        requestImmediateMasterRestPoll(`ws-order-${orderAction}`);
         return;
       }
 
@@ -2634,13 +2661,12 @@ class StrategyMasterSocket {
         return;
       }
 
-      // WS delete/close events are ignored — REST poll confirms master flat.
+      // WS delete/close events — schedule immediate REST poll (faster than waiting for interval).
       if (action === "delete" || action === "closed") {
         console.warn(
-          `[tradeEngine WS] positions ${action} ignored strategyId=${this.strategyId} payload=${JSON.stringify(
-            msg.data ?? null,
-          )} — REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
+          `[tradeEngine WS] positions ${action} strategyId=${this.strategyId} — scheduling immediate REST flat check`,
         );
+        requestImmediateMasterRestPoll(`ws-position-${action}`);
         return;
       }
 
@@ -2663,9 +2689,9 @@ class StrategyMasterSocket {
 
         if (next <= 0 && prev > 0) {
           console.warn(
-            `[tradeEngine WS] positions update size→0 ignored ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — ` +
-              `REST poll (${MASTER_REST_POLL_MS / 1000}s) confirms master flat before follower close.`,
+            `[tradeEngine WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — scheduling immediate REST flat check`,
           );
+          requestImmediateMasterRestPoll("ws-position-flat-hint");
           continue;
         }
 
@@ -2676,11 +2702,11 @@ class StrategyMasterSocket {
             `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
           );
 
-          // Positions channel: tracker only — live copy via fills/orders; REST deficit sync catches gaps.
           if (copyEnabled && next > prev) {
             console.log(
-              `[tradeEngine WS] positions +${next - prev} ${snap.symbol} ${snap.side} — tracker updated, copy via fills/REST`,
+              `[tradeEngine WS] positions +${next - prev} ${snap.symbol} ${snap.side} — scheduling immediate REST copy sync`,
             );
+            requestImmediateMasterRestPoll("ws-position-increase");
           }
         }
       }
@@ -3051,6 +3077,12 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     if (!cancelled.value) scheduleAutoExit();
   });
 
+  masterRestPollContext = {
+    prisma,
+    tracker: masterPositionTracker,
+    cancelled,
+  };
+
   masterRestPollInterval = setInterval(() => {
     try {
       void pollMasterPositionsFallback(
@@ -3074,6 +3106,11 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
   return () => {
     cancelled.value = true;
+    masterRestPollContext = null;
+    if (masterRestPollDebounce != null) {
+      clearTimeout(masterRestPollDebounce);
+      masterRestPollDebounce = null;
+    }
     stopLivePriceTracker();
     if (masterRestPollInterval != null) {
       clearInterval(masterRestPollInterval);

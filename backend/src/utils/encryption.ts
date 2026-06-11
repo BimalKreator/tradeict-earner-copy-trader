@@ -51,6 +51,10 @@ function looksLikeApiCredential(s: string): boolean {
   return /^[A-Za-z0-9_\-+/=:.]+$/.test(s);
 }
 
+function isCryptoJsAesCiphertext(stored: string): boolean {
+  return stored.trim().startsWith("U2Fsd");
+}
+
 /**
  * Decrypt stored Delta credentials, or return sanitized plaintext (legacy rows).
  *
@@ -74,7 +78,16 @@ export function decryptDeltaSecretOrPlain(stored: string): string {
   }
 
   if (decrypted && looksLikeApiCredential(decrypted)) return decrypted;
-  if (plain && looksLikeApiCredential(plain)) return plain;
+  if (plain && looksLikeApiCredential(plain) && !isCryptoJsAesCiphertext(stored)) {
+    return plain;
+  }
+  if (isCryptoJsAesCiphertext(stored)) {
+    console.error(
+      "[encryption] Delta credential appears AES-encrypted but decryption failed — " +
+        "verify PROCESS_ENCRYPTION_KEY matches the key used when the API key was saved",
+    );
+    return "";
+  }
   // last-resort: return whichever is non-empty so callers can detect the
   // failure (Delta will reject with `invalid_api_key`, which we surface).
   return decrypted || plain;
