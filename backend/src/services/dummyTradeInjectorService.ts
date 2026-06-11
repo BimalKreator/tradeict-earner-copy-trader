@@ -1,19 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { TradeStatus, type PrismaClient } from "@prisma/client";
+import {
+  SubscriptionStatus,
+  TradeStatus,
+  type PrismaClient,
+} from "@prisma/client";
 import { EXIT_REASON } from "../constants/exitReasons.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import { computeUserBookedPnlAndRevenueDue } from "./dashboardMetricsService.js";
 
-export type InjectDummyTradeInput = {
+const DEFAULT_INJECT_SYMBOL = "DUMMY-INJECT";
+
+export type InjectTradeInput = {
   userId: string;
-  strategyId: string;
   grossPnl: number;
-  symbol: string;
+  symbol?: string;
+  strategyId?: string;
 };
 
-export type InjectDummyTradeResult = {
+export type InjectTradeResult = {
   tradeId: string;
   pnlRecordId: string;
+  strategyId: string;
   grossPnl: number;
   appRevenue: number;
   profitSharePct: number;
@@ -35,21 +42,107 @@ export type InjectDummyTradeResult = {
   };
 };
 
-export async function injectDummyTrade(
-  prisma: PrismaClient,
-  input: InjectDummyTradeInput,
-): Promise<InjectDummyTradeResult> {
-  const userId = input.userId.trim();
-  const strategyId = input.strategyId.trim();
-  const symbol = input.symbol.trim();
-  const grossPnl = Number(input.grossPnl);
+/** @deprecated use InjectTradeInput */
+export type InjectDummyTradeInput = InjectTradeInput & {
+  strategyId: string;
+  symbol: string;
+};
 
-  if (!userId || !strategyId || !symbol) {
-    throw new Error("userId, strategyId, and symbol are required");
+/** @deprecated use InjectTradeResult */
+export type InjectDummyTradeResult = InjectTradeResult;
+
+async function resolveInjectStrategyId(
+  prisma: PrismaClient,
+  userId: string,
+  strategyId?: string,
+): Promise<string> {
+  const explicit = strategyId?.trim();
+  if (explicit) return explicit;
+
+  const active = await prisma.userStrategySubscription.findFirst({
+    where: {
+      userId,
+      isActive: true,
+      status: SubscriptionStatus.ACTIVE,
+    },
+    orderBy: { joinedDate: "desc" },
+    select: { strategyId: true },
+  });
+  if (active) return active.strategyId;
+
+  const anySub = await prisma.userStrategySubscription.findFirst({
+    where: { userId },
+    orderBy: { joinedDate: "desc" },
+    select: { strategyId: true },
+  });
+  if (!anySub) {
+    throw new Error(
+      "User has no strategy subscription — subscribe them or pass strategyId",
+    );
+  }
+  return anySub.strategyId;
+}
+
+function parseInjectTradeBody(body: {
+  userId?: unknown;
+  grossPnl?: unknown;
+  symbol?: unknown;
+  strategyId?: unknown;
+}): InjectTradeInput {
+  const userId = typeof body.userId === "string" ? body.userId.trim() : "";
+  const grossPnl =
+    typeof body.grossPnl === "number"
+      ? body.grossPnl
+      : typeof body.grossPnl === "string"
+        ? Number.parseFloat(body.grossPnl)
+        : NaN;
+  const symbol =
+    typeof body.symbol === "string" && body.symbol.trim()
+      ? body.symbol.trim()
+      : undefined;
+  const strategyId =
+    typeof body.strategyId === "string" && body.strategyId.trim()
+      ? body.strategyId.trim()
+      : undefined;
+
+  if (!userId) {
+    throw new Error("userId is required");
   }
   if (!Number.isFinite(grossPnl)) {
     throw new Error("grossPnl must be a finite number");
   }
+
+  return {
+    userId,
+    grossPnl,
+    ...(symbol ? { symbol } : {}),
+    ...(strategyId ? { strategyId } : {}),
+  };
+}
+
+export function isInjectTradeClientError(message: string): boolean {
+  return (
+    message.includes("required") ||
+    message.includes("not found") ||
+    message.includes("finite") ||
+    message.includes("subscription") ||
+    message.includes("Failed to create")
+  );
+}
+
+/** Admin debug — simulate a closed trade (no exchange); runs PnL + commission chain. */
+export async function injectTrade(
+  prisma: PrismaClient,
+  input: InjectTradeInput,
+): Promise<InjectTradeResult> {
+  const userId = input.userId.trim();
+  const grossPnl = Number(input.grossPnl);
+  const symbol = input.symbol?.trim() || DEFAULT_INJECT_SYMBOL;
+  const strategyId = await resolveInjectStrategyId(
+    prisma,
+    userId,
+    input.strategyId,
+  );
 
   const [user, strategy] = await Promise.all([
     prisma.user.findUnique({
@@ -98,7 +191,7 @@ export async function injectDummyTrade(
   });
 
   console.log(
-    `[inject-dummy-trade] created Trade id=${trade.id} user=${userId} ` +
+    `[inject-trade] created Trade id=${trade.id} user=${userId} ` +
       `strategy=${strategyId} symbol=${symbol} grossPnl=$${grossPnl.toFixed(2)} isDummy=true`,
   );
 
@@ -111,7 +204,7 @@ export async function injectDummyTrade(
   });
 
   if (!pnlResult) {
-    throw new Error("Failed to create PnL record for dummy trade");
+    throw new Error("Failed to create PnL record for injected trade");
   }
 
   const commissionLedger = await prisma.commissionLedger.findMany({
@@ -133,7 +226,7 @@ export async function injectDummyTrade(
   );
 
   console.log(
-    `[inject-dummy-trade] complete tradeId=${trade.id} pnlRecordId=${pnlResult.pnlRecordId} ` +
+    `[inject-trade] complete tradeId=${trade.id} pnlRecordId=${pnlResult.pnlRecordId} ` +
       `appRevenue=$${pnlResult.commissionAmount.toFixed(4)} ` +
       `commissions=${pnlResult.commissionsCreated} skipped=${pnlResult.commissionsSkipped} ` +
       `bookedGross=$${bookedAfter.grossPnl.toFixed(2)}`,
@@ -142,6 +235,7 @@ export async function injectDummyTrade(
   return {
     tradeId: trade.id,
     pnlRecordId: pnlResult.pnlRecordId,
+    strategyId,
     grossPnl,
     appRevenue: pnlResult.commissionAmount,
     profitSharePct,
@@ -156,4 +250,14 @@ export async function injectDummyTrade(
       netEarnedPnl: bookedAfter.netEarnedPnl,
     },
   };
+}
+
+/** @deprecated use injectTrade */
+export const injectDummyTrade = injectTrade;
+
+export async function handleInjectTradeRequest(
+  prisma: PrismaClient,
+  body: Record<string, unknown>,
+): Promise<InjectTradeResult> {
+  return injectTrade(prisma, parseInjectTradeBody(body));
 }

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import {
   Prisma,
   type PrismaClient,
@@ -40,7 +40,10 @@ import {
   clearDeltaAuthClientCache,
   testDeltaIndiaConnection,
 } from "../services/exchangeService.js";
-import { injectDummyTrade } from "../services/dummyTradeInjectorService.js";
+import {
+  handleInjectTradeRequest,
+  isInjectTradeClientError,
+} from "../services/dummyTradeInjectorService.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -95,55 +98,30 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     res.json({ status: "running" });
   });
 
-  /**
-   * POST /api/admin/debug/inject-dummy-trade
-   * Admin-only — simulate a closed trade for PnL + commission testing (no exchange).
-   */
-  router.post("/debug/inject-dummy-trade", async (req, res, next) => {
+  async function injectTradeHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     try {
-      const body = req.body as {
-        userId?: unknown;
-        strategyId?: unknown;
-        grossPnl?: unknown;
-        symbol?: unknown;
-      };
-
-      const userId =
-        typeof body.userId === "string" ? body.userId.trim() : "";
-      const strategyId =
-        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
-      const symbol = typeof body.symbol === "string" ? body.symbol.trim() : "";
-      const grossPnl =
-        typeof body.grossPnl === "number"
-          ? body.grossPnl
-          : typeof body.grossPnl === "string"
-            ? Number.parseFloat(body.grossPnl)
-            : NaN;
-
-      const result = await injectDummyTrade(prisma, {
-        userId,
-        strategyId,
-        grossPnl,
-        symbol,
-      });
-
+      const result = await handleInjectTradeRequest(
+        prisma,
+        (req.body ?? {}) as Record<string, unknown>,
+      );
       res.status(201).json({ ok: true, ...result });
     } catch (err) {
-      if (err instanceof Error) {
-        const msg = err.message;
-        if (
-          msg.includes("required") ||
-          msg.includes("not found") ||
-          msg.includes("finite") ||
-          msg.includes("Failed to create")
-        ) {
-          res.status(400).json({ error: msg });
-          return;
-        }
+      if (err instanceof Error && isInjectTradeClientError(err.message)) {
+        res.status(400).json({ error: err.message });
+        return;
       }
       next(err);
     }
-  });
+  }
+
+  /** POST /api/admin/debug/inject-trade — PnL + commission test (no exchange). */
+  router.post("/debug/inject-trade", injectTradeHandler);
+  /** @deprecated use /debug/inject-trade */
+  router.post("/debug/inject-dummy-trade", injectTradeHandler);
   router.get("/dashboard-stats", adminController.getDashboardStats);
   router.get("/transactions", adminController.listTransactions);
   router.get("/downloads", adminController.listDownloads);
