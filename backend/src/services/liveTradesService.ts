@@ -26,7 +26,7 @@ const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
 const MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS = 45_000;
 
 /** Successful REST polls before evicting a master leg (explicit flat or missing from snapshot). */
-const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 3;
+const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 1;
 /** Faster eviction when the master book is completely empty on a successful REST read. */
 const MASTER_EMPTY_BOOK_EVICT_POLLS = 1;
 
@@ -170,7 +170,7 @@ async function fetchAndMergeMasterLiveTrades(
   const runOnce = async (timeoutMs: number | null) => {
     const promise = fetchDeltaMarginedPositionSnapshot(apiKey, apiSecret, {
       lite: true,
-      skipCache: opts?.background === true,
+      skipCache: true,
     });
     const snapshot =
       timeoutMs != null

@@ -2700,7 +2700,7 @@ export async function adminBulkAdjustMasterTradeQuantity(
   const { fetchMasterOpenPositions } = await import("./tradeEngine.js");
   let legs: Awaited<ReturnType<typeof fetchMasterOpenPositions>>;
   try {
-    legs = await fetchMasterOpenPositions(apiKey, apiSecret);
+    legs = await fetchMasterOpenPositions(apiKey, apiSecret, { skipCache: true });
   } catch (err) {
     return {
       ok: false,

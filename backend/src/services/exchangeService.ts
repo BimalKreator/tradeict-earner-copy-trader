@@ -170,18 +170,174 @@ async function executeDeltaMarketOrderViaRest(
   }
 }
 
-/** Authenticated margined positions via Delta REST — no CCXT loadMarkets required. */
+const MARGINED_POSITION_CONTRACT_TYPES =
+  "perpetual_futures,call_options,put_options";
+
+/** Stable key for merging margined + realtime position rows. */
+function positionProductMergeKey(position: Record<string, unknown>): string {
+  const ps = String(position.product_symbol ?? "").trim();
+  if (ps && !/^\d+$/.test(ps)) return ps.toUpperCase();
+  const pid = String(position.product_id ?? "").trim();
+  return pid ? `pid:${pid}` : "";
+}
+
+/** Delta returns a single object, array, or nested list for underlying_asset_symbol queries. */
+function normalizeRealtimePositionsResult(result: unknown): unknown[] {
+  if (Array.isArray(result)) return result;
+  if (!result || typeof result !== "object") return [];
+
+  const obj = result as Record<string, unknown>;
+  if (Array.isArray(obj.positions)) return obj.positions;
+  if (obj.product_id != null || obj.product_symbol != null || obj.size != null) {
+    return [result];
+  }
+
+  const values = Object.values(obj).filter(
+    (v) => v != null && typeof v === "object" && "size" in (v as object),
+  );
+  return values.length > 0 ? values : [];
+}
+
+/**
+ * Real-time positions — Delta docs: margined API can lag ~10s after fills/adjustments.
+ * `GET /v2/positions?underlying_asset_symbol=BTC` reflects strike rolls immediately.
+ */
+async function fetchRealtimePositionsViaRest(
+  apiKey: string,
+  secret: string,
+  underlyingAssetSymbol = "BTC",
+): Promise<unknown[]> {
+  const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+    apiKey,
+    secret,
+    method: "GET",
+    path: "/v2/positions",
+    query: { underlying_asset_symbol: underlyingAssetSymbol },
+  });
+  return normalizeRealtimePositionsResult(response.result);
+}
+
+/**
+ * Overlay realtime sizes onto margined rows; add new strikes; zero legs absent from realtime.
+ */
+function mergeRealtimeIntoMarginedPositions(
+  marginedRows: unknown[],
+  realtimeRows: unknown[],
+): { merged: unknown[]; realtimeOpen: number; zeroedStale: number; added: number } {
+  const realtimeByKey = new Map<
+    string,
+    { size: number; entryPrice: string | null; row: Record<string, unknown> }
+  >();
+
+  for (const row of realtimeRows) {
+    if (!row || typeof row !== "object") continue;
+    const pos = row as Record<string, unknown>;
+    const key = positionProductMergeKey(pos);
+    const size =
+      numberOrNull(pos.size) ?? numberOrNull(pos.contracts);
+    if (!key || size === null) continue;
+    realtimeByKey.set(key, {
+      size,
+      entryPrice:
+        pos.entry_price != null ? String(pos.entry_price) : null,
+      row: pos,
+    });
+  }
+
+  if (realtimeByKey.size === 0) {
+    return {
+      merged: marginedRows,
+      realtimeOpen: 0,
+      zeroedStale: 0,
+      added: 0,
+    };
+  }
+
+  const marginedKeys = new Set<string>();
+  let zeroedStale = 0;
+  const merged = marginedRows.map((row) => {
+    if (!row || typeof row !== "object") return row;
+    const pos = row as Record<string, unknown>;
+    const key = positionProductMergeKey(pos);
+    if (key) marginedKeys.add(key);
+
+    const rt = key ? realtimeByKey.get(key) : undefined;
+    if (rt === undefined) {
+      const marginedSize =
+        numberOrNull(pos.size) ?? numberOrNull(pos.contracts);
+      if (
+        key &&
+        marginedSize !== null &&
+        Math.abs(marginedSize) >= 1e-12
+      ) {
+        zeroedStale += 1;
+        return { ...pos, size: 0 };
+      }
+      return row;
+    }
+
+    return {
+      ...pos,
+      ...rt.row,
+      size: rt.size,
+      ...(rt.entryPrice != null ? { entry_price: rt.entryPrice } : {}),
+    };
+  });
+
+  let added = 0;
+  let realtimeOpen = 0;
+  for (const [key, rt] of realtimeByKey) {
+    if (Math.abs(rt.size) >= 1e-12) realtimeOpen += 1;
+    if (marginedKeys.has(key)) continue;
+    if (Math.abs(rt.size) < 1e-12) continue;
+    added += 1;
+    merged.push({
+      ...rt.row,
+      product_symbol:
+        String(rt.row.product_symbol ?? "").trim() || key.replace(/^pid:/, ""),
+      size: rt.size,
+      ...(rt.entryPrice != null ? { entry_price: rt.entryPrice } : {}),
+    });
+  }
+
+  return { merged, realtimeOpen, zeroedStale, added };
+}
+
+/** Authenticated margined positions via Delta REST — paginated, options-inclusive. */
 async function fetchMarginedPositionsViaRest(
   apiKey: string,
   secret: string,
 ): Promise<unknown[]> {
-  const response = await deltaIndiaSignedRequest<{ result?: unknown[] }>({
-    apiKey,
-    secret,
-    method: "GET",
-    path: "/v2/positions/margined",
-  });
-  return Array.isArray(response.result) ? response.result : [];
+  const all: unknown[] = [];
+  let after: string | undefined;
+
+  for (let page = 0; page < 25; page++) {
+    const query: Record<string, string> = {
+      contract_types: MARGINED_POSITION_CONTRACT_TYPES,
+      page_size: "100",
+    };
+    if (after) query.after = after;
+
+    const response = await deltaIndiaSignedRequest<{
+      result?: unknown[];
+      meta?: { after?: string | null };
+    }>({
+      apiKey,
+      secret,
+      method: "GET",
+      path: "/v2/positions/margined",
+      query,
+    });
+
+    const batch = Array.isArray(response.result) ? response.result : [];
+    all.push(...batch);
+
+    const nextAfter = response.meta?.after;
+    if (!nextAfter || batch.length === 0) break;
+    after = String(nextAfter);
+  }
+
+  return all;
 }
 
 /**
@@ -1836,6 +1992,27 @@ async function fetchDeltaMarginedPositionSnapshotInner(
 
   try {
     rawList = await fetchMarginedPositionsViaRest(apiKey, secret);
+    try {
+      const realtimeRows = await fetchRealtimePositionsViaRest(apiKey, secret, "BTC");
+      const overlay = mergeRealtimeIntoMarginedPositions(rawList, realtimeRows);
+      rawList = overlay.merged;
+      if (
+        overlay.realtimeOpen > 0 ||
+        overlay.zeroedStale > 0 ||
+        overlay.added > 0
+      ) {
+        console.log(
+          `[exchangeService] realtime position overlay open=${overlay.realtimeOpen} ` +
+            `added=${overlay.added} zeroedStale=${overlay.zeroedStale} ` +
+            `marginedRows=${overlay.merged.length}`,
+        );
+      }
+    } catch (realtimeErr) {
+      console.warn(
+        `[exchangeService] realtime /v2/positions overlay skipped:`,
+        realtimeErr instanceof Error ? realtimeErr.message : realtimeErr,
+      );
+    }
   } catch (restErr) {
     console.warn(
       `[exchangeService] REST /v2/positions/margined failed — CCXT fallback:`,

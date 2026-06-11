@@ -1309,10 +1309,11 @@ function deltaPositionsToMasterLed(
   return out;
 }
 
-/** Leader opens via CCXT `fetchDeltaOpenPositions` (Delta India, strategy master keys). */
+/** Leader opens via Delta REST margined + realtime overlay (Delta India master keys). */
 export async function fetchMasterOpenPositions(
   apiKey: string,
   apiSecret: string,
+  options?: { skipCache?: boolean },
 ): Promise<MasterLedTrade[]> {
   // Debug: confirm the master key decrypted from the database matches the
   // value pasted into the admin panel. If the masked prefix does NOT match
@@ -1328,7 +1329,10 @@ export async function fetchMasterOpenPositions(
     `[DEBUG_AUTH] fetchMasterOpenPositions decrypted master key starts with: ${maskedKey}`,
   );
 
-  const raw = await fetchDeltaOpenPositions(apiKey, apiSecret);
+  const raw = await fetchDeltaOpenPositions(apiKey, apiSecret, {
+    lite: true,
+    skipCache: options?.skipCache === true,
+  });
   return deltaPositionsToMasterLed(raw);
 }
 
@@ -2128,6 +2132,7 @@ async function pollMasterPositionsFallback(
       masters = await fetchMasterOpenPositions(
         strat.masterApiKey,
         strat.masterApiSecret,
+        { skipCache: true },
       );
     } catch (err) {
       console.warn(
