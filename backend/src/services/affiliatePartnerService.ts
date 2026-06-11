@@ -302,12 +302,15 @@ async function loadUserFinancialMaps(
 
   for (const userId of userIds) {
     const booked = bookedByUser.get(userId) ?? {
+      grossPnl: 0,
+      appRevenue: 0,
+      netEarnedPnl: 0,
       grossBookedPnl: 0,
       revenueSharingDue: 0,
     };
     const fin = map.get(userId)!;
-    fin.totalProfitGenerated = booked.grossBookedPnl;
-    fin.totalRevenueShareDue = booked.revenueSharingDue;
+    fin.totalProfitGenerated = booked.grossPnl;
+    fin.totalRevenueShareDue = booked.appRevenue;
   }
 
   for (const row of invoicePaidGroups) {
@@ -318,7 +321,7 @@ async function loadUserFinancialMaps(
   for (const row of commissionGroups) {
     const fin = map.get(row.sourceUserId)!;
     const booked = bookedByUser.get(row.sourceUserId);
-    if (booked != null && booked.grossBookedPnl <= 0) {
+    if (booked != null && booked.grossPnl <= 0) {
       continue;
     }
     const amount = row._sum.amount ?? 0;

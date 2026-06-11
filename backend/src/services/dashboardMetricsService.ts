@@ -285,51 +285,91 @@ export async function sumAllClosedTradePnl(
   return trades.reduce((s, t) => s + realizedTradePnl(t), 0);
 }
 
-export type BookedPnlAndRevenueDue = {
-  /** Sum of realized PnL on CLOSED trades in the window (ignores open/floating). */
-  grossBookedPnl: number;
+/** Canonical PnL breakdown — shared by user dashboard, trades API, and partner network. */
+export type PnlBreakdown = {
+  /** Sum of realized trade PnL on CLOSED trades before app revenue share. */
+  grossPnl: number;
   /**
-   * Per-strategy: max(0, net booked PnL) × profitShare%, summed across strategies.
-   * Zero when overall gross booked PnL ≤ 0 (losses net out app revenue).
+   * Per-strategy: max(0, strategy gross) × profitShare%, summed across strategies.
+   * Zero when overall gross PnL ≤ 0. Falls back to summed `revenueShareAmt` when
+   * strategy profitShare is unset but per-trade fees were recorded at close.
    */
+  appRevenue: number;
+  /** grossPnl − appRevenue — user's net take-home. */
+  netEarnedPnl: number;
+};
+
+export type BookedPnlAndRevenueDue = PnlBreakdown & {
+  /** @deprecated use grossPnl */
+  grossBookedPnl: number;
+  /** @deprecated use appRevenue */
   revenueSharingDue: number;
 };
+
+const ZERO_PNL_BREAKDOWN: PnlBreakdown = {
+  grossPnl: 0,
+  appRevenue: 0,
+  netEarnedPnl: 0,
+};
+
+function withPnlAliases(breakdown: PnlBreakdown): BookedPnlAndRevenueDue {
+  return {
+    ...breakdown,
+    grossBookedPnl: breakdown.grossPnl,
+    revenueSharingDue: breakdown.appRevenue,
+  };
+}
 
 type ClosedTradePnlRow = {
   strategyId: string;
   tradePnl: number;
   pnl: number | null;
+  revenueShareAmt?: number;
 };
 
-/** Pure net PnL + app revenue from closed trade rows (same rules as user dashboard). */
+/** Gross PnL, app revenue, and net earned PnL from closed trade rows. */
 export function computeBookedPnlAndRevenueDueFromTrades(
   trades: ClosedTradePnlRow[],
   profitShareByStrategyId: Map<string, number>,
 ): BookedPnlAndRevenueDue {
-  let grossBookedPnl = 0;
+  if (trades.length === 0) {
+    return withPnlAliases(ZERO_PNL_BREAKDOWN);
+  }
+
+  let grossPnl = 0;
   const pnlByStrategy = new Map<string, number>();
+  let appRevenueFromRows = 0;
 
   for (const t of trades) {
     const pnl = realizedTradePnl(t);
-    grossBookedPnl += pnl;
+    grossPnl += pnl;
     pnlByStrategy.set(
       t.strategyId,
       (pnlByStrategy.get(t.strategyId) ?? 0) + pnl,
     );
+    const rowShare = t.revenueShareAmt ?? 0;
+    if (Number.isFinite(rowShare) && rowShare > 0) {
+      appRevenueFromRows += rowShare;
+    }
   }
 
-  if (pnlByStrategy.size === 0 || grossBookedPnl <= 0) {
-    return { grossBookedPnl, revenueSharingDue: 0 };
+  let appRevenue = 0;
+  if (grossPnl > 0) {
+    for (const [strategyId, strategyGross] of pnlByStrategy) {
+      if (strategyGross <= 0) continue;
+      const pct = profitShareByStrategyId.get(strategyId) ?? 0;
+      appRevenue += strategyGross * (pct / 100);
+    }
+    if (appRevenue <= 0 && appRevenueFromRows > 0) {
+      appRevenue = appRevenueFromRows;
+    }
   }
 
-  let revenueSharingDue = 0;
-  for (const [strategyId, netBooked] of pnlByStrategy) {
-    if (netBooked <= 0) continue;
-    const pct = profitShareByStrategyId.get(strategyId) ?? 0;
-    revenueSharingDue += netBooked * (pct / 100);
-  }
-
-  return { grossBookedPnl, revenueSharingDue };
+  return withPnlAliases({
+    grossPnl,
+    appRevenue,
+    netEarnedPnl: grossPnl - appRevenue,
+  });
 }
 
 /**
@@ -342,7 +382,7 @@ export async function computeUsersBookedPnlAndRevenueDue(
 ): Promise<Map<string, BookedPnlAndRevenueDue>> {
   const out = new Map<string, BookedPnlAndRevenueDue>();
   for (const id of userIds) {
-    out.set(id, { grossBookedPnl: 0, revenueSharingDue: 0 });
+    out.set(id, withPnlAliases(ZERO_PNL_BREAKDOWN));
   }
   if (userIds.length === 0) return out;
 
@@ -352,7 +392,13 @@ export async function computeUsersBookedPnlAndRevenueDue(
       status: TradeStatus.CLOSED,
       ...(since ? { createdAt: { gte: since } } : {}),
     },
-    select: { userId: true, strategyId: true, tradePnl: true, pnl: true },
+    select: {
+      userId: true,
+      strategyId: true,
+      tradePnl: true,
+      pnl: true,
+      revenueShareAmt: true,
+    },
   });
 
   if (trades.length === 0) return out;
@@ -371,6 +417,7 @@ export async function computeUsersBookedPnlAndRevenueDue(
       strategyId: t.strategyId,
       tradePnl: t.tradePnl,
       pnl: t.pnl,
+      revenueShareAmt: t.revenueShareAmt,
     });
     tradesByUser.set(t.userId, list);
   }
@@ -400,11 +447,16 @@ export async function computeUserBookedPnlAndRevenueDue(
       status: TradeStatus.CLOSED,
       ...(since ? { createdAt: { gte: since } } : {}),
     },
-    select: { strategyId: true, tradePnl: true, pnl: true },
+    select: {
+      strategyId: true,
+      tradePnl: true,
+      pnl: true,
+      revenueShareAmt: true,
+    },
   });
 
   if (trades.length === 0) {
-    return { grossBookedPnl: 0, revenueSharingDue: 0 };
+    return withPnlAliases(ZERO_PNL_BREAKDOWN);
   }
 
   const strategies = await prisma.strategy.findMany({

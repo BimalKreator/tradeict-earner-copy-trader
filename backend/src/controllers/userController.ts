@@ -265,11 +265,9 @@ export function createUserController(prisma: PrismaClient) {
           ? capital.totalBalance
           : capital.availableBalance + capital.usedBalance;
 
-      const earnedPnl =
-        allTimeBooked.grossBookedPnl - allTimeBooked.revenueSharingDue;
-      const monthlyPnl =
-        monthBooked.grossBookedPnl - monthBooked.revenueSharingDue;
-      const revenueSharingDue = monthBooked.revenueSharingDue;
+      const earnedPnl = allTimeBooked.netEarnedPnl;
+      const monthlyPnl = monthBooked.netEarnedPnl;
+      const revenueSharingDue = monthBooked.appRevenue;
 
       res.json({
         earnedPnl,
@@ -278,8 +276,12 @@ export function createUserController(prisma: PrismaClient) {
         todayPnlPercent: pnlPercentOfCapital(todayPnl, capitalBase),
         monthlyPnl,
         monthlyPnlPercent: pnlPercentOfCapital(monthlyPnl, capitalBase),
-        grossBookedPnlAllTime: allTimeBooked.grossBookedPnl,
-        grossBookedPnlMonth: monthBooked.grossBookedPnl,
+        grossPnlAllTime: allTimeBooked.grossPnl,
+        grossPnlMonth: monthBooked.grossPnl,
+        appRevenueAllTime: allTimeBooked.appRevenue,
+        appRevenueMonth: monthBooked.appRevenue,
+        grossBookedPnlAllTime: allTimeBooked.grossPnl,
+        grossBookedPnlMonth: monthBooked.grossPnl,
         revenueSharingDue,
         availableCapital: capital.availableBalance,
         totalBalance: capital.totalBalance,
@@ -682,8 +684,11 @@ export function createUserController(prisma: PrismaClient) {
       res.json({
         trades,
         summary: {
-          netPnl: booked.grossBookedPnl,
-          appRevenue: booked.revenueSharingDue,
+          grossPnl: booked.grossPnl,
+          appRevenue: booked.appRevenue,
+          netEarnedPnl: booked.netEarnedPnl,
+          /** @deprecated use netEarnedPnl */
+          netPnl: booked.netEarnedPnl,
         },
       });
     } catch (err) {

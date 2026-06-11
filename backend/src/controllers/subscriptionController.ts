@@ -46,7 +46,7 @@ export async function recordTradePnl(
   const booked = await computeUserBookedPnlAndRevenueDue(prisma, args.userId, null);
 
   let commissionAmount = 0;
-  if (booked.grossBookedPnl > 0 && args.tradeProfit > 0) {
+  if (booked.grossPnl > 0 && args.tradeProfit > 0) {
     commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
   }
 
@@ -59,7 +59,7 @@ export async function recordTradePnl(
     },
   });
 
-  if (booked.grossBookedPnl <= 0) {
+  if (booked.grossPnl <= 0) {
     await voidPendingEarnedCommissionsForSourceUser(prisma, args.userId);
     return;
   }
