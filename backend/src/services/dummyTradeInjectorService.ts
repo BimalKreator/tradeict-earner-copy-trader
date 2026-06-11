@@ -261,3 +261,61 @@ export async function handleInjectTradeRequest(
 ): Promise<InjectTradeResult> {
   return injectTrade(prisma, parseInjectTradeBody(body));
 }
+
+export type ClearDummyTradesResult = {
+  tradesDeleted: number;
+  pnlRecordsDeleted: number;
+  commissionLedgersDeleted: number;
+};
+
+function dummyTradeWhere() {
+  return {
+    OR: [
+      { isDummy: true },
+      { exitReason: EXIT_REASON.DUMMY_INJECT },
+    ],
+  };
+}
+
+/**
+ * Remove all admin-injected dummy trades and linked PnL / commission rows.
+ * Order: CommissionLedger → PnLRecord → Trade (FK-safe).
+ */
+export async function clearDummyTrades(
+  prisma: PrismaClient,
+): Promise<ClearDummyTradesResult> {
+  return prisma.$transaction(async (tx) => {
+    const dummyPnlRows = await tx.pnLRecord.findMany({
+      where: { isDummy: true },
+      select: { id: true },
+    });
+    const pnlRecordIds = dummyPnlRows.map((r) => r.id);
+
+    const commissionLedgersDeleted = await tx.commissionLedger.deleteMany({
+      where:
+        pnlRecordIds.length > 0
+          ? { pnlRecordId: { in: pnlRecordIds } }
+          : { id: { in: [] } },
+    });
+
+    const pnlRecordsDeleted = await tx.pnLRecord.deleteMany({
+      where: { isDummy: true },
+    });
+
+    const tradesDeleted = await tx.trade.deleteMany({
+      where: dummyTradeWhere(),
+    });
+
+    console.log(
+      `[clear-dummy-trades] removed trades=${tradesDeleted.count} ` +
+        `pnlRecords=${pnlRecordsDeleted.count} ` +
+        `commissionLedgers=${commissionLedgersDeleted.count}`,
+    );
+
+    return {
+      tradesDeleted: tradesDeleted.count,
+      pnlRecordsDeleted: pnlRecordsDeleted.count,
+      commissionLedgersDeleted: commissionLedgersDeleted.count,
+    };
+  });
+}

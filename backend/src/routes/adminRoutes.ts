@@ -41,6 +41,7 @@ import {
   testDeltaIndiaConnection,
 } from "../services/exchangeService.js";
 import {
+  clearDummyTrades,
   handleInjectTradeRequest,
   isInjectTradeClientError,
 } from "../services/dummyTradeInjectorService.js";
@@ -122,6 +123,16 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.post("/debug/inject-trade", injectTradeHandler);
   /** @deprecated use /debug/inject-trade */
   router.post("/debug/inject-dummy-trade", injectTradeHandler);
+
+  /** DELETE /api/admin/debug/clear-dummy-trades — purge injected test data. */
+  router.delete("/debug/clear-dummy-trades", async (_req, res, next) => {
+    try {
+      const result = await clearDummyTrades(prisma);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      next(err);
+    }
+  });
   router.get("/dashboard-stats", adminController.getDashboardStats);
   router.get("/transactions", adminController.listTransactions);
   router.get("/downloads", adminController.listDownloads);

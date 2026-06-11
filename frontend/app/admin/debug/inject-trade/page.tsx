@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, TestTube2 } from "lucide-react";
+import { Loader2, TestTube2, Trash2 } from "lucide-react";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -24,6 +24,13 @@ function authHeaders(): HeadersInit {
 }
 
 type MinimalUser = { id: string; email: string };
+
+type ClearDummyTradesResponse = {
+  ok: boolean;
+  tradesDeleted: number;
+  pnlRecordsDeleted: number;
+  commissionLedgersDeleted: number;
+};
 
 type InjectTradeResponse = {
   ok: boolean;
@@ -67,7 +74,9 @@ export default function AdminInjectTradePage() {
   const [symbol, setSymbol] = useState("");
   const [strategyId, setStrategyId] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [result, setResult] = useState<InjectTradeResponse | null>(null);
 
   const loadUsers = useCallback(async () => {
@@ -96,9 +105,53 @@ export default function AdminInjectTradePage() {
     void loadUsers();
   }, [loadUsers]);
 
+  useEffect(() => {
+    if (!success) return;
+    const t = window.setTimeout(() => setSuccess(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [success]);
+
+  async function handleClearDummyTrades() {
+    const confirmed = window.confirm(
+      "Delete ALL injected dummy trades, their PnL records, and partner commission ledger rows? Real trades are not affected.",
+    );
+    if (!confirmed) return;
+
+    setClearing(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`${apiBase}/admin/debug/clear-dummy-trades`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      const data: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data === "object" &&
+            data !== null &&
+            "error" in data &&
+            typeof (data as { error: unknown }).error === "string"
+            ? (data as { error: string }).error
+            : `Clear failed (${res.status})`,
+        );
+      }
+      const cleared = data as ClearDummyTradesResponse;
+      setResult(null);
+      setSuccess(
+        `Cleaned up ${cleared.tradesDeleted} trade(s), ${cleared.pnlRecordsDeleted} PnL record(s), and ${cleared.commissionLedgersDeleted} commission row(s).`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to clear dummy trades");
+    } finally {
+      setClearing(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setSuccess(null);
     setResult(null);
     setSubmitting(true);
     try {
@@ -162,6 +215,11 @@ export default function AdminInjectTradePage() {
       {error ? (
         <div className="rounded-lg border border-red-500/35 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
+        </div>
+      ) : null}
+      {success ? (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+          {success}
         </div>
       ) : null}
 
@@ -246,6 +304,27 @@ export default function AdminInjectTradePage() {
             {submitting ? "Injecting…" : "Submit Dummy Trade"}
           </button>
         </form>
+
+        <div className="mt-8 border-t border-glassBorder pt-6">
+          <h2 className="text-sm font-semibold text-red-300">Danger zone</h2>
+          <p className="mt-1 text-xs text-white/45">
+            Removes every trade flagged as dummy (or with exit reason &quot;Admin
+            Dummy Trade&quot;), plus linked PnL and commission ledger rows.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleClearDummyTrades()}
+            disabled={submitting || clearing}
+            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-600/90 px-5 py-3 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
+          >
+            {clearing ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <Trash2 className="h-4 w-4" aria-hidden />
+            )}
+            {clearing ? "Clearing…" : "Clear All Dummy Trades"}
+          </button>
+        </div>
       </div>
 
       {result ? (
