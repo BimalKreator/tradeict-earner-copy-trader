@@ -425,7 +425,7 @@ async function resolveMarkForLiveRow(
   return rest.markPrice;
 }
 
-/** Mark for display only — UPNL always from exchangeService (Delta unrealized_pnl). */
+/** Mark for display only — live PnL is Delta REST `unrealized_pnl` (no local math). */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {

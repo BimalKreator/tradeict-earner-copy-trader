@@ -344,7 +344,64 @@ function mergeRealtimeIntoMarginedPositions(
     });
   }
 
-  return { merged, realtimeOpen, zeroedStale, added };
+  const upnlBaseline = indexMarginedUpnlFieldsByKey(marginedRows);
+  const mergedWithUpnl = merged.map((row) => {
+    if (!row || typeof row !== "object") return row;
+    return restoreMarginedUpnlFields(row as Record<string, unknown>, upnlBaseline);
+  });
+
+  return { merged: mergedWithUpnl, realtimeOpen, zeroedStale, added };
+}
+
+/** Snapshot margined UPNL before realtime overlay can drop sparse fields. */
+function indexMarginedUpnlFieldsByKey(
+  marginedRows: unknown[],
+): Map<string, { unrealized_pnl?: unknown; unrealized_funding_pnl?: unknown }> {
+  const map = new Map<
+    string,
+    { unrealized_pnl?: unknown; unrealized_funding_pnl?: unknown }
+  >();
+  for (const row of marginedRows) {
+    if (!row || typeof row !== "object") continue;
+    const pos = row as Record<string, unknown>;
+    const key = positionProductMergeKey(pos);
+    if (!key) continue;
+    if (pos.unrealized_pnl === undefined && pos.unrealized_funding_pnl === undefined) {
+      continue;
+    }
+    map.set(key, {
+      ...(pos.unrealized_pnl !== undefined ? { unrealized_pnl: pos.unrealized_pnl } : {}),
+      ...(pos.unrealized_funding_pnl !== undefined
+        ? { unrealized_funding_pnl: pos.unrealized_funding_pnl }
+        : {}),
+    });
+  }
+  return map;
+}
+
+function restoreMarginedUpnlFields(
+  row: Record<string, unknown>,
+  baseline: Map<string, { unrealized_pnl?: unknown; unrealized_funding_pnl?: unknown }>,
+): Record<string, unknown> {
+  const key = positionProductMergeKey(row);
+  if (!key) return row;
+  const size = numberOrNull(row.size) ?? numberOrNull(row.contracts);
+  if (size === null || Math.abs(size) < 1e-12) return row;
+
+  if (row.unrealized_pnl !== undefined && row.unrealized_pnl !== null) {
+    return row;
+  }
+
+  const saved = baseline.get(key);
+  if (!saved) return row;
+
+  return {
+    ...row,
+    ...(saved.unrealized_pnl !== undefined ? { unrealized_pnl: saved.unrealized_pnl } : {}),
+    ...(saved.unrealized_funding_pnl !== undefined
+      ? { unrealized_funding_pnl: saved.unrealized_funding_pnl }
+      : {}),
+  };
 }
 
 /** Authenticated margined positions via Delta REST — paginated, options-inclusive. */
@@ -913,10 +970,7 @@ export function parseDeltaPositionUnrealizedPnl(
   for (const raw of candidates) {
     if (raw === undefined || raw === null) continue;
     const upnl = parseFloat(String(raw));
-    if (!Number.isFinite(upnl)) continue;
-    const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
-    if (!Number.isNaN(funding)) return upnl + funding;
-    return upnl;
+    if (Number.isFinite(upnl)) return upnl;
   }
   return null;
 }
@@ -970,49 +1024,13 @@ function estimateOptionUnrealizedPnlFromQuotes(args: {
 }
 
 /**
- * Terminal-aligned UPNL for options: bid/offer (UPL@Bid / UPL@Offer) when quotes exist —
- * matches Delta UI. Perps use margined `unrealized_pnl` only.
+ * Delta terminal UPNL — read `unrealized_pnl` from the position REST payload only.
+ * No local mark/bid/offer math (that diverged from Delta UPL@Offer and inflated auto-exit).
  */
-function resolveDeltaTerminalUnrealizedPnl(args: {
-  position: Record<string, unknown>;
-  isOption: boolean;
-  side: TradeSide;
-  entryPrice: number | null;
-  productSymbol: string;
-  realBaseSize: number;
-  tickerCache: Map<string, OptionTickerQuote>;
-}): number | null {
-  const fromApi = parseDeltaPositionUnrealizedPnl(args.position);
-
-  if (!args.isOption) {
-    return fromApi;
-  }
-
-  const manual = estimateOptionUnrealizedPnlFromQuotes({
-    position: args.position,
-    side: args.side,
-    entryPrice: args.entryPrice,
-    productSymbol: args.productSymbol,
-    realBaseSize: args.realBaseSize,
-    tickerCache: args.tickerCache,
-  });
-
-  if (manual !== null) {
-    if (fromApi !== null) {
-      const apiAbs = Math.abs(fromApi);
-      const manAbs = Math.abs(manual);
-      if (manAbs > 0.001 && apiAbs / manAbs > 50) {
-        console.warn(
-          `[exchangeService] option API UPNL $${fromApi.toFixed(4)} >> bid/offer $${manual.toFixed(4)} ` +
-            `symbol=${args.productSymbol} — using bid/offer (extreme API inflation)`,
-        );
-        return manual;
-      }
-    }
-    return manual;
-  }
-
-  return fromApi;
+function resolveDeltaTerminalUnrealizedPnl(
+  position: Record<string, unknown>,
+): number | null {
+  return parseDeltaPositionUnrealizedPnl(position);
 }
 
 /** Bid/offer UPNL math when Delta margined API omits `unrealized_pnl`. */
@@ -2373,99 +2391,15 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       let unrealizedPnl: number | null = null;
       const apiUpnlRaw = position.unrealized_pnl;
 
-      if (lite) {
-        unrealizedPnl = resolveDeltaTerminalUnrealizedPnl({
-          position,
-          isOption,
-          side,
-          entryPrice,
-          productSymbol,
-          realBaseSize,
-          tickerCache: optionTickerCache,
-        });
+      unrealizedPnl = resolveDeltaTerminalUnrealizedPnl(position);
 
-        if (unrealizedPnl === null && !isOption) {
-          unrealizedPnl = computePositionUnrealizedPnl({
-            isOption,
-            side,
-            entryPrice,
-            markPrice,
-            realBaseSize,
-            position,
-            lite: true,
-          });
-        }
-        if (unrealizedPnl === null && !isOption) {
-          if (entryPrice !== null && markPrice !== null) {
-            const sign = side === "SELL" ? -1 : 1;
-            unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
-          }
-        }
-      } else {
-      unrealizedPnl = parseApiUnrealizedPnl(position);
-
-      let upnlPrice: number | null = markPrice;
-      let upnlPriceSource = "api_unrealized_pnl";
-
-      if (unrealizedPnl === null) {
-        upnlPriceSource = "mark";
-        if (isOption) {
-          const resolved = await resolveOptionUpnlPrice(
-            exchange,
-            unified,
-            position,
-            side,
-            markPrice,
-          );
-          upnlPrice = resolved.price;
-          upnlPriceSource = resolved.source;
-        }
-
-        if (entryPrice !== null && upnlPrice !== null) {
-          if (isOption) {
-            unrealizedPnl = computeOptionUpnlFromQuotePrice({
-              side,
-              entryPrice,
-              upnlPrice,
-              realBaseSize,
-              position,
-            });
-          } else {
-            const sign = side === "SELL" ? -1 : 1;
-            unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
-            const funding = parseFloat(
-              String(position.unrealized_funding_pnl ?? "0"),
-            );
-            if (!Number.isNaN(funding)) unrealizedPnl += funding;
-          }
-        } else if (!isOption && apiUpnlRaw !== undefined && apiUpnlRaw !== null) {
-          unrealizedPnl = parseFloat(String(apiUpnlRaw));
-          const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
-          if (!Number.isNaN(funding) && unrealizedPnl !== null) {
-            unrealizedPnl += funding;
-          }
-        }
-      }
-
-      if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
-
-      const { bid, offer } = extractDeltaBidOffer(position);
-
-      console.log(`\n[PNL_TRACKER] -------------------------`);
-      console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side} | option=${isOption}`);
-      console.log(
-        `[PNL_TRACKER] Contract lots: ${contractLotCount} (raw=${contractLots}) × contractValue=${contractValue} → RealBaseSize(BTC)=${realBaseSize}`,
-      );
-      console.log(
-        `[PNL_TRACKER] Entry: ${entryPrice} | Mark(display): ${markPrice} | Bid: ${bid ?? "n/a"} | Offer: ${offer ?? "n/a"}`,
-      );
-      console.log(
-        `[PNL_TRACKER] UPNL source: ${upnlPriceSource} | price: ${upnlPrice} → PnL: ${unrealizedPnl}`,
-      );
-      console.log(
-        `[PNL_TRACKER] API unrealized_pnl: ${apiUpnlRaw ?? "n/a"}`,
-      );
-      console.log(`[PNL_TRACKER] -------------------------\n`);
+      if (!lite && unrealizedPnl === null) {
+        const { bid, offer } = extractDeltaBidOffer(position);
+        console.log(
+          `[PNL_TRACKER] ${unified} option=${isOption} side=${side} ` +
+            `lots=${contractLotCount} api_unrealized_pnl=${apiUpnlRaw ?? "n/a"} ` +
+            `mark=${markPrice} bid=${bid ?? "n/a"} offer=${offer ?? "n/a"}`,
+        );
       }
 
       if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
