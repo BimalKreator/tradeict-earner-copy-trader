@@ -703,18 +703,8 @@ async function prefetchOptionTickerQuotes(
   await Promise.all(
     unique.map(async (sym) => {
       if (isDeltaOptionProductId(sym) || /^\d+$/.test(sym)) {
-        const rest = await fetchDeltaTickerFromRestApi(sym);
-        let bid = rest.bid;
-        let ask = rest.ask;
-        if (
-          (bid == null || ask == null) &&
-          (isDeltaOptionProductId(sym) || /^\d+$/.test(sym))
-        ) {
-          const l2 = await fetchDeltaL2BestQuotes(sym);
-          bid = bid ?? l2.bid;
-          ask = ask ?? l2.ask;
-        }
-        cache.set(sym, { bid, ask });
+        const { bid, offer } = await fetchFreshOptionBidOffer(sym);
+        cache.set(sym, { bid, ask: offer });
         return;
       }
       try {
@@ -756,7 +746,10 @@ function collectOpenOptionProductSymbols(rawList: unknown[]): string[] {
   return out;
 }
 
-/** Lite options UPNL — REST bid/offer first, then prefetched ticker, mark last. */
+/**
+ * Live bid/offer for UPL — prefer fresh ticker/L2 cache over margined row `quotes`
+ * (margined API can lag ~10s and diverge from Delta terminal UPL@Offer).
+ */
 function resolveOptionUpnlPriceLite(
   position: Record<string, unknown>,
   side: TradeSide,
@@ -764,15 +757,13 @@ function resolveOptionUpnlPriceLite(
   productSymbol: string,
   tickerCache: Map<string, OptionTickerQuote>,
 ): number | null {
-  const fromRest = resolveOptionUpnlPriceSync(position, side, null);
-  if (fromRest != null) return fromRest;
-
   const cached = tickerCache.get(productSymbol.trim());
   if (cached) {
     if (side === "BUY" && cached.bid != null && cached.bid > 0) return cached.bid;
     if (side === "SELL" && cached.ask != null && cached.ask > 0) return cached.ask;
   }
-  return null;
+
+  return resolveOptionUpnlPriceSync(position, side, displayMark);
 }
 
 function computePositionUnrealizedPnl(args: {
@@ -1026,29 +1017,58 @@ function optionSignedBaseSize(rawSize: number, contractValue: number): number {
   return rawSize * contractValue;
 }
 
+/** Match Delta terminal — round per-leg UPL to cents before display / auto-exit sum. */
+function roundOptionUpnlUsd(pnl: number): number {
+  if (!Number.isFinite(pnl)) return pnl;
+  return Math.round(pnl * 100) / 100;
+}
+
+/** Fresh L2 top-of-book + ticker `quotes` — UPL@Offer uses orderbook best ask/bid. */
+async function fetchFreshOptionBidOffer(
+  productSymbol: string,
+): Promise<{ bid: number | null; offer: number | null }> {
+  const ref = productSymbol.trim();
+  if (!ref) return { bid: null, offer: null };
+
+  const [rest, l2] = await Promise.all([
+    fetchDeltaTickerFromRestApi(ref),
+    fetchDeltaL2BestQuotes(ref),
+  ]);
+  return {
+    bid: l2.bid ?? rest.bid,
+    offer: l2.ask ?? rest.ask,
+  };
+}
+
 /** Bid/offer UPNL estimate — only when Delta API field is absent (~new realtime legs). */
 function estimateOptionUnrealizedPnlFromQuotes(args: {
   position: Record<string, unknown>;
   side: TradeSide;
   entryPrice: number | null;
   productSymbol: string;
-  realBaseSize: number;
+  rawSignedSize: number;
+  contractValue: number;
+  upnlPriceOverride?: number | null;
   tickerCache: Map<string, OptionTickerQuote>;
 }): number | null {
   if (args.entryPrice === null) return null;
-  const upnlPrice = resolveOptionUpnlPriceLite(
-    args.position,
-    args.side,
-    null,
-    args.productSymbol,
-    args.tickerCache,
-  );
+
+  const upnlPrice =
+    args.upnlPriceOverride ??
+    resolveOptionUpnlPriceLite(
+      args.position,
+      args.side,
+      null,
+      args.productSymbol,
+      args.tickerCache,
+    );
   if (upnlPrice === null) return null;
+
   return computeOptionUpnlFromQuotePrice({
-    side: args.side,
     entryPrice: args.entryPrice,
     upnlPrice,
-    realBaseSize: args.realBaseSize,
+    rawSignedSize: args.rawSignedSize,
+    contractValue: args.contractValue,
     position: args.position,
   });
 }
@@ -1072,40 +1092,60 @@ function isDeltaShortOptionUnsignedUpnl(
   return Math.abs(apiUpnl - unsignedPremium) <= Math.max(0.002, unsignedPremium * 0.08);
 }
 
-/** Signed mark PnL fallback when bid/offer are unavailable (Delta MCP patch formula). */
-function deltaShortOptionSignedMarkUpnl(args: {
-  position: Record<string, unknown>;
-  entryPrice: number;
-  rawSize: number;
-  contractValue: number;
-}): number | null {
-  const mark = extractDeltaMarkPrice(args.position);
-  if (mark === null) return null;
-  return (mark - args.entryPrice) * args.rawSize * args.contractValue;
-}
-
 /**
  * Per-leg UPNL aligned with Delta terminal UPL@Offer.
- * Futures/perps: REST `unrealized_pnl`. Short options: bid/offer (API field is unsigned).
+ * Futures/perps: REST `unrealized_pnl`. Options: live L2 best bid/offer (not mark).
  */
-function resolvePositionUnrealizedPnl(args: {
+async function resolvePositionUnrealizedPnl(args: {
   position: Record<string, unknown>;
   isOption: boolean;
   side: TradeSide;
   rawSize: number;
   entryPrice: number | null;
   productSymbol: string;
-  realBaseSize: number;
   contractValue: number;
   tickerCache: Map<string, OptionTickerQuote>;
-}): number | null {
+}): Promise<number | null> {
   const apiUpnl = parseDeltaPositionUnrealizedPnl(args.position);
 
   if (!args.isOption) {
     return apiUpnl;
   }
 
+  if (args.entryPrice === null) {
+    return apiUpnl !== null ? roundOptionUpnlUsd(apiUpnl) : null;
+  }
+
   const isShort = args.side === "SELL" || args.rawSize < -1e-12;
+  let upnlPriceOverride: number | null = null;
+
+  const fresh = await fetchFreshOptionBidOffer(args.productSymbol);
+  if (isShort && fresh.offer != null && fresh.offer > 0) {
+    upnlPriceOverride = fresh.offer;
+  } else if (!isShort && fresh.bid != null && fresh.bid > 0) {
+    upnlPriceOverride = fresh.bid;
+  }
+
+  if (upnlPriceOverride != null) {
+    args.tickerCache.set(args.productSymbol.trim(), {
+      bid: fresh.bid,
+      ask: fresh.offer,
+    });
+  }
+
+  const fromQuotes = estimateOptionUnrealizedPnlFromQuotes({
+    position: args.position,
+    side: args.side,
+    entryPrice: args.entryPrice,
+    productSymbol: args.productSymbol,
+    rawSignedSize: args.rawSize,
+    contractValue: args.contractValue,
+    upnlPriceOverride,
+    tickerCache: args.tickerCache,
+  });
+  if (fromQuotes !== null) {
+    return roundOptionUpnlUsd(fromQuotes);
+  }
 
   if (isShort) {
     const apiLooksUnsigned =
@@ -1116,42 +1156,11 @@ function resolvePositionUnrealizedPnl(args: {
         args.rawSize,
         args.contractValue,
       );
-
-    if (args.entryPrice !== null) {
-      const fromQuotes = estimateOptionUnrealizedPnlFromQuotes({
-        position: args.position,
-        side: args.side,
-        entryPrice: args.entryPrice,
-        productSymbol: args.productSymbol,
-        realBaseSize: args.realBaseSize,
-        tickerCache: args.tickerCache,
-      });
-      if (fromQuotes !== null) return fromQuotes;
-
-      const fromMark = deltaShortOptionSignedMarkUpnl({
-        position: args.position,
-        entryPrice: args.entryPrice,
-        rawSize: args.rawSize,
-        contractValue: args.contractValue,
-      });
-      if (fromMark !== null) return fromMark;
-    }
-
     if (apiLooksUnsigned) return null;
-    return apiUpnl;
   }
 
-  if (apiUpnl !== null) return apiUpnl;
-
-  if (args.entryPrice === null) return null;
-  return estimateOptionUnrealizedPnlFromQuotes({
-    position: args.position,
-    side: args.side,
-    entryPrice: args.entryPrice,
-    productSymbol: args.productSymbol,
-    realBaseSize: args.realBaseSize,
-    tickerCache: args.tickerCache,
-  });
+  if (apiUpnl !== null) return roundOptionUpnlUsd(apiUpnl);
+  return null;
 }
 
 /** @deprecated Use {@link resolvePositionUnrealizedPnl}. */
@@ -1161,17 +1170,16 @@ function resolveDeltaTerminalUnrealizedPnl(
   return parseDeltaPositionUnrealizedPnl(position);
 }
 
-/** Bid/offer UPNL math when Delta margined API omits `unrealized_pnl`. */
+/** Delta UPL@Offer — `(exitBidOrOffer - entry) × signedLots × contract_value`. */
 function computeOptionUpnlFromQuotePrice(args: {
-  side: TradeSide;
   entryPrice: number;
   upnlPrice: number;
-  realBaseSize: number;
+  rawSignedSize: number;
+  contractValue: number;
   position: Record<string, unknown>;
 }): number {
-  const sign = args.side === "SELL" ? -1 : 1;
   let unrealizedPnl =
-    args.realBaseSize * (args.upnlPrice - args.entryPrice) * sign;
+    (args.upnlPrice - args.entryPrice) * args.rawSignedSize * args.contractValue;
   const funding = parseFloat(String(args.position.unrealized_funding_pnl ?? "0"));
   if (!Number.isNaN(funding)) unrealizedPnl += funding;
   return unrealizedPnl;
@@ -2549,29 +2557,25 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       }
 
       const apiUpnlRaw = position.unrealized_pnl;
-      let unrealizedPnl = resolvePositionUnrealizedPnl({
+      let unrealizedPnl = await resolvePositionUnrealizedPnl({
         position,
         isOption,
         side,
         rawSize: contractLots,
         entryPrice,
         productSymbol,
-        realBaseSize,
         contractValue,
         tickerCache: optionTickerCache,
       });
 
-      if (
-        isOption &&
-        side === "SELL" &&
-        apiUpnlRaw != null &&
-        unrealizedPnl != null &&
-        parseFloat(String(apiUpnlRaw)) !== unrealizedPnl
-      ) {
+      if (isOption && unrealizedPnl != null) {
+        const cached = optionTickerCache.get(productSymbol.trim());
+        const offerUsed = side === "SELL" ? cached?.ask : cached?.bid;
         console.log(
-          `[exchangeService] short option UPL@Offer ${productSymbol} ` +
-            `api=${apiUpnlRaw} resolved=$${unrealizedPnl.toFixed(4)} ` +
-            `lots=${contractLotCount} cv=${contractValue}`,
+          `[exchangeService] option UPL@Offer ${productSymbol} side=${side} ` +
+            `entry=${entryPrice} ${side === "SELL" ? "offer" : "bid"}=${offerUsed ?? "n/a"} ` +
+            `mark=${markPrice ?? "n/a"} pnl=$${unrealizedPnl.toFixed(2)} ` +
+            `api_unrealized_pnl=${apiUpnlRaw ?? "n/a"}`,
         );
       }
 
