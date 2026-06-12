@@ -7,6 +7,7 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
+  isDeltaOptionProductId,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
@@ -55,10 +56,16 @@ function contractSizeFromPosition(pos: DeltaLivePosition): number | undefined {
   return Number.isFinite(cs) && cs > 0 ? cs : undefined;
 }
 
-/** Same PnL basis as admin live-trades (`unrealizedPnl` from margined API, else mark math). */
+/**
+ * Same PnL basis as Delta terminal: margined `unrealized_pnl` only.
+ * Options never use mark/bid estimates — stale quotes inflated PnL and tripped targets early.
+ */
 function legPnlUsd(pos: DeltaLivePosition): number {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
+  }
+  if (isDeltaOptionProductId(pos.symbolKey)) {
+    return 0;
   }
   const mark = resolveMarkForPosition(pos);
   if (

@@ -703,6 +703,7 @@ function computePositionUnrealizedPnl(args: {
 function deltaContractValueFromMarket(
   market: { contractSize?: unknown },
   position: Record<string, unknown>,
+  symbolKey: string,
 ): number {
   const fromMarket = numberOrNull(market.contractSize);
   if (fromMarket != null && fromMarket > 0) return fromMarket;
@@ -716,7 +717,27 @@ function deltaContractValueFromMarket(
   const cvDirect = numberOrNull(position.contract_value);
   if (cvDirect != null && cvDirect > 0) return cvDirect;
 
-  return 1;
+  return deltaContractSizeFallback(symbolKey);
+}
+
+/**
+ * Options: `contract_value` on the margined/realtime row is authoritative.
+ * CCXT `market.contractSize` is often `1` and must not size PnL for BTC options.
+ */
+function resolveOptionContractValue(
+  position: Record<string, unknown>,
+  productSymbol: string,
+): number {
+  const cvDirect = numberOrNull(position.contract_value);
+  if (cvDirect != null && cvDirect > 0) return cvDirect;
+
+  const product = position.product;
+  if (product != null && typeof product === "object") {
+    const cv = numberOrNull((product as Record<string, unknown>).contract_value);
+    if (cv != null && cv > 0) return cv;
+  }
+
+  return deltaContractSizeFallback(productSymbol);
 }
 
 /**
@@ -2170,15 +2191,16 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       const contractLots = rawSize;
       const side: TradeSide = tradeSideFromSignedSize(contractLots);
 
+      const contractValue = isOption
+        ? resolveOptionContractValue(position, productSymbol)
+        : deltaContractValueFromMarket(market ?? {}, position, productSymbol);
+
       const signedBtc = isOption
-        ? contractLots * contractSize
+        ? contractLots * contractValue
         : market != null
-          ? deltaSignedBtcSize(
-              contractLots,
-              deltaContractValueFromMarket(market, position),
-            )
+          ? deltaSignedBtcSize(contractLots, contractValue)
           : Number.isInteger(Math.abs(contractLots)) && Math.abs(contractLots) >= 1
-            ? contractLots * contractSize
+            ? contractLots * contractValue
             : contractLots;
 
       const realBaseSize =
@@ -2217,10 +2239,12 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       const apiUpnlRaw = position.unrealized_pnl;
 
       if (lite) {
-        // Prefer Delta margined `unrealized_pnl` — same basis as the exchange terminal UPNL.
+        // Delta terminal UPNL = margined/realtime `unrealized_pnl` (+ funding when split).
         unrealizedPnl = parseApiUnrealizedPnl(position);
 
         if (unrealizedPnl === null && isOption && entryPrice !== null) {
+          // API field absent (common ~10s on new realtime legs) — bid/offer math with
+          // corrected contract_value only; never trust CCXT contractSize for sizing.
           const upnlPrice = resolveOptionUpnlPriceLite(
             position,
             side,
@@ -2307,7 +2331,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       console.log(`\n[PNL_TRACKER] -------------------------`);
       console.log(`[PNL_TRACKER] Symbol: ${unified} | Side: ${side} | option=${isOption}`);
       console.log(
-        `[PNL_TRACKER] Contract lots: ${contractLotCount} (raw=${contractLots}) × contractSize=${contractSize} → RealBaseSize(BTC)=${realBaseSize}`,
+        `[PNL_TRACKER] Contract lots: ${contractLotCount} (raw=${contractLots}) × contractValue=${contractValue} → RealBaseSize(BTC)=${realBaseSize}`,
       );
       console.log(
         `[PNL_TRACKER] Entry: ${entryPrice} | Mark(display): ${markPrice} | Bid: ${bid ?? "n/a"} | Offer: ${offer ?? "n/a"}`,
