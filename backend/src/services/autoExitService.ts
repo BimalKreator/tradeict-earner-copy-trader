@@ -91,7 +91,9 @@ export async function fetchMasterLegsWithTotalLivePnl(
   apiKeyStored: string,
   apiSecretStored: string,
 ): Promise<{ totalPnlUsd: number; legs: MasterLegCloseTarget[] }> {
-  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
+  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored, {
+    skipCache: true,
+  });
   registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
 
   const legs: MasterLegCloseTarget[] = [];

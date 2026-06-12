@@ -585,6 +585,8 @@ export function createSubscriptionController(prisma: PrismaClient) {
           exchangeAccountId: ex.id,
           isActive: true,
           status: SubscriptionStatus.ACTIVE,
+          syncStatus: "PENDING",
+          syncError: null,
         },
         include: {
           strategy: { select: strategySelectPublic },
@@ -693,7 +695,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
-        data: { isActive: true, status: SubscriptionStatus.ACTIVE },
+        data: {
+          isActive: true,
+          status: SubscriptionStatus.ACTIVE,
+          syncStatus: "PENDING",
+          syncError: null,
+        },
         include: {
           strategy: { select: strategySelectPublic },
           exchangeAccount: { select: { id: true, nickname: true, exchange: true } },

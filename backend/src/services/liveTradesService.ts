@@ -723,7 +723,7 @@ export async function getAdminLiveTradesByStrategy(
           strategyId: strat.id,
           isActive: true,
           status: SubscriptionStatus.ACTIVE,
-          user: { status: UserStatus.ACTIVE },
+          user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
         },
         include: {
           exchangeAccount: true,

@@ -998,10 +998,16 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const body = (req.body ?? {}) as { userId?: unknown; tradeIds?: unknown };
+      const body = (req.body ?? {}) as {
+        userId?: unknown;
+        tradeIds?: unknown;
+        /** Remove PnL + partner commission rows when trades were already flushed. */
+        purgeFinancialsOnly?: unknown;
+      };
       const userId = String(
         body.userId ?? req.params.id ?? "",
       ).trim();
+      const purgeFinancialsOnly = body.purgeFinancialsOnly === true;
       if (!userId) {
         res.status(400).json({ error: "userId is required" });
         return;
@@ -1046,10 +1052,27 @@ export function createAdminController(prisma: PrismaClient) {
       });
 
       if (flushableTrades.length === 0) {
+        if (purgeFinancialsOnly) {
+          const purged = await prisma.$transaction(async (tx) =>
+            purgeAnalyticsForDeletedTrades(tx, userId, [], true),
+          );
+          res.json({
+            ok: true,
+            deleted: 0,
+            analyticsRemoved: purged.pnlRecordsRemoved,
+            pnlRecordsRemoved: purged.pnlRecordsRemoved,
+            commissionLedgersRemoved: purged.commissionLedgersRemoved,
+            message:
+              "Orphan PnL and partner commission rows removed for this user.",
+          });
+          return;
+        }
         res.json({
           ok: true,
           deleted: 0,
           analyticsRemoved: 0,
+          pnlRecordsRemoved: 0,
+          commissionLedgersRemoved: 0,
           message: tradeIds?.length
             ? "No matching closed or failed trades found for the selected ids."
             : "No closed or failed trades found. Open trades were preserved.",
@@ -1121,19 +1144,24 @@ export function createAdminController(prisma: PrismaClient) {
         const deletedTrades = await tx.trade.deleteMany({
           where: { id: { in: tradeIdsToDelete }, userId },
         });
-        const analyticsRemoved = await purgeAnalyticsForDeletedTrades(
+        const purged = await purgeAnalyticsForDeletedTrades(
           tx,
           userId,
           flushableTrades,
           flushAll,
         );
-        return { deletedTrades: deletedTrades.count, analyticsRemoved };
+        return {
+          deletedTrades: deletedTrades.count,
+          ...purged,
+        };
       });
 
       res.json({
         ok: true,
         deleted: result.deletedTrades,
-        analyticsRemoved: result.analyticsRemoved,
+        analyticsRemoved: result.pnlRecordsRemoved,
+        pnlRecordsRemoved: result.pnlRecordsRemoved,
+        commissionLedgersRemoved: result.commissionLedgersRemoved,
         backupFile: saved.relativePath,
       });
     } catch (err) {
@@ -2600,7 +2628,13 @@ export function createAdminController(prisma: PrismaClient) {
       }
 
       const body = req.body as { multiplier?: unknown; isActive?: unknown };
-      const data: { multiplier?: number; isActive?: boolean } = {};
+      const data: {
+        multiplier?: number;
+        isActive?: boolean;
+        status?: SubscriptionStatus;
+        syncStatus?: string;
+        syncError?: string | null;
+      } = {};
 
       if (body.multiplier !== undefined) {
         const multiplier = parseSubscriptionMultiplier(body.multiplier);
@@ -2612,12 +2646,19 @@ export function createAdminController(prisma: PrismaClient) {
         }
         data.multiplier = multiplier;
       }
+      let reEnableCopy = false;
       if (body.isActive !== undefined) {
         if (typeof body.isActive !== "boolean") {
           res.status(400).json({ error: "isActive must be a boolean" });
           return;
         }
         data.isActive = body.isActive;
+        if (body.isActive) {
+          reEnableCopy = true;
+          data.status = SubscriptionStatus.ACTIVE;
+          data.syncStatus = "PENDING";
+          data.syncError = null;
+        }
       }
       if (Object.keys(data).length === 0) {
         res.status(400).json({ error: "multiplier and/or isActive is required" });
@@ -2626,7 +2667,10 @@ export function createAdminController(prisma: PrismaClient) {
 
       const existing = await prisma.userStrategySubscription.findUnique({
         where: { userId_strategyId: { userId, strategyId } },
-        select: { id: true },
+        select: {
+          id: true,
+          strategy: { select: { syncActiveTrades: true } },
+        },
       });
       if (!existing) {
         res.status(404).json({ error: "Subscription not found for this user" });
@@ -2643,10 +2687,26 @@ export function createAdminController(prisma: PrismaClient) {
           multiplier: true,
           isActive: true,
           status: true,
+          syncStatus: true,
+          syncError: true,
           joinedDate: true,
           user: { select: { id: true, email: true, name: true } },
         },
       });
+
+      if (reEnableCopy && existing.strategy.syncActiveTrades) {
+        void import("../services/tradeEngine.js")
+          .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
+            lateJoinMirrorOpenPositionsForSubscriber(prisma, { strategyId, userId }),
+          )
+          .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(
+              `[admin] subscriber re-enable late-join failed strategyId=${strategyId} userId=${userId}:`,
+              msg,
+            );
+          });
+      }
 
       res.json({
         subscriptionId: updated.id,
@@ -2657,6 +2717,8 @@ export function createAdminController(prisma: PrismaClient) {
         multiplier: updated.multiplier,
         isActive: updated.isActive,
         status: updated.status,
+        syncStatus: updated.syncStatus,
+        syncError: updated.syncError,
         joinedDate: updated.joinedDate.toISOString(),
       });
     } catch (err) {

@@ -2,12 +2,12 @@ import { createHmac, createHash } from "node:crypto";
 import WebSocket from "ws";
 import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
-  executeTrade,
   extractDeltaProductSymbolFromPayload,
   fetchDeltaOpenPositions,
   fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   isDeltaOptionProductId,
+  isValidDeltaOptionProductSymbol,
   normalizeDeltaPerpSymbolForCcxt,
   resolveCanonicalDeltaProductId,
   tradeSideFromSignedSize,
@@ -109,8 +109,8 @@ const SAFETY_RECONCILE_MS = 30_000;
 const AUTO_EXIT_CHECK_MS = 1_000;
 /** Align follower contract counts with master × multiplier (REST safety net). */
 const POSITION_QTY_RECONCILE_MS = 60_000;
-/** Poll master REST positions to catch manual UI fills missed by private WS. */
-const MASTER_REST_POLL_MS = 2_000;
+/** REST reconciliation interval — live copy is WS-driven (orders / user_trades). */
+const MASTER_REST_POLL_MS = 30_000;
 /** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
 const MASTER_FLAT_CONFIRM_MS = 4_000;
 /** Debounce immediate REST poll triggered by WS position deltas. */
@@ -279,15 +279,17 @@ async function triggerMasterOpenCopy(
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
-  const canonicalSymbol = await canonicalizeCopySymbol(args.symbol);
+  const isLiveMasterFill = args.source !== "rest";
+
+  const canonicalSymbol = await canonicalizeCopySymbol(args.symbol, {
+    liveFast: isLiveMasterFill,
+  });
   if (!canonicalSymbol) {
     return;
   }
   if (canonicalSymbol !== args.symbol.trim()) {
     args = { ...args, symbol: canonicalSymbol };
   }
-
-  const isLiveMasterFill = args.source !== "rest";
   const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
   const skipCopy = args.skipFollowerCopy === true;
 
@@ -554,9 +556,19 @@ function extractDeltaProductSymbol(o: Record<string, unknown>): string {
   return extractDeltaProductSymbolFromPayload(o);
 }
 
-async function canonicalizeCopySymbol(symbol: string): Promise<string | null> {
+async function canonicalizeCopySymbol(
+  symbol: string,
+  options?: { liveFast?: boolean },
+): Promise<string | null> {
   const raw = symbol.trim();
   if (!raw) return null;
+
+  if (
+    options?.liveFast === true &&
+    isValidDeltaOptionProductSymbol(raw)
+  ) {
+    return raw;
+  }
 
   if (isDeltaOptionProductId(raw) || /^\d+$/.test(raw)) {
     const resolved = await resolveCanonicalDeltaProductId(raw);
@@ -798,69 +810,82 @@ async function processMasterOrderFillRecords(
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   const dedup = tracker?.copyDedup;
-  for (const r of records) {
-    const sig = extractOrderFillSignal(r);
-    if (!sig) continue;
-    const clientOrderId =
-      sig.clientOrderId || extractClientOrderIdFromPayload(r);
-    if (sig.reduceOnly) {
-      if (shouldSkipMasterFillCopy({ clientOrderId })) {
+  await Promise.all(
+    records.map(async (r) => {
+      const sig = extractOrderFillSignal(r);
+      if (!sig) return;
+      const clientOrderId =
+        sig.clientOrderId || extractClientOrderIdFromPayload(r);
+      if (sig.reduceOnly) {
+        if (shouldSkipMasterFillCopy({ clientOrderId })) {
+          console.log(
+            `[MASTER-WS] NC_ reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
+          );
+        }
+        return;
+      }
+      registerSymbolsForLivePrices([sig.symbol]);
+      const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
+
+      const orderId = sig.orderId || null;
+      const copyPlan =
+        !ncSkip && dedup
+          ? dedup.resolveOrdersChannelCopy({
+              orderId,
+              exchangeCumulative: sig.exchangeCumulative,
+              fallbackIncrement: sig.contracts,
+            })
+          : ncSkip
+            ? null
+            : {
+                qty: sig.contracts,
+                masterFillKey: sig.fillKey,
+              };
+
+      const fanOut = !ncSkip && copyPlan != null;
+      if (!fanOut && dedup && orderId) {
         console.log(
-          `[MASTER-WS] NC_ reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
+          `[MASTER-WS] orders dedup skip copy ${sig.symbol} orderId=${orderId} ` +
+            `(fills-first or delta=0 cumulative=${sig.exchangeCumulative})`,
         );
       }
-      continue;
-    }
-    registerSymbolsForLivePrices([sig.symbol]);
-    const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
 
-    const orderId = sig.orderId || null;
-    const copyPlan =
-      !ncSkip && dedup
-        ? dedup.resolveOrdersChannelCopy({
-            orderId,
-            exchangeCumulative: sig.exchangeCumulative,
-            fallbackIncrement: sig.contracts,
-          })
-        : ncSkip
-          ? null
-          : {
-              qty: sig.contracts,
-              masterFillKey: sig.fillKey,
-            };
-
-    const fanOut = !ncSkip && copyPlan != null;
-    if (!fanOut && dedup && orderId) {
-      console.log(
-        `[MASTER-WS] orders dedup skip copy ${sig.symbol} orderId=${orderId} ` +
-          `(fills-first or delta=0 cumulative=${sig.exchangeCumulative})`,
+      const copyTask = triggerMasterOpenCopy(
+        prisma,
+        strategyId,
+        {
+          symbol: sig.symbol,
+          side: sig.side,
+          masterContracts: fanOut ? copyPlan!.qty : sig.contracts,
+          avgPrice: sig.avgPrice,
+          masterFillKey: fanOut ? copyPlan!.masterFillKey : sig.fillKey,
+          source: "orders",
+          skipFollowerCopy: ncSkip || !fanOut,
+          skipTrackerUpdate: !fanOut,
+        },
+        tracker,
       );
-    }
 
-    await triggerMasterOpenCopy(
-      prisma,
-      strategyId,
-      {
-        symbol: sig.symbol,
-        side: sig.side,
-        masterContracts: fanOut ? copyPlan!.qty : sig.contracts,
-        avgPrice: sig.avgPrice,
-        masterFillKey: fanOut ? copyPlan!.masterFillKey : sig.fillKey,
-        source: "orders",
-        skipFollowerCopy: ncSkip || !fanOut,
-        skipTrackerUpdate: !fanOut,
-      },
-      tracker,
-    );
+      if (fanOut) {
+        void copyTask.catch((err) => {
+          console.error(
+            `[MASTER-WS] orders fan-out failed ${sig.symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+      } else {
+        await copyTask;
+      }
 
-    if (fanOut && copyPlan && dedup) {
-      dedup.recordOrdersChannelCopy({
-        orderId,
-        qty: copyPlan.qty,
-        exchangeCumulative: sig.exchangeCumulative,
-      });
-    }
-  }
+      if (fanOut && copyPlan && dedup) {
+        dedup.recordOrdersChannelCopy({
+          orderId,
+          qty: copyPlan.qty,
+          exchangeCumulative: sig.exchangeCumulative,
+        });
+      }
+    }),
+  );
 }
 
 async function processMasterUserTradeFillRecords(
@@ -870,53 +895,66 @@ async function processMasterUserTradeFillRecords(
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   const dedup = tracker?.copyDedup;
-  for (const r of records) {
-    const sig = extractUserTradeFillSignal(r);
-    if (!sig) continue;
-    const clientOrderId =
-      sig.clientOrderId || extractClientOrderIdFromPayload(r);
-    registerSymbolsForLivePrices([sig.symbol]);
-    const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
+  await Promise.all(
+    records.map(async (r) => {
+      const sig = extractUserTradeFillSignal(r);
+      if (!sig) return;
+      const clientOrderId =
+        sig.clientOrderId || extractClientOrderIdFromPayload(r);
+      registerSymbolsForLivePrices([sig.symbol]);
+      const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
 
-    const orderId = sig.orderId || null;
-    const tradeId = sig.tradeId || sig.fillKey;
-    const dedupSkip =
-      !ncSkip &&
-      dedup != null &&
-      dedup.shouldSkipFillsChannelCopy({ tradeId, orderId });
+      const orderId = sig.orderId || null;
+      const tradeId = sig.tradeId || sig.fillKey;
+      const dedupSkip =
+        !ncSkip &&
+        dedup != null &&
+        dedup.shouldSkipFillsChannelCopy({ tradeId, orderId });
 
-    if (dedupSkip) {
-      console.log(
-        `[MASTER-WS] fills dedup skip copy ${sig.symbol} tradeId=${tradeId} orderId=${orderId ?? "none"} ` +
-          `(orders-first or duplicate trade)`,
+      if (dedupSkip) {
+        console.log(
+          `[MASTER-WS] fills dedup skip copy ${sig.symbol} tradeId=${tradeId} orderId=${orderId ?? "none"} ` +
+            `(orders-first or duplicate trade)`,
+        );
+      }
+
+      const fanOut = !ncSkip && !dedupSkip;
+      const copyTask = triggerMasterOpenCopy(
+        prisma,
+        strategyId,
+        {
+          symbol: sig.symbol,
+          side: sig.side,
+          masterContracts: sig.contracts,
+          avgPrice: sig.avgPrice,
+          masterFillKey: sig.fillKey,
+          source: "fills",
+          skipFollowerCopy: ncSkip || !fanOut,
+          skipTrackerUpdate: !fanOut,
+        },
+        tracker,
       );
-    }
 
-    const fanOut = !ncSkip && !dedupSkip;
-    await triggerMasterOpenCopy(
-      prisma,
-      strategyId,
-      {
-        symbol: sig.symbol,
-        side: sig.side,
-        masterContracts: sig.contracts,
-        avgPrice: sig.avgPrice,
-        masterFillKey: sig.fillKey,
-        source: "fills",
-        skipFollowerCopy: ncSkip || !fanOut,
-        skipTrackerUpdate: !fanOut,
-      },
-      tracker,
-    );
+      if (fanOut) {
+        void copyTask.catch((err) => {
+          console.error(
+            `[MASTER-WS] user_trades fan-out failed ${sig.symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+      } else {
+        await copyTask;
+      }
 
-    if (fanOut && dedup) {
-      dedup.recordFillsChannelCopy({
-        tradeId,
-        orderId,
-        qty: sig.contracts,
-      });
-    }
-  }
+      if (fanOut && dedup) {
+        dedup.recordFillsChannelCopy({
+          tradeId,
+          orderId,
+          qty: sig.contracts,
+        });
+      }
+    }),
+  );
 }
 
 /** Collect row objects from Delta WS channel payloads (orders, fills, etc.). */
@@ -1731,14 +1769,18 @@ export async function syncFollowerUserToMasterPositions(
       userId,
       symbol: master.deltaSymbol,
     });
-    const trimResult = await executeTrade(
-      creds.apiKey,
-      creds.apiSecret,
-      master.deltaSymbol,
-      trimSide,
-      diff,
-      { reduceOnly: true, clientOrderId: closeClientOrderId },
-    );
+    const trimResult = await executeFollowerTradeWithVerification(prisma, {
+      strategyId,
+      userId,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      symbol: master.deltaSymbol,
+      side: trimSide,
+      size: diff,
+      reduceOnly: true,
+      clientOrderId: closeClientOrderId,
+      adminForceSync: true,
+    });
     if (!trimResult.success) {
       errors.push(
         `${master.deltaSymbol} trim: ${trimResult.error ?? "execution failed"}`,

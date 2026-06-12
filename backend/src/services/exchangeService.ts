@@ -1,12 +1,32 @@
 import axios from "axios";
 import ccxt from "ccxt";
 import { createHmac } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
 import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
 
 /** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
 const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
+
+/** Reuse TLS sessions across concurrent follower order placements. */
+const deltaHttpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 64,
+});
+const deltaHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 64,
+});
+
+const deltaAxios = axios.create({
+  timeout: 25_000,
+  httpAgent: deltaHttpAgent,
+  httpsAgent: deltaHttpsAgent,
+});
 
 /** Delta India REST auth — METHOD + timestamp + path + query + body (see Delta API docs). */
 function deltaIndiaRestSignature(
@@ -45,7 +65,7 @@ async function deltaIndiaSignedRequest<T>(args: {
     bodyStr,
   );
 
-  const { data } = await axios.request<T & { success?: boolean; error?: unknown }>({
+  const { data } = await deltaAxios.request<T & { success?: boolean; error?: unknown }>({
     method: args.method,
     url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
     headers: {
@@ -842,6 +862,22 @@ function parseApiUnrealizedPnl(position: Record<string, unknown>): number | null
   return upnl;
 }
 
+/** Bid/offer UPNL math when Delta margined API omits `unrealized_pnl`. */
+function computeOptionUpnlFromQuotePrice(args: {
+  side: TradeSide;
+  entryPrice: number;
+  upnlPrice: number;
+  realBaseSize: number;
+  position: Record<string, unknown>;
+}): number {
+  const sign = args.side === "SELL" ? -1 : 1;
+  let unrealizedPnl =
+    args.realBaseSize * (args.upnlPrice - args.entryPrice) * sign;
+  const funding = parseFloat(String(args.position.unrealized_funding_pnl ?? "0"));
+  if (!Number.isNaN(funding)) unrealizedPnl += funding;
+  return unrealizedPnl;
+}
+
 export function deltaLiveLegKey(symbolKey: string, side: TradeSide): string {
   return `${symbolKey}:${side}`;
 }
@@ -1158,7 +1194,7 @@ async function fetchDeltaProductFromRestApi(
   if (!ref) return null;
 
   try {
-    const { data } = await axios.get<{ success?: boolean; result?: unknown }>(
+    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/products/${encodeURIComponent(ref)}`,
       { timeout: 20_000 },
     );
@@ -1553,6 +1589,13 @@ export async function executeTrade(
         );
         return restResult;
       }
+      if (opts?.reduceOnly === true) {
+        console.warn(
+          `[copy-exec] reduceOnly option close failed via REST for "${inputSymbol}" — ` +
+            `aborting (CCXT fallback disabled to prevent reverse entry): ${restResult.error ?? "unknown"}`,
+        );
+        return restResult;
+      }
       console.warn(
         `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
       );
@@ -1878,7 +1921,7 @@ async function fetchDeltaTickerFromRestApi(
   if (!ref) return { last: null, bid: null, ask: null };
 
   try {
-    const { data } = await axios.get<{ success?: boolean; result?: unknown }>(
+    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/tickers/${encodeURIComponent(ref)}`,
       { timeout: 20_000 },
     );
@@ -2174,8 +2217,10 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       const apiUpnlRaw = position.unrealized_pnl;
 
       if (lite) {
-        // Options: never trust raw API unrealized_pnl on Delta India (not USD terminal value).
-        if (isOption && entryPrice !== null) {
+        // Prefer Delta margined `unrealized_pnl` — same basis as the exchange terminal UPNL.
+        unrealizedPnl = parseApiUnrealizedPnl(position);
+
+        if (unrealizedPnl === null && isOption && entryPrice !== null) {
           const upnlPrice = resolveOptionUpnlPriceLite(
             position,
             side,
@@ -2184,16 +2229,15 @@ async function fetchDeltaMarginedPositionSnapshotInner(
             optionTickerCache,
           );
           if (upnlPrice !== null) {
-            const sign = side === "SELL" ? -1 : 1;
-            unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
-            const funding = parseFloat(
-              String(position.unrealized_funding_pnl ?? "0"),
-            );
-            if (!Number.isNaN(funding) && unrealizedPnl !== null) {
-              unrealizedPnl += funding;
-            }
+            unrealizedPnl = computeOptionUpnlFromQuotePrice({
+              side,
+              entryPrice,
+              upnlPrice,
+              realBaseSize,
+              position,
+            });
           }
-        } else {
+        } else if (unrealizedPnl === null) {
           unrealizedPnl = computePositionUnrealizedPnl({
             isOption,
             side,
@@ -2205,38 +2249,55 @@ async function fetchDeltaMarginedPositionSnapshotInner(
           });
         }
         if (unrealizedPnl === null && !isOption) {
-          unrealizedPnl = parseApiUnrealizedPnl(position);
-          if (unrealizedPnl === null && entryPrice !== null && markPrice !== null) {
+          if (entryPrice !== null && markPrice !== null) {
             const sign = side === "SELL" ? -1 : 1;
             unrealizedPnl = realBaseSize * (markPrice - entryPrice) * sign;
           }
         }
       } else {
+      unrealizedPnl = parseApiUnrealizedPnl(position);
+
       let upnlPrice: number | null = markPrice;
-      let upnlPriceSource = "mark";
+      let upnlPriceSource = "api_unrealized_pnl";
 
-      if (isOption) {
-        const resolved = await resolveOptionUpnlPrice(
-          exchange,
-          unified,
-          position,
-          side,
-          markPrice,
-        );
-        upnlPrice = resolved.price;
-        upnlPriceSource = resolved.source;
-      }
+      if (unrealizedPnl === null) {
+        upnlPriceSource = "mark";
+        if (isOption) {
+          const resolved = await resolveOptionUpnlPrice(
+            exchange,
+            unified,
+            position,
+            side,
+            markPrice,
+          );
+          upnlPrice = resolved.price;
+          upnlPriceSource = resolved.source;
+        }
 
-      if (entryPrice !== null && upnlPrice !== null) {
-        const sign = side === "SELL" ? -1 : 1;
-        unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
-
-        const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
-        if (!Number.isNaN(funding)) unrealizedPnl += funding;
-      } else if (!isOption && apiUpnlRaw !== undefined && apiUpnlRaw !== null) {
-        unrealizedPnl = parseFloat(String(apiUpnlRaw));
-        const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
-        if (!Number.isNaN(funding) && unrealizedPnl !== null) unrealizedPnl += funding;
+        if (entryPrice !== null && upnlPrice !== null) {
+          if (isOption) {
+            unrealizedPnl = computeOptionUpnlFromQuotePrice({
+              side,
+              entryPrice,
+              upnlPrice,
+              realBaseSize,
+              position,
+            });
+          } else {
+            const sign = side === "SELL" ? -1 : 1;
+            unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
+            const funding = parseFloat(
+              String(position.unrealized_funding_pnl ?? "0"),
+            );
+            if (!Number.isNaN(funding)) unrealizedPnl += funding;
+          }
+        } else if (!isOption && apiUpnlRaw !== undefined && apiUpnlRaw !== null) {
+          unrealizedPnl = parseFloat(String(apiUpnlRaw));
+          const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
+          if (!Number.isNaN(funding) && unrealizedPnl !== null) {
+            unrealizedPnl += funding;
+          }
+        }
       }
 
       if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
@@ -2252,10 +2313,10 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         `[PNL_TRACKER] Entry: ${entryPrice} | Mark(display): ${markPrice} | Bid: ${bid ?? "n/a"} | Offer: ${offer ?? "n/a"}`,
       );
       console.log(
-        `[PNL_TRACKER] UPNL price (${upnlPriceSource}): ${upnlPrice} → PnL: ${unrealizedPnl}`,
+        `[PNL_TRACKER] UPNL source: ${upnlPriceSource} | price: ${upnlPrice} → PnL: ${unrealizedPnl}`,
       );
       console.log(
-        `[PNL_TRACKER] API unrealized_pnl (ignored for options): ${apiUpnlRaw ?? "n/a"}`,
+        `[PNL_TRACKER] API unrealized_pnl: ${apiUpnlRaw ?? "n/a"}`,
       );
       console.log(`[PNL_TRACKER] -------------------------\n`);
       }
@@ -2714,7 +2775,7 @@ export async function listBtcOptionProducts(
   const contractTypes =
     optionType === "call" ? "call_options" : "put_options";
   try {
-    const { data } = await axios.get<{ result?: DeltaProductRow[] }>(
+    const { data } = await deltaAxios.get<{ result?: DeltaProductRow[] }>(
       `${DELTA_INDIA_API_BASE}/v2/products`,
       {
         params: {

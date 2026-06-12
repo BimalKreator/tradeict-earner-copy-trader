@@ -54,6 +54,9 @@ import {
 const POST_ORDER_VERIFY_WAIT_MS = 5_000;
 const MAX_OPEN_CONFIRM_POLLS = 4;
 const COPY_LEG_CONFIRM_MS = POST_ORDER_VERIFY_WAIT_MS * MAX_OPEN_CONFIRM_POLLS;
+/** Live WS master fill — fire orders immediately; short async confirm only. */
+const LIVE_FILL_VERIFY_WAIT_MS = 300;
+const LIVE_FILL_MAX_POLLS = 2;
 const GRANULAR_SYNC_MAX_RETRIES = 5;
 
 const copyLegExecutionChains = new Map<string, Promise<void>>();
@@ -140,9 +143,58 @@ export function isHardExecutionError(message: string): boolean {
   return HARD_ERROR_PATTERNS.some((p) => u.includes(p.toUpperCase()));
 }
 
-/** Delta returned reduce-only but follower is already flat — not a hard failure. */
+/** Delta / pre-flight: reduce-only close when follower has no open leg — not a hard failure. */
 export function isAlreadyFlatReduceOnlyError(message: string): boolean {
-  return message.toUpperCase().includes("NO_POSITION_FOR_REDUCE_ONLY");
+  const u = message.toUpperCase();
+  if (u.includes("NO_POSITION_FOR_REDUCE_ONLY")) return true;
+  if (u.includes("PRE-FLIGHT") && u.includes("EXCHANGE FLAT")) return true;
+  if (u.includes("REDUCE_ONLY") && u.includes("NO_POSITION")) return true;
+  if (u.includes("REDUCE ONLY") && u.includes("NO POSITION")) return true;
+  if (u.includes("NO OPEN POSITION")) return true;
+  if (u.includes("POSITION_NOT_FOUND")) return true;
+  if (u.includes("INSUFFICIENT") && u.includes("POSITION")) return true;
+  return false;
+}
+
+/** Open-side contract lots from a fresh exchange snapshot (bypasses margined TTL cache). */
+export async function followerExchangeOpenLotsLive(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  symbol: string,
+  openSide: TradeSide,
+): Promise<number> {
+  return followerLegContracts(apiKeyStored, apiSecretStored, symbol, openSide, {
+    skipCache: true,
+  });
+}
+
+/**
+ * Before a reduce-only close: confirm the follower still holds `openSide` on exchange.
+ * Returns lots to close (0 = skip order, clear DB ghost only).
+ */
+async function resolveFollowerReduceOnlyCloseLots(args: {
+  apiKey: string;
+  apiSecret: string;
+  symbol: string;
+  /** Original open leg side (BUY long / SELL short) — not the reduce-only order side. */
+  openSide: TradeSide;
+  requestedLots: number;
+}): Promise<{ lots: number; exchangeOpenLots: number }> {
+  const exchangeOpenLots = await followerExchangeOpenLotsLive(
+    args.apiKey,
+    args.apiSecret,
+    args.symbol,
+    args.openSide,
+  );
+  const exchangeFloor = Math.floor(exchangeOpenLots);
+  if (exchangeFloor <= 0) {
+    return { lots: 0, exchangeOpenLots };
+  }
+  const requested = Math.max(1, Math.floor(args.requestedLots));
+  return {
+    lots: Math.min(requested, exchangeFloor),
+    exchangeOpenLots,
+  };
 }
 
 function compactSymbolKey(s: string): string {
@@ -600,7 +652,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     return { strategyId, fanoutCount: 0 };
   }
 
-  await recordTradePositionOpen(prisma, {
+  void recordTradePositionOpen(prisma, {
     isMaster: true,
     strategyId,
     symbol: fill.symbol,
@@ -614,26 +666,35 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     );
   });
 
-  const tick = await fetchDeltaTicker(fill.symbol);
-  const marketPrice =
-    tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
-
   let entryForCopy = fill.avgPrice;
-  if (
-    marketPrice !== undefined &&
-    slippageBlocksCopy(
-      fill.symbol,
-      fill.avgPrice,
-      marketPrice,
-      strategy.slippage,
-    )
-  ) {
-    console.warn(
-      `[copy] Slippage vs master entry for ${fill.symbol}; using market ${marketPrice} for follower entry`,
-    );
-    entryForCopy = marketPrice;
+  if (fill.liveMasterFill !== true) {
+    const tick = await fetchDeltaTicker(fill.symbol);
+    const marketPrice =
+      tick.last != null && Number.isFinite(tick.last) ? tick.last : undefined;
+    if (
+      marketPrice !== undefined &&
+      slippageBlocksCopy(
+        fill.symbol,
+        fill.avgPrice,
+        marketPrice,
+        strategy.slippage,
+      )
+    ) {
+      console.warn(
+        `[copy] Slippage vs master entry for ${fill.symbol}; using market ${marketPrice} for follower entry`,
+      );
+      entryForCopy = marketPrice;
+    }
   }
 
+  type FanoutJob = {
+    sub: (typeof subscribers)[number];
+    lots: number;
+    clientOrderId: string;
+    creds: { apiKey: string; apiSecret: string };
+  };
+
+  const jobs: FanoutJob[] = [];
   await Promise.all(
     subscribers.map(async (sub) => {
       if (
@@ -691,66 +752,85 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
+      jobs.push({ sub, lots, clientOrderId, creds });
+    }),
+  );
+
+  if (jobs.length === 0) {
+    return { strategyId, fanoutCount: 0 };
+  }
+
+  console.log(
+    `[copy] parallel fan-out ${jobs.length} follower order(s) ${fill.symbol} ${fill.side} ` +
+      `(liveMasterFill=${fill.liveMasterFill === true})`,
+  );
+
+  const settled = await Promise.allSettled(
+    jobs.map(async (job) => {
       console.log(
-        `[copy] Future Hedge open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-          `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier}) clientOrderId=${clientOrderId}`,
+        `[copy] Future Hedge open user=${job.sub.userId} ${fill.symbol} ${fill.side} ` +
+          `lots=${job.lots} (master ${fill.masterLots} × ${job.sub.multiplier}) ` +
+          `clientOrderId=${job.clientOrderId}`,
       );
 
       await markSubscriptionSyncPending(prisma, {
-        userId: sub.userId,
+        userId: job.sub.userId,
         strategyId,
       });
 
       const result = await executeFollowerTradeWithVerification(prisma, {
         strategyId,
-        userId: sub.userId,
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
+        userId: job.sub.userId,
+        apiKey: job.creds.apiKey,
+        apiSecret: job.creds.apiSecret,
         symbol: fill.symbol,
         side: fill.side,
-        size: lots,
+        size: job.lots,
         entryPrice: entryForCopy,
-        clientOrderId,
-        liveMasterFill: true,
+        clientOrderId: job.clientOrderId,
+        liveMasterFill: fill.liveMasterFill === true,
       });
 
       if (result.success && result.verified) {
         await markSubscriptionSynced(prisma, {
-          userId: sub.userId,
+          userId: job.sub.userId,
           strategyId,
         });
-        const recordedLots = result.verifiedQty ?? lots;
+        const recordedLots = result.verifiedQty ?? job.lots;
         await recordTradePositionOpen(prisma, {
           strategyId,
-          userId: sub.userId,
+          userId: job.sub.userId,
           symbol: fill.symbol,
           side: fill.side,
           quantity: recordedLots,
           entryPrice: entryForCopy,
-          clientOrderId,
+          clientOrderId: job.clientOrderId,
           ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
         });
       } else {
         await markSubscriptionSyncFailed(prisma, {
-          userId: sub.userId,
+          userId: job.sub.userId,
           strategyId,
           error: result.error ?? "Copy trade execution failed",
         });
       }
 
       await persistCopyTradeRow(prisma, {
-        userId: sub.userId,
+        userId: job.sub.userId,
         strategyId,
         symbol: fill.symbol,
         side: fill.side,
-        size: result.success && result.verified ? (result.verifiedQty ?? lots) : lots,
+        size:
+          result.success && result.verified
+            ? (result.verifiedQty ?? job.lots)
+            : job.lots,
         entryPrice: entryForCopy,
         status:
           result.success && result.verified
             ? TradeStatus.OPEN
             : TradeStatus.FAILED,
         tradingFee: result.success ? (result.feeCost ?? 0) : 0,
-        clientOrderId,
+        clientOrderId: job.clientOrderId,
         ...(!result.success || !result.verified
           ? {
               exitReason: isHardExecutionError(result.error ?? "")
@@ -759,10 +839,23 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
             }
           : {}),
       });
+
+      return result;
     }),
   );
 
-  return { strategyId, fanoutCount: subscribers.length };
+  for (const outcome of settled) {
+    if (outcome.status === "rejected") {
+      console.error(
+        `[copy] parallel fan-out task rejected:`,
+        outcome.reason instanceof Error
+          ? outcome.reason.message
+          : outcome.reason,
+      );
+    }
+  }
+
+  return { strategyId, fanoutCount: jobs.length };
 }
 
 /**
@@ -876,7 +969,7 @@ export async function forceSyncMasterOpenToFollowers(
     const entryPrice =
       tickLast != null && tickLast > 0 ? tickLast : fill.avgPrice;
 
-    await Promise.all(
+    await Promise.allSettled(
       pending.map(async ({ sub, lots }) => {
         try {
           const creds = resolveCopySubscriptionCreds(sub);
@@ -1294,12 +1387,6 @@ export async function syncMasterCloseToFutureHedgeFollowers(
       const creds = resolveCopySubscriptionCreds(sub);
       if (!creds) return;
 
-      const exchangeLots = await followerExchangeLegContracts(
-        creds.apiKey,
-        creds.apiSecret,
-        snap.symbol,
-        snap.side,
-      );
       const dbLots = await sumOpenFollowerBotQuantity(prisma, {
         strategyId,
         userId: sub.userId,
@@ -1307,10 +1394,17 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         side: snap.side,
       });
 
-      const exchangeLotsFloor = Math.floor(exchangeLots);
       const dbLotsFloor = Math.floor(dbLots);
 
-      if (exchangeLotsFloor <= 0) {
+      const { lots, exchangeOpenLots } = await resolveFollowerReduceOnlyCloseLots({
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: snap.symbol,
+        openSide: snap.side,
+        requestedLots: Math.max(1, Math.floor(dbLots), 1),
+      });
+
+      if (lots <= 0) {
         if (dbLotsFloor > 0) {
           await closeTradePositionsForLeg(prisma, {
             strategyId,
@@ -1319,17 +1413,17 @@ export async function syncMasterCloseToFutureHedgeFollowers(
             side: snap.side,
           });
           console.log(
-            `[copy] Cleared DB ghost leg user=${sub.userId} ${snap.symbol} ${snap.side} (exchange already flat)`,
+            `[copy] Cleared DB ghost leg user=${sub.userId} ${snap.symbol} ${snap.side} ` +
+              `(exchange flat; liveLots=${exchangeOpenLots})`,
           );
         } else {
           console.log(
-            `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — flat on exchange and no DB qty`,
+            `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — ` +
+              `flat on exchange (liveLots=${exchangeOpenLots}) and no DB qty`,
           );
         }
         return;
       }
-
-      const lots = Math.max(1, exchangeLotsFloor);
 
       const closeClientOrderId = buildStableCopyClientOrderId({
         strategyId,
@@ -1342,7 +1436,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
       console.log(
         `[copy] Future Hedge close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${lots} ` +
-          `(exchange=${exchangeLotsFloor} db=${dbLotsFloor})`,
+          `(exchangeLive=${exchangeOpenLots} db=${dbLotsFloor})`,
       );
 
       const closeResult = await executeFollowerTradeWithVerification(prisma, {
@@ -1409,7 +1503,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
   for (const sub of subscribers) {
     const creds = resolveCopySubscriptionCreds(sub);
     if (!creds) continue;
-    const openLots = await followerExchangeLegContracts(
+    const openLots = await followerExchangeOpenLotsLive(
       creds.apiKey,
       creds.apiSecret,
       snap.symbol,
@@ -1469,7 +1563,10 @@ export async function reconcileFollowersToEmptyMasterBook(
     const creds = resolveCopySubscriptionCreds(sub);
     if (!creds) continue;
     try {
-      const open = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret);
+      const open = await fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret, {
+        lite: true,
+        skipCache: true,
+      });
       for (const p of open) {
         if (Math.abs(p.contracts) < 1e-12) continue;
         const k = `${p.symbolKey}:${p.side}`;
@@ -1810,6 +1907,7 @@ export async function executeFollowerTradeWithVerification(
   }
 
   if (args.reduceOnly === true) {
+    const openSide: TradeSide = side === "BUY" ? "SELL" : "BUY";
     const closeClientOrderId =
       args.clientOrderId ??
       (args.strategyId
@@ -1822,12 +1920,44 @@ export async function executeFollowerTradeWithVerification(
             leg: "close",
           })
         : undefined);
+
+    const { lots: closeLots, exchangeOpenLots } =
+      await resolveFollowerReduceOnlyCloseLots({
+        apiKey,
+        apiSecret,
+        symbol,
+        openSide,
+        requestedLots: targetContracts,
+      });
+
+    if (closeLots <= 0) {
+      console.log(
+        `[copy] reduceOnly skip user=${userId} ${symbol} open=${openSide} — ` +
+          `exchange flat (liveLots=${exchangeOpenLots}); clearing DB ghost only`,
+      );
+      if (args.strategyId) {
+        await closeTradePositionsForLeg(prisma, {
+          strategyId: args.strategyId,
+          userId: args.userId,
+          symbol,
+          side: openSide,
+          ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+        });
+      }
+      return {
+        success: true,
+        attempts: 0,
+        verified: true,
+        ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+      };
+    }
+
     const single = await placeFollowerOrder(
       apiKey,
       apiSecret,
       symbol,
       side,
-      targetContracts,
+      closeLots,
       {
         reduceOnly: true,
         ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
@@ -1837,7 +1967,6 @@ export async function executeFollowerTradeWithVerification(
       const err = single.error ?? "Reduce-only close failed";
       if (isAlreadyFlatReduceOnlyError(err)) {
         if (args.strategyId) {
-          const openSide: TradeSide = side === "BUY" ? "SELL" : "BUY";
           await closeTradePositionsForLeg(prisma, {
             strategyId: args.strategyId,
             userId: args.userId,
@@ -1905,12 +2034,18 @@ export async function executeFollowerTradeWithVerification(
   });
 
   if (args.strategyId) {
-    markFollowerCopyInflight({
-      userId: args.userId,
-      strategyId: args.strategyId,
-      symbol,
-      side,
-    });
+    const inflightMs = args.liveMasterFill
+      ? LIVE_FILL_VERIFY_WAIT_MS * (LIVE_FILL_MAX_POLLS + 1)
+      : COPY_LEG_CONFIRM_MS;
+    markFollowerCopyInflight(
+      {
+        userId: args.userId,
+        strategyId: args.strategyId,
+        symbol,
+        side,
+      },
+      Date.now() + inflightMs,
+    );
   }
 
   return withCopyLegExecutionLock(legLockKey, async () => {
@@ -2039,12 +2174,80 @@ export async function executeFollowerTradeWithVerification(
       orderSubmitted = true;
     }
 
-    for (let poll = 0; poll < MAX_OPEN_CONFIRM_POLLS; poll += 1) {
-      console.log(
-        `[RETRY_LOOP] REST confirm poll ${poll + 1}/${MAX_OPEN_CONFIRM_POLLS} ` +
-          `(wait ${POST_ORDER_VERIFY_WAIT_MS}ms) user ${userId} ${symbol}`,
-      );
-      await sleep(POST_ORDER_VERIFY_WAIT_MS);
+    const verifyWaitMs = args.liveMasterFill
+      ? LIVE_FILL_VERIFY_WAIT_MS
+      : POST_ORDER_VERIFY_WAIT_MS;
+    const maxPolls = args.liveMasterFill
+      ? LIVE_FILL_MAX_POLLS
+      : MAX_OPEN_CONFIRM_POLLS;
+
+    if (args.liveMasterFill === true && orderSubmitted && lastResult.success) {
+      exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
+        skipCache: true,
+      });
+      let liveAck: DeltaClientOrderAck | undefined;
+      if (openClientOrderId) {
+        liveAck = await fetchDeltaOrderAckByClientOrderId(
+          apiKey,
+          apiSecret,
+          openClientOrderId,
+        );
+      }
+      const immediate = await tryFinalizeVerifiedOpen(exchangeLots, liveAck);
+      if (immediate) {
+        console.log(
+          `[RETRY_LOOP] Live fill immediate verify user=${userId} ${symbol} ` +
+            `(${exchangeLots}/${targetContracts} contracts)`,
+        );
+        return immediate;
+      }
+      if (
+        lastResult.orderId ||
+        (liveAck &&
+          (orderAckPending(liveAck) || orderAckFilledQty(liveAck) > 0))
+      ) {
+        const optimisticQty = targetContracts;
+        if (args.strategyId) {
+          await recordTradePositionOpen(prisma, {
+            strategyId: args.strategyId,
+            userId: args.userId,
+            symbol,
+            side,
+            quantity: optimisticQty,
+            entryPrice:
+              args.entryPrice != null && Number.isFinite(args.entryPrice)
+                ? args.entryPrice
+                : 0,
+            ...(openClientOrderId ? { clientOrderId: openClientOrderId } : {}),
+            ...(lastResult.orderId ? { exchangeOrderId: lastResult.orderId } : {}),
+          });
+        }
+        console.log(
+          `[RETRY_LOOP] Live fill fast-ack user=${userId} ${symbol} ` +
+            `orderId=${lastResult.orderId ?? liveAck?.orderId ?? "pending"} — returning without slow poll`,
+        );
+        return buildOpenExecuteSuccess({
+          lastResult,
+          ...(openClientOrderId ? { openClientOrderId } : {}),
+          feeCost: totalFee,
+          attempts: Math.max(attempts, 1),
+          verifiedQty: optimisticQty,
+        });
+      }
+    }
+
+    for (let poll = 0; poll < maxPolls; poll += 1) {
+      if (!(args.liveMasterFill && poll === 0)) {
+        console.log(
+          `[RETRY_LOOP] REST confirm poll ${poll + 1}/${maxPolls} ` +
+            `(wait ${verifyWaitMs}ms) user ${userId} ${symbol}`,
+        );
+        await sleep(verifyWaitMs);
+      } else {
+        console.log(
+          `[RETRY_LOOP] Live fill confirm poll ${poll + 1}/${maxPolls} (no initial wait) user ${userId} ${symbol}`,
+        );
+      }
 
       exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
         skipCache: true,

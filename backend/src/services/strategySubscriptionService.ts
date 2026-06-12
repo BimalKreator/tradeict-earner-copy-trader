@@ -135,11 +135,21 @@ export async function findActiveFutureHedgeCopySubscribers(
 export function resolveCopySubscriptionCreds(
   sub: CopySubscriptionRow,
 ): { apiKey: string; apiSecret: string } | null {
+  /** Deploy binds an exchange account — never fall back to another wallet's keys. */
+  if (sub.exchangeAccountId) {
+    if (sub.exchangeAccount == null) return null;
+    const key = sub.exchangeAccount.apiKey?.trim() ?? "";
+    const secret = sub.exchangeAccount.apiSecret?.trim() ?? "";
+    if (key && secret) {
+      return { apiKey: key, apiSecret: secret };
+    }
+    return null;
+  }
   if (sub.exchangeAccount != null) {
     const key = sub.exchangeAccount.apiKey?.trim() ?? "";
     const secret = sub.exchangeAccount.apiSecret?.trim() ?? "";
     if (key && secret) {
-      return { apiKey: sub.exchangeAccount.apiKey, apiSecret: sub.exchangeAccount.apiSecret };
+      return { apiKey: key, apiSecret: secret };
     }
   }
   const ex = sub.user.exchangeAccounts[0];
