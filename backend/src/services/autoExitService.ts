@@ -7,14 +7,10 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
-  isDeltaOptionProductId,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
-import {
-  estimateLivePnlUsd,
-  resolveLiveMarkPrice,
-} from "./liveMarkPriceCache.js";
+import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
@@ -49,42 +45,12 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   return null;
 }
 
-function contractSizeFromPosition(pos: DeltaLivePosition): number | undefined {
-  const lots = Math.abs(pos.contracts);
-  if (lots < 1e-12) return undefined;
-  const cs = pos.realBaseSize / lots;
-  return Number.isFinite(cs) && cs > 0 ? cs : undefined;
-}
-
-/**
- * Same PnL basis as Delta terminal: margined `unrealized_pnl` only.
- * Options never use mark/bid estimates — stale quotes inflated PnL and tripped targets early.
- */
+/** Same PnL as admin live-trades / Delta terminal (`exchangeService` resolver output). */
 function legPnlUsd(pos: DeltaLivePosition): number {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }
-  if (isDeltaOptionProductId(pos.symbolKey)) {
-    return 0;
-  }
-  const mark = resolveMarkForPosition(pos);
-  if (
-    pos.entryPrice == null ||
-    !Number.isFinite(pos.entryPrice) ||
-    mark == null ||
-    !(mark > 0)
-  ) {
-    return 0;
-  }
-  const cs = contractSizeFromPosition(pos);
-  return estimateLivePnlUsd({
-    symbolKey: pos.symbolKey,
-    side: pos.side,
-    entryPrice: pos.entryPrice,
-    contracts: pos.contracts,
-    markPrice: mark,
-    ...(cs != null ? { contractSize: cs } : {}),
-  });
+  return 0;
 }
 
 export type MasterLegCloseTarget = {
