@@ -590,7 +590,39 @@ function extractDeltaMarkPrice(position: Record<string, unknown>): number | null
   );
 }
 
-/** Bid/offer from margined position or nested product (matches Delta UPNL@Bid / UPNL@Offer). */
+/** Delta v2 tickers / positions nest live quotes under `quotes.best_bid` / `quotes.best_ask`. */
+function extractDeltaQuotesBidOffer(
+  source: Record<string, unknown> | null,
+): { bid: number | null; offer: number | null } {
+  if (!source) return { bid: null, offer: null };
+
+  const quotes =
+    source.quotes != null && typeof source.quotes === "object"
+      ? (source.quotes as Record<string, unknown>)
+      : null;
+
+  const bid =
+    numberOrNull(source.best_bid) ??
+    numberOrNull(source.bid_price) ??
+    numberOrNull(source.bid) ??
+    (quotes ? numberOrNull(quotes.best_bid) ?? numberOrNull(quotes.bid) : null);
+
+  const offer =
+    numberOrNull(source.best_ask) ??
+    numberOrNull(source.best_offer) ??
+    numberOrNull(source.offer_price) ??
+    numberOrNull(source.ask_price) ??
+    numberOrNull(source.ask) ??
+    (quotes
+      ? numberOrNull(quotes.best_ask) ??
+        numberOrNull(quotes.ask) ??
+        numberOrNull(quotes.offer)
+      : null);
+
+  return { bid, offer };
+}
+
+/** Bid/offer from margined position or nested product (matches Delta UPL@Bid / UPL@Offer). */
 function extractDeltaBidOffer(position: Record<string, unknown>): {
   bid: number | null;
   offer: number | null;
@@ -600,23 +632,11 @@ function extractDeltaBidOffer(position: Record<string, unknown>): {
       ? (position.product as Record<string, unknown>)
       : null;
 
-  const bid =
-    numberOrNull(position.best_bid) ??
-    numberOrNull(position.bid_price) ??
-    numberOrNull(position.bid) ??
-    numberOrNull(product?.best_bid) ??
-    numberOrNull(product?.bid_price);
-
-  const offer =
-    numberOrNull(position.best_ask) ??
-    numberOrNull(position.best_offer) ??
-    numberOrNull(position.offer_price) ??
-    numberOrNull(position.ask_price) ??
-    numberOrNull(position.ask) ??
-    numberOrNull(product?.best_ask) ??
-    numberOrNull(product?.offer_price);
-
-  return { bid, offer };
+  const fromPosition = extractDeltaQuotesBidOffer(position);
+  if (fromPosition.bid != null || fromPosition.offer != null) {
+    return fromPosition;
+  }
+  return extractDeltaQuotesBidOffer(product);
 }
 
 /**
@@ -684,7 +704,17 @@ async function prefetchOptionTickerQuotes(
     unique.map(async (sym) => {
       if (isDeltaOptionProductId(sym) || /^\d+$/.test(sym)) {
         const rest = await fetchDeltaTickerFromRestApi(sym);
-        cache.set(sym, { bid: rest.bid, ask: rest.ask });
+        let bid = rest.bid;
+        let ask = rest.ask;
+        if (
+          (bid == null || ask == null) &&
+          (isDeltaOptionProductId(sym) || /^\d+$/.test(sym))
+        ) {
+          const l2 = await fetchDeltaL2BestQuotes(sym);
+          bid = bid ?? l2.bid;
+          ask = ask ?? l2.ask;
+        }
+        cache.set(sym, { bid, ask });
         return;
       }
       try {
@@ -2183,6 +2213,39 @@ export async function fetchDeltaMarkPrice(
  * Delta India public REST ticker — CCXT omits most live option contracts.
  * GET /v2/tickers/{symbol}
  */
+/** Top-of-book from L2 orderbook — fallback when ticker omits nested `quotes`. */
+async function fetchDeltaL2BestQuotes(
+  productRef: string,
+): Promise<{ bid: number | null; ask: number | null }> {
+  const ref = productRef.trim();
+  if (!ref) return { bid: null, ask: null };
+
+  try {
+    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
+      `${DELTA_INDIA_API_BASE}/v2/l2orderbook/${encodeURIComponent(ref)}`,
+      { params: { depth: 1 }, timeout: 15_000 },
+    );
+    if (data?.success !== true || data.result == null || typeof data.result !== "object") {
+      return { bid: null, ask: null };
+    }
+
+    const book = data.result as {
+      buy?: Array<{ price?: unknown }>;
+      sell?: Array<{ price?: unknown }>;
+    };
+    const bid = book.buy?.[0] ? numberOrNull(book.buy[0].price) : null;
+    const ask = book.sell?.[0] ? numberOrNull(book.sell[0].price) : null;
+    return { bid, ask };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[exchangeService] fetchDeltaL2BestQuotes failed ref=${ref}:`,
+      msg,
+    );
+    return { bid: null, ask: null };
+  }
+}
+
 async function fetchDeltaTickerFromRestApi(
   productRef: string,
 ): Promise<{ last: number | null; bid: number | null; ask: number | null }> {
@@ -2208,8 +2271,7 @@ async function fetchDeltaTickerFromRestApi(
       numberOrNull(r.close) ??
       numberOrNull(r.mark_price) ??
       numberOrNull(r.spot_price);
-    const bid = numberOrNull(r.best_bid) ?? numberOrNull(r.bid);
-    const ask = numberOrNull(r.best_ask) ?? numberOrNull(r.ask);
+    const { bid, offer: ask } = extractDeltaQuotesBidOffer(r);
     return { last, bid, ask };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
