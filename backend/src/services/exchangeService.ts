@@ -883,6 +883,72 @@ function parseApiUnrealizedPnl(position: Record<string, unknown>): number | null
   return upnl;
 }
 
+/**
+ * Options `size`: integer = lot count (× contract_value); fractional = already BTC.
+ */
+function optionSignedBaseSize(rawSize: number, contractValue: number): number {
+  const abs = Math.abs(rawSize);
+  if (abs < 1e-12) return 0;
+
+  const isLotCount =
+    Number.isInteger(abs) && abs >= 1 && contractValue > 0 && contractValue < 1;
+  if (isLotCount) return rawSize * contractValue;
+
+  if (!Number.isInteger(abs) && abs <= 10) return rawSize;
+
+  return rawSize * contractValue;
+}
+
+/**
+ * Prefer Delta API UPNL; reject API when it diverges >> bid/offer math (realtime overlay bug).
+ */
+function reconcileOptionUnrealizedPnlLite(args: {
+  position: Record<string, unknown>;
+  side: TradeSide;
+  entryPrice: number | null;
+  markPrice: number | null;
+  productSymbol: string;
+  realBaseSize: number;
+  tickerCache: Map<string, OptionTickerQuote>;
+}): number | null {
+  const fromApi = parseApiUnrealizedPnl(args.position);
+
+  let manual: number | null = null;
+  if (args.entryPrice !== null) {
+    const upnlPrice = resolveOptionUpnlPriceLite(
+      args.position,
+      args.side,
+      args.markPrice,
+      args.productSymbol,
+      args.tickerCache,
+    );
+    if (upnlPrice !== null) {
+      manual = computeOptionUpnlFromQuotePrice({
+        side: args.side,
+        entryPrice: args.entryPrice,
+        upnlPrice,
+        realBaseSize: args.realBaseSize,
+        position: args.position,
+      });
+    }
+  }
+
+  if (fromApi !== null && manual !== null) {
+    const apiAbs = Math.abs(fromApi);
+    const manAbs = Math.abs(manual);
+    if (manAbs > 0 && apiAbs / manAbs > 8) {
+      console.warn(
+        `[exchangeService] option API UPNL $${fromApi.toFixed(4)} >> manual $${manual.toFixed(4)} ` +
+          `symbol=${args.productSymbol} realBase=${args.realBaseSize} — using manual`,
+      );
+      return manual;
+    }
+    return fromApi;
+  }
+
+  return fromApi ?? manual;
+}
+
 /** Bid/offer UPNL math when Delta margined API omits `unrealized_pnl`. */
 function computeOptionUpnlFromQuotePrice(args: {
   side: TradeSide;
@@ -2196,15 +2262,18 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         : deltaContractValueFromMarket(market ?? {}, position, productSymbol);
 
       const signedBtc = isOption
-        ? contractLots * contractValue
+        ? optionSignedBaseSize(contractLots, contractValue)
         : market != null
           ? deltaSignedBtcSize(contractLots, contractValue)
           : Number.isInteger(Math.abs(contractLots)) && Math.abs(contractLots) >= 1
             ? contractLots * contractValue
             : contractLots;
 
-      const realBaseSize =
-        Math.abs(signedBtc) > 1e-12 ? Math.abs(signedBtc) : Math.abs(contractLots);
+      const realBaseSize = isOption
+        ? Math.abs(optionSignedBaseSize(contractLots, contractValue))
+        : Math.abs(signedBtc) > 1e-12
+          ? Math.abs(signedBtc)
+          : Math.abs(contractLots);
       let contractLotCount = isOption
         ? Math.abs(contractLots)
         : deltaContractLotCount(contractLots, contractSize, signedBtc);
@@ -2239,29 +2308,21 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       const apiUpnlRaw = position.unrealized_pnl;
 
       if (lite) {
-        // Delta terminal UPNL = margined/realtime `unrealized_pnl` (+ funding when split).
-        unrealizedPnl = parseApiUnrealizedPnl(position);
-
-        if (unrealizedPnl === null && isOption && entryPrice !== null) {
-          // API field absent (common ~10s on new realtime legs) — bid/offer math with
-          // corrected contract_value only; never trust CCXT contractSize for sizing.
-          const upnlPrice = resolveOptionUpnlPriceLite(
+        if (isOption) {
+          unrealizedPnl = reconcileOptionUnrealizedPnlLite({
             position,
             side,
+            entryPrice,
             markPrice,
             productSymbol,
-            optionTickerCache,
-          );
-          if (upnlPrice !== null) {
-            unrealizedPnl = computeOptionUpnlFromQuotePrice({
-              side,
-              entryPrice,
-              upnlPrice,
-              realBaseSize,
-              position,
-            });
-          }
-        } else if (unrealizedPnl === null) {
+            realBaseSize,
+            tickerCache: optionTickerCache,
+          });
+        } else {
+          unrealizedPnl = parseApiUnrealizedPnl(position);
+        }
+
+        if (unrealizedPnl === null && !isOption) {
           unrealizedPnl = computePositionUnrealizedPnl({
             isOption,
             side,

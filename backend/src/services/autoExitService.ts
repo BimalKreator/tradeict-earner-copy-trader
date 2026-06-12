@@ -19,10 +19,10 @@ import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
 const AUTO_EXIT_COOLDOWN_MS = 15_000;
-/** Consecutive poll ticks above/below threshold before closing (1 = immediate). */
-const SUSTAINED_BREACH_TICKS = 1;
-/** Brief pause after new master legs appear (do not reset breach counter). */
-const POSITION_SETTLE_GRACE_MS = 3_000;
+/** Consecutive poll ticks above/below threshold before closing. */
+const SUSTAINED_BREACH_TICKS = 3;
+/** Pause after new master legs — margined UPNL can lag realtime overlay ~10s. */
+const POSITION_SETTLE_GRACE_MS = 12_000;
 
 /** strategyId → timestamp when auto-exit last fired (prevents duplicate close bursts). */
 const lastAutoExitAt = new Map<string, number>();
@@ -282,8 +282,28 @@ export async function runStrategyAutoExitCheck(
   const count = (breachCounters.get(strategyId) ?? 0) + 1;
   breachCounters.set(strategyId, count);
 
+  try {
+    const positions = await fetchDeltaOpenPositions(
+      strategy.masterApiKey,
+      strategy.masterApiSecret,
+      { skipCache: true },
+    );
+    const legSummary = positions
+      .filter((p) => Math.abs(p.contracts) >= 1e-12)
+      .map(
+        (p) =>
+          `${p.symbolKey}:${p.unrealizedPnl != null ? `$${p.unrealizedPnl.toFixed(4)}` : "n/a"}`,
+      )
+      .join(", ");
+    console.warn(
+      `[auto-exit] leg PnL snapshot: ${legSummary || "none"} | total=$${totalPnlUsd.toFixed(2)}`,
+    );
+  } catch {
+    /* diagnostic only */
+  }
+
   console.warn(
-    `[auto-exit] Threshold breached for strategy ${strategyId}. Verifying... (${count}/${SUSTAINED_BREACH_TICKS} seconds) ` +
+    `[auto-exit] Threshold breached for strategy ${strategyId}. Verifying... (${count}/${SUSTAINED_BREACH_TICKS} ticks) ` +
       `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} threshold=${breach.thresholdUsd}`,
   );
 
