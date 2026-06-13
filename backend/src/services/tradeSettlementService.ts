@@ -1,6 +1,7 @@
 import { type PrismaClient, TradeStatus } from "@prisma/client";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import {
+  EXIT_REASON,
   resolveCloseExitReason,
   type ExitReasonValue,
 } from "../constants/exitReasons.js";
@@ -47,6 +48,52 @@ function computeRevenueShareAmt(
   if (!Number.isFinite(realizedPnl) || realizedPnl <= 0) return 0;
   if (!Number.isFinite(profitSharePct) || profitSharePct <= 0) return 0;
   return realizedPnl * (profitSharePct / 100);
+}
+
+/**
+ * Master close fills must not become follower OPEN rows. Drop any opposite-side OPEN
+ * phantom rows (no PnL booking) when the real opening leg settles.
+ */
+export async function voidOrphanOppositeOpenCopyTrades(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    settledSide: TradeSide;
+  },
+): Promise<number> {
+  const oppositeSide: TradeSide = args.settledSide === "BUY" ? "SELL" : "BUY";
+  const orphans = await prisma.trade.findMany({
+    where: {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      side: oppositeSide,
+      status: TradeStatus.OPEN,
+    },
+  });
+  const matching = orphans.filter((t) =>
+    tradePositionSymbolsAlign(args.symbol, t.symbol),
+  );
+  for (const orphan of matching) {
+    await prisma.trade.update({
+      where: { id: orphan.id },
+      data: {
+        status: TradeStatus.FAILED,
+        pnl: 0,
+        tradePnl: 0,
+        revenueShareAmt: 0,
+        exitReason: EXIT_REASON.EXECUTION_FAILED,
+      },
+    });
+  }
+  if (matching.length > 0) {
+    console.log(
+      `[trade-settlement] voided ${matching.length} orphan ${oppositeSide} OPEN row(s) ` +
+        `user=${args.userId} ${args.symbol} (opening leg ${args.settledSide} settled)`,
+    );
+  }
+  return matching.length;
 }
 
 export type SettleOpenCopyTradesArgs = {
@@ -162,6 +209,12 @@ export async function settleOpenCopyTradesForLeg(
   }
 
   if (closed > 0) {
+    await voidOrphanOppositeOpenCopyTrades(prisma, {
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.symbol,
+      settledSide: args.side,
+    });
     console.log(
       `[trade-settlement] CLOSED ${closed} trade(s) user=${args.userId} ` +
         `${args.symbol} ${args.side} exit=${args.exitPrice}`,

@@ -749,6 +749,7 @@ function extractUserTradeFillSignal(
   side: TradeSide;
   contracts: number;
   avgPrice: number | null;
+  reduceOnly: boolean;
   clientOrderId: string;
   tradeId: string;
   orderId: string;
@@ -760,6 +761,8 @@ function extractUserTradeFillSignal(
 
   const side = normalizeSide(o.side ?? o.order_side ?? o.direction);
   if (!side) return null;
+
+  const reduceOnly = Boolean(o.reduce_only ?? o.reduceOnly);
 
   const contracts =
     num(o.size) ??
@@ -799,11 +802,23 @@ function extractUserTradeFillSignal(
     side,
     contracts,
     avgPrice,
+    reduceOnly,
     clientOrderId,
     tradeId,
     orderId,
     fillKey,
   };
+}
+
+/** True when a fill closes an opposite-side leg already tracked on the master book. */
+function masterFillClosesExistingLeg(
+  tracker: MasterPositionTracker | undefined,
+  symbol: string,
+  fillSide: TradeSide,
+): boolean {
+  if (!tracker) return false;
+  const openSide: TradeSide = fillSide === "BUY" ? "SELL" : "BUY";
+  return tracker.maxContractsForSymbolSide(symbol, openSide) > 0;
 }
 
 async function processMasterOrderFillRecords(
@@ -904,6 +919,19 @@ async function processMasterUserTradeFillRecords(
       if (!sig) return;
       const clientOrderId =
         sig.clientOrderId || extractClientOrderIdFromPayload(r);
+      if (sig.reduceOnly) {
+        console.log(
+          `[MASTER-WS] user_trades reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
+        );
+        return;
+      }
+      if (masterFillClosesExistingLeg(tracker, sig.symbol, sig.side)) {
+        console.log(
+          `[MASTER-WS] user_trades closing fill ignored for copy ${sig.symbol} ${sig.side} ` +
+            `(opposite leg open on master book)`,
+        );
+        return;
+      }
       registerSymbolsForLivePrices([sig.symbol]);
       const ncSkip = shouldSkipMasterFillCopy({ clientOrderId });
 

@@ -1582,8 +1582,8 @@ export default function AdminUserDetails({
                             <td className="px-3 py-2 text-white">{t.symbol}</td>
                             <td className="px-3 py-2 text-white/70">{t.status}</td>
                             <td className="px-3 py-2 text-white/80">{t.side}</td>
-                            <td className={`px-3 py-2 ${t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
-                              ${t.pnl.toFixed(2)}
+                            <td className={`px-3 py-2 ${t.status === "OPEN" ? "text-white/40" : t.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                              {t.status === "OPEN" ? "—" : `$${t.pnl.toFixed(2)}`}
                             </td>
                             <td className="px-3 py-2 text-white">${t.tradingFee.toFixed(2)}</td>
                             <td className="px-3 py-2 text-white">${t.adminRevenue.toFixed(2)}</td>
