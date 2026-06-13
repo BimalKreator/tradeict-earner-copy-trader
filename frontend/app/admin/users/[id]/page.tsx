@@ -150,6 +150,7 @@ export default function AdminUserDetails({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
+  const [reconcilingStaleOpen, setReconcilingStaleOpen] = useState(false);
   const [selectedTradeIds, setSelectedTradeIds] = useState<string[]>([]);
   const [sendingReset, setSendingReset] = useState(false);
   const [tradeStartDate, setTradeStartDate] = useState("");
@@ -681,6 +682,44 @@ export default function AdminUserDetails({
       setError(e instanceof Error ? e.message : "Failed to delete user.");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function reconcileStaleOpenTrades(): Promise<void> {
+    const ok = window.confirm(
+      "Close stale OPEN trades where this user's Delta account is already flat? " +
+        "Settled rows become CLOSED; ghost rows become FAILED. Then you can flush them.",
+    );
+    if (!ok) return;
+    setReconcilingStaleOpen(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/users/${userId}/trades/reconcile-stale-open`,
+        {
+          method: "POST",
+          headers: authHeaders,
+        },
+      );
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? "Failed to settle stale OPEN trades.");
+      }
+      const body = (await res.json()) as {
+        settled?: number;
+        voided?: number;
+        skippedStillOpen?: number;
+        message?: string;
+      };
+      setNotice(body.message ?? "Stale OPEN trades reconciled.");
+      await loadAll();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to settle stale OPEN trades.",
+      );
+    } finally {
+      setReconcilingStaleOpen(false);
     }
   }
 
@@ -1514,6 +1553,16 @@ export default function AdminUserDetails({
                   className="rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-3 py-2 text-xs font-medium text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-60"
                 >
                   {exporting ? "Generating..." : "Generate Export"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void reconcileStaleOpenTrades()}
+                  disabled={reconcilingStaleOpen}
+                  className="rounded-lg border border-amber-500/45 bg-amber-500/15 px-3 py-2 text-xs font-medium text-amber-100 hover:bg-amber-500/25 disabled:opacity-60"
+                >
+                  {reconcilingStaleOpen
+                    ? "Settling..."
+                    : "Settle stale OPEN"}
                 </button>
                 <button
                   type="button"

@@ -170,3 +170,40 @@ export function resolveCopySubscriptionCreds(
   }
   return null;
 }
+
+/** Delta API keys for a user — deployed subscription account first, then latest wallet. */
+export async function resolveUserExchangeCreds(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<{ apiKey: string; apiSecret: string } | null> {
+  const sub = await prisma.userStrategySubscription.findFirst({
+    where: { userId, exchangeAccountId: { not: null } },
+    include: COPY_SUBSCRIPTION_INCLUDE,
+    orderBy: { joinedDate: "desc" },
+  });
+  if (sub) {
+    const creds = resolveCopySubscriptionCreds(sub);
+    if (creds) return creds;
+  }
+
+  const ex = await prisma.exchangeAccount.findFirst({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+  });
+  if (ex != null) {
+    const key = ex.apiKey?.trim() ?? "";
+    const secret = ex.apiSecret?.trim() ?? "";
+    if (key && secret) return { apiKey: ex.apiKey, apiSecret: ex.apiSecret };
+  }
+
+  const dk = await prisma.deltaApiKey.findFirst({
+    where: { userId },
+  });
+  if (dk != null) {
+    const key = dk.apiKey?.trim() ?? "";
+    const secret = dk.apiSecret?.trim() ?? "";
+    if (key && secret) return { apiKey: dk.apiKey, apiSecret: dk.apiSecret };
+  }
+
+  return null;
+}

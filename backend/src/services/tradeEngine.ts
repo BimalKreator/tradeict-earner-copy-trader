@@ -25,6 +25,7 @@ import {
 } from "../constants/exitReasons.js";
 import { isHardExecutionError } from "./followerTradeExecution.js";
 import {
+  reconcileStaleOpenTradesForUser,
   settleOpenCopyTradesForLeg,
 } from "./tradeSettlementService.js";
 import {
@@ -56,6 +57,7 @@ import {
   findCopySubscriptionForUser,
   followerLotsFromMaster,
   resolveFutureHedgeStrategyId,
+  resolveUserExchangeCreds,
   STRATEGY_WHERE_HAS_ACTIVE_COPY_SUBSCRIBERS,
   subscriptionMultiplier,
 } from "./strategySubscriptionService.js";
@@ -2043,87 +2045,40 @@ class MasterPositionTracker {
  */
 async function reconcileStaleOpenCopyTrades(
   prisma: PrismaClient,
-  strategyId: string,
+  _strategyId: string,
   cancelled: { value: boolean },
 ): Promise<void> {
   const subs = await findActiveFutureHedgeCopySubscribers(prisma);
-  for (const sub of subs) {
+  const staleUsers = await prisma.trade.findMany({
+    where: { status: TradeStatus.OPEN },
+    distinct: ["userId"],
+    select: { userId: true },
+  });
+  const userIds = new Set([
+    ...subs.map((s) => s.userId),
+    ...staleUsers.map((r) => r.userId),
+  ]);
+
+  for (const userId of userIds) {
     if (cancelled.value) return;
 
-    const creds = resolveSubscriptionCreds(sub);
+    const sub = subs.find((s) => s.userId === userId);
+    const creds =
+      (sub ? resolveSubscriptionCreds(sub) : null) ??
+      (await resolveUserExchangeCreds(prisma, userId));
     if (!creds) continue;
 
-    const openTrades = await prisma.trade.findMany({
-      where: {
-        userId: sub.userId,
-        strategyId,
-        status: TradeStatus.OPEN,
-      },
-    });
-    if (openTrades.length === 0) continue;
-
-    let exchangeOpen: DeltaLivePosition[] = [];
     try {
-      exchangeOpen = await fetchDeltaOpenPositions(
-        creds.apiKey,
-        creds.apiSecret,
-        { lite: true, skipCache: true },
-      );
+      await reconcileStaleOpenTradesForUser(prisma, {
+        userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+      });
     } catch (err) {
       console.warn(
-        `[trade-settlement] stale reconcile fetch failed user=${sub.userId}:`,
+        `[trade-settlement] stale reconcile user=${userId}:`,
         err instanceof Error ? err.message : err,
       );
-      continue;
-    }
-
-    for (const trade of openTrades) {
-      if (cancelled.value) return;
-      const side: TradeSide = trade.side.toUpperCase() === "SELL" ? "SELL" : "BUY";
-      const stillOpen = exchangeOpen.some(
-        (p) =>
-          p.side === side &&
-          tradePositionSymbolsAlign(trade.symbol, p.symbolKey) &&
-          Math.abs(p.contracts) >= 1e-12,
-      );
-      if (stillOpen) continue;
-
-      let exitPrice = 0;
-      const fromMarket = await fetchDeltaSettlementExitPrice(
-        trade.symbol,
-        side,
-      );
-      if (fromMarket != null && Number.isFinite(fromMarket) && fromMarket > 0) {
-        exitPrice = fromMarket;
-      } else {
-        try {
-          const tick = await fetchDeltaTicker(trade.symbol);
-          if (tick.last != null && Number.isFinite(tick.last)) {
-            exitPrice = tick.last;
-          }
-        } catch {
-          /* optional */
-        }
-      }
-      if (exitPrice <= 0 && trade.entryPrice > 0) {
-        exitPrice = trade.entryPrice;
-      }
-
-      const settled = await settleOpenCopyTradesForLeg(prisma, {
-        userId: sub.userId,
-        strategyId,
-        symbol: trade.symbol,
-        side,
-        exitPrice,
-        exitFee: 0,
-        exitReason: EXIT_REASON.MASTER_CLOSED,
-        closeAllMatching: true,
-      });
-      if (settled > 0) {
-        console.log(
-          `[trade-settlement] stale OPEN trade booked user=${sub.userId} ${trade.symbol} ${side}`,
-        );
-      }
     }
   }
 }

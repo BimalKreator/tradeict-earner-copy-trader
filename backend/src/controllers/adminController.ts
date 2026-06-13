@@ -24,6 +24,8 @@ import {
   buildFlushableTradeWhere,
   purgeAnalyticsForDeletedTrades,
 } from "../services/tradeFlushService.js";
+import { reconcileStaleOpenTradesForUser } from "../services/tradeSettlementService.js";
+import { resolveUserExchangeCreds } from "../services/strategySubscriptionService.js";
 import {
   EXIT_REASON,
   markBotInitiatedClose,
@@ -986,6 +988,57 @@ export function createAdminController(prisma: PrismaClient) {
         orderId: result.orderId ?? null,
         raw: result.raw ?? null,
         dbTradesClosed: dbClosed,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function reconcileUserStaleOpenTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? req.body?.userId ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const creds = await resolveUserExchangeCreds(prisma, userId);
+      if (!creds) {
+        res.status(400).json({
+          error:
+            "No Delta API credentials found for this user (deploy a strategy with TE Bot / exchange account first).",
+        });
+        return;
+      }
+
+      const result = await reconcileStaleOpenTradesForUser(prisma, {
+        userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+      });
+
+      res.json({
+        ok: true,
+        ...result,
+        message:
+          result.settled + result.voided > 0
+            ? `Settled ${result.settled} and voided ${result.voided} stale OPEN trade(s). You can flush closed/failed rows now.`
+            : result.skippedStillOpen > 0
+              ? `${result.skippedStillOpen} OPEN trade(s) still match live Delta positions — close on exchange first.`
+              : "No stale OPEN trades found.",
       });
     } catch (err) {
       next(err);
@@ -3090,6 +3143,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
+    reconcileUserStaleOpenTrades,
     flushArbitrageTrades,
     exportTrades,
     listDownloads,
