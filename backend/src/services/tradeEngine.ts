@@ -4,6 +4,7 @@ import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
   extractDeltaProductSymbolFromPayload,
   fetchDeltaOpenPositions,
+  fetchDeltaSettlementExitPrice,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
@@ -2058,13 +2059,21 @@ async function reconcileStaleOpenCopyTrades(
       if (stillOpen) continue;
 
       let exitPrice = 0;
-      try {
-        const tick = await fetchDeltaTicker(trade.symbol);
-        if (tick.last != null && Number.isFinite(tick.last)) {
-          exitPrice = tick.last;
+      const fromMarket = await fetchDeltaSettlementExitPrice(
+        trade.symbol,
+        side,
+      );
+      if (fromMarket != null && Number.isFinite(fromMarket) && fromMarket > 0) {
+        exitPrice = fromMarket;
+      } else {
+        try {
+          const tick = await fetchDeltaTicker(trade.symbol);
+          if (tick.last != null && Number.isFinite(tick.last)) {
+            exitPrice = tick.last;
+          }
+        } catch {
+          /* optional */
         }
-      } catch {
-        /* optional */
       }
       if (exitPrice <= 0 && trade.entryPrice > 0) {
         exitPrice = trade.entryPrice;

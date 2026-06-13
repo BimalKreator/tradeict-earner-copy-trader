@@ -91,6 +91,86 @@ async function deltaIndiaSignedRequest<T>(args: {
   return data;
 }
 
+function parseOrderCommission(order: Record<string, unknown>): number | null {
+  return (
+    numberOrNull(order.paid_commission) ??
+    numberOrNull(order.commission) ??
+    numberOrNull(order.total_commission)
+  );
+}
+
+function parseOrderFillPrice(order: Record<string, unknown>): number | null {
+  return (
+    numberOrNull(order.average_fill_price) ??
+    numberOrNull(order.average_price) ??
+    numberOrNull(order.price) ??
+    numberOrNull(order.limit_price)
+  );
+}
+
+async function fetchDeltaOrderById(
+  apiKey: string,
+  secret: string,
+  orderId: string,
+): Promise<Record<string, unknown> | null> {
+  const id = orderId.trim();
+  if (!id) return null;
+  try {
+    const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+      apiKey,
+      secret,
+      method: "GET",
+      path: `/v2/orders/${encodeURIComponent(id)}`,
+    });
+    const row = response.result;
+    if (row != null && typeof row === "object" && !Array.isArray(row)) {
+      return row as Record<string, unknown>;
+    }
+  } catch (err) {
+    console.warn(
+      `[exchangeService] fetchDeltaOrderById failed orderId=${id}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return null;
+}
+
+/** Poll filled order for Delta `paid_commission` + average fill (POST ack can omit them). */
+async function enrichRestOrderFillDetails(
+  apiKey: string,
+  secret: string,
+  initial: Record<string, unknown>,
+  contractSize: number,
+  lots: number,
+): Promise<{ fillPrice: number | null; feeCost: number }> {
+  let row = initial;
+  const orderId = String(initial.id ?? "").trim();
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const fillPrice = parseOrderFillPrice(row);
+    const fee = parseOrderCommission(row);
+    if (fillPrice != null && fee != null) {
+      return { fillPrice, feeCost: Math.abs(fee) };
+    }
+    if (attempt >= 4 || !orderId) break;
+    await new Promise((r) => setTimeout(r, 350));
+    const fresh = await fetchDeltaOrderById(apiKey, secret, orderId);
+    if (fresh) row = fresh;
+  }
+
+  const fillPrice = parseOrderFillPrice(row);
+  let feeCost = parseOrderCommission(row);
+  if (feeCost == null && fillPrice != null && fillPrice > 0) {
+    // Delta India taker ≈ 0.05% + GST (~0.059%) when API commission not yet available.
+    feeCost = lots * contractSize * fillPrice * 0.00059;
+  }
+  return {
+    fillPrice,
+    feeCost:
+      feeCost != null && Number.isFinite(feeCost) ? Math.max(0, Math.abs(feeCost)) : 0,
+  };
+}
+
 async function resolveDeltaProductNumericId(
   productRef: string,
 ): Promise<{ symbol: string; productId: number; contractSize: number } | null> {
@@ -155,16 +235,15 @@ async function executeDeltaMarketOrderViaRest(
       return { success: false, error: "Delta REST order returned empty result" };
     }
 
-    const fillPrice =
-      numberOrNull(order.average_fill_price) ??
-      numberOrNull(order.average_price) ??
-      numberOrNull(order.price);
-    const feeCost =
-      numberOrNull(order.paid_commission) ??
-      numberOrNull(order.commission) ??
-      (fillPrice != null && fillPrice > 0
-        ? lots * resolved.contractSize * fillPrice * 0.0005
-        : 0);
+    const enriched = await enrichRestOrderFillDetails(
+      apiKey,
+      secret,
+      order,
+      resolved.contractSize,
+      lots,
+    );
+    const fillPrice = enriched.fillPrice;
+    const feeCost = enriched.feeCost;
 
     const orderIdRaw = order.id;
     const orderId =
@@ -902,7 +981,18 @@ function extractFeeCostFromOrder(order: unknown): number | null {
   const o = order as {
     fee?: { cost?: unknown } | null;
     fees?: Array<{ cost?: unknown } | null> | null;
+    paid_commission?: unknown;
+    commission?: unknown;
+    info?: Record<string, unknown> | null;
   };
+  const fromDelta =
+    numberOrNull(o.paid_commission) ??
+    numberOrNull(o.commission) ??
+    (o.info != null && typeof o.info === "object"
+      ? parseOrderCommission(o.info)
+      : null);
+  if (fromDelta != null) return Math.abs(fromDelta);
+
   const direct = numberOrNull(o.fee?.cost);
   if (direct != null) return Math.abs(direct);
   if (Array.isArray(o.fees)) {
@@ -1867,6 +1957,7 @@ export async function executeTrade(
 ): Promise<ExecuteTradeResult> {
   const clientOrderId = opts?.clientOrderId?.trim() || undefined;
   const inputSymbol = symbol.trim();
+  const reduceOnly = opts?.reduceOnly === true;
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
@@ -1880,8 +1971,8 @@ export async function executeTrade(
     const isOptionOrder =
       isDeltaOptionProductId(inputSymbol) || /^\d+$/.test(inputSymbol);
 
-    // Options: Delta REST first (CCXT loadMarkets omits most live contracts).
-    if (isOptionOrder) {
+    // Delta REST first — authoritative `paid_commission`, fill price, contract_value.
+    {
       const restResult = await executeDeltaMarketOrderViaRest(
         apiKey,
         secret,
@@ -1896,16 +1987,22 @@ export async function executeTrade(
         );
         return restResult;
       }
-      if (opts?.reduceOnly === true) {
+      if (reduceOnly) {
         console.warn(
-          `[copy-exec] reduceOnly option close failed via REST for "${inputSymbol}" — ` +
-            `aborting (CCXT fallback disabled to prevent reverse entry): ${restResult.error ?? "unknown"}`,
+          `[copy-exec] reduceOnly close failed via REST for "${inputSymbol}" — ` +
+            `aborting (CCXT fallback disabled): ${restResult.error ?? "unknown"}`,
         );
         return restResult;
       }
-      console.warn(
-        `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
-      );
+      if (isOptionOrder) {
+        console.warn(
+          `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
+        );
+      } else {
+        console.warn(
+          `[copy-exec] REST perp order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
+        );
+      }
     }
 
     const exchange = await getAuthClient(apiKey, secret);
@@ -1940,13 +2037,13 @@ export async function executeTrade(
     console.log(
       `[copy-exec] createMarketOrder side=${side} lots=${size} ` +
         `inputSymbol="${inputSymbol}" canonicalProductId="${canonicalProductId}" ` +
-        `ccxtSymbol="${ccxtSymbol}" reduceOnly=${opts?.reduceOnly === true} ` +
+        `ccxtSymbol="${ccxtSymbol}" reduceOnly=${reduceOnly} ` +
         `clientOrderId=${clientOrderId ?? "none"}`,
     );
 
     const ccxtSide = side === "BUY" ? "buy" : "sell";
     const params: Record<string, unknown> = {};
-    if (opts?.reduceOnly === true) {
+    if (reduceOnly) {
       params.reduceOnly = true;
       params.reduce_only = true;
     }
@@ -1984,23 +2081,23 @@ export async function executeTrade(
     const explicitFee = extractFeeCostFromOrder(order);
     let feeCost = explicitFee ?? 0;
     if (!(Number.isFinite(feeCost) && feeCost > 0)) {
-      let contractSize = 1;
+      const fallbackCs = deltaContractSizeFallback(inputSymbol);
+      let contractSize = fallbackCs;
       try {
         const m = exchange.market(ccxtSymbol);
-        const cs = Number(m.contractSize ?? 1);
-        contractSize =
-          Number.isFinite(cs) && cs > 0
-            ? cs
-            : deltaContractSizeFallback(symbol);
+        const cs = Number(m.contractSize ?? NaN);
+        if (Number.isFinite(cs) && cs > 0) {
+          contractSize = fallbackCs < 1 && cs >= 1 ? fallbackCs : cs;
+        }
       } catch {
-        contractSize = deltaContractSizeFallback(symbol);
+        contractSize = fallbackCs;
       }
       const executedPrice =
         numberOrNull(orderObj.average) ??
         numberOrNull(orderObj.price) ??
         numberOrNull(orderObj.last);
       if (executedPrice != null && Number.isFinite(executedPrice) && executedPrice > 0) {
-        feeCost = Math.abs(size) * contractSize * executedPrice * 0.0005;
+        feeCost = Math.abs(size) * contractSize * executedPrice * 0.00059;
       } else {
         feeCost = 0;
       }
@@ -2156,15 +2253,55 @@ function deltaContractSizeFallback(symbol: string): number {
 }
 
 export async function fetchDeltaSwapContractSize(symbol: string): Promise<number> {
+  const fallback = deltaContractSizeFallback(symbol);
+  const ref = symbol.trim();
+  if (!ref) return fallback;
+
+  const resolved = await resolveDeltaProductNumericId(ref);
+  if (resolved != null && resolved.contractSize > 0) {
+    return resolved.contractSize;
+  }
+
   try {
     const exchange = await getPublicClient();
-    const ccxtSymbol = resolveCcxtSymbol(exchange, symbol);
+    const ccxtSymbol = resolveCcxtSymbol(exchange, ref);
     const market = exchange.market(ccxtSymbol);
-    const cs = Number(market.contractSize ?? 1);
-    return Number.isFinite(cs) && cs > 0 ? cs : 1;
+    const cs = Number(market.contractSize ?? NaN);
+    if (!Number.isFinite(cs) || cs <= 0) return fallback;
+    // CCXT often reports `1` for Delta India linear contracts — use known fallbacks.
+    if (fallback < 1 && cs >= 1) return fallback;
+    return cs;
   } catch {
-    return 1;
+    return fallback;
   }
+}
+
+/** Exit price for booking realized PnL — options use bid/offer, perps use last/mark. */
+export async function fetchDeltaSettlementExitPrice(
+  symbol: string,
+  side: TradeSide,
+): Promise<number | null> {
+  const ref = symbol.trim();
+  if (!ref) return null;
+
+  if (isDeltaOptionProductId(ref)) {
+    const [l2, rest] = await Promise.all([
+      fetchDeltaL2BestQuotes(ref),
+      fetchDeltaTickerFromRestApi(ref),
+    ]);
+    if (side === "SELL" && l2.ask != null && l2.ask > 0) return l2.ask;
+    if (side === "BUY" && l2.bid != null && l2.bid > 0) return l2.bid;
+    if (side === "SELL" && rest.ask != null && rest.ask > 0) return rest.ask;
+    if (side === "BUY" && rest.bid != null && rest.bid > 0) return rest.bid;
+    if (rest.last != null && rest.last > 0) return rest.last;
+    return null;
+  }
+
+  const tick = await fetchDeltaTicker(ref);
+  if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+    return tick.last;
+  }
+  return null;
 }
 
 function extractMarkFromCcxtTicker(ticker: {

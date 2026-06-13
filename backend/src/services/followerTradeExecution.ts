@@ -4,6 +4,7 @@ import {
   executeTrade,
   fetchDeltaOpenPositions,
   fetchDeltaOrderAckByClientOrderId,
+  fetchDeltaSettlementExitPrice,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
@@ -1353,13 +1354,21 @@ async function bookFollowerLegSettlementWhenFlat(
   },
 ): Promise<void> {
   let exitPrice = 0;
-  try {
-    const tick = await fetchDeltaTicker(args.symbol);
-    if (tick.last != null && Number.isFinite(tick.last)) {
-      exitPrice = tick.last;
+  const fromMarket = await fetchDeltaSettlementExitPrice(
+    args.symbol,
+    args.side,
+  );
+  if (fromMarket != null && Number.isFinite(fromMarket) && fromMarket > 0) {
+    exitPrice = fromMarket;
+  } else {
+    try {
+      const tick = await fetchDeltaTicker(args.symbol);
+      if (tick.last != null && Number.isFinite(tick.last)) {
+        exitPrice = tick.last;
+      }
+    } catch {
+      /* optional */
     }
-  } catch {
-    /* ticker optional */
   }
   if (exitPrice <= 0 && args.masterEntryPrice > 0) {
     exitPrice = args.masterEntryPrice;
