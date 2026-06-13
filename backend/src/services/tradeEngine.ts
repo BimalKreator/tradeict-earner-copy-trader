@@ -4,7 +4,6 @@ import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
   extractDeltaProductSymbolFromPayload,
   fetchDeltaOpenPositions,
-  fetchDeltaSwapContractSize,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
@@ -24,6 +23,9 @@ import {
   type ExitReasonValue,
 } from "../constants/exitReasons.js";
 import { isHardExecutionError } from "./followerTradeExecution.js";
+import {
+  settleOpenCopyTradesForLeg,
+} from "./tradeSettlementService.js";
 import {
   STRATEGY_SELECT_IS_ACTIVE,
   STRATEGY_SELECT_LATE_JOIN,
@@ -1096,54 +1098,6 @@ async function recordTrade(
   }
 }
 
-function deltaContractSizeFallback(symbol: string): number {
-  const u = symbol.toUpperCase();
-  if (u.includes("BTC")) return 0.001;
-  if (u.includes("ETH")) return 0.01;
-  return 1;
-}
-
-async function realizedPnlUsd(args: {
-  symbol: string;
-  side: TradeSide;
-  entryPrice: number;
-  exitPrice: number;
-  contracts: number;
-}): Promise<number> {
-  let contractFactor = deltaContractSizeFallback(args.symbol);
-  try {
-    contractFactor = await fetchDeltaSwapContractSize(args.symbol);
-  } catch {
-    /* keep fallback */
-  }
-  const realBaseSize = Math.abs(args.contracts) * contractFactor;
-  const diff = args.exitPrice - args.entryPrice;
-  return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
-}
-
-function entryPriceMatches(stored: number, leader: number): boolean {
-  const eps = Math.max(1e-8, Math.abs(leader) * 1e-6);
-  return Math.abs(stored - leader) <= eps;
-}
-
-/**
- * Per-trade revenue-share fee: positive realized PnL × strategy profitShare%.
- * Negative or zero PnL contributes 0 (no fee on losing trades).
- *
- * Note: this is the *per-trade* display value persisted to `Trade.revenueShareAmt`
- * (used by the user trades page "Est. Fee" column). The actual billable amount
- * is computed cumulatively at month end by `generateMonthlyInvoices`, which
- * correctly netts wins against losses across the whole month.
- */
-function computeRevenueShareAmt(
-  realizedPnl: number,
-  profitSharePct: number,
-): number {
-  if (!Number.isFinite(realizedPnl) || realizedPnl <= 0) return 0;
-  if (!Number.isFinite(profitSharePct) || profitSharePct <= 0) return 0;
-  return realizedPnl * (profitSharePct / 100);
-}
-
 async function closeFollowerTradeAndRecordPnl(
   prisma: PrismaClient,
   args: {
@@ -1158,66 +1112,16 @@ async function closeFollowerTradeAndRecordPnl(
     exitReason?: ExitReasonValue | null;
   },
 ): Promise<void> {
-  const exitReason = resolveCloseExitReason(
-    args.strategyId,
-    args.symbol,
-    args.exitReason,
-  );
-  const candidates = await prisma.trade.findMany({
-    where: {
-      userId: args.userId,
-      strategyId: args.strategyId,
-      symbol: args.symbol,
-      side: args.side,
-      status: TradeStatus.OPEN,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  const open =
-    candidates.find((t) => entryPriceMatches(t.entryPrice, args.masterEntryPrice)) ??
-    candidates[0];
-
-  if (!open) return;
-
-  const grossPnl = await realizedPnlUsd({
-    symbol: args.symbol,
-    side: args.side,
-    entryPrice: open.entryPrice,
-    exitPrice: args.exitPrice,
-    contracts: args.sizedPosition,
-  });
-  const totalTradingFee =
-    Math.max(0, Number(open.tradingFee ?? 0)) + Math.max(0, Number(args.exitFee ?? 0));
-  const netPnl = grossPnl - totalTradingFee;
-
-  // Fetch profitShare for the per-trade revenue-share snapshot. Closes are
-  // infrequent so a single extra select is cheap; doing it here keeps every
-  // call site of this function (WS handler today, future paths) consistent.
-  const strategyMeta = await prisma.strategy.findUnique({
-    where: { id: args.strategyId },
-    select: { profitShare: true },
-  });
-  const profitSharePct = strategyMeta?.profitShare ?? 0;
-  const revenueShareAmt = computeRevenueShareAmt(netPnl, profitSharePct);
-
-  await prisma.trade.update({
-    where: { id: open.id },
-    data: {
-      exitPrice: args.exitPrice,
-      tradingFee: totalTradingFee,
-      pnl: netPnl,
-      tradePnl: netPnl,
-      revenueShareAmt,
-      status: TradeStatus.CLOSED,
-      exitReason,
-    },
-  });
-
-  await recordTradePnl(prisma, {
+  await settleOpenCopyTradesForLeg(prisma, {
     userId: args.userId,
     strategyId: args.strategyId,
-    tradeProfit: netPnl,
+    symbol: args.symbol,
+    side: args.side,
+    exitPrice: args.exitPrice,
+    exitFee: args.exitFee,
+    exitReason: args.exitReason,
+    masterEntryPrice: args.masterEntryPrice,
+    closeAllMatching: true,
   });
 }
 
@@ -1233,61 +1137,16 @@ export async function closeOpenTradesForManualAdmin(
     exitFee: number;
   },
 ): Promise<number> {
-  const opens = await prisma.trade.findMany({
-    where: {
-      userId: args.userId,
-      strategyId: args.strategyId,
-      symbol: args.symbol,
-      side: args.side,
-      status: TradeStatus.OPEN,
-    },
-    orderBy: { createdAt: "asc" },
+  return settleOpenCopyTradesForLeg(prisma, {
+    userId: args.userId,
+    strategyId: args.strategyId,
+    symbol: args.symbol,
+    side: args.side,
+    exitPrice: args.exitPrice,
+    exitFee: args.exitFee,
+    exitReason: EXIT_REASON.ADMIN_PANEL,
+    closeAllMatching: true,
   });
-  if (opens.length === 0) return 0;
-
-  const strategyMeta = await prisma.strategy.findUnique({
-    where: { id: args.strategyId },
-    select: { profitShare: true },
-  });
-  const profitSharePct = strategyMeta?.profitShare ?? 0;
-
-  let closed = 0;
-  for (let i = 0; i < opens.length; i += 1) {
-    const open = opens[i]!;
-    const legExitFee = i === opens.length - 1 ? Math.max(0, args.exitFee) : 0;
-    const grossPnl = await realizedPnlUsd({
-      symbol: args.symbol,
-      side: args.side,
-      entryPrice: open.entryPrice,
-      exitPrice: args.exitPrice,
-      contracts: open.size,
-    });
-    const totalTradingFee =
-      Math.max(0, Number(open.tradingFee ?? 0)) + legExitFee;
-    const netPnl = grossPnl - totalTradingFee;
-    const revenueShareAmt = computeRevenueShareAmt(netPnl, profitSharePct);
-
-    await prisma.trade.update({
-      where: { id: open.id },
-      data: {
-        exitPrice: args.exitPrice,
-        tradingFee: totalTradingFee,
-        pnl: netPnl,
-        tradePnl: netPnl,
-        revenueShareAmt,
-        status: TradeStatus.CLOSED,
-        exitReason: EXIT_REASON.ADMIN_PANEL,
-      },
-    });
-
-    await recordTradePnl(prisma, {
-      userId: args.userId,
-      strategyId: args.strategyId,
-      tradeProfit: netPnl,
-    });
-    closed += 1;
-  }
-  return closed;
 }
 
 function failedReasonFromExecutionError(error?: string): ExitReasonValue {
@@ -1952,22 +1811,38 @@ async function notifyMasterFlat(
   }
 }
 
-/** Close all follower books after REST master auto-exit (WS may lag). */
+/** Close all follower books after master auto-exit or manual flat burst. */
 export async function fanOutMasterFlatCloses(
-  _prisma: PrismaClient,
-  _strategyId: string,
+  prisma: PrismaClient,
+  strategyId: string,
   legs: Array<{
     symbolKey: string;
     side: TradeSide;
     contracts: number;
     entryPrice: number;
   }>,
-  _exitReason: ExitReasonValue,
+  exitReason: ExitReasonValue,
 ): Promise<void> {
-  console.log(
-    `[tradeEngine] fanOutMasterFlatCloses skipped (${legs.length} leg(s)) — ` +
-      `follower closes are centralized in pollMasterPositionsFallback (5s REST) only.`,
-  );
+  for (const leg of legs) {
+    try {
+      await notifyMasterFlat(
+        prisma,
+        strategyId,
+        {
+          symbol: leg.symbolKey,
+          side: leg.side,
+          masterEntryPrice: leg.entryPrice,
+          masterContracts: leg.contracts,
+        },
+        { exitReason },
+      );
+    } catch (err) {
+      console.error(
+        `[tradeEngine] fanOutMasterFlatCloses failed ${leg.symbolKey} ${leg.side}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 }
 
 type LastOpenMeta = {
@@ -2129,6 +2004,88 @@ class MasterPositionTracker {
     if (exchangeOpenedAt) return exchangeOpenedAt;
     const ms = this.legOpenedAtMs.get(masterLegKey(symbol, side));
     return ms != null && Number.isFinite(ms) ? new Date(ms) : null;
+  }
+}
+
+/**
+ * Safety net: OPEN Trade rows while the follower exchange book is flat → book PnL.
+ */
+async function reconcileStaleOpenCopyTrades(
+  prisma: PrismaClient,
+  strategyId: string,
+  cancelled: { value: boolean },
+): Promise<void> {
+  const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+  for (const sub of subs) {
+    if (cancelled.value) return;
+
+    const creds = resolveSubscriptionCreds(sub);
+    if (!creds) continue;
+
+    const openTrades = await prisma.trade.findMany({
+      where: {
+        userId: sub.userId,
+        strategyId,
+        status: TradeStatus.OPEN,
+      },
+    });
+    if (openTrades.length === 0) continue;
+
+    let exchangeOpen: DeltaLivePosition[] = [];
+    try {
+      exchangeOpen = await fetchDeltaOpenPositions(
+        creds.apiKey,
+        creds.apiSecret,
+        { lite: true, skipCache: true },
+      );
+    } catch (err) {
+      console.warn(
+        `[trade-settlement] stale reconcile fetch failed user=${sub.userId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      continue;
+    }
+
+    for (const trade of openTrades) {
+      if (cancelled.value) return;
+      const side: TradeSide = trade.side.toUpperCase() === "SELL" ? "SELL" : "BUY";
+      const stillOpen = exchangeOpen.some(
+        (p) =>
+          p.side === side &&
+          tradePositionSymbolsAlign(trade.symbol, p.symbolKey) &&
+          Math.abs(p.contracts) >= 1e-12,
+      );
+      if (stillOpen) continue;
+
+      let exitPrice = 0;
+      try {
+        const tick = await fetchDeltaTicker(trade.symbol);
+        if (tick.last != null && Number.isFinite(tick.last)) {
+          exitPrice = tick.last;
+        }
+      } catch {
+        /* optional */
+      }
+      if (exitPrice <= 0 && trade.entryPrice > 0) {
+        exitPrice = trade.entryPrice;
+      }
+
+      const settled = await settleOpenCopyTradesForLeg(prisma, {
+        userId: sub.userId,
+        strategyId,
+        symbol: trade.symbol,
+        side,
+        exitPrice,
+        exitFee: 0,
+        exitReason: EXIT_REASON.MASTER_CLOSED,
+        closeAllMatching: true,
+      });
+      if (settled > 0) {
+        console.log(
+          `[trade-settlement] stale OPEN trade booked user=${sub.userId} ${trade.symbol} ${side}`,
+        );
+      }
+    }
   }
 }
 
@@ -2418,6 +2375,8 @@ async function pollMasterPositionsFallback(
         }
       }
     }
+
+    await reconcileStaleOpenCopyTrades(prisma, strat.id, cancelled);
   } catch (err) {
     console.error(
       "[MASTER-REST-SYNC] poll failed:",

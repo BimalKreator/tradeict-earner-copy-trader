@@ -44,6 +44,7 @@ import {
   trimOpenMasterBotQuantity,
   incrementOrRecordMasterTradePosition,
 } from "./tradePositionService.js";
+import { settleOpenCopyTradesForLeg } from "./tradeSettlementService.js";
 import {
   buildMasterNoCopyClientOrderId,
   registerMasterNoCopyRestSuppress,
@@ -1338,6 +1339,46 @@ export type MasterCloseFanoutResult = {
 };
 
 /**
+ * Exchange leg is already flat — book CLOSED + PnL for any lingering OPEN Trade rows.
+ */
+async function bookFollowerLegSettlementWhenFlat(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    side: TradeSide;
+    masterEntryPrice: number;
+    exitReason?: ExitReasonValue;
+  },
+): Promise<void> {
+  let exitPrice = 0;
+  try {
+    const tick = await fetchDeltaTicker(args.symbol);
+    if (tick.last != null && Number.isFinite(tick.last)) {
+      exitPrice = tick.last;
+    }
+  } catch {
+    /* ticker optional */
+  }
+  if (exitPrice <= 0 && args.masterEntryPrice > 0) {
+    exitPrice = args.masterEntryPrice;
+  }
+
+  await settleOpenCopyTradesForLeg(prisma, {
+    userId: args.userId,
+    strategyId: args.strategyId,
+    symbol: args.symbol,
+    side: args.side,
+    exitPrice,
+    exitFee: 0,
+    exitReason: args.exitReason,
+    masterEntryPrice: args.masterEntryPrice,
+    closeAllMatching: true,
+  });
+}
+
+/**
  * Place reduce-only closes for each Future Hedge follower when the master leg flats.
  */
 export async function syncMasterCloseToFutureHedgeFollowers(
@@ -1422,6 +1463,14 @@ export async function syncMasterCloseToFutureHedgeFollowers(
               `flat on exchange (liveLots=${exchangeOpenLots}) and no DB qty`,
           );
         }
+        await bookFollowerLegSettlementWhenFlat(prisma, {
+          userId: sub.userId,
+          strategyId,
+          symbol: snap.symbol,
+          side: snap.side,
+          masterEntryPrice: snap.masterEntryPrice,
+          ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
+        });
         return;
       }
 
