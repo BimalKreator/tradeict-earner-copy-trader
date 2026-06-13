@@ -45,6 +45,7 @@ import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
 import {
   hardDeleteStrategyByExactTitle,
   removeLegacyCryptoOptionsStrategies,
+  consolidateDuplicateFutureHedgeStrategies,
 } from "./services/strategyCleanupService.js";
 
 const CRYPTO_OPTIONS_GHOST_TITLE =
@@ -83,6 +84,13 @@ void (async () => {
     console.log(
       `[BOOT] Primary strategy: "${legacy.primaryStrategyTitle}" (${legacy.primaryStrategyId})`,
     );
+    const dup = await consolidateDuplicateFutureHedgeStrategies(prisma);
+    if (dup.removed > 0) {
+      console.log(
+        `[BOOT] Merged ${dup.removed} duplicate Future Hedge row(s) → canonical=${dup.canonicalId} ` +
+          `(subscriptions moved=${dup.mergedSubscriptions})`,
+      );
+    }
   } catch (err) {
     console.error("[BOOT] Strategy cleanup failed:", err);
   }

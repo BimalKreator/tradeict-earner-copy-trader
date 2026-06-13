@@ -17,6 +17,11 @@ import {
   voidPendingEarnedCommissionsForSourceUser,
 } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
+import {
+  normalizeFutureHedgeStrategyId,
+} from "../services/strategySubscriptionService.js";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { resolveCanonicalFutureHedgeStrategyId } from "../services/futureHedgeService.js";
 
 export type RecordTradePnlResult = {
   pnlRecordId: string;
@@ -323,15 +328,20 @@ export function createSubscriptionController(prisma: PrismaClient) {
         couponCode?: unknown;
       };
 
-      const strategyId =
+      const rawStrategyId =
         typeof body.strategyId === "string" ? body.strategyId.trim() : "";
       const couponCode =
         typeof body.couponCode === "string" ? body.couponCode : undefined;
 
-      if (!strategyId) {
+      if (!rawStrategyId) {
         res.status(400).json({ error: "strategyId is required" });
         return;
       }
+
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId,
+      );
 
       const strategy = await prisma.strategy.findUnique({
         where: { id: strategyId },
@@ -431,7 +441,14 @@ export function createSubscriptionController(prisma: PrismaClient) {
         orderBy: { createdAt: "desc" },
         select: strategySelectPublic,
       });
-      res.json(strategies);
+      const canonicalFutureHedgeId =
+        await resolveCanonicalFutureHedgeStrategyId(prisma);
+      const deduped = strategies.filter(
+        (s) =>
+          s.title !== FUTURE_HEDGE_STRATEGY_TITLE ||
+          s.id === canonicalFutureHedgeId,
+      );
+      res.json(deduped);
     } catch (err) {
       next(err);
     }
@@ -509,16 +526,20 @@ export function createSubscriptionController(prisma: PrismaClient) {
       }
 
       const raw = req.params.strategyId;
-      const strategyId = Array.isArray(raw) ? raw[0] : raw;
-      if (typeof strategyId !== "string" || !strategyId.trim()) {
+      const rawStrategyId = Array.isArray(raw) ? raw[0] : raw;
+      if (typeof rawStrategyId !== "string" || !rawStrategyId.trim()) {
         res.status(400).json({ error: "strategyId is required" });
         return;
       }
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId.trim(),
+      );
 
       const sub = await prisma.userStrategySubscription.findFirst({
         where: {
           userId,
-          strategyId: strategyId.trim(),
+          strategyId,
           status: {
             in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
           },
@@ -555,8 +576,14 @@ export function createSubscriptionController(prisma: PrismaClient) {
     try {
       const userId = req.userId;
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-      const strategyId = String(req.params.strategyId ?? "").trim();
-      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const rawStrategyId = String(req.params.strategyId ?? "").trim();
+      if (!rawStrategyId) {
+        return void res.status(400).json({ error: "strategyId is required" });
+      }
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId,
+      );
 
       const body = req.body as { multiplier?: unknown; exchangeAccountId?: unknown };
       const multiplier = parsePositiveMultiplier(body.multiplier);
@@ -619,8 +646,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
     try {
       const userId = req.userId;
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-      const strategyId = String(req.params.strategyId ?? "").trim();
-      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const rawStrategyId = String(req.params.strategyId ?? "").trim();
+      if (!rawStrategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId,
+      );
       const body = req.body as { multiplier?: unknown };
       const multiplier = parsePositiveMultiplier(body.multiplier);
       if (multiplier == null) {
@@ -653,8 +684,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
     try {
       const userId = req.userId;
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-      const strategyId = String(req.params.strategyId ?? "").trim();
-      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const rawStrategyId = String(req.params.strategyId ?? "").trim();
+      if (!rawStrategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId,
+      );
       const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: SubscriptionStatus.ACTIVE },
         select: { id: true },
@@ -678,8 +713,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
     try {
       const userId = req.userId;
       if (!userId) return void res.status(401).json({ error: "Unauthorized" });
-      const strategyId = String(req.params.strategyId ?? "").trim();
-      if (!strategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const rawStrategyId = String(req.params.strategyId ?? "").trim();
+      if (!rawStrategyId) return void res.status(400).json({ error: "strategyId is required" });
+      const strategyId = await normalizeFutureHedgeStrategyId(
+        prisma,
+        rawStrategyId,
+      );
       const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: USER_PAUSED_STATUS },
         include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },

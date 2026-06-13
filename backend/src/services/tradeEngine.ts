@@ -60,6 +60,8 @@ import {
   subscriptionMultiplier,
 } from "./strategySubscriptionService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { consolidateDuplicateFutureHedgeStrategies } from "./strategyCleanupService.js";
+import { resolveCanonicalFutureHedgeStrategy } from "./futureHedgeService.js";
 import {
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
@@ -2825,19 +2827,39 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
   let qtyReconcileTimeout: ReturnType<typeof setTimeout> | null = null;
   let autoExitTimeout: ReturnType<typeof setTimeout> | null = null;
   let masterRestPollInterval: ReturnType<typeof setInterval> | null = null;
+  let futureHedgeBootstrapped = false;
+  let futureHedgeBootstrapPromise: Promise<void> | null = null;
+
+  function ensureFutureHedgeConsolidated(): Promise<void> {
+    if (futureHedgeBootstrapped) return Promise.resolve();
+    if (!futureHedgeBootstrapPromise) {
+      futureHedgeBootstrapPromise = (async () => {
+        try {
+          const result = await consolidateDuplicateFutureHedgeStrategies(prisma);
+          if (result.removed > 0) {
+            console.log(
+              `[tradeEngine] consolidated ${result.removed} duplicate Future Hedge row(s) ` +
+                `→ canonical=${result.canonicalId} mergedSubs=${result.mergedSubscriptions}`,
+            );
+          }
+        } catch (err) {
+          console.error(
+            "[tradeEngine] Future Hedge consolidation failed:",
+            err instanceof Error ? err.message : err,
+          );
+        } finally {
+          futureHedgeBootstrapped = true;
+        }
+      })();
+    }
+    return futureHedgeBootstrapPromise;
+  }
 
   async function syncRoster(): Promise<void> {
     if (cancelled.value) return;
     try {
-      const fh = await prisma.strategy.findFirst({
-        where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
-        select: {
-          id: true,
-          isActive: true,
-          masterApiKey: true,
-          masterApiSecret: true,
-        },
-      });
+      await ensureFutureHedgeConsolidated();
+      const fh = await resolveCanonicalFutureHedgeStrategy(prisma);
 
       const want = new Set<string>();
 

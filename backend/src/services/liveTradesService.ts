@@ -19,6 +19,7 @@ import {
   type CopySubscriptionRow,
 } from "./strategySubscriptionService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { resolveCanonicalFutureHedgeStrategyId } from "./futureHedgeService.js";
 
 /** Per-account Delta fetch budget — avoids nginx 502 from long sequential CCXT loadMarkets. */
 const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
@@ -659,8 +660,12 @@ export async function getUserLiveTradeRows(
 export async function getAdminLiveTradesByStrategy(
   prisma: PrismaClient,
 ): Promise<AdminLiveTradesGroup[]> {
+  const canonicalId = await resolveCanonicalFutureHedgeStrategyId(prisma);
   const strategies = await prisma.strategy.findMany({
-    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+    where: {
+      title: FUTURE_HEDGE_STRATEGY_TITLE,
+      ...(canonicalId ? { id: canonicalId } : {}),
+    },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,

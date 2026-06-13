@@ -42,14 +42,73 @@ export function mapFutureHedgeConfig(row: FutureHedgeConfig): FutureHedgeConfigD
   };
 }
 
+type FutureHedgeStrategyRow = Strategy & {
+  futureHedgeConfig: FutureHedgeConfig | null;
+  _count?: { subscriptions: number };
+};
+
+function scoreFutureHedgeStrategyCandidate(row: {
+  masterApiKey: string;
+  masterApiSecret: string;
+  futureHedgeConfig: FutureHedgeConfig | null;
+  _count?: { subscriptions: number };
+  createdAt: Date;
+}): number {
+  let score = 0;
+  if (row.masterApiKey?.trim() && row.masterApiSecret?.trim()) score += 10_000;
+  if (row.futureHedgeConfig) score += 1_000;
+  score += (row._count?.subscriptions ?? 0) * 10;
+  score -= row.createdAt.getTime() / 1e15;
+  return score;
+}
+
+/** When duplicate title rows exist, pick the one wired to master Delta keys / subscribers. */
+export async function resolveCanonicalFutureHedgeStrategy(
+  prisma: PrismaClient,
+): Promise<FutureHedgeStrategyRow | null> {
+  const rows = await prisma.strategy.findMany({
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+    orderBy: { createdAt: "asc" },
+    include: {
+      futureHedgeConfig: true,
+      _count: { select: { subscriptions: true } },
+    },
+  });
+  if (rows.length === 0) return null;
+  if (rows.length === 1) return rows[0]!;
+  return rows.reduce((best, cur) =>
+    scoreFutureHedgeStrategyCandidate(cur) > scoreFutureHedgeStrategyCandidate(best)
+      ? cur
+      : best,
+  );
+}
+
+export async function resolveCanonicalFutureHedgeStrategyId(
+  prisma: PrismaClient,
+): Promise<string | null> {
+  const row = await resolveCanonicalFutureHedgeStrategy(prisma);
+  return row?.id ?? null;
+}
+
+/** Map any Future Hedge strategy id to the canonical copy-engine row. */
+export async function normalizeFutureHedgeStrategyId(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<string> {
+  const row = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { title: true },
+  });
+  if (row?.title !== FUTURE_HEDGE_STRATEGY_TITLE) return strategyId;
+  const canonicalId = await resolveCanonicalFutureHedgeStrategyId(prisma);
+  return canonicalId ?? strategyId;
+}
+
 /** Find or create the platform strategy row and its hedge config. */
 export async function resolveFutureHedgeStrategy(
   prisma: PrismaClient,
 ): Promise<Strategy & { futureHedgeConfig: FutureHedgeConfig | null }> {
-  let strategy = await prisma.strategy.findFirst({
-    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
-    include: { futureHedgeConfig: true },
-  });
+  let strategy = await resolveCanonicalFutureHedgeStrategy(prisma);
 
   if (!strategy) {
     strategy = await prisma.strategy.create({

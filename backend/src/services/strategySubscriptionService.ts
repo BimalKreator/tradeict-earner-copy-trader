@@ -4,7 +4,7 @@ import {
   SubscriptionStatus,
   UserStatus,
 } from "@prisma/client";
-import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { resolveCanonicalFutureHedgeStrategyId } from "./futureHedgeService.js";
 
 /** Copy engine: only subscribers with an active row for the given strategy. */
 export function activeStrategySubscriptionWhere(
@@ -104,12 +104,16 @@ export function followerLotsFromMaster(
 export async function resolveFutureHedgeStrategyId(
   prisma: PrismaClient,
 ): Promise<string | null> {
-  const row = await prisma.strategy.findFirst({
-    where: { title: FUTURE_HEDGE_STRATEGY_TITLE, isActive: true },
-    select: { id: true },
+  const id = await resolveCanonicalFutureHedgeStrategyId(prisma);
+  if (!id) return null;
+  const row = await prisma.strategy.findUnique({
+    where: { id },
+    select: { isActive: true },
   });
-  return row?.id ?? null;
+  return row?.isActive ? id : null;
 }
+
+export { normalizeFutureHedgeStrategyId } from "./futureHedgeService.js";
 
 /** True only when the strategy row exists and `Strategy.isActive` is true. */
 export async function isStrategyCopyTradingActive(
