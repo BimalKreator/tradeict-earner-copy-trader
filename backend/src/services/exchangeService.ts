@@ -174,18 +174,59 @@ async function enrichRestOrderFillDetails(
 async function resolveDeltaProductNumericId(
   productRef: string,
 ): Promise<{ symbol: string; productId: number; contractSize: number } | null> {
-  const row = await fetchDeltaProductFromRestApi(productRef);
-  if (!row) return null;
+  for (const ref of deltaIndiaProductRefCandidates(productRef)) {
+    const row = await fetchDeltaProductFromRestApi(ref);
+    if (!row) continue;
 
-  const symbol = String(row.symbol ?? "").trim();
-  const productId = Number(row.id);
-  if (!symbol || !Number.isFinite(productId) || productId <= 0) return null;
+    const symbol = String(row.symbol ?? "").trim();
+    const productId = Number(row.id);
+    if (!symbol || !Number.isFinite(productId) || productId <= 0) continue;
 
-  const contractValue = Number(row.contract_value ?? 0.001);
-  const contractSize =
-    Number.isFinite(contractValue) && contractValue > 0 ? contractValue : 0.001;
+    const contractValue = Number(row.contract_value ?? 0.001);
+    const contractSize =
+      Number.isFinite(contractValue) && contractValue > 0 ? contractValue : 0.001;
 
-  return { symbol, productId, contractSize };
+    if (ref.trim().toUpperCase() !== productRef.trim().toUpperCase()) {
+      console.log(
+        `[exchangeService] resolved product "${productRef}" via alias "${ref}" → ${symbol}`,
+      );
+    }
+
+    return { symbol, productId, contractSize };
+  }
+
+  return null;
+}
+
+/** Delta India perp ids use …USD (e.g. BTCUSD); copy rows often store …USDT. */
+function deltaIndiaProductRefCandidates(ref: string): string[] {
+  const trimmed = ref.trim();
+  const upper = trimmed.toUpperCase();
+  if (!upper) return [];
+
+  if (isDeltaOptionProductId(trimmed) || /^\d+$/.test(trimmed)) {
+    return [trimmed];
+  }
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (v: string) => {
+    const t = v.trim();
+    if (!t) return;
+    const key = t.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+
+  push(trimmed);
+  if (upper.endsWith("USDT")) {
+    push(`${upper.slice(0, -4)}USD`);
+  } else if (upper.endsWith("USD") && !upper.endsWith("USDT")) {
+    push(`${upper.slice(0, -3)}USDT`);
+  }
+
+  return out;
 }
 
 /**
@@ -1987,14 +2028,19 @@ export async function executeTrade(
         );
         return restResult;
       }
-      if (reduceOnly) {
+      if (reduceOnly && isOptionOrder) {
         console.warn(
-          `[copy-exec] reduceOnly close failed via REST for "${inputSymbol}" — ` +
+          `[copy-exec] reduceOnly option close failed via REST for "${inputSymbol}" — ` +
             `aborting (CCXT fallback disabled): ${restResult.error ?? "unknown"}`,
         );
         return restResult;
       }
-      if (isOptionOrder) {
+      if (reduceOnly) {
+        console.warn(
+          `[copy-exec] reduceOnly perp close REST failed for "${inputSymbol}" — ` +
+            `trying CCXT fallback: ${restResult.error ?? "unknown"}`,
+        );
+      } else if (isOptionOrder) {
         console.warn(
           `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
         );
