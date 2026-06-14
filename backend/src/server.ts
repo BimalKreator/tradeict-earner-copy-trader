@@ -1,4 +1,7 @@
 import "dotenv/config";
+import { installTradeLogFilter } from "./utils/tradeLogger.js";
+
+installTradeLogFilter();
 
 if (!process.env.PROCESS_ENCRYPTION_KEY) {
   console.error("FATAL: PROCESS_ENCRYPTION_KEY is missing");

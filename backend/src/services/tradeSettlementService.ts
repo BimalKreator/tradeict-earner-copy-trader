@@ -13,7 +13,33 @@ import {
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
-import { tradePositionSymbolsAlign } from "./tradePositionService.js";
+import {
+  sumOpenFollowerBotQuantity,
+  tradePositionSymbolsAlign,
+} from "./tradePositionService.js";
+
+/** Do not ghost-settle young OPEN rows — options REST can lag minutes behind order ack. */
+const STALE_RECONCILE_MIN_AGE_MS = 10 * 60 * 1000;
+
+export type MasterOpenLegRef = {
+  symbol: string;
+  side: TradeSide;
+  masterContracts: number;
+};
+
+function masterStillHasOpenLeg(
+  masterLegs: MasterOpenLegRef[] | undefined,
+  symbol: string,
+  side: TradeSide,
+): boolean {
+  if (!masterLegs?.length) return false;
+  return masterLegs.some(
+    (m) =>
+      m.masterContracts > 0 &&
+      m.side === side &&
+      tradePositionSymbolsAlign(symbol, m.symbol),
+  );
+}
 
 export function entryPriceMatches(stored: number, leader: number): boolean {
   const eps = Math.max(1e-8, Math.abs(leader) * 1e-6);
@@ -277,6 +303,15 @@ export async function reconcileStaleOpenTradesForUser(
     userId: string;
     apiKey: string;
     apiSecret: string;
+    /** When set, OPEN rows for legs still on the master book are never ghost-settled. */
+    masterOpenLegs?: MasterOpenLegRef[];
+    /** Optional per-leg guard (e.g. copy inflight lock). */
+    shouldSkipStaleLeg?: (leg: {
+      userId: string;
+      strategyId: string;
+      symbol: string;
+      side: TradeSide;
+    }) => boolean;
   },
 ): Promise<{ settled: number; voided: number; skippedStillOpen: number }> {
   const openTrades = await prisma.trade.findMany({
@@ -309,6 +344,41 @@ export async function reconcileStaleOpenTradesForUser(
   for (const trade of openTrades) {
     const side: TradeSide =
       trade.side.toUpperCase() === "SELL" ? "SELL" : "BUY";
+
+    const tradeAgeMs = Date.now() - trade.createdAt.getTime();
+    if (tradeAgeMs < STALE_RECONCILE_MIN_AGE_MS) {
+      skippedStillOpen += 1;
+      continue;
+    }
+
+    if (masterStillHasOpenLeg(args.masterOpenLegs, trade.symbol, side)) {
+      skippedStillOpen += 1;
+      continue;
+    }
+
+    if (
+      args.shouldSkipStaleLeg?.({
+        userId: args.userId,
+        strategyId: trade.strategyId,
+        symbol: trade.symbol,
+        side,
+      })
+    ) {
+      skippedStillOpen += 1;
+      continue;
+    }
+
+    const botManagedQty = await sumOpenFollowerBotQuantity(prisma, {
+      strategyId: trade.strategyId,
+      userId: args.userId,
+      symbol: trade.symbol,
+      side,
+    });
+    if (botManagedQty >= 1) {
+      skippedStillOpen += 1;
+      continue;
+    }
+
     if (exchangeLegStillOpen(exchangeOpen, trade.symbol, side)) {
       skippedStillOpen += 1;
       continue;

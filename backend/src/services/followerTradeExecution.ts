@@ -587,7 +587,10 @@ export function followerEligibleForMasterLegCopy(args: {
 export type MasterOpenFillArgs = {
   symbol: string;
   side: TradeSide;
+  /** Incremental master fill qty for this event (REST force-sync uses cumulative leg size). */
   masterLots: number;
+  /** Cumulative master open leg size after this fill — used for deficit vs follower target. */
+  masterTotalLots?: number;
   avgPrice: number;
   /** Master order id or fill fingerprint — one follower leg per key. */
   masterFillKey: string;
@@ -611,6 +614,118 @@ export type MasterCloseFillArgs = {
   masterLots: number;
   masterEntryPrice: number;
 };
+
+export type MasterPartialTrimArgs = {
+  symbol: string;
+  side: TradeSide;
+  /** Master lots removed from the open leg (positive). */
+  masterTrimLots: number;
+  masterFillKey: string;
+  masterEntryPrice?: number;
+};
+
+/**
+ * Fan-out proportional reduce-only closes when the master scales out (partial exit).
+ * Follower trim = floor(masterTrimLots × multiplier) per subscriber.
+ */
+export async function syncMasterPartialTrimToFollowers(
+  prisma: PrismaClient,
+  args: MasterPartialTrimArgs,
+): Promise<{ trimmedUsers: number } | null> {
+  const masterTrimLots = Math.floor(args.masterTrimLots);
+  if (masterTrimLots <= 0) return null;
+
+  const strategyId = await resolveFutureHedgeStrategyId(prisma);
+  if (!strategyId) return null;
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) return null;
+
+  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  if (subscribers.length === 0) return { trimmedUsers: 0 };
+
+  console.log(
+    `[copy] master partial trim → followers ${args.symbol} ${args.side} ` +
+      `masterTrim=${masterTrimLots} key=${args.masterFillKey}`,
+  );
+
+  await trimOpenMasterBotQuantity(prisma, {
+    strategyId,
+    symbol: args.symbol,
+    side: args.side,
+    reduceBy: masterTrimLots,
+  });
+
+  const closeSide: TradeSide = args.side === "BUY" ? "SELL" : "BUY";
+  let trimmedUsers = 0;
+
+  await Promise.allSettled(
+    subscribers.map(async (sub) => {
+      if (
+        isFollowerCopyInflight({
+          userId: sub.userId,
+          strategyId,
+          symbol: args.symbol,
+          side: args.side,
+        })
+      ) {
+        console.log(
+          `[copy] partial trim skip user=${sub.userId} ${args.symbol} — copy inflight`,
+        );
+        return;
+      }
+
+      const trimLots = followerLotsFromMaster(masterTrimLots, sub);
+      if (trimLots <= 0) return;
+
+      const creds = resolveCopySubscriptionCreds(sub);
+      if (!creds) return;
+
+      const clientOrderId = buildStableCopyClientOrderId({
+        strategyId,
+        userId: sub.userId,
+        masterFillKey: args.masterFillKey,
+        symbol: args.symbol,
+        side: args.side,
+        leg: "close",
+      });
+
+      console.log(
+        `[copy] partial trim user=${sub.userId} ${args.symbol} open=${args.side} ` +
+          `trim=${trimLots} (master -${masterTrimLots} × ${sub.multiplier})`,
+      );
+
+      const result = await executeFollowerTradeWithVerification(prisma, {
+        strategyId,
+        userId: sub.userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: args.symbol,
+        side: closeSide,
+        size: trimLots,
+        reduceOnly: true,
+        clientOrderId,
+        forceRestSync: true,
+      });
+
+      if (result.success && result.verified) {
+        trimmedUsers += 1;
+        await trimOpenFollowerBotQuantity(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: args.symbol,
+          side: args.side,
+          reduceBy: result.verifiedQty ?? trimLots,
+        });
+        await markSubscriptionSynced(prisma, { userId: sub.userId, strategyId });
+      } else {
+        console.warn(
+          `[copy] partial trim failed user=${sub.userId} ${args.symbol}: ${result.error ?? "not verified"}`,
+        );
+      }
+    }),
+  );
+
+  return { trimmedUsers };
+}
 
 /** Gate all master→follower copy paths when the strategy is paused. */
 export async function assertStrategyActiveForCopy(
@@ -716,7 +831,8 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      const lots = followerLotsFromMaster(fill.masterLots, sub);
+      const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
+      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
       const clientOrderId = buildStableCopyClientOrderId({
         strategyId,
         userId: sub.userId,
@@ -738,7 +854,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           strategyId,
           symbol: fill.symbol,
           side: fill.side,
-          size: lots,
+          size: expectedLots,
           entryPrice: entryForCopy,
           status: TradeStatus.FAILED,
           exitReason: EXIT_REASON.NO_API_CREDENTIALS,
@@ -754,7 +870,24 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      jobs.push({ sub, lots, clientOrderId, creds });
+      const deficitLots = await followerBotOpenDeficitLots(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol: fill.symbol,
+        side: fill.side,
+        targetLots: expectedLots,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+      });
+      if (deficitLots <= 0) {
+        console.log(
+          `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+            `(target=${expectedLots}, no deficit)`,
+        );
+        return;
+      }
+
+      jobs.push({ sub, lots: deficitLots, clientOrderId, creds });
     }),
   );
 
@@ -771,7 +904,8 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     jobs.map(async (job) => {
       console.log(
         `[copy] Future Hedge open user=${job.sub.userId} ${fill.symbol} ${fill.side} ` +
-          `lots=${job.lots} (master ${fill.masterLots} × ${job.sub.multiplier}) ` +
+          `deficit=${job.lots} (target ${followerLotsFromMaster(fill.masterTotalLots ?? fill.masterLots, job.sub)}, ` +
+          `fill +${fill.masterLots}, master ${fill.masterTotalLots ?? fill.masterLots} × ${job.sub.multiplier}) ` +
           `clientOrderId=${job.clientOrderId}`,
       );
 
@@ -908,7 +1042,8 @@ export async function forceSyncMasterOpenToFollowers(
         continue;
       }
 
-      const expectedLots = followerLotsFromMaster(fill.masterLots, sub);
+      const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
+      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
       const credsForDeficit = resolveCopySubscriptionCreds(sub);
       const deficitLots = await followerBotOpenDeficitLots(prisma, {
         strategyId,
@@ -1008,7 +1143,7 @@ export async function forceSyncMasterOpenToFollowers(
 
           console.log(
             `[FORCE-SYNC] market open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-              `lots=${lots} (master ${fill.masterLots} × ${sub.multiplier})`,
+              `deficit=${lots} (target ${followerLotsFromMaster(fill.masterLots, sub)}, master ${fill.masterLots} × ${sub.multiplier})`,
           );
 
           const result = await executeFollowerTradeWithVerification(prisma, {
@@ -1437,6 +1572,20 @@ export async function syncMasterCloseToFutureHedgeFollowers(
       const creds = resolveCopySubscriptionCreds(sub);
       if (!creds) return;
 
+      if (
+        isFollowerCopyInflight({
+          userId: sub.userId,
+          strategyId,
+          symbol: snap.symbol,
+          side: snap.side,
+        })
+      ) {
+        console.log(
+          `[copy] Skip close user=${sub.userId} ${snap.symbol} ${snap.side} — copy inflight`,
+        );
+        return;
+      }
+
       const dbLots = await sumOpenFollowerBotQuantity(prisma, {
         strategyId,
         userId: sub.userId,
@@ -1456,6 +1605,19 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
       if (lots <= 0) {
         if (dbLotsFloor > 0) {
+          if (
+            isFollowerCopyInflight({
+              userId: sub.userId,
+              strategyId,
+              symbol: snap.symbol,
+              side: snap.side,
+            })
+          ) {
+            console.log(
+              `[copy] Skip ghost DB clear user=${sub.userId} ${snap.symbol} ${snap.side} — copy inflight`,
+            );
+            return;
+          }
           await closeTradePositionsForLeg(prisma, {
             strategyId,
             userId: sub.userId,
@@ -2827,6 +2989,16 @@ export async function adminAdjustMasterTradeQuantity(
     };
   }
 
+  let entryPrice = 0;
+  try {
+    const tick = await fetchDeltaTicker(symbol);
+    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+      entryPrice = tick.last;
+    }
+  } catch {
+    /* optional for DB row */
+  }
+
   if (copyToUsers) {
     if (orderPlan.reduceOnly) {
       await trimOpenMasterBotQuantity(prisma, {
@@ -2846,6 +3018,47 @@ export async function adminAdjustMasterTradeQuantity(
           adjustmentLots,
         });
       }
+    } else {
+      if (entryPrice <= 0) {
+        try {
+          const tick = await fetchDeltaTicker(symbol);
+          if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
+            entryPrice = tick.last;
+          }
+        } catch {
+          /* optional */
+        }
+      }
+      if (entryPrice <= 0) {
+        return {
+          ok: false,
+          error: `Master order placed but could not resolve mark price for follower fan-out on ${symbol}`,
+          status: 502,
+        };
+      }
+
+      await incrementOrRecordMasterTradePosition(prisma, {
+        strategyId,
+        symbol,
+        side: currentSide,
+        addLots: orderPlan.lots,
+        entryPrice,
+        clientOrderId,
+        exchangeOrderId: orderResult.orderId ?? null,
+      });
+
+      const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+      for (const sub of subscribers) {
+        const followerAdd = followerLotsFromMaster(orderPlan.lots, sub);
+        if (followerAdd <= 0) continue;
+        await adminAdjustFollowerTradeQuantity(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol,
+          currentSide,
+          adjustmentLots: followerAdd,
+        });
+      }
     }
 
     const newQuantityEstimate = Math.max(0, previousQuantity + adjustmentLots);
@@ -2863,16 +3076,6 @@ export async function adminAdjustMasterTradeQuantity(
       clientOrderId,
       ...(orderResult.orderId ? { orderId: orderResult.orderId } : {}),
     };
-  }
-
-  let entryPrice = 0;
-  try {
-    const tick = await fetchDeltaTicker(symbol);
-    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
-      entryPrice = tick.last;
-    }
-  } catch {
-    /* optional for DB row */
   }
 
   if (orderPlan.reduceOnly) {

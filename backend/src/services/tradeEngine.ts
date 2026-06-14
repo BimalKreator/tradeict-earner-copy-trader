@@ -49,6 +49,8 @@ import {
   syncMasterCloseToFutureHedgeFollowers,
   reconcileFollowersToEmptyMasterBook,
   syncMasterOpenFillToFutureHedgeFollowers,
+  syncMasterPartialTrimToFollowers,
+  isFollowerCopyInflight,
 } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
@@ -119,11 +121,17 @@ const POSITION_QTY_RECONCILE_MS = 60_000;
 /** REST reconciliation interval — live copy is WS-driven (orders / user_trades). */
 const MASTER_REST_POLL_MS = 30_000;
 /** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
-const MASTER_FLAT_CONFIRM_MS = 4_000;
+const MASTER_FLAT_CONFIRM_MS = 15_000;
+/** Shorter flat confirm when WS already signaled size→0 / delete. */
+const MASTER_FLAT_WS_CONFIRM_MS = 5_000;
+/** Debounce REST partial-trim for the same master leg. */
+const REST_PARTIAL_TRIM_COOLDOWN_MS = 30_000;
+
+const restPartialTrimLastAttempt = new Map<string, number>();
 /** Debounce immediate REST poll triggered by WS position deltas. */
 const MASTER_REST_IMMEDIATE_DEBOUNCE_MS = 350;
 /** Do not re-trigger REST force-copy for the same master leg within this window. */
-const REST_FORCE_COPY_COOLDOWN_MS = 20_000;
+const REST_FORCE_COPY_COOLDOWN_MS = 45_000;
 
 const restForceCopyLastAttempt = new Map<string, number>();
 
@@ -151,6 +159,27 @@ function markRestForceCopyAttempt(
   side: TradeSide,
 ): void {
   restForceCopyLastAttempt.set(
+    restForceCopyCooldownKey(strategyId, symbol, side),
+    Date.now(),
+  );
+}
+
+function restPartialTrimOnCooldown(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): boolean {
+  const key = restForceCopyCooldownKey(strategyId, symbol, side);
+  const last = restPartialTrimLastAttempt.get(key) ?? 0;
+  return Date.now() - last < REST_PARTIAL_TRIM_COOLDOWN_MS;
+}
+
+function markRestPartialTrimAttempt(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): void {
+  restPartialTrimLastAttempt.set(
     restForceCopyCooldownKey(strategyId, symbol, side),
     Date.now(),
   );
@@ -340,10 +369,22 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
+    let masterTotalLots = args.masterContracts;
+    if (tracker && isLiveMasterFill) {
+      const prevTracked = tracker.maxContractsForSymbolSide(
+        args.symbol,
+        args.side,
+      );
+      masterTotalLots = prevTracked + args.masterContracts;
+    } else if (tracker && !isLiveMasterFill) {
+      masterTotalLots = args.masterContracts;
+    }
+
     await copyMasterFillToSubscribers(prisma, strategyId, {
     symbol: args.symbol,
     side: args.side,
     masterContracts: args.masterContracts,
+    masterTotalLots,
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
     ...(forceRestSync ? { forceRestSync: true } : {}),
@@ -1769,6 +1810,7 @@ async function copyMasterFillToSubscribers(
     symbol: string;
     side: TradeSide;
     masterContracts: number;
+    masterTotalLots?: number;
     avgPrice: number;
     masterFillKey: string;
     forceRestSync?: boolean;
@@ -1792,7 +1834,8 @@ async function copyMasterFillToSubscribers(
   }
 
   console.log(
-    `[copy] master fill → followers ${args.symbol} ${args.side} lots=${args.masterContracts} ` +
+    `[copy] master fill → followers ${args.symbol} ${args.side} ` +
+      `fill=${args.masterContracts} total=${args.masterTotalLots ?? args.masterContracts} ` +
       `forceRestSync=${args.forceRestSync === true}`,
   );
 
@@ -1800,6 +1843,7 @@ async function copyMasterFillToSubscribers(
     symbol: args.symbol,
     side: args.side,
     masterLots: args.masterContracts,
+    masterTotalLots: args.masterTotalLots ?? args.masterContracts,
     avgPrice: args.avgPrice,
     masterFillKey: args.masterFillKey,
     ...(args.forceRestSync ? { forceRestSync: true } : {}),
@@ -1944,6 +1988,8 @@ class MasterPositionTracker {
   readonly legsAtBaseline = new Set<string>();
   /** legKey → ms when bot first observed open time (exchange or local first-seen). */
   readonly legOpenedAtMs = new Map<string, number>();
+  /** legKey → ms when WS signaled flat (size→0 / delete). */
+  readonly wsFlatHintAt = new Map<string, number>();
   /** Cross-channel master fill dedup for live follower fan-out. */
   readonly copyDedup = new MasterFillDedup();
   private restBaselineSeeded = false;
@@ -2037,6 +2083,20 @@ class MasterPositionTracker {
     this.pendingFlatSince.delete(legKey);
   }
 
+  markWsFlatHint(symbol: string, side: TradeSide): void {
+    this.wsFlatHintAt.set(masterLegKey(symbol, side), Date.now());
+  }
+
+  wsFlatHintAgeMs(symbol: string, side: TradeSide, refMs = Date.now()): number | null {
+    const at = this.wsFlatHintAt.get(masterLegKey(symbol, side));
+    if (at == null) return null;
+    return refMs - at;
+  }
+
+  clearWsFlatHint(symbol: string, side: TradeSide): void {
+    this.wsFlatHintAt.delete(masterLegKey(symbol, side));
+  }
+
   isRestBaselineSeeded(): boolean {
     return this.restBaselineSeeded;
   }
@@ -2092,6 +2152,7 @@ async function reconcileStaleOpenCopyTrades(
   prisma: PrismaClient,
   _strategyId: string,
   cancelled: { value: boolean },
+  masterOpenLegs: MasterLedTrade[] = [],
 ): Promise<void> {
   const subs = await findActiveFutureHedgeCopySubscribers(prisma);
   const staleUsers = await prisma.trade.findMany({
@@ -2103,6 +2164,12 @@ async function reconcileStaleOpenCopyTrades(
     ...subs.map((s) => s.userId),
     ...staleUsers.map((r) => r.userId),
   ]);
+
+  const masterLegRefs = masterOpenLegs.map((m) => ({
+    symbol: m.deltaSymbol,
+    side: m.side,
+    masterContracts: m.masterContracts,
+  }));
 
   for (const userId of userIds) {
     if (cancelled.value) return;
@@ -2118,6 +2185,14 @@ async function reconcileStaleOpenCopyTrades(
         userId,
         apiKey: creds.apiKey,
         apiSecret: creds.apiSecret,
+        masterOpenLegs: masterLegRefs,
+        shouldSkipStaleLeg: (leg) =>
+          isFollowerCopyInflight({
+            userId: leg.userId,
+            strategyId: leg.strategyId,
+            symbol: leg.symbol,
+            side: leg.side,
+          }),
       });
     } catch (err) {
       console.warn(
@@ -2298,6 +2373,39 @@ async function pollMasterPositionsFallback(
         }
       }
 
+      const prevTracked = tracker.maxContractsForSymbolSide(m.deltaSymbol, m.side);
+      if (
+        wasBaselineSeeded &&
+        prevTracked > m.masterContracts + 1e-9 &&
+        m.masterContracts > 0 &&
+        !restPartialTrimOnCooldown(strat.id, m.deltaSymbol, m.side)
+      ) {
+        const masterTrimLots = Math.floor(prevTracked - m.masterContracts);
+        if (masterTrimLots > 0) {
+          markRestPartialTrimAttempt(strat.id, m.deltaSymbol, m.side);
+          const trimKey = `rest-trim:${buildMasterFillKey([
+            m.deltaSymbol,
+            m.side,
+            String(m.masterContracts),
+            String(masterTrimLots),
+          ])}`;
+          try {
+            await syncMasterPartialTrimToFollowers(prisma, {
+              symbol: m.deltaSymbol,
+              side: m.side,
+              masterTrimLots,
+              masterFillKey: trimKey,
+              masterEntryPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
+            });
+          } catch (trimErr) {
+            console.error(
+              `[MASTER-REST-SYNC] partial trim failed ${m.deltaSymbol} ${m.side}:`,
+              trimErr instanceof Error ? trimErr.message : trimErr,
+            );
+          }
+        }
+      }
+
       tracker.applyMasterLeg({
         symbol: m.deltaSymbol,
         side: m.side,
@@ -2320,6 +2428,7 @@ async function pollMasterPositionsFallback(
 
         if (masterLegOpenOnRest(meta, masters)) {
           tracker.clearPendingFlat(lk);
+          tracker.clearWsFlatHint(meta.symbol, meta.side);
           continue;
         }
 
@@ -2331,15 +2440,21 @@ async function pollMasterPositionsFallback(
 
         const now = Date.now();
         const firstMissing = tracker.pendingFlatSince.get(lk);
+        const wsHintAge = tracker.wsFlatHintAgeMs(meta.symbol, meta.side, now);
+        const confirmMs =
+          wsHintAge != null && wsHintAge <= 120_000
+            ? MASTER_FLAT_WS_CONFIRM_MS
+            : MASTER_FLAT_CONFIRM_MS;
         if (firstMissing === undefined) {
           tracker.pendingFlatSince.set(lk, now);
           console.log(
             `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
-              `awaiting ${MASTER_FLAT_CONFIRM_MS / 1000}s confirmation before follower close.`,
+              `awaiting ${confirmMs / 1000}s confirmation before follower close` +
+              `${wsHintAge != null ? " (WS flat hint)" : ""}.`,
           );
           continue;
         }
-        if (now - firstMissing < MASTER_FLAT_CONFIRM_MS) {
+        if (now - firstMissing < confirmMs) {
           continue;
         }
 
@@ -2365,6 +2480,7 @@ async function pollMasterPositionsFallback(
             );
             continue;
           }
+          tracker.clearWsFlatHint(meta.symbol, meta.side);
         } catch (closeErr) {
           console.error(
             `[MASTER-REST-SYNC] notifyMasterFlat failed ${meta.symbol} ${meta.side}:`,
@@ -2415,7 +2531,7 @@ async function pollMasterPositionsFallback(
       }
     }
 
-    await reconcileStaleOpenCopyTrades(prisma, strat.id, cancelled);
+    await reconcileStaleOpenCopyTrades(prisma, strat.id, cancelled, masters);
   } catch (err) {
     console.error(
       "[MASTER-REST-SYNC] poll failed:",
@@ -2752,8 +2868,14 @@ class StrategyMasterSocket {
 
       // WS delete/close events — schedule immediate REST poll (faster than waiting for interval).
       if (action === "delete" || action === "closed") {
+        const rows = collectRows();
+        for (const r of rows) {
+          const snap = extractPositionSnapshot(r);
+          if (!snap) continue;
+          this.tracker.markWsFlatHint(snap.symbol, snap.side);
+        }
         console.warn(
-          `[tradeEngine WS] positions ${action} strategyId=${this.strategyId} — scheduling immediate REST flat check`,
+          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — scheduling immediate REST flat check`,
         );
         requestImmediateMasterRestPoll(`ws-position-${action}`);
         return;
@@ -2777,8 +2899,9 @@ class StrategyMasterSocket {
         const next = snap.contracts;
 
         if (next <= 0 && prev > 0) {
+          this.tracker.markWsFlatHint(snap.symbol, snap.side);
           console.warn(
-            `[tradeEngine WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — scheduling immediate REST flat check`,
+            `[MASTER-WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — scheduling immediate REST flat check`,
           );
           requestImmediateMasterRestPoll("ws-position-flat-hint");
           continue;
@@ -2786,16 +2909,45 @@ class StrategyMasterSocket {
 
         if (next > 0) {
           registerSymbolsForLivePrices([snap.symbol]);
+          const decreased = prev > next;
+          const increased = next > prev;
           this.tracker.writeTracked(snap, next);
-          console.log(
-            `[tradeEngine WS] tracked ${snap.symbol} ${snap.side} ${next} contracts (keys=${JSON.stringify(aliases)})`,
-          );
 
-          if (copyEnabled && next > prev) {
+          if (copyEnabled && increased) {
             console.log(
-              `[tradeEngine WS] positions +${next - prev} ${snap.symbol} ${snap.side} — scheduling immediate REST copy sync`,
+              `[MASTER-WS] positions +${next - prev} ${snap.symbol} ${snap.side} — scheduling immediate REST copy sync`,
             );
             requestImmediateMasterRestPoll("ws-position-increase");
+          }
+
+          if (copyEnabled && decreased) {
+            const masterTrimLots = Math.floor(prev - next);
+            if (masterTrimLots > 0) {
+              const trimKey = `ws-trim:${buildMasterFillKey([
+                snap.symbol,
+                snap.side,
+                String(next),
+                String(masterTrimLots),
+              ])}`;
+              console.log(
+                `[MASTER-WS] partial trim ${snap.symbol} ${snap.side} -${masterTrimLots} (${prev}→${next})`,
+              );
+              void syncMasterPartialTrimToFollowers(this.prisma, {
+                symbol: snap.symbol,
+                side: snap.side,
+                masterTrimLots,
+                masterFillKey: trimKey,
+                masterEntryPrice:
+                  snap.avgEntry != null && Number.isFinite(snap.avgEntry)
+                    ? snap.avgEntry
+                    : 0,
+              }).catch((err) => {
+                console.error(
+                  `[MASTER-WS] partial trim failed ${snap.symbol} ${snap.side}:`,
+                  err instanceof Error ? err.message : err,
+                );
+              });
+            }
           }
         }
       }
@@ -3128,13 +3280,95 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               continue;
             }
 
-            // Over-allocation / master-flat trim disabled — closes only via 5s REST poll.
+            const trimLots = dbQty - expectedContracts;
+            if (
+              isFollowerCopyInflight({
+                userId: sub.userId,
+                strategyId: strat.id,
+                symbol: botLeg.symbol,
+                side: botLeg.side as TradeSide,
+              })
+            ) {
+              console.log(
+                `[RECONCILE] defer trim user ${sub.userId} ${botLeg.symbol} — copy inflight`,
+              );
+              continue;
+            }
+
             console.log(
-              `[RECONCILE] skip trim user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} > expected ${expectedContracts} — ` +
-                `follower closes only via MASTER-REST-SYNC`,
+              `[RECONCILE] trim over-allocated user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (-${trimLots})`,
+            );
+
+            const closeSide: TradeSide =
+              botLeg.side === "BUY" ? "SELL" : "BUY";
+            const trimFillKey = `reconcile-trim:${sub.userId}:${botLeg.symbol}:${botLeg.side}:${expectedContracts}`;
+            const trimClientOrderId = buildStableCopyClientOrderId({
+              strategyId: strat.id,
+              userId: sub.userId,
+              masterFillKey: trimFillKey,
+              symbol: botLeg.symbol,
+              side: botLeg.side as TradeSide,
+              leg: "close",
+            });
+
+            const trimResult = await executeFollowerTradeWithVerification(prisma, {
+              strategyId: strat.id,
+              userId: sub.userId,
+              apiKey: creds.apiKey,
+              apiSecret: creds.apiSecret,
+              symbol: botLeg.symbol,
+              side: closeSide,
+              size: trimLots,
+              entryPrice: 0,
+              clientOrderId: trimClientOrderId,
+              reduceOnly: true,
+              forceRestSync: true,
+            });
+
+            if (!trimResult.success || !trimResult.verified) {
+              console.error(
+                `[RECONCILE] trim failed userId=${sub.userId} symbol=${botLeg.symbol} trim=${trimLots}: ${trimResult.error ?? "not verified"}`,
+              );
+            } else {
+              await markSubscriptionSynced(prisma, {
+                userId: sub.userId,
+                strategyId: strat.id,
+              });
+            }
+          }
+
+          const outOfSync: string[] = [];
+          for (const m of masterLegs) {
+            const expected = followerContractsFromMaster(
+              m.masterContracts,
+              subscriptionMultiplier(sub),
+            );
+            const deficit = await followerBotOpenDeficitLots(prisma, {
+              strategyId: strat.id,
+              userId: sub.userId,
+              symbol: m.deltaSymbol,
+              side: m.side,
+              targetLots: expected,
+              apiKey: creds.apiKey,
+              apiSecret: creds.apiSecret,
+            });
+            if (deficit > 0) {
+              outOfSync.push(
+                `${m.deltaSymbol} ${m.side} need+${deficit} (target=${expected})`,
+              );
+            }
+          }
+
+          if (outOfSync.length > 0) {
+            console.log(
+              `[SYNC-MONITOR] user=${sub.userId} out of sync: ${outOfSync.join("; ")}`,
             );
           }
         }
+
+        console.log(
+          `[SYNC-MONITOR] pass complete strategyId=${strat.id} subscribers=${subs.length} masterLegs=${masterLegs.length}`,
+        );
     } catch (err) {
       console.error("[RECONCILE] position quantity pass failed:", err);
     }
