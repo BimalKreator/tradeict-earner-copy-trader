@@ -8,6 +8,7 @@ import {
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
+  normalizeDeltaPerpProductRef,
   normalizeDeltaPerpSymbolForCcxt,
   resolveCanonicalDeltaProductId,
   tradeSideFromSignedSize,
@@ -51,6 +52,7 @@ import {
   syncMasterOpenFillToFutureHedgeFollowers,
   syncMasterPartialTrimToFollowers,
   isFollowerCopyInflight,
+  followerExchangeLegContracts,
 } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
@@ -86,6 +88,7 @@ import {
   closeTradePositionsForLeg,
   listOpenFollowerBotLegs,
   recordTradePositionOpen,
+  trimOpenFollowerBotQuantity,
   tradePositionSymbolsAlign,
 } from "./tradePositionService.js";
 
@@ -634,7 +637,7 @@ async function canonicalizeCopySymbol(
     return resolved.productId;
   }
 
-  return raw;
+  return normalizeDeltaPerpProductRef(raw);
 }
 
 function marketIdMatchesOption(a: string, b: string): boolean {
@@ -3144,10 +3147,47 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 )
               : 0;
             const dbQty = Math.max(0, Math.floor(botLeg.quantity));
+            const legSymbol = master?.deltaSymbol ?? botLeg.symbol;
+            const legSide = botLeg.side as TradeSide;
 
-            if (dbQty === expectedContracts) continue;
+            let exchangeLots = 0;
+            try {
+              exchangeLots = Math.floor(
+                await followerExchangeLegContracts(
+                  creds.apiKey,
+                  creds.apiSecret,
+                  legSymbol,
+                  legSide,
+                ),
+              );
+            } catch (err) {
+              console.warn(
+                `[RECONCILE] exchange read failed user=${sub.userId} ${legSymbol}:`,
+                err instanceof Error ? err.message : err,
+              );
+            }
 
-            if (dbQty < expectedContracts) {
+            if (exchangeLots === expectedContracts && dbQty === expectedContracts) {
+              continue;
+            }
+
+            if (exchangeLots === expectedContracts && dbQty !== expectedContracts) {
+              if (dbQty > expectedContracts) {
+                await trimOpenFollowerBotQuantity(prisma, {
+                  strategyId: strat.id,
+                  userId: sub.userId,
+                  symbol: legSymbol,
+                  side: legSide,
+                  reduceBy: dbQty - expectedContracts,
+                });
+                console.log(
+                  `[RECONCILE] DB ghost trim user ${sub.userId} ${legSymbol}: DB ${dbQty} → ${expectedContracts} (exchange ok)`,
+                );
+              }
+              continue;
+            }
+
+            if (exchangeLots < expectedContracts) {
               const masterOpenedAt = master?.openedAt ?? null;
               const isNewLeg = master
                 ? masterPositionTracker.isNewLegThisSession(
@@ -3192,7 +3232,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 })
               ) {
                 console.log(
-                  `[RECONCILE] skip catch-up user ${sub.userId} ${botLeg.symbol} — ` +
+                  `[RECONCILE] skip catch-up user ${sub.userId} ${legSymbol} — ` +
                     `late-join guard (fresh=${isMasterLegFreshForRestCatchup(
                       masterOpenedAt,
                       locallyFirstSeenAt,
@@ -3202,9 +3242,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 continue;
               }
 
-              const diff = expectedContracts - dbQty;
+              const diff = expectedContracts - exchangeLots;
               console.log(
-                `[RECONCILE] Bot leg catch-up user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (+${diff})`,
+                `[RECONCILE] Bot leg catch-up user ${sub.userId} ${legSymbol}: exchange ${exchangeLots} → expected ${expectedContracts} (+${diff})`,
               );
               let px =
                 master != null &&
@@ -3214,7 +3254,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                   : 0;
               if (px <= 0) {
                 try {
-                  const tick = await fetchDeltaTicker(botLeg.symbol);
+                  const tick = await fetchDeltaTicker(legSymbol);
                   if (tick.last != null && Number.isFinite(tick.last)) {
                     px = tick.last;
                   }
@@ -3224,18 +3264,18 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               }
               if (px <= 0) {
                 console.warn(
-                  `[RECONCILE] skip catch-up user ${sub.userId} ${botLeg.symbol} — no entry price`,
+                  `[RECONCILE] skip catch-up user ${sub.userId} ${legSymbol} — no entry price`,
                 );
                 continue;
               }
 
-              const reconcileFillKey = `reconcile:${sub.userId}:${botLeg.symbol}:${botLeg.side}:${expectedContracts}`;
+              const reconcileFillKey = `reconcile:${sub.userId}:${legSymbol}:${legSide}:${expectedContracts}:${exchangeLots}`;
               const clientOrderId = buildStableCopyClientOrderId({
                 strategyId: strat.id,
                 userId: sub.userId,
                 masterFillKey: reconcileFillKey,
-                symbol: botLeg.symbol,
-                side: botLeg.side as TradeSide,
+                symbol: legSymbol,
+                side: legSide,
                 leg: "open",
               });
 
@@ -3244,8 +3284,8 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 userId: sub.userId,
                 apiKey: creds.apiKey,
                 apiSecret: creds.apiSecret,
-                symbol: botLeg.symbol,
-                side: botLeg.side as TradeSide,
+                symbol: legSymbol,
+                side: legSide,
                 size: diff,
                 entryPrice: px,
                 clientOrderId,
@@ -3253,7 +3293,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               });
               if (!result.success || !result.verified) {
                 console.error(
-                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${botLeg.symbol} diff=${diff}: ${result.error ?? "not verified"}`,
+                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${legSymbol} diff=${diff}: ${result.error ?? "not verified"}`,
                 );
                 await markSubscriptionSyncFailed(prisma, {
                   userId: sub.userId,
@@ -3265,8 +3305,8 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 await recordTradePositionOpen(prisma, {
                   strategyId: strat.id,
                   userId: sub.userId,
-                  symbol: botLeg.symbol,
-                  side: botLeg.side,
+                  symbol: legSymbol,
+                  side: legSide,
                   quantity: recordedLots,
                   entryPrice: px,
                   clientOrderId,
@@ -3280,34 +3320,37 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               continue;
             }
 
-            const trimLots = dbQty - expectedContracts;
+            if (exchangeLots <= expectedContracts) {
+              continue;
+            }
+
+            const trimLots = exchangeLots - expectedContracts;
             if (
               isFollowerCopyInflight({
                 userId: sub.userId,
                 strategyId: strat.id,
-                symbol: botLeg.symbol,
-                side: botLeg.side as TradeSide,
+                symbol: legSymbol,
+                side: legSide,
               })
             ) {
               console.log(
-                `[RECONCILE] defer trim user ${sub.userId} ${botLeg.symbol} — copy inflight`,
+                `[RECONCILE] defer trim user ${sub.userId} ${legSymbol} — copy inflight`,
               );
               continue;
             }
 
             console.log(
-              `[RECONCILE] trim over-allocated user ${sub.userId} ${botLeg.symbol}: DB ${dbQty} → expected ${expectedContracts} (-${trimLots})`,
+              `[RECONCILE] trim over-allocated user ${sub.userId} ${legSymbol}: exchange ${exchangeLots} → expected ${expectedContracts} (-${trimLots})`,
             );
 
-            const closeSide: TradeSide =
-              botLeg.side === "BUY" ? "SELL" : "BUY";
-            const trimFillKey = `reconcile-trim:${sub.userId}:${botLeg.symbol}:${botLeg.side}:${expectedContracts}`;
+            const closeSide: TradeSide = legSide === "BUY" ? "SELL" : "BUY";
+            const trimFillKey = `reconcile-trim:${sub.userId}:${legSymbol}:${legSide}:${expectedContracts}:${exchangeLots}`;
             const trimClientOrderId = buildStableCopyClientOrderId({
               strategyId: strat.id,
               userId: sub.userId,
               masterFillKey: trimFillKey,
-              symbol: botLeg.symbol,
-              side: botLeg.side as TradeSide,
+              symbol: legSymbol,
+              side: legSide,
               leg: "close",
             });
 
@@ -3316,7 +3359,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               userId: sub.userId,
               apiKey: creds.apiKey,
               apiSecret: creds.apiSecret,
-              symbol: botLeg.symbol,
+              symbol: legSymbol,
               side: closeSide,
               size: trimLots,
               entryPrice: 0,
@@ -3327,7 +3370,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
             if (!trimResult.success || !trimResult.verified) {
               console.error(
-                `[RECONCILE] trim failed userId=${sub.userId} symbol=${botLeg.symbol} trim=${trimLots}: ${trimResult.error ?? "not verified"}`,
+                `[RECONCILE] trim failed userId=${sub.userId} symbol=${legSymbol} trim=${trimLots}: ${trimResult.error ?? "not verified"}`,
               );
             } else {
               await markSubscriptionSynced(prisma, {

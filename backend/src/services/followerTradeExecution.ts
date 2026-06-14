@@ -321,12 +321,17 @@ function minVerifiedLots(targetContracts: number, isOptionLeg: boolean): number 
   return targetContracts;
 }
 
-/** Lots to persist — never above what exchange confirms, never above requested target. */
+/** Lots to persist — perps require exchange REST; options allow ack fallback on REST lag. */
 function resolvedDbOpenQty(
   targetContracts: number,
   exchangeLots: number,
   ackFilled?: number,
+  isOptionLeg = false,
 ): number {
+  if (!isOptionLeg) {
+    if (exchangeLots <= 0) return 0;
+    return Math.min(targetContracts, Math.floor(exchangeLots));
+  }
   const candidates = [exchangeLots, ackFilled ?? 0].filter(
     (n) => Number.isFinite(n) && n > 0,
   );
@@ -2244,7 +2249,7 @@ export async function executeFollowerTradeWithVerification(
   };
   let attempts = 0;
 
-  const openClientOrderId =
+  let openClientOrderId =
     args.clientOrderId ??
     (args.strategyId
       ? buildStableCopyClientOrderId({
@@ -2290,7 +2295,12 @@ export async function executeFollowerTradeWithVerification(
         );
       }
       const ackFilled = ack ? orderAckFilledQty(ack) : 0;
-      const dbQty = resolvedDbOpenQty(targetContracts, exchangeLots, ackFilled);
+      const dbQty = resolvedDbOpenQty(
+        targetContracts,
+        exchangeLots,
+        ackFilled,
+        isOptionLeg,
+      );
       if (dbQty < minFilled) {
         return null;
       }
@@ -2342,11 +2352,40 @@ export async function executeFollowerTradeWithVerification(
         apiSecret,
         openClientOrderId,
       );
-      if (orderAckPending(existingAck) || orderAckFilledQty(existingAck) > 0) {
+      const existingAckFilled = orderAckFilledQty(existingAck);
+      if (orderAckPending(existingAck)) {
         orderSubmitted = true;
         console.log(
           `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} state=${existingAck.state} filled=${existingAck.filledSize} — poll only`,
         );
+      } else if (existingAckFilled > 0) {
+        exchangeLots = await followerLegContracts(apiKey, apiSecret, symbol, side, {
+          skipCache: true,
+        });
+        if (exchangeLots >= minFilled) {
+          orderSubmitted = true;
+          console.log(
+            `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} filled=${existingAckFilled} exchange=${exchangeLots} — already synced`,
+          );
+        } else if (!isOptionLeg) {
+          openClientOrderId = buildStableCopyClientOrderId({
+            strategyId: args.strategyId!,
+            userId: args.userId,
+            masterFillKey: `${symbol}:${side}:open:refire:${Date.now()}`,
+            symbol,
+            side,
+            leg: "open",
+          });
+          console.warn(
+            `[RETRY_LOOP] Stale filled ack (${existingAckFilled}) but exchange flat (${exchangeLots}) ` +
+              `user=${userId} ${symbol} — refire clientOrderId=${openClientOrderId}`,
+          );
+        } else {
+          orderSubmitted = true;
+          console.log(
+            `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} state=${existingAck.state} filled=${existingAck.filledSize} — poll only`,
+          );
+        }
       }
     }
 
@@ -2527,7 +2566,12 @@ export async function executeFollowerTradeWithVerification(
 
     if (isOptionLeg && orderSubmitted && openClientOrderId && finalAck) {
       const ackFilled = orderAckFilledQty(finalAck);
-      const dbQty = resolvedDbOpenQty(targetContracts, exchangeLots, ackFilled);
+      const dbQty = resolvedDbOpenQty(
+        targetContracts,
+        exchangeLots,
+        ackFilled,
+        true,
+      );
       if (dbQty >= minFilled) {
         console.warn(
           `[RETRY_LOOP] Option ${symbol} REST lag — ack filled=${ackFilled} position=${exchangeLots}`,

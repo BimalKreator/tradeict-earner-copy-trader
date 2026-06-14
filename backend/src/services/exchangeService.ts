@@ -229,6 +229,17 @@ function deltaIndiaProductRefCandidates(ref: string): string[] {
   return out;
 }
 
+/** Compact Delta India perp product ref — BTCUSDT → BTCUSD for REST orders / position reads. */
+export function normalizeDeltaPerpProductRef(raw: string): string {
+  const s = raw.trim();
+  if (!s || isDeltaOptionProductId(s) || s.includes("/")) return s;
+  const upper = s.toUpperCase();
+  if (upper.endsWith("USDT")) {
+    return `${upper.slice(0, -4)}USD`;
+  }
+  return s;
+}
+
 /**
  * Place a market order via Delta India REST (bypasses CCXT market catalogue).
  * Preferred for BTC options — CCXT loadMarkets often omits live option contracts.
@@ -1997,7 +2008,7 @@ export async function executeTrade(
   opts?: { reduceOnly?: boolean; clientOrderId?: string },
 ): Promise<ExecuteTradeResult> {
   const clientOrderId = opts?.clientOrderId?.trim() || undefined;
-  const inputSymbol = symbol.trim();
+  const inputSymbol = normalizeDeltaPerpProductRef(symbol.trim());
   const reduceOnly = opts?.reduceOnly === true;
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
