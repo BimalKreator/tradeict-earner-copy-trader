@@ -449,12 +449,7 @@ async function followerFillAlreadyCopied(
     where: { clientOrderId },
     select: { status: true },
   });
-  if (leg?.status === TradePositionStatus.OPEN) {
-    return true;
-  }
-
-  // Stale Trade rows without a bot-managed leg must not block retries.
-  return false;
+  return leg?.status === TradePositionStatus.OPEN;
 }
 
 /**
@@ -811,6 +806,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   type FanoutJob = {
     sub: (typeof subscribers)[number];
     lots: number;
+    expectedLots: number;
     clientOrderId: string;
     creds: { apiKey: string; apiSecret: string };
   };
@@ -836,11 +832,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       }
 
       const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
-      const isIncrementalLive =
-        fill.liveMasterFill === true && fill.forceRestSync !== true;
-      const expectedLots = isIncrementalLive
-        ? followerLotsFromMaster(fill.masterLots, sub)
-        : followerLotsFromMaster(masterTargetLots, sub);
+      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
       const clientOrderId = buildStableCopyClientOrderId({
         strategyId,
         userId: sub.userId,
@@ -878,30 +870,24 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      let lotsToOrder: number;
-      if (isIncrementalLive) {
-        lotsToOrder = expectedLots;
-        if (lotsToOrder <= 0) return;
-      } else {
-        lotsToOrder = await followerBotOpenDeficitLots(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-          targetLots: expectedLots,
-          apiKey: creds.apiKey,
-          apiSecret: creds.apiSecret,
-        });
-        if (lotsToOrder <= 0) {
-          console.log(
-            `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-              `(target=${expectedLots}, no deficit)`,
-          );
-          return;
-        }
+      const lotsToOrder = await followerBotOpenDeficitLots(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol: fill.symbol,
+        side: fill.side,
+        targetLots: expectedLots,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+      });
+      if (lotsToOrder <= 0) {
+        console.log(
+          `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+            `(target=${expectedLots}, no deficit)`,
+        );
+        return;
       }
 
-      jobs.push({ sub, lots: lotsToOrder, clientOrderId, creds });
+      jobs.push({ sub, lots: lotsToOrder, expectedLots, clientOrderId, creds });
     }),
   );
 
@@ -936,6 +922,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         symbol: fill.symbol,
         side: fill.side,
         size: job.lots,
+        expectedTotalLots: job.expectedLots,
         entryPrice: entryForCopy,
         clientOrderId: job.clientOrderId,
         liveMasterFill: fill.liveMasterFill === true,
@@ -946,7 +933,10 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           userId: job.sub.userId,
           strategyId,
         });
-        const recordedLots = result.verifiedQty ?? job.lots;
+        const recordedLots = Math.min(
+          job.lots,
+          Math.max(1, result.verifiedQty ?? job.lots),
+        );
         await recordTradePositionOpen(prisma, {
           strategyId,
           userId: job.sub.userId,
@@ -1148,16 +1138,14 @@ export async function forceSyncMasterOpenToFollowers(
             return;
           }
 
-          if (await followerFillAlreadyCopied(prisma, clientOrderId)) {
-            console.log(
-              `[FORCE-SYNC] Skip duplicate force-sync user=${sub.userId} ${fill.symbol} clientOrderId=${clientOrderId}`,
-            );
-            return;
-          }
+          const expectedTotalLots = followerLotsFromMaster(
+            fill.masterTotalLots ?? fill.masterLots,
+            sub,
+          );
 
           console.log(
             `[FORCE-SYNC] market open user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-              `deficit=${lots} (target ${followerLotsFromMaster(fill.masterLots, sub)}, master ${fill.masterLots} × ${sub.multiplier})`,
+              `deficit=${lots} (target ${expectedTotalLots}, master ${fill.masterTotalLots ?? fill.masterLots} × ${sub.multiplier})`,
           );
 
           const result = await executeFollowerTradeWithVerification(prisma, {
@@ -1168,6 +1156,7 @@ export async function forceSyncMasterOpenToFollowers(
             symbol: fill.symbol,
             side: fill.side,
             size: lots,
+            expectedTotalLots,
             entryPrice,
             clientOrderId,
             forceRestSync: true,
@@ -1180,7 +1169,10 @@ export async function forceSyncMasterOpenToFollowers(
               userId: sub.userId,
               strategyId,
             });
-            const recordedLots = result.verifiedQty ?? lots;
+            const recordedLots = Math.min(
+              lots,
+              Math.max(1, result.verifiedQty ?? lots),
+            );
             await recordTradePositionOpen(prisma, {
               strategyId,
               userId: sub.userId,
@@ -2103,10 +2095,16 @@ export async function executeFollowerTradeWithVerification(
     liveMasterFill?: boolean;
     /** Admin Force Sync — allow opens despite FAILED syncStatus / late-join rules. */
     adminForceSync?: boolean;
+    /** Cumulative follower lots required after this open (scale-in / reconcile). */
+    expectedTotalLots?: number;
   },
 ): Promise<FollowerExecuteResult> {
   const { userId, apiKey, apiSecret, symbol, side } = args;
-  const targetContracts = Math.max(1, Math.floor(args.size));
+  const orderLots = Math.max(1, Math.floor(args.size));
+  const targetContracts = Math.max(
+    orderLots,
+    Math.floor(args.expectedTotalLots ?? orderLots),
+  );
   const skipSyncStatusGate =
     args.adminForceSync === true ||
     args.forceRestSync === true ||
@@ -2198,7 +2196,7 @@ export async function executeFollowerTradeWithVerification(
         apiSecret,
         symbol,
         openSide,
-        requestedLots: targetContracts,
+        requestedLots: orderLots,
       });
 
     if (closeLots <= 0) {

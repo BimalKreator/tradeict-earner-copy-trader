@@ -378,14 +378,23 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
-    // Live WS fills copy increment only; cumulative target comes from REST force-sync.
-    const masterTotalLots = forceRestSync ? args.masterContracts : undefined;
+    let masterTotalLots = args.masterContracts;
+    if (tracker && isLiveMasterFill && !forceRestSync) {
+      const prevTracked = tracker.maxContractsForSymbolSide(
+        args.symbol,
+        args.side,
+      );
+      masterTotalLots =
+        prevTracked > 0
+          ? prevTracked + args.masterContracts
+          : args.masterContracts;
+    }
 
     await copyMasterFillToSubscribers(prisma, strategyId, {
     symbol: args.symbol,
     side: args.side,
     masterContracts: args.masterContracts,
-    ...(masterTotalLots != null ? { masterTotalLots } : {}),
+    masterTotalLots,
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
     ...(forceRestSync ? { forceRestSync: true } : {}),
@@ -3400,6 +3409,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 symbol: legSymbol,
                 side: legSide,
                 size: diff,
+                expectedTotalLots: expectedContracts,
                 entryPrice: px,
                 clientOrderId,
                 forceRestSync: true,
@@ -3414,7 +3424,10 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                   error: result.error ?? "Reconcile catch-up failed",
                 });
               } else {
-                const recordedLots = result.verifiedQty ?? diff;
+                const recordedLots = Math.min(
+                  diff,
+                  Math.max(1, result.verifiedQty ?? diff),
+                );
                 await recordTradePositionOpen(prisma, {
                   strategyId: strat.id,
                   userId: sub.userId,
