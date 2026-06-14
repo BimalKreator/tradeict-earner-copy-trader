@@ -831,8 +831,9 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
+      const isLiveIncrement =
+        fill.liveMasterFill === true && fill.forceRestSync !== true;
       const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
-      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
       const clientOrderId = buildStableCopyClientOrderId({
         strategyId,
         userId: sub.userId,
@@ -854,7 +855,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           strategyId,
           symbol: fill.symbol,
           side: fill.side,
-          size: expectedLots,
+          size: followerLotsFromMaster(fill.masterLots, sub),
           entryPrice: entryForCopy,
           status: TradeStatus.FAILED,
           exitReason: EXIT_REASON.NO_API_CREDENTIALS,
@@ -870,21 +871,59 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      const lotsToOrder = await followerBotOpenDeficitLots(prisma, {
-        strategyId,
-        userId: sub.userId,
-        symbol: fill.symbol,
-        side: fill.side,
-        targetLots: expectedLots,
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-      });
-      if (lotsToOrder <= 0) {
-        console.log(
-          `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-            `(target=${expectedLots}, no deficit)`,
-        );
-        return;
+      const incrementLots = followerLotsFromMaster(fill.masterLots, sub);
+      let expectedLots: number;
+      let lotsToOrder: number;
+
+      if (isLiveIncrement) {
+        const botQty = await sumOpenFollowerBotQuantity(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+        });
+        let exchangeLots = 0;
+        try {
+          exchangeLots = Math.floor(
+            await followerLegContracts(
+              creds.apiKey,
+              creds.apiSecret,
+              fill.symbol,
+              fill.side,
+              { skipCache: true },
+            ),
+          );
+        } catch {
+          /* deficit uses bot qty only */
+        }
+        const effective = Math.max(Math.floor(botQty), exchangeLots);
+        expectedLots = effective + incrementLots;
+        if (effective >= expectedLots) {
+          console.log(
+            `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+              `(effective=${effective}, increment +${incrementLots} already applied)`,
+          );
+          return;
+        }
+        lotsToOrder = incrementLots;
+      } else {
+        expectedLots = followerLotsFromMaster(masterTargetLots, sub);
+        lotsToOrder = await followerBotOpenDeficitLots(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+          targetLots: expectedLots,
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+        });
+        if (lotsToOrder <= 0) {
+          console.log(
+            `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+              `(target=${expectedLots}, no deficit)`,
+          );
+          return;
+        }
       }
 
       jobs.push({ sub, lots: lotsToOrder, expectedLots, clientOrderId, creds });
@@ -904,8 +943,8 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     jobs.map(async (job) => {
       console.log(
         `[copy] Future Hedge open user=${job.sub.userId} ${fill.symbol} ${fill.side} ` +
-          `deficit=${job.lots} (target ${followerLotsFromMaster(fill.masterTotalLots ?? fill.masterLots, job.sub)}, ` +
-          `fill +${fill.masterLots}, master ${fill.masterTotalLots ?? fill.masterLots} × ${job.sub.multiplier}) ` +
+          `deficit=${job.lots} (target ${job.expectedLots}, fill +${fill.masterLots}` +
+          `${fill.masterTotalLots != null ? `, master ${fill.masterTotalLots}` : ""} × ${job.sub.multiplier}) ` +
           `clientOrderId=${job.clientOrderId}`,
       );
 

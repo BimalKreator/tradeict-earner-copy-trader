@@ -378,38 +378,38 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
-    let masterTotalLots = args.masterContracts;
-    if (tracker && isLiveMasterFill && !forceRestSync) {
-      const prevTracked = tracker.maxContractsForSymbolSide(
-        args.symbol,
-        args.side,
-      );
-      masterTotalLots =
-        prevTracked > 0
-          ? prevTracked + args.masterContracts
-          : args.masterContracts;
-    }
+    const legK = masterLegKey(args.symbol, args.side);
+    const baselineReplay =
+      isLiveMasterFill &&
+      tracker != null &&
+      tracker.legsAtBaseline.has(legK);
 
-    await copyMasterFillToSubscribers(prisma, strategyId, {
-    symbol: args.symbol,
-    side: args.side,
-    masterContracts: args.masterContracts,
-    masterTotalLots,
-    avgPrice: entryPrice,
-    masterFillKey: args.masterFillKey,
-    ...(forceRestSync ? { forceRestSync: true } : {}),
-    ...(args.adminForceSync ? { adminForceSync: true } : {}),
-    ...(isLiveMasterFill ? { liveMasterFill: true } : {}),
-    ...(args.masterOpenedAt !== undefined
-      ? { masterOpenedAt: args.masterOpenedAt }
-      : {}),
-    ...(args.locallyFirstSeenAt !== undefined
-      ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
-      : {}),
-    ...(args.restPreExistingUnknown
-      ? { restPreExistingUnknown: true }
-      : {}),
-    });
+    if (baselineReplay) {
+      console.log(
+        `${logTag} skip live fill copy ${args.symbol} ${args.side} — ` +
+          `leg pre-existing at REST baseline (REST catch-up only)`,
+      );
+    } else {
+      await copyMasterFillToSubscribers(prisma, strategyId, {
+      symbol: args.symbol,
+      side: args.side,
+      masterContracts: args.masterContracts,
+      avgPrice: entryPrice,
+      masterFillKey: args.masterFillKey,
+      ...(forceRestSync ? { forceRestSync: true, masterTotalLots: args.masterContracts } : {}),
+      ...(args.adminForceSync ? { adminForceSync: true } : {}),
+      ...(isLiveMasterFill ? { liveMasterFill: true } : {}),
+      ...(args.masterOpenedAt !== undefined
+        ? { masterOpenedAt: args.masterOpenedAt }
+        : {}),
+      ...(args.locallyFirstSeenAt !== undefined
+        ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
+        : {}),
+      ...(args.restPreExistingUnknown
+        ? { restPreExistingUnknown: true }
+        : {}),
+      });
+    }
   }
 
   if (
@@ -420,14 +420,23 @@ async function triggerMasterOpenCopy(
     if (isLiveMasterFill) {
       const isNewLeg = tracker.isNewLegThisSession(args.symbol, args.side);
       tracker.noteLegObserved(args.symbol, args.side, null, isNewLeg);
+      const prev = tracker.maxContractsForSymbolSide(args.symbol, args.side);
+      if (prev <= 0) {
+        tracker.applyMasterLeg({
+          symbol: args.symbol,
+          side: args.side,
+          contracts: args.masterContracts,
+          avgEntry: entryPrice,
+        });
+      }
+    } else {
+      tracker.applyMasterLeg({
+        symbol: args.symbol,
+        side: args.side,
+        contracts: args.masterContracts,
+        avgEntry: entryPrice,
+      });
     }
-    const prev = tracker.maxContractsForSymbolSide(args.symbol, args.side);
-    tracker.applyMasterLeg({
-      symbol: args.symbol,
-      side: args.side,
-      contracts: prev + args.masterContracts,
-      avgEntry: entryPrice,
-    });
   }
 }
 
@@ -3037,6 +3046,10 @@ class StrategyMasterSocket {
           const decreased = prev > next;
           const increased = next > prev;
           this.tracker.writeTracked(snap, next);
+          this.tracker.lastRestContractsByLeg.set(
+            masterLegKey(snap.symbol, snap.side),
+            next,
+          );
 
           if (copyEnabled && increased) {
             console.log(
