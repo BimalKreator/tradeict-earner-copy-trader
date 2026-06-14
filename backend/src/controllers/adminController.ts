@@ -2454,6 +2454,65 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function closeAllLiveTrades(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as { strategyId?: unknown };
+      const strategyId = String(body.strategyId ?? "").trim();
+      if (!strategyId) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+
+      const { adminCloseAllLivePositions } = await import(
+        "../services/adminLiveTradesOpsService.js"
+      );
+      const result = await adminCloseAllLivePositions(prisma, strategyId);
+      const status = result.ok ? 200 : 207;
+      res.status(status).json({
+        ...result,
+        message:
+          result.masterLegsClosed + result.followerLegsClosed > 0
+            ? `Closed ${result.masterLegsClosed} master leg(s) and ${result.followerLegsClosed} follower leg(s).`
+            : "No open exchange positions found.",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function syncAllFollowersToMaster(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as { strategyId?: unknown };
+      const strategyId = String(body.strategyId ?? "").trim();
+      if (!strategyId) {
+        res.status(400).json({ error: "strategyId is required" });
+        return;
+      }
+
+      const { adminSyncAllFollowersToMaster } = await import(
+        "../services/adminLiveTradesOpsService.js"
+      );
+      const result = await adminSyncAllFollowersToMaster(prisma, strategyId);
+      const status = result.ok ? 200 : 207;
+      res.status(status).json({
+        ...result,
+        message: result.ok
+          ? `All ${result.usersSynced} follower(s) synced to master (${result.totalAdjustments} adjustment(s)).`
+          : `${result.usersSynced}/${result.usersAttempted} follower(s) synced — check per-user errors.`,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function adjustFollowerQtyLiveTrade(
     req: Request,
     res: Response,
@@ -3164,6 +3223,8 @@ export function createAdminController(prisma: PrismaClient) {
     listStrategySubscribers,
     syncStrategyUser,
     granularSyncLiveTrades,
+    closeAllLiveTrades,
+    syncAllFollowersToMaster,
     adjustFollowerQtyLiveTrade,
     bulkAdjustFollowerLiveTrades,
     adjustMasterQtyLiveTrade,

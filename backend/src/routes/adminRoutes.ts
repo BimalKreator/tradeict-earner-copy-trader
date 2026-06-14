@@ -1350,6 +1350,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
    * Body: `{ userId, strategyId, legs: [{ symbol, side, addLots }] }`
    */
   router.post("/live-trades/granular-sync", adminController.granularSyncLiveTrades);
+  router.post("/live-trades/close-all", adminController.closeAllLiveTrades);
+  router.post(
+    "/live-trades/sync-all-followers",
+    adminController.syncAllFollowersToMaster,
+  );
 
   /**
    * Admin manual follower lot adjustment on one open leg.

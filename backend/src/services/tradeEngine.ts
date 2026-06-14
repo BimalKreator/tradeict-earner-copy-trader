@@ -1682,6 +1682,51 @@ export async function syncFollowerUserToMasterPositions(
     adjustmentsMade += 1;
   }
 
+  try {
+    followerPositions = await fetchDeltaOpenPositions(
+      creds.apiKey,
+      creds.apiSecret,
+      { lite: true, skipCache: true },
+    );
+  } catch {
+    followerPositions = [];
+  }
+
+  for (const fp of followerPositions) {
+    const openSide: TradeSide = fp.side === "SELL" ? "SELL" : "BUY";
+    const lots = Math.floor(Math.abs(fp.contracts));
+    if (lots <= 0) continue;
+    const onMasterBook = masterLegs.some(
+      (m) =>
+        m.side === openSide &&
+        tradePositionSymbolsAlign(m.deltaSymbol, fp.symbolKey),
+    );
+    if (onMasterBook) continue;
+
+    const trimSide: TradeSide = openSide === "BUY" ? "SELL" : "BUY";
+    console.log(
+      `[manual-sync] user=${userId} orphan close ${fp.symbolKey} ${openSide} lots=${lots}`,
+    );
+    const orphanClose = await executeFollowerTradeWithVerification(prisma, {
+      strategyId,
+      userId,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      symbol: fp.symbolKey,
+      side: trimSide,
+      size: lots,
+      reduceOnly: true,
+      adminForceSync: true,
+    });
+    if (!orphanClose.success) {
+      errors.push(
+        `${fp.symbolKey} orphan close: ${orphanClose.error ?? "execution failed"}`,
+      );
+      break;
+    }
+    adjustmentsMade += 1;
+  }
+
   if (errors.length > 0) {
     const errorMsg = errors.join("; ");
     await markSubscriptionSyncFailed(prisma, {

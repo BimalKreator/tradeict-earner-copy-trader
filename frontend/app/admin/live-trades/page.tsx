@@ -16,6 +16,8 @@ import {
   Users,
   Wifi,
   WifiOff,
+  XCircle,
+  Zap,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -636,6 +638,9 @@ function StrategyLivePanel({
   onOpenBulkAdjust,
   onOpenMasterAdjust,
   onOpenBulkMasterAdjust,
+  onCloseAllPositions,
+  onSyncAllToMaster,
+  bulkOpsBusy,
 }: {
   strategy: StrategySection;
   isActiveTab: boolean;
@@ -660,6 +665,9 @@ function StrategyLivePanel({
   onOpenBulkAdjust: (target: BulkAdjustQtyTarget) => void;
   onOpenMasterAdjust: (target: MasterAdjustQtyTarget) => void;
   onOpenBulkMasterAdjust: (target: BulkMasterAdjustQtyTarget) => void;
+  onCloseAllPositions: (strategyId: string) => Promise<void>;
+  onSyncAllToMaster: (strategyId: string) => Promise<void>;
+  bulkOpsBusy: boolean;
 }) {
   const masterPnl = sumLivePnl(strategy.masterPositions);
 
@@ -692,6 +700,40 @@ function StrategyLivePanel({
         totalLivePnl={masterPnl}
         onSaved={onAutoExitSaved}
       />
+
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-3">
+        <p className="mr-2 text-xs font-medium uppercase tracking-wide text-white/50">
+          Bulk actions
+        </p>
+        <button
+          type="button"
+          disabled={bulkOpsBusy}
+          onClick={() => void onSyncAllToMaster(strategy.strategyId)}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/45 bg-emerald-500/15 px-3 py-2 text-xs font-medium text-emerald-100 transition hover:bg-emerald-500/25 disabled:opacity-60"
+          title="Match every follower's open legs and lot sizes to master (× multiplier)"
+        >
+          {bulkOpsBusy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Zap className="h-3.5 w-3.5" aria-hidden />
+          )}
+          Auto Sync All to Master
+        </button>
+        <button
+          type="button"
+          disabled={bulkOpsBusy}
+          onClick={() => void onCloseAllPositions(strategy.strategyId)}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/45 bg-red-500/15 px-3 py-2 text-xs font-medium text-red-100 transition hover:bg-red-500/25 disabled:opacity-60"
+          title="Reduce-only close every open leg on master and all follower accounts"
+        >
+          {bulkOpsBusy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <XCircle className="h-3.5 w-3.5" aria-hidden />
+          )}
+          Close All Positions
+        </button>
+      </div>
 
       <section className="overflow-hidden rounded-xl border border-primary/25 bg-black/20">
         <div className="flex items-center justify-between border-b border-primary/25 bg-primary/5 px-4 py-3">
@@ -1258,6 +1300,9 @@ export default function AdminLiveTradesPage() {
     useState<MasterAdjustQtyTarget | null>(null);
   const [bulkMasterAdjustTarget, setBulkMasterAdjustTarget] =
     useState<BulkMasterAdjustQtyTarget | null>(null);
+  const [bulkOpsStrategyId, setBulkOpsStrategyId] = useState<string | null>(
+    null,
+  );
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1436,6 +1481,100 @@ export default function AdminLiveTradesPage() {
     [load],
   );
 
+  const closeAllPositions = useCallback(
+    async (strategyId: string) => {
+      const ok = window.confirm(
+        "Close ALL open positions on the master account and every active follower for this strategy? This places reduce-only market orders on Delta.",
+      );
+      if (!ok) return;
+      setBulkOpsStrategyId(strategyId);
+      setError(null);
+      try {
+        const base = resolveAdminApiBase();
+        const res = await fetch(`${base}/admin/live-trades/close-all`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+          body: JSON.stringify({ strategyId }),
+        });
+        const payload: unknown = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg =
+            typeof payload === "object" &&
+            payload !== null &&
+            "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+              ? (payload as { error: string }).error
+              : `Close all failed (${res.status})`;
+          throw new Error(msg);
+        }
+        const message =
+          typeof payload === "object" &&
+          payload !== null &&
+          "message" in payload &&
+          typeof (payload as { message: unknown }).message === "string"
+            ? (payload as { message: string }).message
+            : "All positions closed.";
+        setToast(message);
+        await load({ silent: true });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to close all positions");
+      } finally {
+        setBulkOpsStrategyId(null);
+      }
+    },
+    [load],
+  );
+
+  const syncAllToMaster = useCallback(
+    async (strategyId: string) => {
+      const ok = window.confirm(
+        "Sync ALL active followers to match master open legs and lot sizes (× each user's multiplier)? Extra follower-only legs will be closed.",
+      );
+      if (!ok) return;
+      setBulkOpsStrategyId(strategyId);
+      setError(null);
+      try {
+        const base = resolveAdminApiBase();
+        const res = await fetch(`${base}/admin/live-trades/sync-all-followers`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+          body: JSON.stringify({ strategyId }),
+        });
+        const payload: unknown = await res.json().catch(() => ({}));
+        if (!res.ok && res.status !== 207) {
+          const msg =
+            typeof payload === "object" &&
+            payload !== null &&
+            "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+              ? (payload as { error: string }).error
+              : `Sync all failed (${res.status})`;
+          throw new Error(msg);
+        }
+        const message =
+          typeof payload === "object" &&
+          payload !== null &&
+          "message" in payload &&
+          typeof (payload as { message: unknown }).message === "string"
+            ? (payload as { message: string }).message
+            : "Followers synced to master.";
+        setToast(message);
+        await load({ silent: true });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to sync followers");
+      } finally {
+        setBulkOpsStrategyId(null);
+      }
+    },
+    [load],
+  );
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void load();
@@ -1561,6 +1700,9 @@ export default function AdminLiveTradesPage() {
                     onOpenBulkAdjust={openBulkAdjust}
                     onOpenMasterAdjust={openMasterAdjust}
                     onOpenBulkMasterAdjust={openBulkMasterAdjust}
+                    onCloseAllPositions={closeAllPositions}
+                    onSyncAllToMaster={syncAllToMaster}
+                    bulkOpsBusy={bulkOpsStrategyId === panel.strategyId}
                     onAutoExitSaved={(message, updated) => {
                       setToast(message);
                       if (updated) {
