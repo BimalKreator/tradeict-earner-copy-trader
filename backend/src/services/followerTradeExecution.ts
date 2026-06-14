@@ -321,22 +321,21 @@ function minVerifiedLots(targetContracts: number, isOptionLeg: boolean): number 
   return targetContracts;
 }
 
-/** Lots to persist — perps require exchange REST; options allow ack fallback on REST lag. */
+/** Lots to persist — exchange REST is source of truth; ack alone never opens when flat. */
 function resolvedDbOpenQty(
   targetContracts: number,
   exchangeLots: number,
   ackFilled?: number,
   isOptionLeg = false,
 ): number {
+  if (exchangeLots <= 0) {
+    return 0;
+  }
   if (!isOptionLeg) {
-    if (exchangeLots <= 0) return 0;
     return Math.min(targetContracts, Math.floor(exchangeLots));
   }
-  const candidates = [exchangeLots, ackFilled ?? 0].filter(
-    (n) => Number.isFinite(n) && n > 0,
-  );
-  const confirmed =
-    candidates.length > 0 ? Math.max(...candidates) : 0;
+  const ack = ackFilled ?? 0;
+  const confirmed = Math.max(exchangeLots, ack > 0 && ack <= targetContracts ? ack : 0);
   if (confirmed <= 0) return 0;
   return Math.min(targetContracts, Math.floor(confirmed));
 }
@@ -837,7 +836,11 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       }
 
       const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
-      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
+      const isIncrementalLive =
+        fill.liveMasterFill === true && fill.forceRestSync !== true;
+      const expectedLots = isIncrementalLive
+        ? followerLotsFromMaster(fill.masterLots, sub)
+        : followerLotsFromMaster(masterTargetLots, sub);
       const clientOrderId = buildStableCopyClientOrderId({
         strategyId,
         userId: sub.userId,
@@ -875,24 +878,30 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      const deficitLots = await followerBotOpenDeficitLots(prisma, {
-        strategyId,
-        userId: sub.userId,
-        symbol: fill.symbol,
-        side: fill.side,
-        targetLots: expectedLots,
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-      });
-      if (deficitLots <= 0) {
-        console.log(
-          `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-            `(target=${expectedLots}, no deficit)`,
-        );
-        return;
+      let lotsToOrder: number;
+      if (isIncrementalLive) {
+        lotsToOrder = expectedLots;
+        if (lotsToOrder <= 0) return;
+      } else {
+        lotsToOrder = await followerBotOpenDeficitLots(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+          targetLots: expectedLots,
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+        });
+        if (lotsToOrder <= 0) {
+          console.log(
+            `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+              `(target=${expectedLots}, no deficit)`,
+          );
+          return;
+        }
       }
 
-      jobs.push({ sub, lots: deficitLots, clientOrderId, creds });
+      jobs.push({ sub, lots: lotsToOrder, clientOrderId, creds });
     }),
   );
 
@@ -1817,6 +1826,33 @@ export async function reconcileFollowersToEmptyMasterBook(
 
   if (legKeys.size === 0) return 0;
 
+  const strategy = await resolveFutureHedgeStrategy(prisma);
+  const masterKey = strategy.masterApiKey?.trim();
+  const masterSecret = strategy.masterApiSecret?.trim();
+  if (masterKey && masterSecret) {
+    try {
+      const masterOpen = await fetchDeltaOpenPositions(masterKey, masterSecret, {
+        lite: true,
+        skipCache: true,
+      });
+      const masterStillOpen = masterOpen.some(
+        (p) => Math.abs(p.contracts) > 1e-12,
+      );
+      if (masterStillOpen) {
+        console.warn(
+          `[MASTER-REST-SYNC] orphan reconcile aborted — master still has open leg(s) on re-check`,
+        );
+        return 0;
+      }
+    } catch (err) {
+      console.warn(
+        "[MASTER-REST-SYNC] orphan reconcile master re-check failed — skipping:",
+        err instanceof Error ? err.message : err,
+      );
+      return 0;
+    }
+  }
+
   console.log(
     `[MASTER-REST-SYNC] master book empty — reconciling ${legKeys.size} orphan follower leg(s)`,
   );
@@ -2367,7 +2403,7 @@ export async function executeFollowerTradeWithVerification(
           console.log(
             `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} filled=${existingAckFilled} exchange=${exchangeLots} — already synced`,
           );
-        } else if (!isOptionLeg) {
+        } else {
           openClientOrderId = buildStableCopyClientOrderId({
             strategyId: args.strategyId!,
             userId: args.userId,
@@ -2379,11 +2415,6 @@ export async function executeFollowerTradeWithVerification(
           console.warn(
             `[RETRY_LOOP] Stale filled ack (${existingAckFilled}) but exchange flat (${exchangeLots}) ` +
               `user=${userId} ${symbol} — refire clientOrderId=${openClientOrderId}`,
-          );
-        } else {
-          orderSubmitted = true;
-          console.log(
-            `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} state=${existingAck.state} filled=${existingAck.filledSize} — poll only`,
           );
         }
       }

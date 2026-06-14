@@ -127,6 +127,8 @@ const MASTER_REST_POLL_MS = 30_000;
 const MASTER_FLAT_CONFIRM_MS = 15_000;
 /** Shorter flat confirm when WS already signaled size→0 / delete. */
 const MASTER_FLAT_WS_CONFIRM_MS = 5_000;
+/** Consecutive empty REST reads before orphan follower reconcile. */
+const MASTER_EMPTY_BOOK_POLLS_REQUIRED = 3;
 /** Debounce REST partial-trim for the same master leg. */
 const REST_PARTIAL_TRIM_COOLDOWN_MS = 30_000;
 
@@ -372,22 +374,14 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
-    let masterTotalLots = args.masterContracts;
-    if (tracker && isLiveMasterFill) {
-      const prevTracked = tracker.maxContractsForSymbolSide(
-        args.symbol,
-        args.side,
-      );
-      masterTotalLots = prevTracked + args.masterContracts;
-    } else if (tracker && !isLiveMasterFill) {
-      masterTotalLots = args.masterContracts;
-    }
+    // Live WS fills copy increment only; cumulative target comes from REST force-sync.
+    const masterTotalLots = forceRestSync ? args.masterContracts : undefined;
 
     await copyMasterFillToSubscribers(prisma, strategyId, {
     symbol: args.symbol,
     side: args.side,
     masterContracts: args.masterContracts,
-    masterTotalLots,
+    ...(masterTotalLots != null ? { masterTotalLots } : {}),
     avgPrice: entryPrice,
     masterFillKey: args.masterFillKey,
     ...(forceRestSync ? { forceRestSync: true } : {}),
@@ -1995,6 +1989,12 @@ class MasterPositionTracker {
   readonly wsFlatHintAt = new Map<string, number>();
   /** Cross-channel master fill dedup for live follower fan-out. */
   readonly copyDedup = new MasterFillDedup();
+  /** legKey → last REST-reported contracts (partial trim uses this, not WS-inflated tracker). */
+  readonly lastRestContractsByLeg = new Map<string, number>();
+  /** First REST poll time the master book was completely empty. */
+  emptyBookSince: number | null = null;
+  /** Consecutive successful REST polls with zero master legs. */
+  emptyBookPollStreak = 0;
   private restBaselineSeeded = false;
 
   aliasesForSnap(snap: {
@@ -2079,6 +2079,7 @@ class MasterPositionTracker {
     for (const k of keys) {
       this.lastPositionContracts.delete(k);
       this.lastOpenMeta.delete(k);
+      this.lastRestContractsByLeg.delete(k);
     }
   }
 
@@ -2098,6 +2099,37 @@ class MasterPositionTracker {
 
   clearWsFlatHint(symbol: string, side: TradeSide): void {
     this.wsFlatHintAt.delete(masterLegKey(symbol, side));
+  }
+
+  noteRestMasterBookSize(openLegCount: number, refMs = Date.now()): void {
+    if (openLegCount > 0) {
+      this.emptyBookSince = null;
+      this.emptyBookPollStreak = 0;
+      return;
+    }
+    this.emptyBookPollStreak += 1;
+    if (this.emptyBookSince == null) {
+      this.emptyBookSince = refMs;
+    }
+  }
+
+  canReconcileEmptyMasterBook(refMs = Date.now()): boolean {
+    if (this.emptyBookPollStreak < MASTER_EMPTY_BOOK_POLLS_REQUIRED) {
+      return false;
+    }
+    if (this.emptyBookSince == null) {
+      return false;
+    }
+    return refMs - this.emptyBookSince >= MASTER_FLAT_CONFIRM_MS;
+  }
+
+  hasTrackedOpenLegs(): boolean {
+    for (const meta of this.lastOpenMeta.values()) {
+      if (this.maxContractsForSymbolSide(meta.symbol, meta.side) > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   isRestBaselineSeeded(): boolean {
@@ -2260,6 +2292,8 @@ async function pollMasterPositionsFallback(
 
     registerSymbolsForLivePrices(masters.map((m) => m.deltaSymbol));
 
+    tracker.noteRestMasterBookSize(masters.length);
+
     const wasBaselineSeeded = tracker.isRestBaselineSeeded();
 
     if (!wasBaselineSeeded) {
@@ -2272,6 +2306,10 @@ async function pollMasterPositionsFallback(
         });
         tracker.markBaselineLeg(m.deltaSymbol, m.side);
         tracker.noteLegObserved(m.deltaSymbol, m.side, m.openedAt, false);
+        tracker.lastRestContractsByLeg.set(
+          masterLegKey(m.deltaSymbol, m.side),
+          m.masterContracts,
+        );
       }
       tracker.markRestBaselineSeeded();
       console.log(
@@ -2376,14 +2414,16 @@ async function pollMasterPositionsFallback(
         }
       }
 
-      const prevTracked = tracker.maxContractsForSymbolSide(m.deltaSymbol, m.side);
+      const legK = masterLegKey(m.deltaSymbol, m.side);
+      const prevRest =
+        tracker.lastRestContractsByLeg.get(legK) ?? m.masterContracts;
       if (
         wasBaselineSeeded &&
-        prevTracked > m.masterContracts + 1e-9 &&
+        prevRest > m.masterContracts + 1e-9 &&
         m.masterContracts > 0 &&
         !restPartialTrimOnCooldown(strat.id, m.deltaSymbol, m.side)
       ) {
-        const masterTrimLots = Math.floor(prevTracked - m.masterContracts);
+        const masterTrimLots = Math.floor(prevRest - m.masterContracts);
         if (masterTrimLots > 0) {
           markRestPartialTrimAttempt(strat.id, m.deltaSymbol, m.side);
           const trimKey = `rest-trim:${buildMasterFillKey([
@@ -2415,6 +2455,7 @@ async function pollMasterPositionsFallback(
         contracts: m.masterContracts,
         avgEntry: Number.isFinite(m.entryPrice) ? m.entryPrice : 0,
       });
+      tracker.lastRestContractsByLeg.set(legK, m.masterContracts);
     }
 
     if (wasBaselineSeeded) {
@@ -2499,9 +2540,14 @@ async function pollMasterPositionsFallback(
             productKey: meta.symbol,
           }),
         );
+        tracker.lastRestContractsByLeg.delete(masterLegKey(meta.symbol, meta.side));
       }
 
-      if (masters.length === 0) {
+      if (
+        masters.length === 0 &&
+        !tracker.hasTrackedOpenLegs() &&
+        tracker.canReconcileEmptyMasterBook()
+      ) {
         try {
           const reconciled = await reconcileFollowersToEmptyMasterBook(
             prisma,
@@ -2531,6 +2577,13 @@ async function pollMasterPositionsFallback(
             reconcileErr instanceof Error ? reconcileErr.message : reconcileErr,
           );
         }
+      } else if (
+        masters.length === 0 &&
+        tracker.emptyBookPollStreak === 1
+      ) {
+        console.log(
+          `[MASTER-REST-SYNC] master REST empty — awaiting ${MASTER_EMPTY_BOOK_POLLS_REQUIRED} polls / ${MASTER_FLAT_CONFIRM_MS / 1000}s before orphan reconcile`,
+        );
       }
     }
 
