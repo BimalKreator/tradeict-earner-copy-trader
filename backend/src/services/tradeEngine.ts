@@ -125,8 +125,12 @@ const POSITION_QTY_RECONCILE_MS = 60_000;
 const MASTER_REST_POLL_MS = 30_000;
 /** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
 const MASTER_FLAT_CONFIRM_MS = 15_000;
-/** Shorter flat confirm when WS already signaled size→0 / delete. */
-const MASTER_FLAT_WS_CONFIRM_MS = 5_000;
+/** Same minimum wait even when WS hinted flat — avoids 5s false exits on position delete. */
+const MASTER_FLAT_WS_CONFIRM_MS = 15_000;
+/** Consecutive REST polls with leg missing before flat close is allowed. */
+const MASTER_FLAT_REST_MISS_POLLS_REQUIRED = 3;
+/** After ignored hedge roll fills, defer flat detection for this symbol. */
+const MASTER_FLAT_SUPPRESS_AFTER_ROLL_MS = 90_000;
 /** Consecutive empty REST reads before orphan follower reconcile. */
 const MASTER_EMPTY_BOOK_POLLS_REQUIRED = 3;
 /** Debounce REST partial-trim for the same master leg. */
@@ -968,6 +972,7 @@ async function processMasterUserTradeFillRecords(
         return;
       }
       if (masterFillClosesExistingLeg(tracker, sig.symbol, sig.side)) {
+        tracker?.noteMasterBookRoll(sig.symbol);
         console.log(
           `[MASTER-WS] user_trades closing fill ignored for copy ${sig.symbol} ${sig.side} ` +
             `(opposite leg open on master book)`,
@@ -1987,6 +1992,10 @@ class MasterPositionTracker {
   readonly legOpenedAtMs = new Map<string, number>();
   /** legKey → ms when WS signaled flat (size→0 / delete). */
   readonly wsFlatHintAt = new Map<string, number>();
+  /** legKey → consecutive REST polls where leg was absent. */
+  readonly pendingFlatMissStreak = new Map<string, number>();
+  /** symbol → defer flat detection until (hedge roll / ignored closing fills). */
+  readonly suppressFlatUntilBySymbol = new Map<string, number>();
   /** Cross-channel master fill dedup for live follower fan-out. */
   readonly copyDedup = new MasterFillDedup();
   /** legKey → last REST-reported contracts (partial trim uses this, not WS-inflated tracker). */
@@ -2085,6 +2094,7 @@ class MasterPositionTracker {
 
   clearPendingFlat(legKey: string): void {
     this.pendingFlatSince.delete(legKey);
+    this.pendingFlatMissStreak.delete(legKey);
   }
 
   markWsFlatHint(symbol: string, side: TradeSide): void {
@@ -2099,6 +2109,20 @@ class MasterPositionTracker {
 
   clearWsFlatHint(symbol: string, side: TradeSide): void {
     this.wsFlatHintAt.delete(masterLegKey(symbol, side));
+  }
+
+  noteMasterBookRoll(symbol: string, refMs = Date.now()): void {
+    const key = symbol.trim().toUpperCase();
+    if (!key) return;
+    this.suppressFlatUntilBySymbol.set(
+      key,
+      refMs + MASTER_FLAT_SUPPRESS_AFTER_ROLL_MS,
+    );
+  }
+
+  isFlatDetectionSuppressed(symbol: string, refMs = Date.now()): boolean {
+    const until = this.suppressFlatUntilBySymbol.get(symbol.trim().toUpperCase());
+    return until != null && refMs < until;
   }
 
   noteRestMasterBookSize(openLegCount: number, refMs = Date.now()): void {
@@ -2470,9 +2494,20 @@ async function pollMasterPositionsFallback(
       for (const [lk, meta] of trackedLegs) {
         if (cancelled.value) return;
 
+        const now = Date.now();
+        const firstMissing = tracker.pendingFlatSince.get(lk);
+
         if (masterLegOpenOnRest(meta, masters)) {
           tracker.clearPendingFlat(lk);
           tracker.clearWsFlatHint(meta.symbol, meta.side);
+          continue;
+        }
+
+        if (tracker.isFlatDetectionSuppressed(meta.symbol, now)) {
+          tracker.clearPendingFlat(lk);
+          console.log(
+            `[MASTER-REST-SYNC] flat detection suppressed for ${meta.symbol} — hedge roll window`,
+          );
           continue;
         }
 
@@ -2482,8 +2517,9 @@ async function pollMasterPositionsFallback(
         );
         if (lastContracts <= 0) continue;
 
-        const now = Date.now();
-        const firstMissing = tracker.pendingFlatSince.get(lk);
+        const missStreak = (tracker.pendingFlatMissStreak.get(lk) ?? 0) + 1;
+        tracker.pendingFlatMissStreak.set(lk, missStreak);
+
         const wsHintAge = tracker.wsFlatHintAgeMs(meta.symbol, meta.side, now);
         const confirmMs =
           wsHintAge != null && wsHintAge <= 120_000
@@ -2493,8 +2529,15 @@ async function pollMasterPositionsFallback(
           tracker.pendingFlatSince.set(lk, now);
           console.log(
             `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
-              `awaiting ${confirmMs / 1000}s confirmation before follower close` +
-              `${wsHintAge != null ? " (WS flat hint)" : ""}.`,
+              `awaiting ${confirmMs / 1000}s + ${MASTER_FLAT_REST_MISS_POLLS_REQUIRED} REST miss(es) before follower close` +
+              `${wsHintAge != null ? " (WS flat hint)" : ""} streak=${missStreak}/${MASTER_FLAT_REST_MISS_POLLS_REQUIRED}.`,
+          );
+          continue;
+        }
+        if (missStreak < MASTER_FLAT_REST_MISS_POLLS_REQUIRED) {
+          console.log(
+            `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
+              `streak=${missStreak}/${MASTER_FLAT_REST_MISS_POLLS_REQUIRED}, not closing yet.`,
           );
           continue;
         }
@@ -2502,9 +2545,32 @@ async function pollMasterPositionsFallback(
           continue;
         }
 
+        let freshMasters = masters;
+        try {
+          freshMasters = await fetchMasterOpenPositions(
+            strat.masterApiKey!,
+            strat.masterApiSecret!,
+            { skipCache: true },
+          );
+        } catch (recheckErr) {
+          console.warn(
+            `[MASTER-REST-SYNC] master re-check before flat close failed ${meta.symbol}:`,
+            recheckErr instanceof Error ? recheckErr.message : recheckErr,
+          );
+          continue;
+        }
+        if (masterLegOpenOnRest(meta, freshMasters)) {
+          tracker.clearPendingFlat(lk);
+          tracker.clearWsFlatHint(meta.symbol, meta.side);
+          console.log(
+            `[MASTER-REST-SYNC] flat close aborted — ${meta.symbol} ${meta.side} still open on master re-check`,
+          );
+          continue;
+        }
+
         console.log(
           `[MASTER-REST-SYNC] Master flat confirmed via REST ${meta.symbol} ${meta.side} ` +
-            `(${lastContracts} contracts, missing ${Math.round((now - firstMissing) / 1000)}s) — closing followers.`,
+            `(${lastContracts} contracts, missing ${Math.round((now - firstMissing) / 1000)}s, streak=${missStreak}) — closing followers.`,
         );
         tracker.clearPendingFlat(lk);
 
@@ -2922,16 +2988,10 @@ class StrategyMasterSocket {
         return;
       }
 
-      // WS delete/close events — schedule immediate REST poll (faster than waiting for interval).
+      // WS delete/close — refresh REST snapshot only; do not treat as flat (hedge rolls emit deletes).
       if (action === "delete" || action === "closed") {
-        const rows = collectRows();
-        for (const r of rows) {
-          const snap = extractPositionSnapshot(r);
-          if (!snap) continue;
-          this.tracker.markWsFlatHint(snap.symbol, snap.side);
-        }
         console.warn(
-          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — scheduling immediate REST flat check`,
+          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — scheduling REST sync (no flat hint)`,
         );
         requestImmediateMasterRestPoll(`ws-position-${action}`);
         return;

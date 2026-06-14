@@ -1609,12 +1609,21 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
       const dbLotsFloor = Math.floor(dbLots);
 
-      const { lots, exchangeOpenLots } = await resolveFollowerReduceOnlyCloseLots({
+      const exchangeOpenLots = await followerExchangeOpenLotsLive(
+        creds.apiKey,
+        creds.apiSecret,
+        snap.symbol,
+        snap.side,
+      );
+      const exchangeFloor = Math.floor(exchangeOpenLots);
+      const requestedCloseLots = Math.max(dbLotsFloor, exchangeFloor, 1);
+
+      const { lots } = await resolveFollowerReduceOnlyCloseLots({
         apiKey: creds.apiKey,
         apiSecret: creds.apiSecret,
         symbol: snap.symbol,
         openSide: snap.side,
-        requestedLots: Math.max(1, Math.floor(dbLots), 1),
+        requestedLots: requestedCloseLots,
       });
 
       if (lots <= 0) {
