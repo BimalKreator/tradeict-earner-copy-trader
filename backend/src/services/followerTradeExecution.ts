@@ -1898,7 +1898,8 @@ export async function executeFollowerTradeWithVerification(
   const skipSyncStatusGate =
     args.adminForceSync === true ||
     args.forceRestSync === true ||
-    args.liveMasterFill === true;
+    args.liveMasterFill === true ||
+    args.reduceOnly === true;
   const isOptionLeg = isDeltaOptionProductId(symbol);
 
   if (args.strategyId) {
@@ -1953,7 +1954,7 @@ export async function executeFollowerTradeWithVerification(
       subscriptionSyncBlocksReconcile(sub.syncStatus)
     ) {
       console.log(
-        `[RETRY_LOOP] skip open user=${args.userId} syncStatus=${sub.syncStatus}`,
+        `[RETRY_LOOP] skip copy user=${args.userId} syncStatus=${sub.syncStatus}`,
       );
       return {
         success: false,
@@ -2000,6 +2001,10 @@ export async function executeFollowerTradeWithVerification(
           symbol,
           side: openSide,
           ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
+        });
+        await markSubscriptionSynced(prisma, {
+          userId,
+          strategyId: args.strategyId,
         });
       }
       return {
@@ -2059,6 +2064,12 @@ export async function executeFollowerTradeWithVerification(
         side: openSide,
         ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
       });
+      if (single.success) {
+        await markSubscriptionSynced(prisma, {
+          userId,
+          strategyId: args.strategyId,
+        });
+      }
     }
     return { ...single, attempts: 1, verified: single.success };
   }
