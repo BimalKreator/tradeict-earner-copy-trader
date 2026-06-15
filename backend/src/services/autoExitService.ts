@@ -4,6 +4,7 @@ import {
   markBotInitiatedClose,
   setPendingStrategyExitReason,
 } from "../constants/exitReasons.js";
+import { clearFutureHedgeActiveBatch } from "./futureHedgeEngine.js";
 import {
   executeTrade,
   fetchDeltaOpenPositions,
@@ -321,6 +322,18 @@ export async function runStrategyAutoExitCheck(
   }
 
   if (closed > 0) {
+    try {
+      await clearFutureHedgeActiveBatch(
+        prisma,
+        `auto-exit:${breach.reason}`,
+      );
+    } catch (batchErr) {
+      console.warn(
+        `[auto-exit] Future Hedge batch reset failed strategyId=${strategyId}:`,
+        batchErr instanceof Error ? batchErr.message : batchErr,
+      );
+    }
+
     try {
       const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
       await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);

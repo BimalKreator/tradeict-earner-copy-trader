@@ -227,6 +227,30 @@ async function clearActiveBatch(
 }
 
 /**
+ * Reset Future Hedge batch state when master is fully flat (auto-exit, manual close, etc.).
+ * Prevents the engine from running grid adjustments against an empty exchange book.
+ */
+export async function clearFutureHedgeActiveBatch(
+  prisma: PrismaClient,
+  reason: string,
+): Promise<boolean> {
+  const config = await prisma.futureHedgeConfig.findFirst({
+    where: { strategy: { title: FUTURE_HEDGE_STRATEGY_TITLE } },
+    select: { id: true, currentBatchId: true },
+  });
+  if (!config?.currentBatchId) return false;
+
+  await clearActiveBatch(prisma, config.id);
+  lastEntryAttemptAt = Date.now();
+  lastLoggedMtm = null;
+
+  console.log(
+    `[future-hedge-engine] batch cleared (${reason}) — was id=${config.currentBatchId}`,
+  );
+  return true;
+}
+
+/**
  * Market-close every open leg belonging to the batch (reduce-only).
  */
 export async function forceCloseBatchPositions(
@@ -533,6 +557,19 @@ export async function tryExecuteFreshEntry(
       return {
         ok: false,
         error: "Master Delta API key and secret must be set on the strategy",
+      };
+    }
+
+    const openOnExchange = await fetchDeltaOpenPositions(apiKey, apiSecret, {
+      skipCache: true,
+    });
+    const hasOpenLegs = openOnExchange.some(
+      (p) => Math.abs(p.contracts) >= 1e-12,
+    );
+    if (hasOpenLegs) {
+      return {
+        ok: false,
+        error: "Master still has open positions — skip fresh entry",
       };
     }
 
@@ -843,6 +880,30 @@ async function engineTick(prisma: PrismaClient): Promise<void> {
     if (!config) return;
 
     if (config.currentBatchId) {
+      const strategy = await prisma.strategy.findFirst({
+        where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+        select: { masterApiKey: true, masterApiSecret: true },
+      });
+      const apiKey = strategy?.masterApiKey?.trim() ?? "";
+      const apiSecret = strategy?.masterApiSecret?.trim() ?? "";
+      if (apiKey && apiSecret) {
+        const snapshot = await computeCombinedBatchMtm(
+          prisma,
+          apiKey,
+          apiSecret,
+          config,
+        );
+        if (snapshot && snapshot.legCount === 0) {
+          await clearActiveBatch(prisma, config.id);
+          lastEntryAttemptAt = Date.now();
+          lastLoggedMtm = null;
+          console.log(
+            `[future-hedge-engine] batch ${config.currentBatchId} cleared — exchange flat (no batch legs)`,
+          );
+          return;
+        }
+      }
+
       const result = await tryExecuteAdjustment(prisma);
       if (
         !result.ok &&

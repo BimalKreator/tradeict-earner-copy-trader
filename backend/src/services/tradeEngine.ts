@@ -89,6 +89,8 @@ import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import { consolidateDuplicateFutureHedgeStrategies } from "./strategyCleanupService.js";
 import { resolveCanonicalFutureHedgeStrategy } from "./futureHedgeService.js";
 import {
+  isLegClosingBlocked,
+  markLegClosing,
   markMasterFlatting,
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
@@ -401,15 +403,31 @@ async function triggerMasterOpenCopy(
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
 
-  if (
-    args.source === "rest" &&
-    args.adminForceSync !== true &&
-    syncMonitorOpensBlocked(strategyId)
-  ) {
-    console.log(
-      `[MASTER-REST-SYNC] skip open copy — master flatting lock strategyId=${strategyId} symbol=${args.symbol}`,
-    );
-    return;
+  if (args.adminForceSync !== true) {
+    if (syncMonitorOpensBlocked(strategyId)) {
+      const logTagEarly =
+        args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
+      console.log(
+        `${logTagEarly} skip open copy — master flatting lock strategyId=${strategyId} symbol=${args.symbol}`,
+      );
+      return;
+    }
+    if (isLegClosingBlocked(strategyId, args.symbol, args.side)) {
+      const logTagEarly =
+        args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
+      console.log(
+        `${logTagEarly} skip open copy — leg closing lock strategyId=${strategyId} symbol=${args.symbol} ${args.side}`,
+      );
+      return;
+    }
+    if (tracker?.wsFlatHintAgeMs(args.symbol, args.side) != null) {
+      const logTagEarly =
+        args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
+      console.log(
+        `${logTagEarly} skip open copy — WS flat hint active ${args.symbol} ${args.side}`,
+      );
+      return;
+    }
   }
 
   const isLiveMasterFill = args.source !== "rest";
@@ -1034,6 +1052,8 @@ async function handleMasterWsClosingFill(
   if (!meta) return;
 
   tracker.markWsFlatHint(sig.symbol, openSide);
+  markLegClosing(strategyId, sig.symbol, openSide);
+  markMasterFlatting(strategyId);
 
   console.log(
     `[MASTER-WS] instant follower close ${sig.symbol} ${openSide} ` +
@@ -1207,6 +1227,8 @@ async function processMasterUserTradeFillRecords(
         const meta = resolveTrackedOpenLegMeta(tracker, sig.symbol, openSide);
         if (!meta) return;
         tracker.markWsFlatHint(sig.symbol, openSide);
+        markLegClosing(strategyId, sig.symbol, openSide);
+        markMasterFlatting(strategyId);
         console.log(
           `[MASTER-WS] opposing fill → instant close ${sig.symbol} ${openSide} ` +
             `(fill ${sig.side} qty=${sig.contracts})`,
@@ -2147,6 +2169,7 @@ async function notifyMasterFlat(
     `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice} origin="${closureOrigin}"`,
   );
 
+  markLegClosing(strategyId, snap.symbol, snap.side);
   markMasterFlatting(strategyId);
 
   try {
@@ -2578,6 +2601,10 @@ async function pollMasterPositionsFallback(
 
     const wasBaselineSeeded = tracker.isRestBaselineSeeded();
 
+    if (masters.length === 0 && wasBaselineSeeded) {
+      markMasterFlatting(strat.id);
+    }
+
     if (!wasBaselineSeeded) {
       for (const m of masters) {
         tracker.applyMasterLeg({
@@ -2660,6 +2687,19 @@ async function pollMasterPositionsFallback(
           continue;
         }
 
+        if (syncMonitorOpensBlocked(strat.id)) {
+          continue;
+        }
+        if (isLegClosingBlocked(strat.id, m.deltaSymbol, m.side)) {
+          continue;
+        }
+        if (tracker.wsFlatHintAgeMs(m.deltaSymbol, m.side) != null) {
+          console.log(
+            `[MASTER-REST-SYNC] skip open — WS flat hint ${m.deltaSymbol} ${m.side}`,
+          );
+          continue;
+        }
+
         const missingOnFollowers =
           !isMasterScaleIn &&
           !isMasterPartialTrim &&
@@ -2723,6 +2763,14 @@ async function pollMasterPositionsFallback(
       }
 
       if (isMasterScaleIn) {
+        if (
+          syncMonitorOpensBlocked(strat.id) ||
+          isLegClosingBlocked(strat.id, m.deltaSymbol, m.side) ||
+          tracker.wsFlatHintAgeMs(m.deltaSymbol, m.side) != null
+        ) {
+          tracker.lastRestContractsByLeg.set(legK, m.masterContracts);
+          continue;
+        }
         if (
           !restForceCopyOnCooldown(
             strat.id,
@@ -4006,6 +4054,12 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         for (const m of liveMasterLegsForOpens) {
           if (cancelled.value) return;
           if (!syncMonitorOpensAllowed) {
+            continue;
+          }
+          if (isLegClosingBlocked(strat.id, m.deltaSymbol, m.side)) {
+            continue;
+          }
+          if (masterPositionTracker.wsFlatHintAgeMs(m.deltaSymbol, m.side) != null) {
             continue;
           }
           if (restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side, m.masterContracts)) {

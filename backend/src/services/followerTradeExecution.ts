@@ -32,6 +32,7 @@ import {
   markSubscriptionSyncPending,
   subscriptionSyncBlocksReconcile,
   syncMonitorOpensBlocked,
+  isLegClosingBlocked,
 } from "./subscriptionSyncService.js";
 import {
   buildClientOrderId,
@@ -877,6 +878,17 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   }
 
   const strategyId = strategy.id;
+  if (
+    fill.adminForceSync !== true &&
+    (syncMonitorOpensBlocked(strategyId) ||
+      isLegClosingBlocked(strategyId, fill.symbol, fill.side))
+  ) {
+    console.log(
+      `[copy] skip master open fan-out — flatting/closing lock ${fill.symbol} ${fill.side}`,
+    );
+    return null;
+  }
+
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   if (subscribers.length === 0) {
     console.log("[copy] No active Future Hedge subscribers for master open");
@@ -1171,6 +1183,17 @@ export async function forceSyncMasterOpenToFollowers(
     }
 
     const strategyId = strategy.id;
+    if (
+      fill.adminForceSync !== true &&
+      (syncMonitorOpensBlocked(strategyId) ||
+        isLegClosingBlocked(strategyId, fill.symbol, fill.side))
+    ) {
+      console.log(
+        `[FORCE-SYNC] blocked — master flatting/closing lock ${fill.symbol} ${fill.side}`,
+      );
+      return null;
+    }
+
     const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
     if (subscribers.length === 0) {
       return { strategyId, fanoutCount: 0 };
@@ -2353,11 +2376,12 @@ export async function executeFollowerTradeWithVerification(
   if (
     args.strategyId &&
     args.reduceOnly !== true &&
-    args.forceRestSync === true &&
-    syncMonitorOpensBlocked(args.strategyId)
+    args.adminForceSync !== true &&
+    (syncMonitorOpensBlocked(args.strategyId) ||
+      isLegClosingBlocked(args.strategyId, symbol, side))
   ) {
     console.warn(
-      `[copy] Block open user=${userId} ${symbol} ${side} — master flatting lock active`,
+      `[copy] Block open user=${userId} ${symbol} ${side} — master flatting/closing lock active`,
     );
     return {
       success: false,
