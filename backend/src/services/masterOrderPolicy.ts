@@ -3,6 +3,8 @@ import type { PrismaClient } from "@prisma/client";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 import { findActiveFutureHedgeCopySubscribers } from "./strategySubscriptionService.js";
+import { isMasterFlatting } from "./subscriptionSyncService.js";
+import { isFutureHedgePostExitEntryBlocked } from "./futureHedgeEngine.js";
 
 export function masterApiKeyFingerprint(apiKeyPlain: string): string {
   return createHash("sha256")
@@ -13,6 +15,7 @@ export function masterApiKeyFingerprint(apiKeyPlain: string): string {
 
 type PolicyState = {
   masterFingerprints: Set<string>;
+  strategyId: string | null;
   opensAllowed: boolean;
   blockReason: string;
   refreshedAt: number;
@@ -20,6 +23,7 @@ type PolicyState = {
 
 const state: PolicyState = {
   masterFingerprints: new Set(),
+  strategyId: null,
   opensAllowed: false,
   blockReason: "policy not initialized — master opens denied by default",
   refreshedAt: 0,
@@ -39,6 +43,12 @@ export function assertMasterExchangeOpenAllowed(
   if (bypassPolicy === true) return { ok: true };
   if (!isRegisteredMasterApiKey(apiKeyPlain)) {
     return { ok: true };
+  }
+  if (state.strategyId && isMasterFlatting(state.strategyId)) {
+    return { ok: false, error: "master flatting lock active — open blocked" };
+  }
+  if (isFutureHedgePostExitEntryBlocked()) {
+    return { ok: false, error: "post-exit entry cooldown active — open blocked" };
   }
   if (!state.opensAllowed) {
     return {
@@ -84,10 +94,20 @@ export async function refreshMasterOrderPolicy(
   const strategyActive = strategy?.isActive === true;
   const autoEnabled = config?.isAutoEnabled === true;
   const hasSubs = subs.length > 0;
+  const strategyId = strategy?.id ?? null;
+  state.strategyId = strategyId;
+  const flattingLock =
+    strategyId != null && isMasterFlatting(strategyId);
 
   if (!strategyActive) {
     state.opensAllowed = false;
     state.blockReason = "strategy paused (isActive=false)";
+  } else if (flattingLock) {
+    state.opensAllowed = false;
+    state.blockReason = "master flatting lock active";
+  } else if (isFutureHedgePostExitEntryBlocked()) {
+    state.opensAllowed = false;
+    state.blockReason = "post-exit entry cooldown active";
   } else if (!autoEnabled) {
     state.opensAllowed = false;
     state.blockReason = "Future Hedge isAutoEnabled=false";

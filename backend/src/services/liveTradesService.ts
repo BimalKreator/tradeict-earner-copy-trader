@@ -94,6 +94,22 @@ function masterCachedPositions(strategyId: string): LiveTradeRow[] {
   return sortMasterCachedRows(cache);
 }
 
+/**
+ * Instantly clear admin live-trades master leg cache (e.g. on master flat / auto-exit)
+ * so the UI does not wait for REST flat-eviction polls.
+ */
+export function clearMasterLivePositionsCache(strategyId: string): void {
+  const cache = lastKnownMasterPositions.get(strategyId);
+  if (cache) {
+    cache.clear();
+  } else {
+    lastKnownMasterPositions.set(strategyId, new Map());
+  }
+  console.log(
+    `[live-trades] master cache force-cleared strategyId=${strategyId}`,
+  );
+}
+
 type MasterLiveFetchOpts = {
   /** No client timeout — used for background refresh and cold-start retry. */
   background?: boolean;

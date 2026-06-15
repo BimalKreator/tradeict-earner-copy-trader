@@ -23,12 +23,16 @@ import {
 } from "./futureHedgeDataService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 import { findActiveFutureHedgeCopySubscribers } from "./strategySubscriptionService.js";
+import { isMasterFlatting } from "./subscriptionSyncService.js";
 
 const ENGINE_TICK_MS =
   Number(process.env.FUTURE_HEDGE_ENGINE_TICK_MS) || 5_000;
 const MTM_TICK_MS = Number(process.env.FUTURE_HEDGE_MTM_TICK_MS) || 1_000;
 const ENTRY_COOLDOWN_MS =
   Number(process.env.FUTURE_HEDGE_ENTRY_COOLDOWN_MS) || 120_000;
+/** After auto-exit / breakeven flat — block fresh hedge entries even if EMA trend fires. */
+const POST_EXIT_ENTRY_BLOCK_MS =
+  Number(process.env.FUTURE_HEDGE_POST_EXIT_BLOCK_MS) || 180_000;
 const BATCH_EXPIRY_MATCH_TOLERANCE_MS = 86_400_000;
 
 export type FutureHedgeEntryResult = {
@@ -78,6 +82,7 @@ let entryInFlight = false;
 let adjustmentInFlight = false;
 let closeInFlight = false;
 let lastEntryAttemptAt = 0;
+let postExitEntryBlockedUntil = 0;
 let lastLoggedMtm: number | null = null;
 let lastNoSubscriberSafetyAt = 0;
 let lastNoSubscriberBlockLogAt = 0;
@@ -92,19 +97,46 @@ function logMasterOpenBlocked(reason: string): void {
   console.warn(`[future-hedge-engine] master opens BLOCKED: ${reason}`);
 }
 
+/** Block fresh hedge entries after auto-exit / breakeven / manual master flat. */
+export function markFutureHedgePostExitEntryBlock(
+  durationMs: number = POST_EXIT_ENTRY_BLOCK_MS,
+): void {
+  postExitEntryBlockedUntil = Math.max(
+    postExitEntryBlockedUntil,
+    Date.now() + durationMs,
+  );
+  lastEntryAttemptAt = Date.now();
+}
+
+export function isFutureHedgePostExitEntryBlocked(): boolean {
+  return Date.now() < postExitEntryBlockedUntil;
+}
+
 /** Master hedge opens require an active strategy and at least one copy subscriber. */
 async function assertMasterHedgeOpensAllowed(
   prisma: PrismaClient,
-  strategy?: { isActive: boolean },
+  strategy?: { id: string; isActive: boolean },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const strat =
     strategy ??
     (await prisma.strategy.findFirst({
       where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
-      select: { isActive: true },
+      select: { id: true, isActive: true },
     }));
   if (!strat?.isActive) {
     return { ok: false, reason: "strategy paused (isActive=false)" };
+  }
+  if (isMasterFlatting(strat.id)) {
+    return {
+      ok: false,
+      reason: "master flatting lock active — hedge entry blocked",
+    };
+  }
+  if (isFutureHedgePostExitEntryBlocked()) {
+    return {
+      ok: false,
+      reason: "post-exit entry cooldown active — hedge entry blocked",
+    };
   }
   const subs = await findActiveFutureHedgeCopySubscribers(prisma);
   if (subs.length === 0) {
@@ -339,14 +371,20 @@ export async function clearFutureHedgeActiveBatch(
   prisma: PrismaClient,
   reason: string,
 ): Promise<boolean> {
+  markFutureHedgePostExitEntryBlock();
+
   const config = await prisma.futureHedgeConfig.findFirst({
     where: { strategy: { title: FUTURE_HEDGE_STRATEGY_TITLE } },
     select: { id: true, currentBatchId: true },
   });
-  if (!config?.currentBatchId) return false;
+  if (!config?.currentBatchId) {
+    console.log(
+      `[future-hedge-engine] post-exit entry cooldown (${reason}) — no active batch`,
+    );
+    return false;
+  }
 
   await clearActiveBatch(prisma, config.id);
-  lastEntryAttemptAt = Date.now();
   lastLoggedMtm = null;
 
   console.log(
@@ -967,6 +1005,14 @@ async function mtmTick(prisma: PrismaClient): Promise<void> {
       return;
     }
 
+    const strategyRow = await prisma.strategy.findFirst({
+      where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+      select: { id: true },
+    });
+    if (strategyRow && isMasterFlatting(strategyRow.id)) {
+      return;
+    }
+
     const strategy = await prisma.strategy.findFirst({
       where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
       include: { futureHedgeConfig: true },
@@ -1018,6 +1064,17 @@ async function engineTick(prisma: PrismaClient): Promise<void> {
 
     const subs = await findActiveFutureHedgeCopySubscribers(prisma);
     if (subs.length === 0) {
+      return;
+    }
+
+    const strategyRow = await prisma.strategy.findFirst({
+      where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+      select: { id: true },
+    });
+    if (strategyRow && isMasterFlatting(strategyRow.id)) {
+      return;
+    }
+    if (isFutureHedgePostExitEntryBlocked()) {
       return;
     }
 

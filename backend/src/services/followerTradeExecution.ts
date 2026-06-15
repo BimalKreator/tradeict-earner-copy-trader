@@ -46,6 +46,7 @@ import {
   sumOpenMasterBotQuantity,
   trimOpenMasterBotQuantity,
   incrementOrRecordMasterTradePosition,
+  tradePositionSymbolsAlign,
 } from "./tradePositionService.js";
 import { settleOpenCopyTradesForLeg } from "./tradeSettlementService.js";
 import {
@@ -62,9 +63,17 @@ const COPY_LEG_CONFIRM_MS = POST_ORDER_VERIFY_WAIT_MS * MAX_OPEN_CONFIRM_POLLS;
 const LIVE_FILL_VERIFY_WAIT_MS = 300;
 const LIVE_FILL_MAX_POLLS = 2;
 const GRANULAR_SYNC_MAX_RETRIES = 5;
+/** After a successful follower entry API ack, block catch-up/refire while Delta REST lags. */
+export const FOLLOWER_ENTRY_INFLIGHT_MS = 12_000;
 
 const copyLegExecutionChains = new Map<string, Promise<void>>();
 const followerCopyInflightUntil = new Map<string, number>();
+
+function pruneFollowerCopyInflightLocks(now = Date.now()): void {
+  for (const [key, until] of followerCopyInflightUntil) {
+    if (now >= until) followerCopyInflightUntil.delete(key);
+  }
+}
 
 function copyLegLockKey(args: {
   userId: string;
@@ -107,9 +116,21 @@ export function markFollowerCopyInflight(
     symbol: string;
     side: TradeSide | string;
   },
-  untilMs = Date.now() + COPY_LEG_CONFIRM_MS,
+  untilMs = Date.now() + FOLLOWER_ENTRY_INFLIGHT_MS,
 ): void {
-  followerCopyInflightUntil.set(copyLegLockKey(args), untilMs);
+  pruneFollowerCopyInflightLocks();
+  const prev = followerCopyInflightUntil.get(copyLegLockKey(args)) ?? 0;
+  followerCopyInflightUntil.set(copyLegLockKey(args), Math.max(prev, untilMs));
+}
+
+/** Extend (or set) the in-flight window after a successful entry API response. */
+export function extendFollowerCopyInflight(args: {
+  userId: string;
+  strategyId: string;
+  symbol: string;
+  side: TradeSide | string;
+}): void {
+  markFollowerCopyInflight(args, Date.now() + FOLLOWER_ENTRY_INFLIGHT_MS);
 }
 
 export function isFollowerCopyInflight(args: {
@@ -118,7 +139,31 @@ export function isFollowerCopyInflight(args: {
   symbol: string;
   side: TradeSide | string;
 }): boolean {
-  return (followerCopyInflightUntil.get(copyLegLockKey(args)) ?? 0) > Date.now();
+  pruneFollowerCopyInflightLocks();
+  const now = Date.now();
+  const sym = args.symbol.trim();
+  const side = String(args.side).toUpperCase();
+  for (const [key, until] of followerCopyInflightUntil) {
+    if (until <= now) continue;
+    const parts = key.split("|");
+    if (parts.length !== 4) continue;
+    const [uid, sid, storedSym, storedSide] = parts as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    if (uid !== args.userId || sid !== args.strategyId || storedSide !== side) {
+      continue;
+    }
+    if (
+      storedSym === sym.replace(/[/:]/g, "").toUpperCase() ||
+      tradePositionSymbolsAlign(sym, storedSym)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const HARD_ERROR_PATTERNS = [
@@ -379,6 +424,12 @@ async function finalizeOptimisticFollowerOpen(
       ...(args.lastResult.orderId ? { exchangeOrderId: args.lastResult.orderId } : {}),
     });
     persistedOpen = true;
+    extendFollowerCopyInflight({
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol: args.symbol,
+      side: args.side,
+    });
     await markSubscriptionSynced(prisma, {
       userId: args.userId,
       strategyId: args.strategyId,
@@ -1241,6 +1292,19 @@ export async function forceSyncMasterOpenToFollowers(
             : {}),
         });
         if (deficitLots > 0) {
+          if (
+            isFollowerCopyInflight({
+              userId: sub.userId,
+              strategyId,
+              symbol: fill.symbol,
+              side: fill.side,
+            })
+          ) {
+            console.log(
+              `[FORCE-SYNC] skip user=${sub.userId} ${fill.symbol} ${fill.side} — entry in-flight`,
+            );
+            return;
+          }
           pending.push({ sub, lots: deficitLots });
         }
       }),
@@ -2615,13 +2679,29 @@ export async function executeFollowerTradeWithVerification(
     side,
   });
 
+  if (
+    args.strategyId &&
+    args.adminForceSync !== true &&
+    isFollowerCopyInflight({
+      userId: args.userId,
+      strategyId: args.strategyId,
+      symbol,
+      side,
+    })
+  ) {
+    console.log(
+      `[copy-exec] blocked duplicate open user=${userId} ${symbol} ${side} — entry in-flight (REST lag grace)`,
+    );
+    return {
+      success: true,
+      verified: true,
+      attempts: 0,
+      verifiedQty: targetContracts,
+      persistedOpen: true,
+    };
+  }
+
   if (args.strategyId) {
-    const optimistic = usesOptimisticOpenExecution(args, isOptionLeg);
-    const inflightMs = optimistic
-      ? 3_000
-      : args.liveMasterFill
-        ? LIVE_FILL_VERIFY_WAIT_MS * (LIVE_FILL_MAX_POLLS + 1)
-        : COPY_LEG_CONFIRM_MS;
     markFollowerCopyInflight(
       {
         userId: args.userId,
@@ -2629,7 +2709,7 @@ export async function executeFollowerTradeWithVerification(
         symbol,
         side,
       },
-      Date.now() + inflightMs,
+      Date.now() + FOLLOWER_ENTRY_INFLIGHT_MS,
     );
   }
 
@@ -2705,6 +2785,14 @@ export async function executeFollowerTradeWithVerification(
       const existingAckFilled = orderAckFilledQty(existingAck);
       if (orderAckPending(existingAck)) {
         orderSubmitted = true;
+        if (args.strategyId) {
+          extendFollowerCopyInflight({
+            userId: args.userId,
+            strategyId: args.strategyId,
+            symbol,
+            side,
+          });
+        }
         console.log(
           `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} state=${existingAck.state} filled=${existingAck.filledSize} — poll only`,
         );
@@ -2718,17 +2806,16 @@ export async function executeFollowerTradeWithVerification(
             `[RETRY_LOOP] Existing clientOrderId=${openClientOrderId} filled=${existingAckFilled} exchange=${exchangeLots} — already synced`,
           );
         } else {
-          openClientOrderId = buildStableCopyClientOrderId({
-            strategyId: args.strategyId!,
+          extendFollowerCopyInflight({
             userId: args.userId,
-            masterFillKey: `${symbol}:${side}:open:refire:${Date.now()}`,
+            strategyId: args.strategyId!,
             symbol,
             side,
-            leg: "open",
           });
+          orderSubmitted = true;
           console.warn(
-            `[RETRY_LOOP] Stale filled ack (${existingAckFilled}) but exchange flat (${exchangeLots}) ` +
-              `user=${userId} ${symbol} — refire clientOrderId=${openClientOrderId}`,
+            `[RETRY_LOOP] Ack filled=${existingAckFilled} but REST flat (${exchangeLots}) ` +
+              `user=${userId} ${symbol} — trust in-flight, no refire`,
           );
         }
       }
@@ -2761,6 +2848,14 @@ export async function executeFollowerTradeWithVerification(
             openClientOrderId,
           );
           if (orderAckPending(ack) || orderAckFilledQty(ack) > 0) {
+            if (args.strategyId) {
+              extendFollowerCopyInflight({
+                userId: args.userId,
+                strategyId: args.strategyId,
+                symbol,
+                side,
+              });
+            }
             console.log(
               `[RETRY_LOOP] Place rejected but order live on exchange (${ack.state}) — poll only`,
             );
@@ -2784,6 +2879,14 @@ export async function executeFollowerTradeWithVerification(
       } else {
         if (lastResult.feeCost != null && Number.isFinite(lastResult.feeCost)) {
           totalFee += lastResult.feeCost;
+        }
+        if (args.strategyId) {
+          extendFollowerCopyInflight({
+            userId: args.userId,
+            strategyId: args.strategyId,
+            symbol,
+            side,
+          });
         }
       }
       orderSubmitted = true;

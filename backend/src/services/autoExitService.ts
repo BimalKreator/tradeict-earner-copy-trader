@@ -4,7 +4,7 @@ import {
   markBotInitiatedClose,
   setPendingStrategyExitReason,
 } from "../constants/exitReasons.js";
-import { clearFutureHedgeActiveBatch } from "./futureHedgeEngine.js";
+import { clearFutureHedgeActiveBatch, markFutureHedgePostExitEntryBlock } from "./futureHedgeEngine.js";
 import {
   FUTURE_HEDGE_BTC_SYMBOL,
   getLiveFuturePrice,
@@ -18,6 +18,10 @@ import {
 import type { DeltaLivePosition } from "./exchangeService.js";
 import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
+import {
+  markLegClosing,
+  markMasterFlatting,
+} from "./subscriptionSyncService.js";
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
 const AUTO_EXIT_COOLDOWN_MS = 15_000;
@@ -217,7 +221,10 @@ async function executeMasterFlatAutoExit(args: {
     logDetail,
   } = args;
 
+  markMasterFlatting(strategyId);
+  markFutureHedgePostExitEntryBlock();
   for (const leg of legs) {
+    markLegClosing(strategyId, leg.symbolKey, leg.side);
     markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
   }
   setPendingStrategyExitReason(strategyId, exitReason);

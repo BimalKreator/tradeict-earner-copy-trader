@@ -2181,6 +2181,9 @@ async function notifyMasterFlat(
   markLegClosing(strategyId, snap.symbol, snap.side);
   markMasterFlatting(strategyId);
 
+  const { clearMasterLivePositionsCache } = await import("./liveTradesService.js");
+  clearMasterLivePositionsCache(strategyId);
+
   try {
     const result = await syncMasterCloseToFutureHedgeFollowers(
       prisma,
@@ -3765,6 +3768,19 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               if (masterFlattingLock || masterLegs.length === 0) {
                 continue;
               }
+              if (
+                isFollowerCopyInflight({
+                  userId: sub.userId,
+                  strategyId: strat.id,
+                  symbol: legSymbol,
+                  side: legSide,
+                })
+              ) {
+                console.log(
+                  `[SYNC-MONITOR] skip catch-up user ${sub.userId} ${legSymbol} ${legSide} — entry in-flight`,
+                );
+                continue;
+              }
               const masterOpenedAt = master?.openedAt ?? null;
               const isNewLeg = master
                 ? masterPositionTracker.isNewLegThisSession(
@@ -3966,6 +3982,20 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         );
         await Promise.allSettled(
           catchUpJobsToRun.map(async (job) => {
+            if (
+              isFollowerCopyInflight({
+                userId: job.userId,
+                strategyId: strat.id,
+                symbol: job.legSymbol,
+                side: job.legSide,
+              })
+            ) {
+              console.log(
+                `[SYNC-MONITOR] skip catch-up job user=${job.userId} ${job.legSymbol} — entry in-flight`,
+              );
+              return;
+            }
+
             const clientOrderId = buildStableCopyClientOrderId({
               strategyId: strat.id,
               userId: job.userId,
