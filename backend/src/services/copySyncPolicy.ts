@@ -2,9 +2,9 @@
  * Copy-trading sync policy — professional lag handling.
  *
  * Rules:
- * 1. WebSocket closing hints (reduce-only fills, size→0, position delete) trigger
- *    an immediate priority REST poll; one REST miss closes followers (fast path).
- * 2. Pure REST polling (no WS hint) keeps the 4-miss / 20s hysteresis fallback.
+ * 1. WebSocket closing hints trigger {@link runPriorityFlatVerificationRestFetch}
+ *    (one REST fetch; streak treated as verified → immediate notifyMasterFlat).
+ * 2. Pure REST polling with no WS hint keeps 4-miss / 20s hysteresis.
  * 3. Master Delta REST open positions remain authority — closes still re-check REST once.
  * 4. Never trim followers to zero on a single laggy empty REST read without hints.
  */
