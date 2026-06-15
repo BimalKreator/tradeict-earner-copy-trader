@@ -2,20 +2,27 @@
  * Copy-trading sync policy — professional lag handling.
  *
  * Rules:
- * 1. WebSocket events are HINTS only (schedule REST poll, never close on WS alone).
- * 2. Master Delta REST open positions are the sole authority for opens/closes/target qty.
- * 3. Follower closes require consecutive REST misses + time + re-check (hysteresis).
- * 4. Never trim followers to zero because master REST was empty on a single laggy read.
+ * 1. WebSocket closing hints (reduce-only fills, size→0, position delete) trigger
+ *    an immediate priority REST poll; one REST miss closes followers (fast path).
+ * 2. Pure REST polling (no WS hint) keeps the 4-miss / 20s hysteresis fallback.
+ * 3. Master Delta REST open positions remain authority — closes still re-check REST once.
+ * 4. Never trim followers to zero on a single laggy empty REST read without hints.
  */
 
-/** Minimum time a master leg must be absent from REST before follower close. */
+/** Minimum time a master leg must be absent from REST before follower close (REST-only). */
 export const COPY_FLAT_CONFIRM_MS = 20_000;
 
-/** Same minimum when WS also hinted flat (no fast-path close). */
-export const COPY_FLAT_WS_CONFIRM_MS = 20_000;
+/** WS-hinted flat: no extra wait after REST confirms missing (streak=1). */
+export const COPY_FLAT_WS_CONFIRM_MS = 0;
 
-/** Consecutive successful REST polls with leg missing before flat close. */
+/** Consecutive REST misses with WS flat hint before follower close. */
+export const COPY_FLAT_WS_MISS_POLLS_REQUIRED = 1;
+
+/** Consecutive REST misses without WS hint (pure REST fallback). */
 export const COPY_FLAT_MISS_POLLS_REQUIRED = 4;
+
+/** WS flat hints older than this are ignored for the fast close path. */
+export const COPY_WS_HINT_MAX_AGE_MS = 120_000;
 
 /** Consecutive empty master REST books before orphan follower reconcile. */
 export const COPY_EMPTY_BOOK_POLLS_REQUIRED = 4;
@@ -66,14 +73,31 @@ export function deferFollowerTrimMasterLegAbsent(masterLegOnRest: boolean): bool
 export function deferFollowerCloseMissingMasterLeg(args: {
   missStreak: number;
   firstMissingSinceMs: number | null;
+  wsHinted?: boolean;
   refMs?: number;
 }): boolean {
   const refMs = args.refMs ?? Date.now();
-  if (args.missStreak < COPY_FLAT_MISS_POLLS_REQUIRED) {
+  const wsHinted = args.wsHinted === true;
+  const missRequired = wsHinted
+    ? COPY_FLAT_WS_MISS_POLLS_REQUIRED
+    : COPY_FLAT_MISS_POLLS_REQUIRED;
+  const confirmMs = wsHinted ? COPY_FLAT_WS_CONFIRM_MS : COPY_FLAT_CONFIRM_MS;
+
+  if (args.missStreak < missRequired) {
     return true;
   }
   if (args.firstMissingSinceMs == null) {
     return true;
   }
-  return refMs - args.firstMissingSinceMs < COPY_FLAT_CONFIRM_MS;
+  return refMs - args.firstMissingSinceMs < confirmMs;
+}
+
+export function masterLegCloseHasActiveWsHint(
+  wsHintAgeMs: number | null,
+): boolean {
+  return (
+    wsHintAgeMs != null &&
+    wsHintAgeMs >= 0 &&
+    wsHintAgeMs <= COPY_WS_HINT_MAX_AGE_MS
+  );
 }

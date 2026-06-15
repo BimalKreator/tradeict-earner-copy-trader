@@ -29,12 +29,14 @@ import {
   COPY_FLAT_CONFIRM_MS,
   COPY_FLAT_MISS_POLLS_REQUIRED,
   COPY_FLAT_WS_CONFIRM_MS,
+  COPY_FLAT_WS_MISS_POLLS_REQUIRED,
   COPY_FORCE_SYNC_COOLDOWN_MS,
   COPY_MASTER_REST_POLL_MS,
   COPY_QTY_RECONCILE_MS,
   COPY_REST_IMMEDIATE_DEBOUNCE_MS,
   COPY_ROLL_SUPPRESS_MS,
   deferFollowerTrimMasterLegAbsent,
+  masterLegCloseHasActiveWsHint,
 } from "./copySyncPolicy.js";
 import {
   reconcileStaleOpenTradesForUser,
@@ -139,8 +141,10 @@ const MASTER_REST_POLL_MS = COPY_MASTER_REST_POLL_MS;
 const MASTER_FLAT_CONFIRM_MS = COPY_FLAT_CONFIRM_MS;
 /** Same minimum wait even when WS hinted flat — avoids fast false exits on position delete. */
 const MASTER_FLAT_WS_CONFIRM_MS = COPY_FLAT_WS_CONFIRM_MS;
-/** Consecutive REST polls with leg missing before flat close is allowed. */
+/** Consecutive REST polls with leg missing before flat close is allowed (REST-only). */
 const MASTER_FLAT_REST_MISS_POLLS_REQUIRED = COPY_FLAT_MISS_POLLS_REQUIRED;
+/** Single REST miss when WS hinted flat / delete / closing fill. */
+const MASTER_FLAT_WS_MISS_POLLS_REQUIRED = COPY_FLAT_WS_MISS_POLLS_REQUIRED;
 /** After ignored hedge roll fills, defer flat detection for this symbol. */
 const MASTER_FLAT_SUPPRESS_AFTER_ROLL_MS = COPY_ROLL_SUPPRESS_MS;
 /** Consecutive empty REST reads before orphan follower reconcile. */
@@ -228,6 +232,20 @@ function requestImmediateMasterRestPoll(reason: string): void {
     console.log(`[MASTER-REST-SYNC] immediate poll (${reason})`);
     scheduleMasterRestPoll(active.prisma, active.tracker, active.cancelled);
   }, MASTER_REST_IMMEDIATE_DEBOUNCE_MS);
+}
+
+/** Priority REST poll — no debounce (WS position delete / closing fill). */
+function requestPriorityMasterRestPoll(reason: string): void {
+  const ctx = masterRestPollContext;
+  if (!ctx || ctx.cancelled.value) return;
+
+  if (masterRestPollDebounce != null) {
+    clearTimeout(masterRestPollDebounce);
+    masterRestPollDebounce = null;
+  }
+
+  console.log(`[MASTER-REST-SYNC] priority poll (${reason})`);
+  scheduleMasterRestPoll(ctx.prisma, ctx.tracker, ctx.cancelled);
 }
 
 function wsAuthSignature(secretPlain: string, timestampSec: string): string {
@@ -891,6 +909,188 @@ function masterFillClosesExistingLeg(
   return tracker.maxContractsForSymbolSide(symbol, openSide) > 0;
 }
 
+/** Open leg side that a reduce-only or opposing fill is closing. */
+function closingFillOpenSide(fillSide: TradeSide): TradeSide {
+  return fillSide === "BUY" ? "SELL" : "BUY";
+}
+
+function resolveTrackedOpenLegMeta(
+  tracker: MasterPositionTracker,
+  symbol: string,
+  openSide: TradeSide,
+): LastOpenMeta | null {
+  const legMeta = tracker.lastOpenMeta.get(masterLegKey(symbol, openSide));
+  if (legMeta?.side === openSide) return legMeta;
+  for (const alias of symbolAliasSet(symbol)) {
+    const m = tracker.lastOpenMeta.get(alias);
+    if (m?.side === openSide) return m;
+  }
+  return null;
+}
+
+async function tryExecuteMasterLegCloseAfterRestCheck(
+  prisma: PrismaClient,
+  strategyId: string,
+  tracker: MasterPositionTracker,
+  args: {
+    symbol: string;
+    openSide: TradeSide;
+    trackedContracts: number;
+    avgEntry: number;
+    source: string;
+  },
+): Promise<boolean> {
+  if (args.trackedContracts <= 0) return false;
+  if (tracker.isFlatDetectionSuppressed(args.symbol)) return false;
+
+  const strat = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { masterApiKey: true, masterApiSecret: true, isActive: true },
+  });
+  if (!strat?.isActive) return false;
+  const key = strat.masterApiKey?.trim();
+  const secret = strat.masterApiSecret?.trim();
+  if (!key || !secret) return false;
+
+  let masters: MasterLedTrade[];
+  try {
+    masters = await fetchMasterOpenPositions(key, secret, { skipCache: true });
+  } catch (err) {
+    console.warn(
+      `[MASTER-WS] REST close check failed ${args.symbol} ${args.openSide}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+
+  const meta = { symbol: args.symbol, side: args.openSide };
+  const restOpen = masterLegOpenOnRest(meta, masters);
+  const restLeg = masters.find(
+    (m) =>
+      m.masterContracts > 0 &&
+      m.side === args.openSide &&
+      positionSymbolsAlign(args.symbol, m.deltaSymbol),
+  );
+  const restContracts = restLeg?.masterContracts ?? 0;
+
+  if (restOpen && restContracts >= args.trackedContracts - 1e-9) {
+    return false;
+  }
+
+  if (!restOpen || restContracts <= 0) {
+    console.log(
+      `[MASTER-WS] fast close ${args.symbol} ${args.openSide} via REST (${args.source}) — master flat`,
+    );
+    const flatOk = await notifyMasterFlat(prisma, strategyId, {
+      symbol: args.symbol,
+      side: args.openSide,
+      masterEntryPrice:
+        Number.isFinite(args.avgEntry) && args.avgEntry > 0 ? args.avgEntry : 0,
+      masterContracts: args.trackedContracts,
+    });
+    if (!flatOk) return false;
+    tracker.clearPendingFlat(masterLegKey(args.symbol, args.openSide));
+    tracker.clearWsFlatHint(args.symbol, args.openSide);
+    tracker.clearLegKeys(
+      tracker.aliasesForSnap({
+        symbol: args.symbol,
+        side: args.openSide,
+        productKey: args.symbol,
+      }),
+    );
+    tracker.lastRestContractsByLeg.delete(
+      masterLegKey(args.symbol, args.openSide),
+    );
+    return true;
+  }
+
+  const trimLots = Math.floor(args.trackedContracts - restContracts);
+  if (trimLots <= 0) return false;
+
+  console.log(
+    `[MASTER-WS] fast partial trim ${args.symbol} ${args.openSide} -${trimLots} via REST (${args.source})`,
+  );
+  const trimKey = `ws-fast-trim:${buildMasterFillKey([
+    args.symbol,
+    args.openSide,
+    String(restContracts),
+    String(trimLots),
+    args.source,
+  ])}`;
+  try {
+    await syncMasterPartialTrimToFollowers(prisma, {
+      symbol: args.symbol,
+      side: args.openSide,
+      masterTrimLots: trimLots,
+      masterFillKey: trimKey,
+      masterEntryPrice:
+        Number.isFinite(args.avgEntry) && args.avgEntry > 0 ? args.avgEntry : 0,
+    });
+  } catch (trimErr) {
+    console.error(
+      `[MASTER-WS] fast partial trim failed ${args.symbol} ${args.openSide}:`,
+      trimErr instanceof Error ? trimErr.message : trimErr,
+    );
+    return false;
+  }
+
+  tracker.applyMasterLeg({
+    symbol: args.symbol,
+    side: args.openSide,
+    contracts: restContracts,
+    avgEntry:
+      Number.isFinite(restLeg?.entryPrice) && (restLeg?.entryPrice ?? 0) > 0
+        ? (restLeg!.entryPrice)
+        : args.avgEntry,
+  });
+  tracker.lastRestContractsByLeg.set(
+    masterLegKey(args.symbol, args.openSide),
+    restContracts,
+  );
+  return true;
+}
+
+async function handleMasterWsClosingFill(
+  prisma: PrismaClient,
+  strategyId: string,
+  sig: {
+    symbol: string;
+    side: TradeSide;
+    contracts: number;
+    reduceOnly: boolean;
+    source: string;
+  },
+  tracker: MasterPositionTracker,
+): Promise<void> {
+  if (!sig.reduceOnly) return;
+
+  const openSide = closingFillOpenSide(sig.side);
+  const trackedContracts = tracker.maxContractsForSymbolSide(sig.symbol, openSide);
+  if (trackedContracts <= 0) return;
+
+  const meta = resolveTrackedOpenLegMeta(tracker, sig.symbol, openSide);
+  if (!meta) return;
+
+  tracker.markWsFlatHint(sig.symbol, openSide);
+
+  const closed = await tryExecuteMasterLegCloseAfterRestCheck(
+    prisma,
+    strategyId,
+    tracker,
+    {
+      symbol: sig.symbol,
+      openSide,
+      trackedContracts,
+      avgEntry: meta.avgEntry,
+      source: sig.source,
+    },
+  );
+
+  if (!closed) {
+    requestPriorityMasterRestPoll(`ws-close-fill:${sig.symbol}:${openSide}`);
+  }
+}
+
 async function processMasterOrderFillRecords(
   prisma: PrismaClient,
   strategyId: string,
@@ -905,11 +1105,19 @@ async function processMasterOrderFillRecords(
       const clientOrderId =
         sig.clientOrderId || extractClientOrderIdFromPayload(r);
       if (sig.reduceOnly) {
-        if (shouldSkipMasterFillCopy({ clientOrderId })) {
-          console.log(
-            `[MASTER-WS] NC_ reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
-          );
-        }
+        if (!tracker) return;
+        await handleMasterWsClosingFill(
+          prisma,
+          strategyId,
+          {
+            symbol: sig.symbol,
+            side: sig.side,
+            contracts: sig.contracts,
+            reduceOnly: true,
+            source: "orders-reduce-only",
+          },
+          tracker,
+        );
         return;
       }
       registerSymbolsForLivePrices([sig.symbol]);
@@ -990,8 +1198,18 @@ async function processMasterUserTradeFillRecords(
       const clientOrderId =
         sig.clientOrderId || extractClientOrderIdFromPayload(r);
       if (sig.reduceOnly) {
-        console.log(
-          `[MASTER-WS] user_trades reduce-only fill ignored for copy ${sig.symbol} clientOrderId=${clientOrderId}`,
+        if (!tracker) return;
+        await handleMasterWsClosingFill(
+          prisma,
+          strategyId,
+          {
+            symbol: sig.symbol,
+            side: sig.side,
+            contracts: sig.contracts,
+            reduceOnly: true,
+            source: "user_trades-reduce-only",
+          },
+          tracker,
         );
         return;
       }
@@ -2541,31 +2759,42 @@ async function pollMasterPositionsFallback(
         );
         if (lastContracts <= 0) continue;
 
+        const wsHintAge = tracker.wsFlatHintAgeMs(meta.symbol, meta.side, now);
+        const hasWsHint = masterLegCloseHasActiveWsHint(wsHintAge);
+        const missPollsRequired = hasWsHint
+          ? MASTER_FLAT_WS_MISS_POLLS_REQUIRED
+          : MASTER_FLAT_REST_MISS_POLLS_REQUIRED;
+        const confirmMs = hasWsHint
+          ? MASTER_FLAT_WS_CONFIRM_MS
+          : MASTER_FLAT_CONFIRM_MS;
+
         const missStreak = (tracker.pendingFlatMissStreak.get(lk) ?? 0) + 1;
         tracker.pendingFlatMissStreak.set(lk, missStreak);
 
-        const wsHintAge = tracker.wsFlatHintAgeMs(meta.symbol, meta.side, now);
-        const confirmMs =
-          wsHintAge != null && wsHintAge <= 120_000
-            ? MASTER_FLAT_WS_CONFIRM_MS
-            : MASTER_FLAT_CONFIRM_MS;
         if (firstMissing === undefined) {
           tracker.pendingFlatSince.set(lk, now);
+          if (!hasWsHint) {
+            console.log(
+              `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
+                `awaiting ${confirmMs / 1000}s + ${missPollsRequired} REST miss(es) before follower close ` +
+                `streak=${missStreak}/${missPollsRequired}.`,
+            );
+            continue;
+          }
           console.log(
             `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
-              `awaiting ${confirmMs / 1000}s + ${MASTER_FLAT_REST_MISS_POLLS_REQUIRED} REST miss(es) before follower close` +
-              `${wsHintAge != null ? " (WS flat hint)" : ""} streak=${missStreak}/${MASTER_FLAT_REST_MISS_POLLS_REQUIRED}.`,
+              `WS fast-path close (streak=${missStreak}/${missPollsRequired}).`,
+          );
+        }
+        if (missStreak < missPollsRequired) {
+          console.log(
+            `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
+              `streak=${missStreak}/${missPollsRequired}, not closing yet.`,
           );
           continue;
         }
-        if (missStreak < MASTER_FLAT_REST_MISS_POLLS_REQUIRED) {
-          console.log(
-            `[MASTER-REST-SYNC] leg missing from REST ${meta.symbol} ${meta.side} — ` +
-              `streak=${missStreak}/${MASTER_FLAT_REST_MISS_POLLS_REQUIRED}, not closing yet.`,
-          );
-          continue;
-        }
-        if (now - firstMissing < confirmMs) {
+        const missingSince = tracker.pendingFlatSince.get(lk) ?? now;
+        if (now - missingSince < confirmMs) {
           continue;
         }
 
@@ -2594,7 +2823,8 @@ async function pollMasterPositionsFallback(
 
         console.log(
           `[MASTER-REST-SYNC] Master flat confirmed via REST ${meta.symbol} ${meta.side} ` +
-            `(${lastContracts} contracts, missing ${Math.round((now - firstMissing) / 1000)}s, streak=${missStreak}) — closing followers.`,
+            `(${lastContracts} contracts, missing ${Math.round((now - missingSince) / 1000)}s, streak=${missStreak}` +
+            `${hasWsHint ? ", WS fast-path" : ""}) — closing followers.`,
         );
         tracker.clearPendingFlat(lk);
 
@@ -3012,12 +3242,24 @@ class StrategyMasterSocket {
         return;
       }
 
-      // WS delete/close — refresh REST snapshot only; do not treat as flat (hedge rolls emit deletes).
+      // WS delete/close — mark flat hint + priority REST (fast-path streak=1 on confirm).
       if (action === "delete" || action === "closed") {
+        const rows = collectRows();
+        for (const r of rows) {
+          const snap = extractPositionSnapshot(r);
+          if (!snap) continue;
+          const prevContracts = this.tracker.maxContractsForSymbolSide(
+            snap.symbol,
+            snap.side,
+          );
+          if (prevContracts > 0 || snap.contracts > 0) {
+            this.tracker.markWsFlatHint(snap.symbol, snap.side);
+          }
+        }
         console.warn(
-          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — scheduling REST sync (no flat hint)`,
+          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — priority REST flat check`,
         );
-        requestImmediateMasterRestPoll(`ws-position-${action}`);
+        requestPriorityMasterRestPoll(`ws-position-${action}`);
         return;
       }
 
@@ -3041,9 +3283,9 @@ class StrategyMasterSocket {
         if (next <= 0 && prev > 0) {
           this.tracker.markWsFlatHint(snap.symbol, snap.side);
           console.warn(
-            `[MASTER-WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — scheduling immediate REST flat check`,
+            `[MASTER-WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — priority REST flat check`,
           );
-          requestImmediateMasterRestPoll("ws-position-flat-hint");
+          requestPriorityMasterRestPoll("ws-position-flat-hint");
           continue;
         }
 
