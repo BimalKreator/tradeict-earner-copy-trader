@@ -27,6 +27,8 @@ import {
 } from "../services/dashboardMetricsService.js";
 import {
   buildFlushableTradeWhere,
+  FLUSH_ALL_PLATFORM_CONFIRM_PHRASE,
+  flushAllPlatformTrades,
   purgeAnalyticsForDeletedTrades,
 } from "../services/tradeFlushService.js";
 import { reconcileStaleOpenTradesForUser } from "../services/tradeSettlementService.js";
@@ -1223,6 +1225,150 @@ export function createAdminController(prisma: PrismaClient) {
         pnlRecordsRemoved: result.pnlRecordsRemoved,
         commissionLedgersRemoved: result.commissionLedgersRemoved,
         backupFile: saved.relativePath,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function flushAllPlatformTradesHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = (req.body ?? {}) as {
+        confirmPhrase?: unknown;
+        includeOpen?: unknown;
+        purgeFinancialsOnly?: unknown;
+      };
+
+      const confirmPhrase =
+        typeof body.confirmPhrase === "string" ? body.confirmPhrase.trim() : "";
+      if (confirmPhrase !== FLUSH_ALL_PLATFORM_CONFIRM_PHRASE) {
+        res.status(400).json({
+          error: `Type "${FLUSH_ALL_PLATFORM_CONFIRM_PHRASE}" to confirm platform-wide flush.`,
+        });
+        return;
+      }
+
+      const includeOpen = body.includeOpen === true;
+      const purgeFinancialsOnly = body.purgeFinancialsOnly === true;
+
+      const tradeWhere = includeOpen
+        ? {}
+        : { status: { not: TradeStatus.OPEN } };
+
+      const flushableTrades = await prisma.trade.findMany({
+        where: tradeWhere,
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          userId: true,
+          createdAt: true,
+          strategyId: true,
+          symbol: true,
+          side: true,
+          size: true,
+          entryPrice: true,
+          exitPrice: true,
+          tradePnl: true,
+          pnl: true,
+          tradingFee: true,
+          revenueShareAmt: true,
+          status: true,
+          user: { select: { email: true, name: true } },
+        },
+      });
+
+      if (flushableTrades.length === 0 && !purgeFinancialsOnly) {
+        res.json({
+          ok: true,
+          deleted: 0,
+          analyticsRemoved: 0,
+          pnlRecordsRemoved: 0,
+          commissionLedgersRemoved: 0,
+          pendingInvoicesRemoved: 0,
+          tradePositionsRemoved: 0,
+          openTradesPreserved: includeOpen
+            ? 0
+            : await prisma.trade.count({ where: { status: TradeStatus.OPEN } }),
+          message: "No trades to flush. Open positions were preserved.",
+        });
+        return;
+      }
+
+      let backupFile: string | undefined;
+      if (flushableTrades.length > 0) {
+        const fileName = `Flush_All_Platform_Trades_${buildTimestampTag()}.csv`;
+        const csv = rowsToCsv(
+          flushableTrades.map((t) => ({
+            id: t.id,
+            userId: t.userId,
+            userEmail: t.user.email,
+            userName: t.user.name ?? "",
+            createdAt: t.createdAt.toISOString(),
+            strategyId: t.strategyId,
+            symbol: t.symbol,
+            side: t.side,
+            size: t.size,
+            entryPrice: t.entryPrice,
+            exitPrice: t.exitPrice ?? "",
+            netPnl: t.tradePnl,
+            tradingFee: t.tradingFee,
+            revenueShareAmt: t.revenueShareAmt,
+            status: t.status,
+          })),
+          [
+            { key: "id", label: "Trade ID" },
+            { key: "userId", label: "User ID" },
+            { key: "userEmail", label: "User Email" },
+            { key: "userName", label: "User Name" },
+            { key: "createdAt", label: "Created At" },
+            { key: "strategyId", label: "Strategy ID" },
+            { key: "symbol", label: "Symbol" },
+            { key: "side", label: "Side" },
+            { key: "size", label: "Size" },
+            { key: "entryPrice", label: "Entry Price" },
+            { key: "exitPrice", label: "Exit Price" },
+            { key: "netPnl", label: "Net PnL" },
+            { key: "tradingFee", label: "Trading Fee" },
+            { key: "revenueShareAmt", label: "Admin Revenue Share" },
+            { key: "status", label: "Status" },
+          ],
+        );
+        const saved = writeCsvToDownloads(fileName, csv);
+        backupFile = saved.relativePath;
+        await prisma.downloadFile.create({
+          data: {
+            fileName,
+            filePath: saved.relativePath,
+            fileType: "FLUSH_BACKUP",
+            status: "READY",
+          },
+        });
+      }
+
+      const result = await flushAllPlatformTrades(prisma, {
+        includeOpen,
+        purgeFinancialsOnly,
+      });
+
+      res.json({
+        ok: true,
+        deleted: result.deletedTrades,
+        analyticsRemoved: result.pnlRecordsRemoved,
+        pnlRecordsRemoved: result.pnlRecordsRemoved,
+        commissionLedgersRemoved: result.commissionLedgersRemoved,
+        pendingInvoicesRemoved: result.pendingInvoicesRemoved,
+        tradePositionsRemoved: result.tradePositionsRemoved,
+        openTradesPreserved: result.openTradesPreserved,
+        usersAffected: new Set(flushableTrades.map((t) => t.userId)).size,
+        backupFile,
+        message:
+          result.deletedTrades > 0
+            ? `Flushed ${result.deletedTrades} trade(s) across all users. PnL, commission, and pending invoices cleared.`
+            : "PnL, commission, and pending invoices cleared (no trade rows to delete).",
       });
     } catch (err) {
       next(err);
@@ -3209,6 +3355,7 @@ export function createAdminController(prisma: PrismaClient) {
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,
+    flushAllPlatformTrades: flushAllPlatformTradesHandler,
     reconcileUserStaleOpenTrades,
     flushArbitrageTrades,
     exportTrades,

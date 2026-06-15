@@ -1,4 +1,5 @@
 import {
+  InvoiceStatus,
   TradeStatus,
   type Prisma,
   type PrismaClient,
@@ -171,4 +172,93 @@ export function buildFlushableTradeWhere(
     return { ...where, id: { in: tradeIds } };
   }
   return where;
+}
+
+export const FLUSH_ALL_PLATFORM_CONFIRM_PHRASE = "FLUSH ALL TRADES";
+
+export type FlushAllPlatformResult = {
+  deletedTrades: number;
+  pnlRecordsRemoved: number;
+  commissionLedgersRemoved: number;
+  pendingInvoicesRemoved: number;
+  tradePositionsRemoved: number;
+  openTradesPreserved: number;
+};
+
+/** Wipe every PnL row and partner commission ledger (platform-wide reset). */
+export async function purgeAllPlatformAnalytics(
+  prisma: DbClient,
+): Promise<PurgeAnalyticsResult> {
+  const commissionOut = await prisma.commissionLedger.deleteMany({});
+  const pnlOut = await prisma.pnLRecord.deleteMany({});
+  return {
+    pnlRecordsRemoved: pnlOut.count,
+    commissionLedgersRemoved: commissionOut.count,
+  };
+}
+
+export type FlushAllPlatformTradesOpts = {
+  includeOpen?: boolean;
+  /** Clear analytics + pending invoices even when no flushable trade rows exist. */
+  purgeFinancialsOnly?: boolean;
+};
+
+/**
+ * Delete copy-trade history for every user and reset related billing analytics.
+ * OPEN exchange legs are preserved unless `includeOpen` is true.
+ */
+export async function flushAllPlatformTrades(
+  prisma: PrismaClient,
+  opts: FlushAllPlatformTradesOpts = {},
+): Promise<FlushAllPlatformResult> {
+  const includeOpen = opts.includeOpen === true;
+  const purgeFinancialsOnly = opts.purgeFinancialsOnly === true;
+
+  const tradeWhere = includeOpen
+    ? {}
+    : { status: { not: TradeStatus.OPEN } };
+
+  const flushableCount = await prisma.trade.count({ where: tradeWhere });
+  const openTradesPreserved = includeOpen
+    ? 0
+    : await prisma.trade.count({ where: { status: TradeStatus.OPEN } });
+
+  if (flushableCount === 0 && !purgeFinancialsOnly) {
+    return {
+      deletedTrades: 0,
+      pnlRecordsRemoved: 0,
+      commissionLedgersRemoved: 0,
+      pendingInvoicesRemoved: 0,
+      tradePositionsRemoved: 0,
+      openTradesPreserved,
+    };
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const purged = await purgeAllPlatformAnalytics(tx);
+
+    const invoiceOut = await tx.invoice.deleteMany({
+      where: {
+        status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+      },
+    });
+
+    let tradePositionsRemoved = 0;
+    if (includeOpen) {
+      const posOut = await tx.tradePosition.deleteMany({});
+      tradePositionsRemoved = posOut.count;
+    }
+
+    const tradeOut = await tx.trade.deleteMany({ where: tradeWhere });
+
+    return {
+      deletedTrades: tradeOut.count,
+      ...purged,
+      pendingInvoicesRemoved: invoiceOut.count,
+      tradePositionsRemoved,
+      openTradesPreserved,
+    };
+  });
+
+  return result;
 }

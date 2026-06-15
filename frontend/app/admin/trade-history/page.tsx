@@ -1,10 +1,11 @@
 "use client";
 
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
-import { History, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, History, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+const FLUSH_ALL_CONFIRM_PHRASE = "FLUSH ALL TRADES";
 
 type UserOption = {
   id: string;
@@ -71,6 +72,11 @@ export default function AdminTradeHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flushModalOpen, setFlushModalOpen] = useState(false);
+  const [flushConfirmText, setFlushConfirmText] = useState("");
+  const [includeOpenTrades, setIncludeOpenTrades] = useState(false);
+  const [flushingAll, setFlushingAll] = useState(false);
+  const [flushSuccess, setFlushSuccess] = useState<string | null>(null);
 
   const headers = useMemo(
     () => ({ Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` }),
@@ -124,6 +130,61 @@ export default function AdminTradeHistoryPage() {
     void load(false);
   }, [load]);
 
+  async function flushAllPlatformTrades(): Promise<void> {
+    if (flushConfirmText.trim() !== FLUSH_ALL_CONFIRM_PHRASE) {
+      setError(`Type "${FLUSH_ALL_CONFIRM_PHRASE}" to confirm.`);
+      return;
+    }
+    setFlushingAll(true);
+    setError(null);
+    setFlushSuccess(null);
+    try {
+      const res = await fetch(`${API_BASE}/admin/trades/flush-all`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          confirmPhrase: flushConfirmText.trim(),
+          includeOpen: includeOpenTrades,
+        }),
+      });
+      const body = (await res.json()) as {
+        error?: string;
+        message?: string;
+        deleted?: number;
+        pnlRecordsRemoved?: number;
+        commissionLedgersRemoved?: number;
+        pendingInvoicesRemoved?: number;
+        usersAffected?: number;
+        openTradesPreserved?: number;
+        backupFile?: string;
+      };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to flush all trades.");
+      }
+      setFlushModalOpen(false);
+      setFlushConfirmText("");
+      setIncludeOpenTrades(false);
+      setFlushSuccess(
+        body.message ??
+          `Removed ${body.deleted ?? 0} trade(s) for ${body.usersAffected ?? 0} user(s). ` +
+            `PnL rows: ${body.pnlRecordsRemoved ?? 0}, commission rows: ${body.commissionLedgersRemoved ?? 0}, ` +
+            `pending invoices: ${body.pendingInvoicesRemoved ?? 0}.` +
+            (body.openTradesPreserved
+              ? ` ${body.openTradesPreserved} open trade(s) preserved.`
+              : ""),
+      );
+      setRows([]);
+      void load(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to flush all trades.");
+    } finally {
+      setFlushingAll(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-8">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -140,19 +201,41 @@ export default function AdminTradeHistoryPage() {
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setRefreshing(true);
-            void load(true);
-          }}
-          disabled={refreshing || loading}
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setFlushModalOpen(true);
+              setFlushConfirmText("");
+              setIncludeOpenTrades(false);
+              setError(null);
+            }}
+            disabled={loading || flushingAll}
+            className="inline-flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            Flush All Users
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRefreshing(true);
+              void load(true);
+            }}
+            disabled={refreshing || loading}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </header>
+
+      {flushSuccess && (
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+          {flushSuccess}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -251,6 +334,74 @@ export default function AdminTradeHistoryPage() {
         <p className="text-xs text-slate-500">
           Showing {rows.length} most recent trade{rows.length === 1 ? "" : "s"}.
         </p>
+      ) : null}
+
+      {flushModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div
+            className="w-full max-w-lg rounded-xl border border-red-500/30 bg-slate-900 p-6 shadow-xl"
+            role="dialog"
+            aria-labelledby="flush-all-title"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-6 w-6 shrink-0 text-red-400" />
+              <div className="space-y-3">
+                <h2 id="flush-all-title" className="text-lg font-semibold text-white">
+                  Flush all users&apos; trades?
+                </h2>
+                <p className="text-sm text-slate-400">
+                  This removes closed and failed trades for every user, clears all PnL
+                  records, partner commission ledger rows, and pending/overdue invoices.
+                  A CSV backup is saved to Admin Downloads.
+                </p>
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={includeOpenTrades}
+                    onChange={(e) => setIncludeOpenTrades(e.target.checked)}
+                    className="rounded border-slate-600"
+                  />
+                  Also delete OPEN trades and all TradePosition ledger rows
+                </label>
+                <label className="block text-sm text-slate-400">
+                  Type <span className="font-mono text-red-300">{FLUSH_ALL_CONFIRM_PHRASE}</span> to confirm
+                  <input
+                    type="text"
+                    value={flushConfirmText}
+                    onChange={(e) => setFlushConfirmText(e.target.value)}
+                    className="mt-2 block w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-red-500/40"
+                    placeholder={FLUSH_ALL_CONFIRM_PHRASE}
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFlushModalOpen(false);
+                  setFlushConfirmText("");
+                  setIncludeOpenTrades(false);
+                }}
+                disabled={flushingAll}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void flushAllPlatformTrades()}
+                disabled={
+                  flushingAll || flushConfirmText.trim() !== FLUSH_ALL_CONFIRM_PHRASE
+                }
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {flushingAll ? "Flushing..." : "Flush everything"}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

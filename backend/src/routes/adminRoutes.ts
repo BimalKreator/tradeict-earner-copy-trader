@@ -506,6 +506,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/users/:id/balance", adminController.getUserBalance);
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
   router.post("/users/flush-trades", adminController.flushUserTrades);
+  router.post("/trades/flush-all", adminController.flushAllPlatformTrades);
   router.post(
     "/users/:id/trades/reconcile-stale-open",
     adminController.reconcileUserStaleOpenTrades,
