@@ -271,6 +271,10 @@ async function executeDeltaMarketOrderViaRest(
   const clientOrderId = opts?.clientOrderId?.trim();
   if (clientOrderId) body.client_order_id = clientOrderId;
 
+  if (opts?.reduceOnly === true && size <= 0) {
+    return { success: false, error: "Reduce-only close requires positive size" };
+  }
+
   try {
     const response = await deltaIndiaSignedRequest<{
       result?: Record<string, unknown>;

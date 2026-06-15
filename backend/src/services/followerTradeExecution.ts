@@ -31,6 +31,7 @@ import {
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
   subscriptionSyncBlocksReconcile,
+  syncMonitorOpensBlocked,
 } from "./subscriptionSyncService.js";
 import {
   buildClientOrderId,
@@ -2114,12 +2115,16 @@ async function placeFollowerOrder(
   size: number,
   opts?: { reduceOnly?: boolean; clientOrderId?: string },
 ): Promise<ExecuteTradeResult> {
+  const reduceOnly = opts?.reduceOnly === true;
   console.log(
     `[copy] placeFollowerOrder symbol="${symbol.trim()}" side=${side} lots=${size} ` +
-      `reduceOnly=${opts?.reduceOnly === true} clientOrderId=${opts?.clientOrderId ?? "none"}`,
+      `reduceOnly=${reduceOnly} clientOrderId=${opts?.clientOrderId ?? "none"}`,
   );
   try {
-    return await executeTrade(apiKey, apiSecret, symbol, side, size, opts);
+    return await executeTrade(apiKey, apiSecret, symbol, side, size, {
+      ...(opts ?? {}),
+      ...(reduceOnly ? { reduceOnly: true } : {}),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[copy] createOrder threw for ${symbol}: ${message}`);
@@ -2344,6 +2349,23 @@ export async function executeFollowerTradeWithVerification(
     args.liveMasterFill === true ||
     args.reduceOnly === true;
   const isOptionLeg = isDeltaOptionProductId(symbol);
+
+  if (
+    args.strategyId &&
+    args.reduceOnly !== true &&
+    args.forceRestSync === true &&
+    syncMonitorOpensBlocked(args.strategyId)
+  ) {
+    console.warn(
+      `[copy] Block open user=${userId} ${symbol} ${side} — master flatting lock active`,
+    );
+    return {
+      success: false,
+      error: "Master flatting lock active — open blocked",
+      attempts: 0,
+      verified: false,
+    };
+  }
 
   if (
     args.strategyId &&

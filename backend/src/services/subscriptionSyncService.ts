@@ -85,6 +85,34 @@ export async function markSubscriptionSyncFailed(
   });
 }
 
+/** Block SYNC-MONITOR / reconcile opens while master flat close is in flight. */
+const MASTER_FLATTING_BLOCK_MS = 10_000;
+const masterFlattingUntilByStrategy = new Map<string, number>();
+
+/** Engage a short-lived lock after master flat close starts (prevents ghost catch-up opens). */
+export function markMasterFlatting(
+  strategyId: string,
+  durationMs: number = MASTER_FLATTING_BLOCK_MS,
+): void {
+  masterFlattingUntilByStrategy.set(strategyId, Date.now() + durationMs);
+}
+
+/** True while the master flatting window is active for this strategy. */
+export function isMasterFlatting(strategyId: string): boolean {
+  const until = masterFlattingUntilByStrategy.get(strategyId);
+  if (until == null) return false;
+  if (Date.now() >= until) {
+    masterFlattingUntilByStrategy.delete(strategyId);
+    return false;
+  }
+  return true;
+}
+
+/** SYNC-MONITOR and reconcile must not place new open legs while this is true. */
+export function syncMonitorOpensBlocked(strategyId: string): boolean {
+  return isMasterFlatting(strategyId);
+}
+
 export async function markSubscriptionSyncError(
   prisma: PrismaClient,
   args: {

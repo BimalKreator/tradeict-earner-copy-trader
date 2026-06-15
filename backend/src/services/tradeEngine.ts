@@ -89,9 +89,11 @@ import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import { consolidateDuplicateFutureHedgeStrategies } from "./strategyCleanupService.js";
 import { resolveCanonicalFutureHedgeStrategy } from "./futureHedgeService.js";
 import {
+  markMasterFlatting,
   markSubscriptionSyncFailed,
   markSubscriptionSyncPending,
   markSubscriptionSynced,
+  syncMonitorOpensBlocked,
 } from "./subscriptionSyncService.js";
 import {
   registerSymbolsForLivePrices,
@@ -398,6 +400,17 @@ async function triggerMasterOpenCopy(
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
+
+  if (
+    args.source === "rest" &&
+    args.adminForceSync !== true &&
+    syncMonitorOpensBlocked(strategyId)
+  ) {
+    console.log(
+      `[MASTER-REST-SYNC] skip open copy — master flatting lock strategyId=${strategyId} symbol=${args.symbol}`,
+    );
+    return;
+  }
 
   const isLiveMasterFill = args.source !== "rest";
 
@@ -2134,6 +2147,8 @@ async function notifyMasterFlat(
     `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice} origin="${closureOrigin}"`,
   );
 
+  markMasterFlatting(strategyId);
+
   try {
     const result = await syncMasterCloseToFutureHedgeFollowers(
       prisma,
@@ -3575,6 +3590,19 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         return;
       }
 
+      const masterFlattingLock = syncMonitorOpensBlocked(strat.id);
+      if (masterFlattingLock) {
+        console.log(
+          `[SYNC-MONITOR] skip open pass — master flatting lock strategyId=${strat.id}`,
+        );
+      }
+
+      if (masterLegs.length === 0) {
+        console.log(
+          `[SYNC-MONITOR] master snapshot empty — skip all catch-up open orders strategyId=${strat.id}`,
+        );
+      }
+
       const subs = await findActiveFutureHedgeCopySubscribers(prisma);
 
       type ReconcileCatchUpJob = {
@@ -3674,6 +3702,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             }
 
             if (exchangeLots < expectedContracts) {
+              if (masterFlattingLock || masterLegs.length === 0) {
+                continue;
+              }
               const masterOpenedAt = master?.openedAt ?? null;
               const isNewLeg = master
                 ? masterPositionTracker.isNewLegThisSession(
@@ -3840,12 +3871,41 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         }),
       );
 
-      if (catchUpJobs.length > 0) {
+      let catchUpJobsToRun = catchUpJobs;
+      let liveMasterLegsForOpens: MasterLedTrade[] = [];
+      if (!masterFlattingLock && masterLegs.length > 0) {
+        try {
+          liveMasterLegsForOpens = await fetchMasterOpenPositions(
+            strat.masterApiKey,
+            strat.masterApiSecret,
+            { skipCache: true },
+          );
+        } catch (liveErr) {
+          console.warn(
+            `[SYNC-MONITOR] live master re-check failed strategyId=${strat.id}:`,
+            liveErr instanceof Error ? liveErr.message : liveErr,
+          );
+          liveMasterLegsForOpens = [];
+        }
+      }
+
+      const syncMonitorOpensAllowed =
+        !masterFlattingLock && liveMasterLegsForOpens.length > 0;
+
+      if (catchUpJobs.length > 0 && !syncMonitorOpensAllowed) {
         console.log(
-          `[RECONCILE] parallel catch-up ${catchUpJobs.length} follower job(s)`,
+          `[SYNC-MONITOR] abort ${catchUpJobs.length} catch-up open job(s) — ` +
+            `masterFlat=${masterFlattingLock} liveLegs=${liveMasterLegsForOpens.length} strategyId=${strat.id}`,
+        );
+        catchUpJobsToRun = [];
+      }
+
+      if (catchUpJobsToRun.length > 0) {
+        console.log(
+          `[RECONCILE] parallel catch-up ${catchUpJobsToRun.length} follower job(s)`,
         );
         await Promise.allSettled(
-          catchUpJobs.map(async (job) => {
+          catchUpJobsToRun.map(async (job) => {
             const clientOrderId = buildStableCopyClientOrderId({
               strategyId: strat.id,
               userId: job.userId,
@@ -3943,8 +4003,11 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         );
       }
 
-        for (const m of masterLegs) {
+        for (const m of liveMasterLegsForOpens) {
           if (cancelled.value) return;
+          if (!syncMonitorOpensAllowed) {
+            continue;
+          }
           if (restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side, m.masterContracts)) {
             continue;
           }
@@ -4027,7 +4090,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         }
 
         console.log(
-          `[SYNC-MONITOR] pass complete strategyId=${strat.id} subscribers=${subs.length} masterLegs=${masterLegs.length}`,
+          `[SYNC-MONITOR] pass complete strategyId=${strat.id} subscribers=${subs.length} masterLegs=${liveMasterLegsForOpens.length}`,
         );
     } catch (err) {
       console.error("[RECONCILE] position quantity pass failed:", err);
