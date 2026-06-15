@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -94,6 +94,95 @@ type StrategySection = {
 };
 
 const LIVE_TRADES_REFRESH_MS = 8_000;
+const BTC_TICKER_POLL_MS = 1_000;
+
+function BtcUsdLiveTicker() {
+  const [price, setPrice] = useState<number | null>(null);
+  const [symbol, setSymbol] = useState("BTCUSD");
+  const [flash, setFlash] = useState<"up" | "down" | null>(null);
+  const prevRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!flash) return;
+    const id = window.setTimeout(() => setFlash(null), 450);
+    return () => window.clearTimeout(id);
+  }, [flash, price]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      const base = resolveAdminApiBase();
+      if (!base || cancelled) return;
+      try {
+        const res = await fetch(
+          `${base}/admin/strategies/future-hedge/market?t=${Date.now()}`,
+          {
+            cache: "no-store",
+            headers: {
+              Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            },
+          },
+        );
+        if (!res.ok || cancelled) return;
+        const data: unknown = await res.json();
+        if (typeof data !== "object" || data === null) return;
+        const row = data as Record<string, unknown>;
+        const livePrice = row.livePrice;
+        const sym = typeof row.symbol === "string" ? row.symbol : "BTCUSD";
+        if (typeof livePrice !== "number" || !Number.isFinite(livePrice)) return;
+        const prev = prevRef.current;
+        if (prev != null) {
+          if (livePrice > prev) setFlash("up");
+          else if (livePrice < prev) setFlash("down");
+        }
+        prevRef.current = livePrice;
+        setSymbol(sym);
+        setPrice(livePrice);
+      } catch {
+        /* polling is best-effort */
+      }
+    };
+    void poll();
+    const id = window.setInterval(poll, BTC_TICKER_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const priceClass =
+    flash === "up"
+      ? "text-emerald-400"
+      : flash === "down"
+        ? "text-red-400"
+        : "text-white";
+
+  return (
+    <div className="sticky top-0 z-30 rounded-xl border border-glassBorder bg-slate-950/90 px-4 py-3 shadow-lg shadow-black/30 backdrop-blur-md">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Radio className="h-4 w-4 text-emerald-400/80" aria-hidden />
+          <p className="text-xs font-semibold uppercase tracking-wide text-white/55">
+            Live BTC futures
+          </p>
+        </div>
+        <p
+          className={`text-2xl font-bold tabular-nums transition-colors duration-150 ${priceClass} ${
+            flash ? "animate-pulse" : ""
+          }`}
+        >
+          {price != null
+            ? `$${price.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}`
+            : "—"}
+          <span className="ml-2 text-sm font-normal text-white/40">{symbol}</span>
+        </p>
+      </div>
+    </div>
+  );
+}
 
 interface AutoExitPayload {
   autoExitEnabled?: boolean;
@@ -1617,6 +1706,8 @@ export default function AdminLiveTradesPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
+      <BtcUsdLiveTicker />
+
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
           <div className="rounded-xl border border-glassBorder bg-primary/10 p-3">

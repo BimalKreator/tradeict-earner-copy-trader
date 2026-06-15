@@ -2,6 +2,7 @@
 export const EXIT_REASON = {
   AUTO_EXIT_TARGET: "Auto-Exit Target Hit",
   AUTO_EXIT_STOP_LOSS: "Auto-Exit Stop Loss Hit",
+  AUTO_EXIT_BREAKEVEN: "Auto-Exit Breakeven Hit",
   ADMIN_PANEL: "Closed via Admin Panel",
   EXTERNAL_DELTA:
     "Closed Externally on Delta Exchange (Manual/Liquidation)",

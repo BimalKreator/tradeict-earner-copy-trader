@@ -244,6 +244,11 @@ model FutureHedgeConfig {
   emaPeriod       Int      @default(200)
   adjustmentPct   Float    @default(0.5)
   targetProfitUsd Float    @default(10.0)
+  /** When true, auto-flat master legs when BTC price breaches breakeven bounds. */
+  isBreakevenExitEnabled Boolean @default(false)
+  /** Lower/upper breakeven bound (USD); either or both may be set. */
+  breakevenPrice1        Float?
+  breakevenPrice2        Float?
   /** Groups a run of hedge adjustments; cleared when a batch completes. */
   currentBatchId  String?
   /** BTC perp price anchor for the adjustment grid (updated each entry/adjustment). */

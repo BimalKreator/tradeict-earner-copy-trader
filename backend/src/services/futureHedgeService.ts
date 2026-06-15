@@ -11,6 +11,9 @@ export type FutureHedgeConfigDto = {
   emaPeriod: number;
   adjustmentPct: number;
   targetProfitUsd: number;
+  isBreakevenExitEnabled: boolean;
+  breakevenPrice1: number | null;
+  breakevenPrice2: number | null;
   currentBatchId: string | null;
   lastEntryPrice: number | null;
   createdAt: string;
@@ -35,6 +38,9 @@ export function mapFutureHedgeConfig(row: FutureHedgeConfig): FutureHedgeConfigD
     emaPeriod: row.emaPeriod,
     adjustmentPct: row.adjustmentPct,
     targetProfitUsd: row.targetProfitUsd,
+    isBreakevenExitEnabled: row.isBreakevenExitEnabled,
+    breakevenPrice1: row.breakevenPrice1,
+    breakevenPrice2: row.breakevenPrice2,
     currentBatchId: row.currentBatchId,
     lastEntryPrice: row.lastEntryPrice,
     createdAt: row.createdAt.toISOString(),
@@ -146,6 +152,9 @@ export type FutureHedgeConfigUpdateInput = {
   emaPeriod?: number;
   adjustmentPct?: number;
   targetProfitUsd?: number;
+  isBreakevenExitEnabled?: boolean;
+  breakevenPrice1?: number | null;
+  breakevenPrice2?: number | null;
   currentBatchId?: string | null;
 };
 
@@ -174,6 +183,25 @@ export function validateFutureHedgeUpdate(
   if (input.targetProfitUsd !== undefined) {
     if (!Number.isFinite(input.targetProfitUsd) || input.targetProfitUsd <= 0) {
       return "targetProfitUsd must be a positive number";
+    }
+  }
+  if (input.breakevenPrice1 !== undefined && input.breakevenPrice1 !== null) {
+    if (!Number.isFinite(input.breakevenPrice1) || input.breakevenPrice1 <= 0) {
+      return "breakevenPrice1 must be a positive number or null";
+    }
+  }
+  if (input.breakevenPrice2 !== undefined && input.breakevenPrice2 !== null) {
+    if (!Number.isFinite(input.breakevenPrice2) || input.breakevenPrice2 <= 0) {
+      return "breakevenPrice2 must be a positive number or null";
+    }
+  }
+  if (input.isBreakevenExitEnabled === true) {
+    const p1 = input.breakevenPrice1;
+    const p2 = input.breakevenPrice2;
+    const hasP1 = p1 != null && Number.isFinite(p1) && p1 > 0;
+    const hasP2 = p2 != null && Number.isFinite(p2) && p2 > 0;
+    if (!hasP1 && !hasP2) {
+      return "At least one breakeven price is required when breakeven exit is enabled";
     }
   }
   if (input.currentBatchId !== undefined && input.currentBatchId !== null) {
@@ -219,6 +247,15 @@ export async function upsertFutureHedgeConfigForStrategy(
   if (input.targetProfitUsd !== undefined) {
     updateData.targetProfitUsd = input.targetProfitUsd;
   }
+  if (input.isBreakevenExitEnabled !== undefined) {
+    updateData.isBreakevenExitEnabled = input.isBreakevenExitEnabled;
+  }
+  if (input.breakevenPrice1 !== undefined) {
+    updateData.breakevenPrice1 = input.breakevenPrice1;
+  }
+  if (input.breakevenPrice2 !== undefined) {
+    updateData.breakevenPrice2 = input.breakevenPrice2;
+  }
   if (input.currentBatchId !== undefined) {
     updateData.currentBatchId = input.currentBatchId;
   }
@@ -257,6 +294,19 @@ export function parseFutureHedgeBody(body: Record<string, unknown>): FutureHedge
   }
   if (typeof body.targetProfitUsd === "number") {
     out.targetProfitUsd = body.targetProfitUsd;
+  }
+  if (typeof body.isBreakevenExitEnabled === "boolean") {
+    out.isBreakevenExitEnabled = body.isBreakevenExitEnabled;
+  }
+  if (body.breakevenPrice1 === null) {
+    out.breakevenPrice1 = null;
+  } else if (typeof body.breakevenPrice1 === "number") {
+    out.breakevenPrice1 = body.breakevenPrice1;
+  }
+  if (body.breakevenPrice2 === null) {
+    out.breakevenPrice2 = null;
+  } else if (typeof body.breakevenPrice2 === "number") {
+    out.breakevenPrice2 = body.breakevenPrice2;
   }
   if (body.currentBatchId === null) {
     out.currentBatchId = null;

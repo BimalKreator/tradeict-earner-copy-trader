@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
+import { getFutureHedgeMarketSnapshot } from "../services/futureHedgeDataService.js";
 import {
   mapFutureHedgeConfig,
   parseFutureHedgeBody,
@@ -43,7 +44,7 @@ export function createFutureHedgeController(prisma: PrismaClient) {
       if (Object.keys(updates).length === 0) {
         res.status(400).json({
           error:
-            "Provide at least one of isAutoEnabled, baseLots, emaPeriod, adjustmentPct, targetProfitUsd, currentBatchId",
+            "Provide at least one of isAutoEnabled, baseLots, emaPeriod, adjustmentPct, targetProfitUsd, isBreakevenExitEnabled, breakevenPrice1, breakevenPrice2, currentBatchId",
         });
         return;
       }
@@ -78,5 +79,17 @@ export function createFutureHedgeController(prisma: PrismaClient) {
     }
   }
 
-  return { getConfig, updateConfig };
+  async function getMarket(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      res.json(getFutureHedgeMarketSnapshot());
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  return { getConfig, getMarket, updateConfig };
 }

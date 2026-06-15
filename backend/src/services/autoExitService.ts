@@ -6,8 +6,13 @@ import {
 } from "../constants/exitReasons.js";
 import { clearFutureHedgeActiveBatch } from "./futureHedgeEngine.js";
 import {
+  FUTURE_HEDGE_BTC_SYMBOL,
+  getLiveFuturePrice,
+} from "./futureHedgeDataService.js";
+import {
   executeTrade,
   fetchDeltaOpenPositions,
+  fetchDeltaTicker,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
@@ -32,6 +37,15 @@ const positionSettleUntil = new Map<string, number>();
 
 /** strategyId → open leg count on previous tick (detect new basket legs). */
 const lastLegCountByStrategy = new Map<string, number>();
+
+/** strategyId → consecutive poll ticks where BTC price breached breakeven bounds. */
+const breakevenBreachCounters = new Map<string, number>();
+
+/** strategyId → last observed BTC price for single-level cross detection. */
+const lastBtcPriceByStrategy = new Map<string, number>();
+
+/** USD tolerance when a single breakeven level is configured. */
+const BREAKEVEN_TOUCH_EPSILON_USD = 1.0;
 
 function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   const cached = resolveLiveMarkPrice(pos.symbolKey);
@@ -130,6 +144,129 @@ export function evaluateAutoExitThresholds(args: {
     };
   }
   return null;
+}
+
+export async function resolveLiveBtcUsdPrice(): Promise<number | null> {
+  const cached = getLiveFuturePrice();
+  if (cached != null && Number.isFinite(cached) && cached > 0) {
+    return cached;
+  }
+  try {
+    const tick = await fetchDeltaTicker(FUTURE_HEDGE_BTC_SYMBOL);
+    const last = tick.last;
+    if (last != null && Number.isFinite(last) && last > 0) {
+      return last;
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+export function evaluateBreakevenPriceBreach(args: {
+  livePrice: number;
+  prevPrice?: number | null;
+  breakevenPrice1: number | null;
+  breakevenPrice2: number | null;
+}): boolean {
+  const levels = [args.breakevenPrice1, args.breakevenPrice2].filter(
+    (p): p is number => p != null && Number.isFinite(p) && p > 0,
+  );
+  if (levels.length === 0) return false;
+
+  if (levels.length >= 2) {
+    const low = Math.min(levels[0]!, levels[1]!);
+    const high = Math.max(levels[0]!, levels[1]!);
+    return args.livePrice <= low || args.livePrice >= high;
+  }
+
+  const level = levels[0]!;
+  if (Math.abs(args.livePrice - level) <= BREAKEVEN_TOUCH_EPSILON_USD) {
+    return true;
+  }
+  const prev = args.prevPrice;
+  if (prev != null && Number.isFinite(prev)) {
+    return (
+      (prev < level && args.livePrice >= level) ||
+      (prev > level && args.livePrice <= level)
+    );
+  }
+  return false;
+}
+
+async function executeMasterFlatAutoExit(args: {
+  prisma: PrismaClient;
+  strategyId: string;
+  strategyTitle: string;
+  masterApiKey: string;
+  masterApiSecret: string;
+  legs: MasterLegCloseTarget[];
+  exitReason: (typeof EXIT_REASON)[keyof typeof EXIT_REASON];
+  logTag: string;
+  logDetail: string;
+}): Promise<void> {
+  const {
+    prisma,
+    strategyId,
+    strategyTitle,
+    masterApiKey,
+    masterApiSecret,
+    legs,
+    exitReason,
+    logTag,
+    logDetail,
+  } = args;
+
+  for (const leg of legs) {
+    markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
+  }
+  setPendingStrategyExitReason(strategyId, exitReason);
+
+  console.warn(
+    `[${logTag}] THRESHOLD HIT strategy="${strategyTitle}" (${strategyId}) ` +
+      `${logDetail} openLegs=${legs.length} — closing ALL master positions`,
+  );
+
+  const { closed, errors } = await closeAllMasterPositionsMarket(
+    masterApiKey,
+    masterApiSecret,
+    legs,
+  );
+
+  if (closed > 0 || errors.length === 0) {
+    lastAutoExitAt.set(strategyId, Date.now());
+  }
+
+  if (errors.length > 0) {
+    console.error(
+      `[${logTag}] partial close strategyId=${strategyId} closed=${closed}/${legs.length} errors=${errors.join("; ")}`,
+    );
+  } else {
+    console.log(
+      `[${logTag}] master flat complete strategyId=${strategyId} closed=${closed} leg(s)`,
+    );
+  }
+
+  if (closed > 0) {
+    try {
+      await clearFutureHedgeActiveBatch(prisma, `${logTag}:flat`);
+    } catch (batchErr) {
+      console.warn(
+        `[${logTag}] Future Hedge batch reset failed strategyId=${strategyId}:`,
+        batchErr instanceof Error ? batchErr.message : batchErr,
+      );
+    }
+
+    try {
+      const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
+      await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);
+    } catch (err) {
+      console.error(
+        `[${logTag}] follower fan-out failed strategyId=${strategyId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 }
 
 export async function closeAllMasterPositionsMarket(
@@ -290,59 +427,171 @@ export async function runStrategyAutoExitCheck(
       ? EXIT_REASON.AUTO_EXIT_TARGET
       : EXIT_REASON.AUTO_EXIT_STOP_LOSS;
 
-  for (const leg of legs) {
-    markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
+  await executeMasterFlatAutoExit({
+    prisma,
+    strategyId,
+    strategyTitle: strategy.title,
+    masterApiKey: strategy.masterApiKey,
+    masterApiSecret: strategy.masterApiSecret,
+    legs,
+    exitReason,
+    logTag: "auto-exit",
+    logDetail:
+      `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
+      `threshold=${breach.thresholdUsd}`,
+  });
+}
+
+/**
+ * Poll-driven breakeven exit: compare live BTCUSD price to configured bounds
+ * and market-close every open master leg when breached.
+ */
+export async function runBreakevenExitCheck(
+  prisma: PrismaClient,
+  strategy: {
+    id: string;
+    title: string;
+    masterApiKey: string;
+    masterApiSecret: string;
+    futureHedgeConfig: {
+      isBreakevenExitEnabled: boolean;
+      breakevenPrice1: number | null;
+      breakevenPrice2: number | null;
+    } | null;
+  },
+): Promise<void> {
+  const config = strategy.futureHedgeConfig;
+  if (!config?.isBreakevenExitEnabled) return;
+
+  const p1 = config.breakevenPrice1;
+  const p2 = config.breakevenPrice2;
+  const hasP1 = p1 != null && Number.isFinite(p1) && p1 > 0;
+  const hasP2 = p2 != null && Number.isFinite(p2) && p2 > 0;
+  if (!hasP1 && !hasP2) return;
+
+  const key = strategy.masterApiKey?.trim() ?? "";
+  const secret = strategy.masterApiSecret?.trim() ?? "";
+  if (!key || !secret) return;
+
+  const livePrice = await resolveLiveBtcUsdPrice();
+  if (livePrice == null) return;
+
+  const strategyId = strategy.id;
+  const prevPrice = lastBtcPriceByStrategy.get(strategyId) ?? null;
+  lastBtcPriceByStrategy.set(strategyId, livePrice);
+
+  let totalPnlUsd: number;
+  let legs: MasterLegCloseTarget[];
+  try {
+    const snap = await fetchMasterLegsWithTotalLivePnl(
+      strategy.masterApiKey,
+      strategy.masterApiSecret,
+    );
+    totalPnlUsd = snap.totalPnlUsd;
+    legs = snap.legs;
+  } catch (err) {
+    console.warn(
+      `[breakeven-exit] master snapshot failed strategyId=${strategyId}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return;
   }
-  setPendingStrategyExitReason(strategyId, exitReason);
+
+  if (legs.length === 0) {
+    breakevenBreachCounters.set(strategyId, 0);
+    return;
+  }
+
+  const prevLegCount = lastLegCountByStrategy.get(strategyId) ?? 0;
+  if (legs.length > prevLegCount) {
+    positionSettleUntil.set(strategyId, Date.now() + POSITION_SETTLE_GRACE_MS);
+  }
+  lastLegCountByStrategy.set(strategyId, legs.length);
+
+  const settleUntil = positionSettleUntil.get(strategyId) ?? 0;
+  if (Date.now() < settleUntil) {
+    return;
+  }
+
+  const breached = evaluateBreakevenPriceBreach({
+    livePrice,
+    prevPrice,
+    breakevenPrice1: hasP1 ? p1 : null,
+    breakevenPrice2: hasP2 ? p2 : null,
+  });
+
+  if (!breached) {
+    breakevenBreachCounters.set(strategyId, 0);
+    return;
+  }
+
+  const count = (breakevenBreachCounters.get(strategyId) ?? 0) + 1;
+  breakevenBreachCounters.set(strategyId, count);
 
   console.warn(
-    `[auto-exit] THRESHOLD HIT strategy="${strategy.title}" (${strategyId}) ` +
-      `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
-      `threshold=${breach.thresholdUsd} openLegs=${legs.length} — closing ALL master positions`,
+    `[breakeven-exit] Price breach for strategy ${strategyId}. Verifying... (${count}/${SUSTAINED_BREACH_TICKS} ticks) ` +
+      `livePrice=${livePrice.toFixed(2)} p1=${hasP1 ? p1 : "—"} p2=${hasP2 ? p2 : "—"} totalPnl=$${totalPnlUsd.toFixed(2)}`,
   );
 
-  const { closed, errors } = await closeAllMasterPositionsMarket(
-    strategy.masterApiKey,
-    strategy.masterApiSecret,
+  if (count < SUSTAINED_BREACH_TICKS) {
+    return;
+  }
+
+  const lastExit = lastAutoExitAt.get(strategyId) ?? 0;
+  if (Date.now() - lastExit < AUTO_EXIT_COOLDOWN_MS) {
+    return;
+  }
+
+  breakevenBreachCounters.set(strategyId, 0);
+
+  await executeMasterFlatAutoExit({
+    prisma,
+    strategyId,
+    strategyTitle: strategy.title,
+    masterApiKey: strategy.masterApiKey,
+    masterApiSecret: strategy.masterApiSecret,
     legs,
-  );
+    exitReason: EXIT_REASON.AUTO_EXIT_BREAKEVEN,
+    logTag: "breakeven-exit",
+    logDetail:
+      `livePrice=${livePrice.toFixed(2)} breakeven1=${hasP1 ? p1 : "—"} ` +
+      `breakeven2=${hasP2 ? p2 : "—"}`,
+  });
+}
 
-  if (closed > 0 || errors.length === 0) {
-    lastAutoExitAt.set(strategyId, Date.now());
-  }
+export async function runAllBreakevenExitChecks(
+  prisma: PrismaClient,
+): Promise<void> {
+  const strategies = await prisma.strategy.findMany({
+    where: {
+      isActive: true,
+      futureHedgeConfig: {
+        is: {
+          isBreakevenExitEnabled: true,
+          OR: [
+            { breakevenPrice1: { not: null } },
+            { breakevenPrice2: { not: null } },
+          ],
+        },
+      },
+    },
+    select: {
+      id: true,
+      title: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+      futureHedgeConfig: {
+        select: {
+          isBreakevenExitEnabled: true,
+          breakevenPrice1: true,
+          breakevenPrice2: true,
+        },
+      },
+    },
+  });
 
-  if (errors.length > 0) {
-    console.error(
-      `[auto-exit] partial close strategyId=${strategy.id} closed=${closed}/${legs.length} errors=${errors.join("; ")}`,
-    );
-  } else {
-    console.log(
-      `[auto-exit] master flat complete strategyId=${strategy.id} closed=${closed} leg(s)`,
-    );
-  }
-
-  if (closed > 0) {
-    try {
-      await clearFutureHedgeActiveBatch(
-        prisma,
-        `auto-exit:${breach.reason}`,
-      );
-    } catch (batchErr) {
-      console.warn(
-        `[auto-exit] Future Hedge batch reset failed strategyId=${strategyId}:`,
-        batchErr instanceof Error ? batchErr.message : batchErr,
-      );
-    }
-
-    try {
-      const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
-      await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);
-    } catch (err) {
-      console.error(
-        `[auto-exit] follower fan-out failed strategyId=${strategyId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
+  for (const strat of strategies) {
+    await runBreakevenExitCheck(prisma, strat);
   }
 }
 

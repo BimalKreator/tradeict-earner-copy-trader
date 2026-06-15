@@ -75,6 +75,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.use(authenticateToken(), isAdmin(prisma));
 
   router.get("/strategies/future-hedge", futureHedge.getConfig);
+  router.get("/strategies/future-hedge/market", futureHedge.getMarket);
   router.put("/strategies/future-hedge", futureHedge.updateConfig);
 
   router.post("/notifications/broadcast", adminNotifications.broadcast);
@@ -869,7 +870,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         if (Object.keys(futureHedgeInput).length === 0) {
           res.status(400).json({
             error:
-              "futureHedgeConfig must include at least one of: isAutoEnabled, baseLots, emaPeriod, adjustmentPct, targetProfitUsd",
+              "futureHedgeConfig must include at least one of: isAutoEnabled, baseLots, emaPeriod, adjustmentPct, targetProfitUsd, isBreakevenExitEnabled, breakevenPrice1, breakevenPrice2",
           });
           return;
         }

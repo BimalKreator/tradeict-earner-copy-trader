@@ -28,6 +28,9 @@ export const STRATEGY_SELECT_ADMIN_LIST: Prisma.StrategySelect = {
       emaPeriod: true,
       adjustmentPct: true,
       targetProfitUsd: true,
+      isBreakevenExitEnabled: true,
+      breakevenPrice1: true,
+      breakevenPrice2: true,
     },
   },
 };
@@ -56,6 +59,9 @@ export const STRATEGY_SELECT_ADMIN_SAFE: Prisma.StrategySelect = {
       emaPeriod: true,
       adjustmentPct: true,
       targetProfitUsd: true,
+      isBreakevenExitEnabled: true,
+      breakevenPrice1: true,
+      breakevenPrice2: true,
     },
   },
 };

@@ -57,7 +57,7 @@ import {
 } from "../prisma/strategySelect.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
-import { runAllStrategyAutoExitChecks } from "./autoExitService.js";
+import { runAllStrategyAutoExitChecks, runAllBreakevenExitChecks } from "./autoExitService.js";
 import {
   assertStrategyActiveForCopy,
   executeFollowerTradeWithVerification,
@@ -4183,6 +4183,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     if (cancelled.value) return;
     try {
       await runAllStrategyAutoExitChecks(prisma);
+      await runAllBreakevenExitChecks(prisma);
     } catch (err) {
       console.error("[tradeEngine] auto-exit pass failed:", err);
     }
