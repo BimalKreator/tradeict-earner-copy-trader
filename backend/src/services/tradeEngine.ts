@@ -168,16 +168,27 @@ function restForceCopyCooldownKey(
   strategyId: string,
   symbol: string,
   side: TradeSide,
+  /** When set, cooldown is per master qty target — scale-in is not blocked by initial open. */
+  masterTargetLots?: number,
 ): string {
-  return `${strategyId}|${symbol}|${side}`;
+  const base = `${strategyId}|${symbol}|${side}`;
+  return masterTargetLots != null && masterTargetLots > 0
+    ? `${base}|t${masterTargetLots}`
+    : base;
 }
 
 function restForceCopyOnCooldown(
   strategyId: string,
   symbol: string,
   side: TradeSide,
+  masterTargetLots?: number,
 ): boolean {
-  const key = restForceCopyCooldownKey(strategyId, symbol, side);
+  const key = restForceCopyCooldownKey(
+    strategyId,
+    symbol,
+    side,
+    masterTargetLots,
+  );
   const last = restForceCopyLastAttempt.get(key) ?? 0;
   return Date.now() - last < REST_FORCE_COPY_COOLDOWN_MS;
 }
@@ -186,9 +197,10 @@ function markRestForceCopyAttempt(
   strategyId: string,
   symbol: string,
   side: TradeSide,
+  masterTargetLots?: number,
 ): void {
   restForceCopyLastAttempt.set(
-    restForceCopyCooldownKey(strategyId, symbol, side),
+    restForceCopyCooldownKey(strategyId, symbol, side, masterTargetLots),
     Date.now(),
   );
 }
@@ -369,6 +381,8 @@ async function triggerMasterOpenCopy(
     symbol: string;
     side: TradeSide;
     masterContracts: number;
+    /** Cumulative master lots on the leg (scale-in uses increment in masterContracts). */
+    masterTotalLots?: number;
     avgPrice: number | null;
     masterFillKey: string;
     source: "orders" | "positions" | "fills" | "rest";
@@ -452,7 +466,12 @@ async function triggerMasterOpenCopy(
       masterContracts: args.masterContracts,
       avgPrice: entryPrice,
       masterFillKey: args.masterFillKey,
-      ...(forceRestSync ? { forceRestSync: true, masterTotalLots: args.masterContracts } : {}),
+      ...(forceRestSync
+        ? {
+            forceRestSync: true,
+            masterTotalLots: args.masterTotalLots ?? args.masterContracts,
+          }
+        : {}),
       ...(args.adminForceSync ? { adminForceSync: true } : {}),
       ...(args.masterOpenedAt !== undefined
         ? { masterOpenedAt: args.masterOpenedAt }
@@ -2585,11 +2604,21 @@ async function pollMasterPositionsFallback(
 
         if (missingOnFollowers) {
           if (
-            restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side)
+            restForceCopyOnCooldown(
+              strat.id,
+              m.deltaSymbol,
+              m.side,
+              m.masterContracts,
+            )
           ) {
             continue;
           }
-          markRestForceCopyAttempt(strat.id, m.deltaSymbol, m.side);
+          markRestForceCopyAttempt(
+            strat.id,
+            m.deltaSymbol,
+            m.side,
+            m.masterContracts,
+          );
 
           const legKey = masterLegKey(m.deltaSymbol, m.side);
           const fillKey = `force-rest:${buildMasterFillKey([
@@ -2603,6 +2632,7 @@ async function pollMasterPositionsFallback(
               symbol: m.deltaSymbol,
               side: m.side,
               masterContracts: m.masterContracts,
+              masterTotalLots: m.masterContracts,
               avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
               masterFillKey: fillKey,
               source: "rest",
@@ -2623,6 +2653,70 @@ async function pollMasterPositionsFallback(
       const legK = masterLegKey(m.deltaSymbol, m.side);
       const prevRest =
         tracker.lastRestContractsByLeg.get(legK) ?? m.masterContracts;
+
+      if (
+        wasBaselineSeeded &&
+        prevRest > 0 &&
+        m.masterContracts > prevRest + 1e-9 &&
+        !restForceCopyOnCooldown(
+          strat.id,
+          m.deltaSymbol,
+          m.side,
+          m.masterContracts,
+        )
+      ) {
+        const incrementLots = Math.floor(m.masterContracts - prevRest);
+        if (incrementLots > 0) {
+          const scaleIsNewLeg = tracker.isNewLegThisSession(m.deltaSymbol, m.side);
+          tracker.noteLegObserved(m.deltaSymbol, m.side, m.openedAt, scaleIsNewLeg);
+          const scaleLocallyFirstSeenAt = tracker.resolveLegOpenedAt(
+            m.deltaSymbol,
+            m.side,
+            m.openedAt,
+          );
+          const scaleRestPreExistingUnknown = masterLegRestPreExistingUnknown({
+            isNewLegThisSession: scaleIsNewLeg,
+            exchangeOpenedAt: m.openedAt,
+            locallyFirstSeenAt: scaleLocallyFirstSeenAt,
+          });
+          markRestForceCopyAttempt(
+            strat.id,
+            m.deltaSymbol,
+            m.side,
+            m.masterContracts,
+          );
+          const scaleFillKey = `force-rest-scale-in:${buildMasterFillKey([
+            m.deltaSymbol,
+            m.side,
+            String(prevRest),
+            String(m.masterContracts),
+          ])}`;
+          console.log(
+            `[MASTER-REST-SYNC] master scale-in ${m.deltaSymbol} ${m.side} ${prevRest}→${m.masterContracts} — parallel follower sync`,
+          );
+          try {
+            await triggerMasterOpenCopy(prisma, strat.id, {
+              symbol: m.deltaSymbol,
+              side: m.side,
+              masterContracts: incrementLots,
+              masterTotalLots: m.masterContracts,
+              avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
+              masterFillKey: scaleFillKey,
+              source: "rest",
+              forceRestSync: true,
+              masterOpenedAt: m.openedAt,
+              locallyFirstSeenAt: scaleLocallyFirstSeenAt,
+              restPreExistingUnknown: scaleRestPreExistingUnknown,
+            });
+          } catch (scaleErr) {
+            console.error(
+              `[MASTER-REST-SYNC] scale-in copy failed ${m.deltaSymbol} ${m.side}:`,
+              scaleErr instanceof Error ? scaleErr.message : scaleErr,
+            );
+          }
+        }
+      }
+
       if (
         wasBaselineSeeded &&
         prevRest > m.masterContracts + 1e-9 &&
@@ -3437,7 +3531,31 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
       const subs = await findActiveFutureHedgeCopySubscribers(prisma);
 
-      for (const sub of subs) {
+      type ReconcileCatchUpJob = {
+        userId: string;
+        creds: { apiKey: string; apiSecret: string };
+        legSymbol: string;
+        legSide: TradeSide;
+        diff: number;
+        expectedContracts: number;
+        px: number;
+        reconcileFillKey: string;
+      };
+      type ReconcileOverTrimJob = {
+        userId: string;
+        creds: { apiKey: string; apiSecret: string };
+        legSymbol: string;
+        legSide: TradeSide;
+        trimLots: number;
+        expectedContracts: number;
+        exchangeLots: number;
+      };
+
+      const catchUpJobs: ReconcileCatchUpJob[] = [];
+      const overTrimJobs: ReconcileOverTrimJob[] = [];
+
+      await Promise.all(
+        subs.map(async (sub) => {
           if (cancelled.value) return;
 
           const creds = resolveSubscriptionCreds(sub);
@@ -3445,7 +3563,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             console.warn(
               `[RECONCILE] skip userId=${sub.userId} strategyId=${strat.id} — no API credentials`,
             );
-            continue;
+            return;
           }
 
           const botLegs = await listOpenFollowerBotLegs(
@@ -3592,57 +3710,16 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               }
 
               const reconcileFillKey = `reconcile:${sub.userId}:${legSymbol}:${legSide}:${expectedContracts}:${exchangeLots}`;
-              const clientOrderId = buildStableCopyClientOrderId({
-                strategyId: strat.id,
+              catchUpJobs.push({
                 userId: sub.userId,
-                masterFillKey: reconcileFillKey,
-                symbol: legSymbol,
-                side: legSide,
-                leg: "open",
+                creds,
+                legSymbol,
+                legSide,
+                diff,
+                expectedContracts,
+                px,
+                reconcileFillKey,
               });
-
-              const result = await executeFollowerTradeWithVerification(prisma, {
-                strategyId: strat.id,
-                userId: sub.userId,
-                apiKey: creds.apiKey,
-                apiSecret: creds.apiSecret,
-                symbol: legSymbol,
-                side: legSide,
-                size: diff,
-                expectedTotalLots: expectedContracts,
-                entryPrice: px,
-                clientOrderId,
-                forceRestSync: true,
-              });
-              if (!result.success || !result.verified) {
-                console.error(
-                  `[RECONCILE] catch-up failed userId=${sub.userId} symbol=${legSymbol} diff=${diff}: ${result.error ?? "not verified"}`,
-                );
-                await markSubscriptionSyncFailed(prisma, {
-                  userId: sub.userId,
-                  strategyId: strat.id,
-                  error: result.error ?? "Reconcile catch-up failed",
-                });
-              } else {
-                const recordedLots = Math.min(
-                  diff,
-                  Math.max(1, result.verifiedQty ?? diff),
-                );
-                await recordTradePositionOpen(prisma, {
-                  strategyId: strat.id,
-                  userId: sub.userId,
-                  symbol: legSymbol,
-                  side: legSide,
-                  quantity: recordedLots,
-                  entryPrice: px,
-                  clientOrderId,
-                  ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
-                });
-                await markSubscriptionSynced(prisma, {
-                  userId: sub.userId,
-                  strategyId: strat.id,
-                });
-              }
               continue;
             }
 
@@ -3676,42 +3753,15 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             console.log(
               `[RECONCILE] trim over-allocated user ${sub.userId} ${legSymbol}: exchange ${exchangeLots} → expected ${expectedContracts} (-${trimLots})`,
             );
-
-            const closeSide: TradeSide = legSide === "BUY" ? "SELL" : "BUY";
-            const trimFillKey = `reconcile-trim:${sub.userId}:${legSymbol}:${legSide}:${expectedContracts}:${exchangeLots}`;
-            const trimClientOrderId = buildStableCopyClientOrderId({
-              strategyId: strat.id,
+            overTrimJobs.push({
               userId: sub.userId,
-              masterFillKey: trimFillKey,
-              symbol: legSymbol,
-              side: legSide,
-              leg: "close",
+              creds,
+              legSymbol,
+              legSide,
+              trimLots,
+              expectedContracts,
+              exchangeLots,
             });
-
-            const trimResult = await executeFollowerTradeWithVerification(prisma, {
-              strategyId: strat.id,
-              userId: sub.userId,
-              apiKey: creds.apiKey,
-              apiSecret: creds.apiSecret,
-              symbol: legSymbol,
-              side: closeSide,
-              size: trimLots,
-              entryPrice: 0,
-              clientOrderId: trimClientOrderId,
-              reduceOnly: true,
-              forceRestSync: true,
-            });
-
-            if (!trimResult.success || !trimResult.verified) {
-              console.error(
-                `[RECONCILE] trim failed userId=${sub.userId} symbol=${legSymbol} trim=${trimLots}: ${trimResult.error ?? "not verified"}`,
-              );
-            } else {
-              await markSubscriptionSynced(prisma, {
-                userId: sub.userId,
-                strategyId: strat.id,
-              });
-            }
           }
 
           const outOfSync: string[] = [];
@@ -3741,11 +3791,115 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               `[SYNC-MONITOR] user=${sub.userId} out of sync: ${outOfSync.join("; ")}`,
             );
           }
-        }
+        }),
+      );
+
+      if (catchUpJobs.length > 0) {
+        console.log(
+          `[RECONCILE] parallel catch-up ${catchUpJobs.length} follower job(s)`,
+        );
+        await Promise.allSettled(
+          catchUpJobs.map(async (job) => {
+            const clientOrderId = buildStableCopyClientOrderId({
+              strategyId: strat.id,
+              userId: job.userId,
+              masterFillKey: job.reconcileFillKey,
+              symbol: job.legSymbol,
+              side: job.legSide,
+              leg: "open",
+            });
+
+            const result = await executeFollowerTradeWithVerification(prisma, {
+              strategyId: strat.id,
+              userId: job.userId,
+              apiKey: job.creds.apiKey,
+              apiSecret: job.creds.apiSecret,
+              symbol: job.legSymbol,
+              side: job.legSide,
+              size: job.diff,
+              expectedTotalLots: job.expectedContracts,
+              entryPrice: job.px,
+              clientOrderId,
+              forceRestSync: true,
+            });
+            if (!result.success || !result.verified) {
+              console.error(
+                `[RECONCILE] catch-up failed userId=${job.userId} symbol=${job.legSymbol} diff=${job.diff}: ${result.error ?? "not verified"}`,
+              );
+              await markSubscriptionSyncFailed(prisma, {
+                userId: job.userId,
+                strategyId: strat.id,
+                error: result.error ?? "Reconcile catch-up failed",
+              });
+            } else {
+              const recordedLots = Math.min(
+                job.diff,
+                Math.max(1, result.verifiedQty ?? job.diff),
+              );
+              await recordTradePositionOpen(prisma, {
+                strategyId: strat.id,
+                userId: job.userId,
+                symbol: job.legSymbol,
+                side: job.legSide,
+                quantity: recordedLots,
+                entryPrice: job.px,
+                clientOrderId,
+                ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
+              });
+              await markSubscriptionSynced(prisma, {
+                userId: job.userId,
+                strategyId: strat.id,
+              });
+            }
+          }),
+        );
+      }
+
+      if (overTrimJobs.length > 0) {
+        await Promise.allSettled(
+          overTrimJobs.map(async (job) => {
+            const closeSide: TradeSide = job.legSide === "BUY" ? "SELL" : "BUY";
+            const trimFillKey = `reconcile-trim:${job.userId}:${job.legSymbol}:${job.legSide}:${job.expectedContracts}:${job.exchangeLots}`;
+            const trimClientOrderId = buildStableCopyClientOrderId({
+              strategyId: strat.id,
+              userId: job.userId,
+              masterFillKey: trimFillKey,
+              symbol: job.legSymbol,
+              side: job.legSide,
+              leg: "close",
+            });
+
+            const trimResult = await executeFollowerTradeWithVerification(prisma, {
+              strategyId: strat.id,
+              userId: job.userId,
+              apiKey: job.creds.apiKey,
+              apiSecret: job.creds.apiSecret,
+              symbol: job.legSymbol,
+              side: closeSide,
+              size: job.trimLots,
+              entryPrice: 0,
+              clientOrderId: trimClientOrderId,
+              reduceOnly: true,
+              forceRestSync: true,
+            });
+
+            if (!trimResult.success || !trimResult.verified) {
+              console.error(
+                `[RECONCILE] trim failed userId=${job.userId} symbol=${job.legSymbol} trim=${job.trimLots}: ${trimResult.error ?? "not verified"}`,
+              );
+            } else {
+              await markSubscriptionSynced(prisma, {
+                userId: job.userId,
+                strategyId: strat.id,
+              });
+            }
+          }),
+        );
+      }
 
         for (const m of masterLegs) {
           if (cancelled.value) return;
-          if (restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side)) {
+          if (restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side, m.masterContracts)) {
             continue;
           }
           let legDeficit = false;
@@ -3796,7 +3950,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           ) {
             continue;
           }
-          markRestForceCopyAttempt(strat.id, m.deltaSymbol, m.side);
+          markRestForceCopyAttempt(strat.id, m.deltaSymbol, m.side, m.masterContracts);
           const fillKey = `sync-monitor:${buildMasterFillKey([
             m.deltaSymbol,
             m.side,
@@ -3810,6 +3964,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               symbol: m.deltaSymbol,
               side: m.side,
               masterContracts: m.masterContracts,
+              masterTotalLots: m.masterContracts,
               avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
               masterFillKey: fillKey,
               source: "rest",

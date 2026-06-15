@@ -1108,53 +1108,54 @@ export async function forceSyncMasterOpenToFollowers(
       lots: number;
     }> = [];
 
-    for (const sub of subscribers) {
-      if (
-        !followerEligibleForMasterLegCopy({
-          joinedDate: sub.joinedDate,
-          masterOpenedAt: fill.masterOpenedAt ?? null,
-          locallyFirstSeenAt: fill.locallyFirstSeenAt ?? null,
-          liveMasterFill: fill.liveMasterFill === true,
-          adminForceSync:
-            fill.adminForceSync === true || fill.forceRestSync === true,
-          restPreExistingUnknown: fill.restPreExistingUnknown === true,
-        })
-      ) {
-        console.log(
-          `[FORCE-SYNC] skip late-join user=${sub.userId} ${fill.symbol} — ` +
-            `master leg predates subscription (joined=${sub.joinedDate.toISOString()})`,
-        );
-        continue;
-      }
+    await Promise.all(
+      subscribers.map(async (sub) => {
+        if (
+          !followerEligibleForMasterLegCopy({
+            joinedDate: sub.joinedDate,
+            masterOpenedAt: fill.masterOpenedAt ?? null,
+            locallyFirstSeenAt: fill.locallyFirstSeenAt ?? null,
+            liveMasterFill: fill.liveMasterFill === true,
+            adminForceSync:
+              fill.adminForceSync === true || fill.forceRestSync === true,
+            restPreExistingUnknown: fill.restPreExistingUnknown === true,
+          })
+        ) {
+          console.log(
+            `[FORCE-SYNC] skip late-join user=${sub.userId} ${fill.symbol} — ` +
+              `master leg predates subscription (joined=${sub.joinedDate.toISOString()})`,
+          );
+          return;
+        }
 
-      const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
-      const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
-      const credsForDeficit = resolveCopySubscriptionCreds(sub);
-      const deficitLots = await followerBotOpenDeficitLots(prisma, {
-        strategyId,
-        userId: sub.userId,
-        symbol: fill.symbol,
-        side: fill.side,
-        targetLots: expectedLots,
-        ...(credsForDeficit
-          ? {
-              apiKey: credsForDeficit.apiKey,
-              apiSecret: credsForDeficit.apiSecret,
-            }
-          : {}),
-      });
-      if (deficitLots > 0) {
-        pending.push({ sub, lots: deficitLots });
-      }
-    }
+        const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
+        const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
+        const credsForDeficit = resolveCopySubscriptionCreds(sub);
+        const deficitLots = await followerBotOpenDeficitLots(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+          targetLots: expectedLots,
+          ...(credsForDeficit
+            ? {
+                apiKey: credsForDeficit.apiKey,
+                apiSecret: credsForDeficit.apiSecret,
+              }
+            : {}),
+        });
+        if (deficitLots > 0) {
+          pending.push({ sub, lots: deficitLots });
+        }
+      }),
+    );
 
     if (pending.length === 0) {
       return { strategyId, fanoutCount: 0 };
     }
 
     console.log(
-      "[FORCE-SYNC] Forcing market open order synchronization for followers on symbol:",
-      fill.symbol,
+      `[FORCE-SYNC] parallel fan-out ${pending.length} follower order(s) on ${fill.symbol} ${fill.side}`,
     );
 
     try {
