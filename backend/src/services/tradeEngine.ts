@@ -1022,26 +1022,48 @@ async function handleMasterWsClosingFill(
 
   tracker.markWsFlatHint(sig.symbol, openSide);
 
-  const closed = await tryExecuteMasterLegCloseAfterRestCheck(
-    prisma,
-    strategyId,
-    tracker,
-    {
-      symbol: sig.symbol,
-      openSide,
-      trackedContracts,
-      avgEntry: meta.avgEntry,
-      source: sig.source,
-    },
+  console.log(
+    `[MASTER-WS] instant follower close ${sig.symbol} ${openSide} ` +
+      `(fill ${sig.side} qty=${sig.contracts} source=${sig.source})`,
   );
 
-  if (!closed) {
-    requestPriorityMasterRestPoll(
-      strategyId,
-      `ws-close-fill:${sig.symbol}:${openSide}`,
-      [{ symbol: sig.symbol, side: openSide }],
-    );
-  }
+  void notifyMasterFlat(
+    prisma,
+    strategyId,
+    {
+      symbol: sig.symbol,
+      side: openSide,
+      masterEntryPrice: meta.avgEntry,
+      masterContracts: trackedContracts,
+    },
+    { instantClose: true },
+  )
+    .then((closed) => {
+      if (closed) {
+        tracker.clearPendingFlat(masterLegKey(sig.symbol, openSide));
+        tracker.clearWsFlatHint(sig.symbol, openSide);
+        tracker.clearLegKeys(
+          tracker.aliasesForSnap({
+            symbol: sig.symbol,
+            side: openSide,
+            productKey: sig.symbol,
+          }),
+        );
+        tracker.lastRestContractsByLeg.delete(masterLegKey(sig.symbol, openSide));
+      }
+    })
+    .catch((err) => {
+      console.error(
+        `[MASTER-WS] instant close fan-out failed ${sig.symbol} ${openSide}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+
+  requestPriorityMasterRestPoll(
+    strategyId,
+    `ws-close-fill:${sig.symbol}:${openSide}`,
+    [{ symbol: sig.symbol, side: openSide }],
+  );
 }
 
 async function processMasterOrderFillRecords(
@@ -1167,11 +1189,31 @@ async function processMasterUserTradeFillRecords(
         return;
       }
       if (masterFillClosesExistingLeg(tracker, sig.symbol, sig.side)) {
-        tracker?.noteMasterBookRoll(sig.symbol);
+        if (!tracker) return;
+        const openSide: TradeSide = sig.side === "BUY" ? "SELL" : "BUY";
+        const meta = resolveTrackedOpenLegMeta(tracker, sig.symbol, openSide);
+        if (!meta) return;
+        tracker.markWsFlatHint(sig.symbol, openSide);
         console.log(
-          `[MASTER-WS] user_trades closing fill ignored for copy ${sig.symbol} ${sig.side} ` +
-            `(opposite leg open on master book)`,
+          `[MASTER-WS] opposing fill → instant close ${sig.symbol} ${openSide} ` +
+            `(fill ${sig.side} qty=${sig.contracts})`,
         );
+        void notifyMasterFlat(
+          prisma,
+          strategyId,
+          {
+            symbol: sig.symbol,
+            side: openSide,
+            masterEntryPrice: meta.avgEntry,
+            masterContracts: meta.contracts,
+          },
+          { instantClose: true },
+        ).catch((err) => {
+          console.error(
+            `[MASTER-WS] opposing-fill close failed ${sig.symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
         return;
       }
       registerSymbolsForLivePrices([sig.symbol]);
@@ -2067,7 +2109,7 @@ async function notifyMasterFlat(
     masterEntryPrice: number;
     masterContracts: number;
   },
-  options?: { exitReason?: ExitReasonValue },
+  options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
 ): Promise<boolean> {
   // Follower closes — also invoked from masterSyncService priority REST verification.
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
@@ -2114,7 +2156,7 @@ async function notifyMasterFlat(
           exitReason: closureOrigin,
         });
       },
-      { exitReason: closureOrigin },
+      { exitReason: closureOrigin, ...(options?.instantClose ? { instantClose: true } : {}) },
     );
     if (!result) return false;
     if (result.remainingExchangeLots > 0) {

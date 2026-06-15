@@ -324,7 +324,79 @@ export type FollowerExecuteResult = ExecuteTradeResult & {
   verified: boolean;
   /** Exchange-confirmed filled lots recorded to DB (may be < requested target). */
   verifiedQty?: number;
+  /** Open leg already written to TradePosition in this call (skip duplicate persist). */
+  persistedOpen?: boolean;
 };
+
+/** Options + force-sync paths — fire REST order and return; SYNC-MONITOR verifies later. */
+function usesOptimisticOpenExecution(
+  args: {
+    liveMasterFill?: boolean;
+    forceRestSync?: boolean;
+    reduceOnly?: boolean;
+  },
+  isOptionLeg: boolean,
+): boolean {
+  if (args.reduceOnly === true) return false;
+  return (
+    isOptionLeg ||
+    args.liveMasterFill === true ||
+    args.forceRestSync === true
+  );
+}
+
+async function finalizeOptimisticFollowerOpen(
+  prisma: PrismaClient,
+  args: {
+    strategyId?: string;
+    userId: string;
+    symbol: string;
+    side: TradeSide;
+    targetContracts: number;
+    entryPrice?: number;
+    openClientOrderId?: string;
+    lastResult: ExecuteTradeResult;
+    totalFee: number;
+    attempts: number;
+  },
+): Promise<FollowerExecuteResult> {
+  const optimisticQty = args.targetContracts;
+  let persistedOpen = false;
+  if (args.strategyId) {
+    await recordTradePositionOpen(prisma, {
+      strategyId: args.strategyId,
+      userId: args.userId,
+      symbol: args.symbol,
+      side: args.side,
+      quantity: optimisticQty,
+      entryPrice:
+        args.entryPrice != null && Number.isFinite(args.entryPrice)
+          ? args.entryPrice
+          : 0,
+      ...(args.openClientOrderId ? { clientOrderId: args.openClientOrderId } : {}),
+      ...(args.lastResult.orderId ? { exchangeOrderId: args.lastResult.orderId } : {}),
+    });
+    persistedOpen = true;
+    await markSubscriptionSynced(prisma, {
+      userId: args.userId,
+      strategyId: args.strategyId,
+    });
+  }
+  console.log(
+    `[copy-exec] optimistic open user=${args.userId} ${args.symbol} ${args.side} ` +
+      `qty=${optimisticQty} orderId=${args.lastResult.orderId ?? "pending"} — SYNC-MONITOR will verify`,
+  );
+  return {
+    ...buildOpenExecuteSuccess({
+      lastResult: args.lastResult,
+      ...(args.openClientOrderId ? { openClientOrderId: args.openClientOrderId } : {}),
+      feeCost: args.totalFee,
+      attempts: Math.max(args.attempts, 1),
+      verifiedQty: optimisticQty,
+    }),
+    persistedOpen,
+  };
+}
 
 function percentSlippage(entry: number, market: number): number {
   if (entry <= 0) return Number.POSITIVE_INFINITY;
@@ -1251,20 +1323,22 @@ export async function forceSyncMasterOpenToFollowers(
               userId: sub.userId,
               strategyId,
             });
-            const recordedLots = Math.min(
-              lots,
-              Math.max(1, result.verifiedQty ?? lots),
-            );
-            await recordTradePositionOpen(prisma, {
-              strategyId,
-              userId: sub.userId,
-              symbol: fill.symbol,
-              side: fill.side,
-              quantity: recordedLots,
-              entryPrice,
-              clientOrderId,
-              ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
-            });
+            if (!result.persistedOpen) {
+              const recordedLots = Math.min(
+                lots,
+                Math.max(1, result.verifiedQty ?? lots),
+              );
+              await recordTradePositionOpen(prisma, {
+                strategyId,
+                userId: sub.userId,
+                symbol: fill.symbol,
+                side: fill.side,
+                quantity: recordedLots,
+                entryPrice,
+                clientOrderId,
+                ...(result.orderId ? { exchangeOrderId: result.orderId } : {}),
+              });
+            }
           } else {
             await markSubscriptionSyncFailed(prisma, {
               userId: sub.userId,
@@ -1627,7 +1701,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
     exitFee: number;
     exitReason?: ExitReasonValue;
   }) => Promise<void>,
-  options?: { exitReason?: ExitReasonValue },
+  options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
 ): Promise<MasterCloseFanoutResult | null> {
   const strategyId = await resolveFutureHedgeStrategyId(prisma);
   if (!strategyId) return null;
@@ -1653,14 +1727,16 @@ export async function syncMasterCloseToFutureHedgeFollowers(
 
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
+  const instantClose = options?.instantClose === true;
   let closedCount = 0;
 
-  await Promise.all(
+  await Promise.allSettled(
     subscribers.map(async (sub) => {
       const creds = resolveCopySubscriptionCreds(sub);
       if (!creds) return;
 
       if (
+        !instantClose &&
         isFollowerCopyInflight({
           userId: sub.userId,
           strategyId,
@@ -1682,6 +1758,81 @@ export async function syncMasterCloseToFutureHedgeFollowers(
       });
 
       const dbLotsFloor = Math.floor(dbLots);
+
+      if (instantClose) {
+        if (dbLotsFloor <= 0) {
+          console.log(
+            `[copy] instant close skip user=${sub.userId} ${snap.symbol} ${snap.side} — no DB qty`,
+          );
+          return;
+        }
+
+        const closeLots = dbLotsFloor;
+        const closeClientOrderId = buildStableCopyClientOrderId({
+          strategyId,
+          userId: sub.userId,
+          masterFillKey: `close:${snap.symbol}:${snap.side}:ws-instant`,
+          symbol: snap.symbol,
+          side: oppositeSide,
+          leg: "close",
+        });
+
+        console.log(
+          `[copy] instant WS close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${closeLots}`,
+        );
+
+        const closeResult = await placeFollowerOrder(
+          creds.apiKey,
+          creds.apiSecret,
+          snap.symbol,
+          oppositeSide,
+          closeLots,
+          {
+            reduceOnly: true,
+            clientOrderId: closeClientOrderId,
+          },
+        );
+
+        if (
+          !closeResult.success &&
+          !isAlreadyFlatReduceOnlyError(closeResult.error ?? "")
+        ) {
+          console.error(
+            `[copy] instant close failed user=${sub.userId} ${snap.symbol}: ${closeResult.error ?? "unknown"}`,
+          );
+          return;
+        }
+
+        let exitPrice = closeResult.fillPrice ?? null;
+        if (exitPrice == null || !Number.isFinite(exitPrice)) {
+          exitPrice =
+            Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
+              ? snap.masterEntryPrice
+              : 0;
+        }
+
+        await closeTradePositionsForLeg(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: snap.symbol,
+          side: snap.side,
+          clientOrderId: closeClientOrderId,
+        });
+
+        await onFollowerClosed({
+          userId: sub.userId,
+          strategyId,
+          symbol: snap.symbol,
+          side: snap.side,
+          masterEntryPrice: snap.masterEntryPrice,
+          sizedPosition: closeLots,
+          exitPrice,
+          exitFee: closeResult.feeCost ?? 0,
+          ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
+        });
+        closedCount += 1;
+        return;
+      }
 
       const exchangeOpenLots = await followerExchangeOpenLotsLive(
         creds.apiKey,
@@ -2419,9 +2570,12 @@ export async function executeFollowerTradeWithVerification(
   });
 
   if (args.strategyId) {
-    const inflightMs = args.liveMasterFill
-      ? LIVE_FILL_VERIFY_WAIT_MS * (LIVE_FILL_MAX_POLLS + 1)
-      : COPY_LEG_CONFIRM_MS;
+    const optimistic = usesOptimisticOpenExecution(args, isOptionLeg);
+    const inflightMs = optimistic
+      ? 3_000
+      : args.liveMasterFill
+        ? LIVE_FILL_VERIFY_WAIT_MS * (LIVE_FILL_MAX_POLLS + 1)
+        : COPY_LEG_CONFIRM_MS;
     markFollowerCopyInflight(
       {
         userId: args.userId,
@@ -2495,7 +2649,8 @@ export async function executeFollowerTradeWithVerification(
     }
 
     let orderSubmitted = false;
-    if (openClientOrderId) {
+    const optimisticOpen = usesOptimisticOpenExecution(args, isOptionLeg);
+    if (openClientOrderId && !optimisticOpen) {
       const existingAck = await fetchDeltaOrderAckByClientOrderId(
         apiKey,
         apiSecret,
@@ -2586,6 +2741,21 @@ export async function executeFollowerTradeWithVerification(
         }
       }
       orderSubmitted = true;
+    }
+
+    if (optimisticOpen && orderSubmitted && lastResult.success) {
+      return finalizeOptimisticFollowerOpen(prisma, {
+        ...(args.strategyId ? { strategyId: args.strategyId } : {}),
+        userId: args.userId,
+        symbol,
+        side,
+        targetContracts,
+        ...(args.entryPrice != null ? { entryPrice: args.entryPrice } : {}),
+        ...(openClientOrderId ? { openClientOrderId } : {}),
+        lastResult,
+        totalFee,
+        attempts,
+      });
     }
 
     const verifyWaitMs = args.liveMasterFill

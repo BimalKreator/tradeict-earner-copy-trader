@@ -287,15 +287,27 @@ async function executeDeltaMarketOrderViaRest(
       return { success: false, error: "Delta REST order returned empty result" };
     }
 
-    const enriched = await enrichRestOrderFillDetails(
-      apiKey,
-      secret,
-      order,
-      resolved.contractSize,
-      lots,
-    );
-    const fillPrice = enriched.fillPrice;
-    const feeCost = enriched.feeCost;
+    const isOptionOrder = isDeltaOptionProductId(resolved.symbol);
+    let fillPrice: number | null;
+    let feeCost: number;
+    if (isOptionOrder) {
+      fillPrice = parseOrderFillPrice(order);
+      const fee = parseOrderCommission(order);
+      feeCost =
+        fee != null && Number.isFinite(fee)
+          ? Math.max(0, Math.abs(fee))
+          : 0;
+    } else {
+      const enriched = await enrichRestOrderFillDetails(
+        apiKey,
+        secret,
+        order,
+        resolved.contractSize,
+        lots,
+      );
+      fillPrice = enriched.fillPrice;
+      feeCost = enriched.feeCost;
+    }
 
     const orderIdRaw = order.id;
     const orderId =
@@ -1460,46 +1472,15 @@ export type ResolvedExactDeltaProduct = {
  * Returns null when strike cannot be determined — never guess a nearby contract.
  */
 export function resolveExactDeltaProductFromMarkets(
-  exchange: InstanceType<typeof ccxt.delta>,
+  _exchange: InstanceType<typeof ccxt.delta>,
   raw: string,
 ): ResolvedExactDeltaProduct | null {
   const ref = raw.trim();
   if (!ref) return null;
 
   if (isValidDeltaOptionProductSymbol(ref)) {
-    const market = findCcxtMarketByExactProductId(exchange, ref);
-    if (!market?.symbol) {
-      console.error(
-        `[exchangeService] option product ${ref} not found in CCXT markets — refusing fuzzy match`,
-      );
-      return null;
-    }
-    const productId = String(market.id ?? ref).trim();
-    if (!isValidDeltaOptionProductSymbol(productId)) {
-      console.error(
-        `[exchangeService] CCXT market id "${productId}" for ref ${ref} is not a valid option id`,
-      );
-      return null;
-    }
-    return { productId, ccxtSymbol: market.symbol };
-  }
-
-  if (/^\d+$/.test(ref)) {
-    const market = findCcxtMarketByExactProductId(exchange, ref);
-    if (!market?.symbol) {
-      console.error(
-        `[exchangeService] numeric product_id ${ref} did not resolve in CCXT markets_by_id`,
-      );
-      return null;
-    }
-    const productId = String(market.id ?? "").trim();
-    if (!isValidDeltaOptionProductSymbol(productId)) {
-      console.error(
-        `[exchangeService] numeric product_id ${ref} mapped to non-option market id=${productId}`,
-      );
-      return null;
-    }
-    return { productId, ccxtSymbol: market.symbol };
+    const productId = ref.trim().toUpperCase();
+    return { productId, ccxtSymbol: productId };
   }
 
   return null;
@@ -1778,16 +1759,23 @@ export function extractDeltaProductSymbolFromPayload(
 
 export async function resolveCanonicalDeltaProductId(
   raw: string,
-  exchange?: InstanceType<typeof ccxt.delta>,
+  _exchange?: InstanceType<typeof ccxt.delta>,
 ): Promise<ResolvedExactDeltaProduct | null> {
   const ref = raw.trim();
   if (!ref) return null;
 
+  if (isValidDeltaOptionProductSymbol(ref)) {
+    const productId = ref.trim().toUpperCase();
+    return { productId, ccxtSymbol: productId };
+  }
+
   if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
-    const ex = exchange ?? (await getPublicClient());
-    const fromCcxt = resolveExactDeltaProductFromMarkets(ex, ref);
-    if (fromCcxt) return fromCcxt;
-    return hydrateExactDeltaOptionOnExchange(ex, ref);
+    const row = await fetchDeltaProductFromRestApi(ref);
+    if (!row) return null;
+    const sym = String(row.symbol ?? row.product_symbol ?? "").trim();
+    if (!isValidDeltaOptionProductSymbol(sym)) return null;
+    const productId = sym.toUpperCase();
+    return { productId, ccxtSymbol: productId };
   }
 
   return null;
@@ -1893,28 +1881,22 @@ function resolvePositionMarket(
     };
   };
 
-  if (isDeltaOptionProductId(productSymbol) || /^\d+$/.test(productSymbol.trim())) {
-    const exact = resolveExactDeltaProductFromMarkets(exchange, productSymbol);
-    if (!exact) {
-      console.warn(
-        `[exchangeService] fetchDeltaOpenPositions: exact option resolve failed product_ref=${productSymbol}`,
-      );
-      return {
-        market: null,
-        unified: productSymbol,
-        symbolKey: isValidDeltaOptionProductSymbol(productSymbol)
-          ? productSymbol
-          : productSymbol,
-        isOption: true,
-        contractSize: fallbackSize,
-      };
-    }
-    const market = findCcxtMarketByExactProductId(exchange, exact.productId);
-    if (market) return fromMarket(market);
+  if (isValidDeltaOptionProductSymbol(productSymbol)) {
+    const productId = productSymbol.trim().toUpperCase();
     return {
       market: null,
-      unified: exact.productId,
-      symbolKey: exact.productId,
+      unified: productId,
+      symbolKey: productId,
+      isOption: true,
+      contractSize: fallbackSize,
+    };
+  }
+
+  if (isDeltaOptionProductId(productSymbol) || /^\d+$/.test(productSymbol.trim())) {
+    return {
+      market: null,
+      unified: productSymbol,
+      symbolKey: productSymbol,
       isOption: true,
       contractSize: fallbackSize,
     };
@@ -2039,10 +2021,10 @@ export async function executeTrade(
         );
         return restResult;
       }
-      if (reduceOnly && isOptionOrder) {
+      if (isOptionOrder) {
         console.warn(
-          `[copy-exec] reduceOnly option close failed via REST for "${inputSymbol}" — ` +
-            `aborting (CCXT fallback disabled): ${restResult.error ?? "unknown"}`,
+          `[copy-exec] option order REST failed for "${inputSymbol}" — ` +
+            `CCXT fallback disabled: ${restResult.error ?? "unknown"}`,
         );
         return restResult;
       }
@@ -2050,10 +2032,6 @@ export async function executeTrade(
         console.warn(
           `[copy-exec] reduceOnly perp close REST failed for "${inputSymbol}" — ` +
             `trying CCXT fallback: ${restResult.error ?? "unknown"}`,
-        );
-      } else if (isOptionOrder) {
-        console.warn(
-          `[copy-exec] REST option order failed for "${inputSymbol}" — trying CCXT fallback: ${restResult.error ?? "unknown"}`,
         );
       } else {
         console.warn(
@@ -2067,21 +2045,7 @@ export async function executeTrade(
     let canonicalProductId = inputSymbol;
     let ccxtSymbol: string;
     try {
-      if (isOptionOrder) {
-        let exact = resolveExactDeltaProductFromMarkets(exchange, inputSymbol);
-        if (!exact) {
-          exact = await hydrateExactDeltaOptionOnExchange(exchange, inputSymbol);
-        }
-        if (!exact) {
-          const err = `Exact option product resolve failed for "${inputSymbol}" — order not placed`;
-          console.error(`[copy-exec] ${err}`);
-          return { success: false, error: err };
-        }
-        canonicalProductId = exact.productId;
-        ccxtSymbol = exact.ccxtSymbol;
-      } else {
-        ccxtSymbol = resolveCcxtSymbol(exchange, inputSymbol);
-      }
+      ccxtSymbol = resolveCcxtSymbol(exchange, inputSymbol);
     } catch (resolveErr) {
       const err =
         resolveErr instanceof Error
@@ -2219,7 +2183,7 @@ function parseDeltaClientOrderAckRow(
   };
 }
 
-/** Lookup order ack by client_order_id — used to avoid double-firing market copies. */
+/** Lookup order ack by client_order_id — Delta REST only (no CCXT fetchOrders). */
 export async function fetchDeltaOrderAckByClientOrderId(
   apiKeyStored: string,
   apiSecretStored: string,
@@ -2237,60 +2201,21 @@ export async function fetchDeltaOrderAckByClientOrderId(
   try {
     const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
     const secret = decryptDeltaSecretOrPlain(apiSecretStored);
-    const exchange = await getAuthClient(apiKey, secret);
+    if (!apiKey || !secret) return empty;
 
-    type OrderByClientResponse = {
-      success?: boolean;
-      result?: Record<string, unknown>;
-    };
-
-    try {
-      const response = (await (
-        exchange as InstanceType<typeof ccxt.delta> & {
-          privateGetOrdersClientOrderIdClientOid: (params: {
-            client_oid: string;
-          }) => Promise<OrderByClientResponse>;
-        }
-      ).privateGetOrdersClientOrderIdClientOid({ client_oid: id })) as OrderByClientResponse;
-
-      const row = response?.result;
-      if (row && typeof row === "object") {
-        return parseDeltaClientOrderAckRow(row);
-      }
-    } catch (directErr) {
-      console.warn(
-        `[exchangeService] privateGetOrdersClientOrderIdClientOid failed clientOrderId=${id}:`,
-        directErr instanceof Error ? directErr.message : directErr,
-      );
-    }
-
-    try {
-      const orders = await exchange.fetchOrders(undefined, undefined, 50, {
-        client_order_id: id,
-        clientOrderId: id,
-      });
-      for (const order of orders) {
-        const o = order as unknown as Record<string, unknown>;
-        const oid =
-          String(o.clientOrderId ?? o.client_order_id ?? "").trim() === id
-            ? id
-            : "";
-        if (!oid) continue;
-        const info =
-          o.info != null && typeof o.info === "object"
-            ? (o.info as Record<string, unknown>)
-            : o;
-        return parseDeltaClientOrderAckRow(info);
-      }
-    } catch (fetchErr) {
-      console.warn(
-        `[exchangeService] fetchOrders by clientOrderId failed clientOrderId=${id}:`,
-        fetchErr instanceof Error ? fetchErr.message : fetchErr,
-      );
+    const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+      apiKey,
+      secret,
+      method: "GET",
+      path: `/v2/orders/client_order_id/${encodeURIComponent(id)}`,
+    });
+    const row = response.result;
+    if (row != null && typeof row === "object" && !Array.isArray(row)) {
+      return parseDeltaClientOrderAckRow(row as Record<string, unknown>);
     }
   } catch (err) {
     console.warn(
-      `[exchangeService] fetchDeltaOrderAckByClientOrderId failed:`,
+      `[exchangeService] REST client_order_id lookup failed clientOrderId=${id}:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -2616,18 +2541,6 @@ async function fetchDeltaMarginedPositionSnapshotInner(
     exchange = await getAuthClient(apiKey, secret);
   }
 
-  const openOptionRefs = collectOpenOptionProductSymbols(rawList);
-  for (const ref of openOptionRefs) {
-    try {
-      await hydrateExactDeltaOptionOnExchange(exchange, ref);
-    } catch (hydrateErr) {
-      console.warn(
-        `[exchangeService] option hydrate before position parse failed ${ref}:`,
-        hydrateErr instanceof Error ? hydrateErr.message : hydrateErr,
-      );
-    }
-  }
-
   const optionTickerCache = await prefetchOptionTickerQuotes(
     collectOpenOptionProductSymbols(rawList),
   );
@@ -2654,12 +2567,23 @@ async function fetchDeltaMarginedPositionSnapshotInner(
       if (!productSymbol) {
         const pid = String(position.product_id ?? "").trim();
         if (pid) {
-          const exact = resolveExactDeltaProductFromMarkets(exchange, pid);
-          productSymbol = exact?.productId ?? pid;
+          if (isValidDeltaOptionProductSymbol(pid)) {
+            productSymbol = pid;
+          } else if (/^\d+$/.test(pid)) {
+            const row = await fetchDeltaProductFromRestApi(pid);
+            const sym = String(row?.symbol ?? row?.product_symbol ?? "").trim();
+            productSymbol =
+              sym && isValidDeltaOptionProductSymbol(sym) ? sym : pid;
+          } else {
+            productSymbol = pid;
+          }
         }
       } else if (/^\d+$/.test(productSymbol)) {
-        const exact = resolveExactDeltaProductFromMarkets(exchange, productSymbol);
-        if (exact) productSymbol = exact.productId;
+        const row = await fetchDeltaProductFromRestApi(productSymbol);
+        const sym = String(row?.symbol ?? row?.product_symbol ?? "").trim();
+        if (sym && isValidDeltaOptionProductSymbol(sym)) {
+          productSymbol = sym;
+        }
       }
 
       if (rawSize === null || Math.abs(rawSize) < 1e-12) {
