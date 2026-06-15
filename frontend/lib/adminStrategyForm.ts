@@ -6,9 +6,6 @@ export type FutureHedgeConfig = {
   emaPeriod: number;
   adjustmentPct: number;
   targetProfitUsd: number;
-  isBreakevenExitEnabled?: boolean;
-  breakevenPrice1?: number | null;
-  breakevenPrice2?: number | null;
 };
 
 export type Strategy = {
@@ -78,9 +75,6 @@ export const DEFAULT_FUTURE_HEDGE: FutureHedgeConfig = {
   emaPeriod: 200,
   adjustmentPct: 0.5,
   targetProfitUsd: 10,
-  isBreakevenExitEnabled: false,
-  breakevenPrice1: null,
-  breakevenPrice2: null,
 };
 
 export function isFutureHedgeStrategy(strategyTitle: string): boolean {
@@ -384,9 +378,6 @@ export function applyStrategyToFormState(s: Strategy): {
           emaPeriod: cfg.emaPeriod,
           adjustmentPct: cfg.adjustmentPct,
           targetProfitUsd: cfg.targetProfitUsd,
-          isBreakevenExitEnabled: Boolean(cfg.isBreakevenExitEnabled),
-          breakevenPrice1: cfg.breakevenPrice1 ?? null,
-          breakevenPrice2: cfg.breakevenPrice2 ?? null,
         }
       : { ...DEFAULT_FUTURE_HEDGE },
   };

@@ -343,6 +343,9 @@ export type LiveStrategySummary = {
   autoExitEnabled: boolean;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
+  isBreakevenExitEnabled: boolean;
+  breakevenPrice1: number | null;
+  breakevenPrice2: number | null;
 };
 
 /** Active subscriber with all open legs on Delta for this strategy mapping. */
@@ -554,6 +557,13 @@ export async function getUserLiveTradesByStrategy(
           autoExitStopLoss: true,
           masterApiKey: true,
           masterApiSecret: true,
+          futureHedgeConfig: {
+            select: {
+              isBreakevenExitEnabled: true,
+              breakevenPrice1: true,
+              breakevenPrice2: true,
+            },
+          },
         },
       },
       ...COPY_SUBSCRIPTION_INCLUDE,
@@ -623,6 +633,10 @@ export async function getUserLiveTradesByStrategy(
         autoExitEnabled: sub.strategy.autoExitEnabled,
         autoExitTarget: sub.strategy.autoExitTarget,
         autoExitStopLoss: sub.strategy.autoExitStopLoss,
+        isBreakevenExitEnabled:
+          sub.strategy.futureHedgeConfig?.isBreakevenExitEnabled ?? false,
+        breakevenPrice1: sub.strategy.futureHedgeConfig?.breakevenPrice1 ?? null,
+        breakevenPrice2: sub.strategy.futureHedgeConfig?.breakevenPrice2 ?? null,
         multiplier: sub.multiplier,
       },
       userPositions,
@@ -676,6 +690,13 @@ export async function getAdminLiveTradesByStrategy(
       autoExitEnabled: true,
       autoExitTarget: true,
       autoExitStopLoss: true,
+      futureHedgeConfig: {
+        select: {
+          isBreakevenExitEnabled: true,
+          breakevenPrice1: true,
+          breakevenPrice2: true,
+        },
+      },
     },
   });
 
@@ -710,6 +731,7 @@ export async function getAdminLiveTradesByStrategy(
 
   for (const strat of strategies) {
     try {
+      const hedge = strat.futureHedgeConfig;
       const strategy: LiveStrategySummary = {
         id: strat.id,
         title: strat.title,
@@ -717,6 +739,9 @@ export async function getAdminLiveTradesByStrategy(
         autoExitEnabled: strat.autoExitEnabled,
         autoExitTarget: strat.autoExitTarget,
         autoExitStopLoss: strat.autoExitStopLoss,
+        isBreakevenExitEnabled: hedge?.isBreakevenExitEnabled ?? false,
+        breakevenPrice1: hedge?.breakevenPrice1 ?? null,
+        breakevenPrice2: hedge?.breakevenPrice2 ?? null,
       };
 
       const credentialsPresent = Boolean(

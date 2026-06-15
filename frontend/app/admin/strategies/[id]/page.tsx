@@ -73,11 +73,6 @@ export default function AdminEditStrategyPage() {
   const [hedgeTargetProfitUsd, setHedgeTargetProfitUsd] = useState(
     String(DEFAULT_FUTURE_HEDGE.targetProfitUsd),
   );
-  const [hedgeBreakevenEnabled, setHedgeBreakevenEnabled] = useState(
-    Boolean(DEFAULT_FUTURE_HEDGE.isBreakevenExitEnabled),
-  );
-  const [hedgeBreakevenPrice1, setHedgeBreakevenPrice1] = useState("");
-  const [hedgeBreakevenPrice2, setHedgeBreakevenPrice2] = useState("");
 
   const [subscribers, setSubscribers] = useState<StrategySubscriber[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
@@ -121,17 +116,6 @@ export default function AdminEditStrategyPage() {
     setHedgeEmaPeriod(String(applied.hedge.emaPeriod));
     setHedgeAdjustmentPct(String(applied.hedge.adjustmentPct));
     setHedgeTargetProfitUsd(String(applied.hedge.targetProfitUsd));
-    setHedgeBreakevenEnabled(Boolean(applied.hedge.isBreakevenExitEnabled));
-    setHedgeBreakevenPrice1(
-      applied.hedge.breakevenPrice1 != null
-        ? String(applied.hedge.breakevenPrice1)
-        : "",
-    );
-    setHedgeBreakevenPrice2(
-      applied.hedge.breakevenPrice2 != null
-        ? String(applied.hedge.breakevenPrice2)
-        : "",
-    );
   }, []);
 
   const loadStrategy = useCallback(async () => {
@@ -437,52 +421,12 @@ export default function AdminEditStrategyPage() {
         return;
       }
 
-      const breakevenPrice1Raw = hedgeBreakevenPrice1.trim();
-      const breakevenPrice2Raw = hedgeBreakevenPrice2.trim();
-      const breakevenPrice1 = breakevenPrice1Raw
-        ? Number.parseFloat(breakevenPrice1Raw)
-        : null;
-      const breakevenPrice2 = breakevenPrice2Raw
-        ? Number.parseFloat(breakevenPrice2Raw)
-        : null;
-
-      if (
-        breakevenPrice1Raw &&
-        (!Number.isFinite(breakevenPrice1!) || breakevenPrice1! <= 0)
-      ) {
-        setFormError("Breakeven Price 1 must be a positive number.");
-        setSubmitting(false);
-        return;
-      }
-      if (
-        breakevenPrice2Raw &&
-        (!Number.isFinite(breakevenPrice2!) || breakevenPrice2! <= 0)
-      ) {
-        setFormError("Breakeven Price 2 must be a positive number.");
-        setSubmitting(false);
-        return;
-      }
-      if (
-        hedgeBreakevenEnabled &&
-        breakevenPrice1 == null &&
-        breakevenPrice2 == null
-      ) {
-        setFormError(
-          "Enable Breakeven Exit requires at least one breakeven price.",
-        );
-        setSubmitting(false);
-        return;
-      }
-
       payload.futureHedgeConfig = {
         isAutoEnabled: hedgeAutoEnabled,
         baseLots,
         emaPeriod,
         adjustmentPct,
         targetProfitUsd,
-        isBreakevenExitEnabled: hedgeBreakevenEnabled,
-        breakevenPrice1,
-        breakevenPrice2,
       };
     }
 
@@ -1024,57 +968,6 @@ export default function AdminEditStrategyPage() {
                       className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-cyan-500/40"
                     />
                   </label>
-                </div>
-                <div className="space-y-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] p-3">
-                  <label className="flex cursor-pointer items-start gap-3">
-                    <input
-                      type="checkbox"
-                      checked={hedgeBreakevenEnabled}
-                      onChange={(e) => setHedgeBreakevenEnabled(e.target.checked)}
-                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-glassBorder text-amber-400 focus:ring-amber-500/40"
-                    />
-                    <span>
-                      <span className="text-sm font-medium text-white">
-                        Enable Breakeven Exit
-                      </span>
-                      <span className="mt-0.5 block text-xs text-white/50">
-                        Auto-flat all master legs when live BTCUSD price
-                        touches or breaches the configured bounds.
-                      </span>
-                    </span>
-                  </label>
-                  {hedgeBreakevenEnabled ? (
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="block">
-                        <span className="text-xs font-medium text-white/60">
-                          Breakeven Price 1 (USD)
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={hedgeBreakevenPrice1}
-                          onChange={(e) => setHedgeBreakevenPrice1(e.target.value)}
-                          placeholder="Lower bound"
-                          className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-amber-500/40"
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="text-xs font-medium text-white/60">
-                          Breakeven Price 2 (USD)
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={hedgeBreakevenPrice2}
-                          onChange={(e) => setHedgeBreakevenPrice2(e.target.value)}
-                          placeholder="Upper bound"
-                          className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-amber-500/40"
-                        />
-                      </label>
-                    </div>
-                  ) : null}
                 </div>
               </div>
             ) : null}

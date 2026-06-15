@@ -60,6 +60,10 @@ import {
 } from "../constants/subscription.js";
 import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
 import {
+  upsertFutureHedgeConfigForStrategy,
+  validateFutureHedgeUpdate,
+} from "../services/futureHedgeService.js";
+import {
   assertUserSafeToDelete,
   changeUserAcquiredBy,
   listSalesMembers,
@@ -311,23 +315,32 @@ export function createAdminController(prisma: PrismaClient) {
         autoExitTarget?: unknown;
         autoExitStopLoss?: unknown;
         autoExitEnabled?: unknown;
+        isBreakevenExitEnabled?: unknown;
+        breakevenPrice1?: unknown;
+        breakevenPrice2?: unknown;
       };
 
-      const data: {
+      const strategyData: {
         autoExitTarget?: number | null;
         autoExitStopLoss?: number | null;
         autoExitEnabled?: boolean;
       } = {};
 
+      const hedgeData: {
+        isBreakevenExitEnabled?: boolean;
+        breakevenPrice1?: number | null;
+        breakevenPrice2?: number | null;
+      } = {};
+
       if ("autoExitTarget" in body) {
         if (body.autoExitTarget === null) {
-          data.autoExitTarget = null;
+          strategyData.autoExitTarget = null;
         } else if (
           typeof body.autoExitTarget === "number" &&
           Number.isFinite(body.autoExitTarget) &&
           body.autoExitTarget >= 0
         ) {
-          data.autoExitTarget = body.autoExitTarget;
+          strategyData.autoExitTarget = body.autoExitTarget;
         } else {
           res.status(400).json({
             error: "autoExitTarget must be a non-negative number or null",
@@ -338,13 +351,13 @@ export function createAdminController(prisma: PrismaClient) {
 
       if ("autoExitStopLoss" in body) {
         if (body.autoExitStopLoss === null) {
-          data.autoExitStopLoss = null;
+          strategyData.autoExitStopLoss = null;
         } else if (
           typeof body.autoExitStopLoss === "number" &&
           Number.isFinite(body.autoExitStopLoss) &&
           body.autoExitStopLoss > 0
         ) {
-          data.autoExitStopLoss = body.autoExitStopLoss;
+          strategyData.autoExitStopLoss = body.autoExitStopLoss;
         } else {
           res.status(400).json({
             error: "autoExitStopLoss must be a positive number or null",
@@ -355,7 +368,7 @@ export function createAdminController(prisma: PrismaClient) {
 
       if ("autoExitEnabled" in body) {
         if (typeof body.autoExitEnabled === "boolean") {
-          data.autoExitEnabled = body.autoExitEnabled;
+          strategyData.autoExitEnabled = body.autoExitEnabled;
         } else {
           res.status(400).json({
             error: "autoExitEnabled must be a boolean",
@@ -364,31 +377,199 @@ export function createAdminController(prisma: PrismaClient) {
         }
       }
 
-      if (
-        !("autoExitTarget" in body) &&
-        !("autoExitStopLoss" in body) &&
-        !("autoExitEnabled" in body)
-      ) {
+      if ("isBreakevenExitEnabled" in body) {
+        if (typeof body.isBreakevenExitEnabled === "boolean") {
+          hedgeData.isBreakevenExitEnabled = body.isBreakevenExitEnabled;
+        } else {
+          res.status(400).json({
+            error: "isBreakevenExitEnabled must be a boolean",
+          });
+          return;
+        }
+      }
+
+      if ("breakevenPrice1" in body) {
+        if (body.breakevenPrice1 === null) {
+          hedgeData.breakevenPrice1 = null;
+        } else if (
+          typeof body.breakevenPrice1 === "number" &&
+          Number.isFinite(body.breakevenPrice1) &&
+          body.breakevenPrice1 > 0
+        ) {
+          hedgeData.breakevenPrice1 = body.breakevenPrice1;
+        } else {
+          res.status(400).json({
+            error: "breakevenPrice1 must be a positive number or null",
+          });
+          return;
+        }
+      }
+
+      if ("breakevenPrice2" in body) {
+        if (body.breakevenPrice2 === null) {
+          hedgeData.breakevenPrice2 = null;
+        } else if (
+          typeof body.breakevenPrice2 === "number" &&
+          Number.isFinite(body.breakevenPrice2) &&
+          body.breakevenPrice2 > 0
+        ) {
+          hedgeData.breakevenPrice2 = body.breakevenPrice2;
+        } else {
+          res.status(400).json({
+            error: "breakevenPrice2 must be a positive number or null",
+          });
+          return;
+        }
+      }
+
+      const hasStrategyFields = Object.keys(strategyData).length > 0;
+      const hasHedgeFields = Object.keys(hedgeData).length > 0;
+
+      if (!hasStrategyFields && !hasHedgeFields) {
         res.status(400).json({
           error:
-            "Provide autoExitTarget, autoExitStopLoss, and/or autoExitEnabled",
+            "Provide autoExitTarget, autoExitStopLoss, autoExitEnabled, isBreakevenExitEnabled, breakevenPrice1, and/or breakevenPrice2",
         });
         return;
       }
 
-      const updated = await prisma.strategy.update({
-        where: { id },
-        data,
-        select: {
-          id: true,
-          title: true,
-          autoExitEnabled: true,
-          autoExitTarget: true,
-          autoExitStopLoss: true,
-        },
-      });
+      if (hasHedgeFields) {
+        const existingHedge = await prisma.futureHedgeConfig.findUnique({
+          where: { strategyId: id },
+          select: {
+            isBreakevenExitEnabled: true,
+            breakevenPrice1: true,
+            breakevenPrice2: true,
+          },
+        });
 
-      res.json(updated);
+        const mergedBreakevenEnabled =
+          hedgeData.isBreakevenExitEnabled ??
+          existingHedge?.isBreakevenExitEnabled ??
+          false;
+        const mergedP1 =
+          hedgeData.breakevenPrice1 !== undefined
+            ? hedgeData.breakevenPrice1
+            : (existingHedge?.breakevenPrice1 ?? null);
+        const mergedP2 =
+          hedgeData.breakevenPrice2 !== undefined
+            ? hedgeData.breakevenPrice2
+            : (existingHedge?.breakevenPrice2 ?? null);
+
+        if (mergedBreakevenEnabled) {
+          const hasP1 =
+            mergedP1 != null && Number.isFinite(mergedP1) && mergedP1 > 0;
+          const hasP2 =
+            mergedP2 != null && Number.isFinite(mergedP2) && mergedP2 > 0;
+          if (!hasP1 && !hasP2) {
+            res.status(400).json({
+              error:
+                "At least one breakeven price is required when breakeven exit is enabled",
+            });
+            return;
+          }
+        }
+
+        const validationError = validateFutureHedgeUpdate({
+          ...hedgeData,
+          ...(hedgeData.isBreakevenExitEnabled === true
+            ? {
+                breakevenPrice1: mergedP1,
+                breakevenPrice2: mergedP2,
+              }
+            : {}),
+        });
+        if (validationError) {
+          res.status(400).json({ error: validationError });
+          return;
+        }
+      }
+
+      let updatedStrategy:
+        | {
+            id: string;
+            title: string;
+            autoExitEnabled: boolean;
+            autoExitTarget: number | null;
+            autoExitStopLoss: number | null;
+          }
+        | null = null;
+
+      if (hasStrategyFields) {
+        updatedStrategy = await prisma.strategy.update({
+          where: { id },
+          data: strategyData,
+          select: {
+            id: true,
+            title: true,
+            autoExitEnabled: true,
+            autoExitTarget: true,
+            autoExitStopLoss: true,
+          },
+        });
+      } else {
+        updatedStrategy = await prisma.strategy.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            title: true,
+            autoExitEnabled: true,
+            autoExitTarget: true,
+            autoExitStopLoss: true,
+          },
+        });
+      }
+
+      if (!updatedStrategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+
+      let hedgeConfig:
+        | {
+            isBreakevenExitEnabled: boolean;
+            breakevenPrice1: number | null;
+            breakevenPrice2: number | null;
+          }
+        | null = null;
+
+      if (hasHedgeFields) {
+        const row = await upsertFutureHedgeConfigForStrategy(
+          prisma,
+          id,
+          hedgeData,
+        );
+        hedgeConfig = {
+          isBreakevenExitEnabled: row.isBreakevenExitEnabled,
+          breakevenPrice1: row.breakevenPrice1,
+          breakevenPrice2: row.breakevenPrice2,
+        };
+      } else {
+        const row = await prisma.futureHedgeConfig.findUnique({
+          where: { strategyId: id },
+          select: {
+            isBreakevenExitEnabled: true,
+            breakevenPrice1: true,
+            breakevenPrice2: true,
+          },
+        });
+        hedgeConfig = row
+          ? {
+              isBreakevenExitEnabled: row.isBreakevenExitEnabled,
+              breakevenPrice1: row.breakevenPrice1,
+              breakevenPrice2: row.breakevenPrice2,
+            }
+          : {
+              isBreakevenExitEnabled: false,
+              breakevenPrice1: null,
+              breakevenPrice2: null,
+            };
+      }
+
+      res.json({
+        ...updatedStrategy,
+        ...hedgeConfig,
+      });
     } catch (err) {
       next(err);
     }

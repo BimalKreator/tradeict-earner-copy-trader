@@ -88,6 +88,9 @@ type StrategySection = {
   autoExitEnabled: boolean;
   autoExitTarget: number | null;
   autoExitStopLoss: number | null;
+  isBreakevenExitEnabled: boolean;
+  breakevenPrice1: number | null;
+  breakevenPrice2: number | null;
   masterPositions: LiveRow[];
   subscribers: SubscriberUser[];
   masterMeta: MasterMeta;
@@ -188,11 +191,19 @@ interface AutoExitPayload {
   autoExitEnabled?: boolean;
   autoExitTarget?: number | null;
   autoExitStopLoss?: number | null;
+  isBreakevenExitEnabled?: boolean;
+  breakevenPrice1?: number | null;
+  breakevenPrice2?: number | null;
 }
 
 type AutoExitSaved = Pick<
   StrategySection,
-  "autoExitEnabled" | "autoExitTarget" | "autoExitStopLoss"
+  | "autoExitEnabled"
+  | "autoExitTarget"
+  | "autoExitStopLoss"
+  | "isBreakevenExitEnabled"
+  | "breakevenPrice1"
+  | "breakevenPrice2"
 >;
 
 function parseAutoExitSaved(payload: unknown): AutoExitSaved | undefined {
@@ -208,6 +219,18 @@ function parseAutoExitSaved(payload: unknown): AutoExitSaved | undefined {
     autoExitStopLoss:
       p.autoExitStopLoss === null || typeof p.autoExitStopLoss === "number"
         ? (p.autoExitStopLoss ?? null)
+        : null,
+    isBreakevenExitEnabled:
+      typeof p.isBreakevenExitEnabled === "boolean"
+        ? p.isBreakevenExitEnabled
+        : false,
+    breakevenPrice1:
+      p.breakevenPrice1 === null || typeof p.breakevenPrice1 === "number"
+        ? (p.breakevenPrice1 ?? null)
+        : null,
+    breakevenPrice2:
+      p.breakevenPrice2 === null || typeof p.breakevenPrice2 === "number"
+        ? (p.breakevenPrice2 ?? null)
         : null,
   };
 }
@@ -359,6 +382,24 @@ function parseStrategyGroups(data: unknown): StrategySection[] {
           ? strat.autoExitStopLoss
           : typeof row.autoExitStopLoss === "number"
             ? row.autoExitStopLoss
+            : null,
+      isBreakevenExitEnabled:
+        typeof strat.isBreakevenExitEnabled === "boolean"
+          ? strat.isBreakevenExitEnabled
+          : typeof row.isBreakevenExitEnabled === "boolean"
+            ? row.isBreakevenExitEnabled
+            : false,
+      breakevenPrice1:
+        typeof strat.breakevenPrice1 === "number"
+          ? strat.breakevenPrice1
+          : typeof row.breakevenPrice1 === "number"
+            ? row.breakevenPrice1
+            : null,
+      breakevenPrice2:
+        typeof strat.breakevenPrice2 === "number"
+          ? strat.breakevenPrice2
+          : typeof row.breakevenPrice2 === "number"
+            ? row.breakevenPrice2
             : null,
       masterPositions: Array.isArray(row.masterPositions)
         ? (row.masterPositions as LiveRow[])
@@ -952,6 +993,15 @@ function RiskManagementPanel({
   const [stopInput, setStopInput] = useState(
     strategy.autoExitStopLoss != null ? String(strategy.autoExitStopLoss) : "",
   );
+  const [breakevenEnabled, setBreakevenEnabled] = useState(
+    strategy.isBreakevenExitEnabled,
+  );
+  const [breakevenPrice1Input, setBreakevenPrice1Input] = useState(
+    strategy.breakevenPrice1 != null ? String(strategy.breakevenPrice1) : "",
+  );
+  const [breakevenPrice2Input, setBreakevenPrice2Input] = useState(
+    strategy.breakevenPrice2 != null ? String(strategy.breakevenPrice2) : "",
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -962,13 +1012,24 @@ function RiskManagementPanel({
     setStopInput(
       strategy.autoExitStopLoss != null ? String(strategy.autoExitStopLoss) : "",
     );
+    setBreakevenEnabled(strategy.isBreakevenExitEnabled);
+    setBreakevenPrice1Input(
+      strategy.breakevenPrice1 != null ? String(strategy.breakevenPrice1) : "",
+    );
+    setBreakevenPrice2Input(
+      strategy.breakevenPrice2 != null ? String(strategy.breakevenPrice2) : "",
+    );
   }, [
     strategy.autoExitEnabled,
     strategy.autoExitTarget,
     strategy.autoExitStopLoss,
+    strategy.isBreakevenExitEnabled,
+    strategy.breakevenPrice1,
+    strategy.breakevenPrice2,
   ]);
 
   const inputsDisabled = !autoExitEnabled;
+  const breakevenInputsDisabled = !breakevenEnabled;
 
   const pnlPositive = totalLivePnl > 0;
   const pnlNegative = totalLivePnl < 0;
@@ -984,7 +1045,13 @@ function RiskManagementPanel({
       autoExitEnabled: boolean;
       autoExitTarget?: number | null;
       autoExitStopLoss?: number | null;
-    } = { autoExitEnabled };
+      isBreakevenExitEnabled: boolean;
+      breakevenPrice1?: number | null;
+      breakevenPrice2?: number | null;
+    } = {
+      autoExitEnabled,
+      isBreakevenExitEnabled: breakevenEnabled,
+    };
 
     if (targetInput.trim() === "") {
       body.autoExitTarget = null;
@@ -1006,6 +1073,37 @@ function RiskManagementPanel({
         return;
       }
       body.autoExitStopLoss = s;
+    }
+
+    if (breakevenPrice1Input.trim() === "") {
+      body.breakevenPrice1 = null;
+    } else {
+      const p1 = Number(breakevenPrice1Input);
+      if (!Number.isFinite(p1) || p1 <= 0) {
+        onSaved("Breakeven Price 1 must be a positive number.");
+        return;
+      }
+      body.breakevenPrice1 = p1;
+    }
+
+    if (breakevenPrice2Input.trim() === "") {
+      body.breakevenPrice2 = null;
+    } else {
+      const p2 = Number(breakevenPrice2Input);
+      if (!Number.isFinite(p2) || p2 <= 0) {
+        onSaved("Breakeven Price 2 must be a positive number.");
+        return;
+      }
+      body.breakevenPrice2 = p2;
+    }
+
+    if (
+      breakevenEnabled &&
+      body.breakevenPrice1 == null &&
+      body.breakevenPrice2 == null
+    ) {
+      onSaved("Enable Breakeven Exit requires at least one breakeven price.");
+      return;
     }
 
     setSaving(true);
@@ -1033,9 +1131,9 @@ function RiskManagementPanel({
         throw new Error(msg);
       }
       const saved = parseAutoExitSaved(payload);
-      onSaved("Auto-exit settings saved.", saved);
+      onSaved("Risk settings saved.", saved);
     } catch (e) {
-      onSaved(e instanceof Error ? e.message : "Failed to save auto-exit");
+      onSaved(e instanceof Error ? e.message : "Failed to save settings");
     } finally {
       setSaving(false);
     }
@@ -1055,9 +1153,10 @@ function RiskManagementPanel({
               Risk Management &amp; Summary
             </h3>
             <p className="mt-0.5 max-w-xl text-xs text-white/45">
-              Total unrealized PnL across all master legs. When thresholds are
-              hit, the trade engine closes every master position (followers copy
-              via WebSocket).
+              Total unrealized PnL across all master legs. Configure PnL
+              target/stop and BTC breakeven bounds — the trade engine closes
+              every master position when a threshold is hit (followers copy via
+              WebSocket).
             </p>
           </div>
         </div>
@@ -1095,7 +1194,7 @@ function RiskManagementPanel({
         />
       </div>
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <label className={`block ${inputsDisabled ? "opacity-45" : ""}`}>
           <span className="flex items-center gap-1.5 text-xs font-medium text-white/55">
             <Target className="h-3.5 w-3.5 text-emerald-400/80" aria-hidden />
@@ -1128,13 +1227,65 @@ function RiskManagementPanel({
             className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30 disabled:cursor-not-allowed disabled:bg-black/20"
           />
         </label>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.04] px-3 py-2.5">
+        <div>
+          <p className="text-sm font-medium text-white">
+            Enable Breakeven Exit
+          </p>
+          <p className="text-xs text-white/45">
+            Auto-flat when live BTCUSD touches or breaches the price bounds below.
+          </p>
+        </div>
+        <AutoExitToggleSwitch
+          checked={breakevenEnabled}
+          disabled={saving}
+          onChange={() => setBreakevenEnabled((prev) => !prev)}
+        />
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label className={`block ${breakevenInputsDisabled ? "opacity-45" : ""}`}>
+          <span className="text-xs font-medium text-white/55">
+            Breakeven Price 1 (USD)
+          </span>
+          <input
+            type="number"
+            min={0}
+            step="any"
+            placeholder="Lower bound"
+            value={breakevenPrice1Input}
+            disabled={breakevenInputsDisabled}
+            onChange={(e) => setBreakevenPrice1Input(e.target.value)}
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/30 disabled:cursor-not-allowed disabled:bg-black/20"
+          />
+        </label>
+        <label className={`block ${breakevenInputsDisabled ? "opacity-45" : ""}`}>
+          <span className="text-xs font-medium text-white/55">
+            Breakeven Price 2 (USD)
+          </span>
+          <input
+            type="number"
+            min={0}
+            step="any"
+            placeholder="Upper bound"
+            value={breakevenPrice2Input}
+            disabled={breakevenInputsDisabled}
+            onChange={(e) => setBreakevenPrice2Input(e.target.value)}
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/30 disabled:cursor-not-allowed disabled:bg-black/20"
+          />
+        </label>
+      </div>
+
+      <div className="mt-4 flex justify-end">
         <button
           type="button"
           disabled={saving}
           onClick={() => void saveAutoExit()}
           className="rounded-lg border border-primary/50 bg-primary/20 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {saving ? "Saving…" : "Save Auto-Exit"}
+          {saving ? "Saving…" : "Save Settings"}
         </button>
       </div>
     </div>
