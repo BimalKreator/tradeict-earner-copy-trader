@@ -35,6 +35,10 @@ import {
 import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
+import {
+  getMasterOrderPolicySnapshot,
+  startMasterOrderPolicyRefresh,
+} from "./services/masterOrderPolicy.js";
 import { initArbitrageEngine } from "./services/arbitrageEngine.js";
 import { initBillingCronJobs } from "./services/billingService.js";
 import { initAffiliateCommissionCronJobs } from "./services/affiliateCommissionService.js";
@@ -109,8 +113,14 @@ initTelegramCronJobs(prisma);
 const stopTradeEngine = startTradeEngine(prisma);
 const stopFutureHedgeDataEngine = startFutureHedgeDataEngine(prisma);
 const stopFutureHedgeEngine = startFutureHedgeEngine(prisma);
+const stopMasterOrderPolicy = startMasterOrderPolicyRefresh(prisma);
 
 function shutdownBackgroundEngines(): void {
+  try {
+    stopMasterOrderPolicy();
+  } catch {
+    /* ignore */
+  }
   try {
     stopFutureHedgeEngine();
   } catch {
@@ -150,10 +160,22 @@ app.use("/uploads", express.static(path.join(__dirname, "../public/uploads")));
 
 /** No auth: proves which `dist/` build is live. Stale PM2 shows wrong `deltaEthUsdtToCcxt` (must be `ETH/USD:USD`). */
 app.get("/api/health/build", (_req, res) => {
-  res.json({ deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL });
+  const policy = getMasterOrderPolicySnapshot();
+  res.json({
+    deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL,
+    masterOpensAllowed: policy.opensAllowed,
+    masterOpenBlockReason: policy.blockReason,
+    masterPolicyRefreshedAt: policy.refreshedAt,
+  });
 });
 app.get("/health/build", (_req, res) => {
-  res.json({ deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL });
+  const policy = getMasterOrderPolicySnapshot();
+  res.json({
+    deltaEthUsdtToCcxt: DELTA_INDIA_CCXT_SAMPLE_SYMBOL,
+    masterOpensAllowed: policy.opensAllowed,
+    masterOpenBlockReason: policy.blockReason,
+    masterPolicyRefreshedAt: policy.refreshedAt,
+  });
 });
 
 app.use("/api/admin", createAdminRoutes(prisma));

@@ -22,6 +22,7 @@ import {
   type FutureHedgeTrend,
 } from "./futureHedgeDataService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
+import { findActiveFutureHedgeCopySubscribers } from "./strategySubscriptionService.js";
 
 const ENGINE_TICK_MS =
   Number(process.env.FUTURE_HEDGE_ENGINE_TICK_MS) || 5_000;
@@ -78,6 +79,110 @@ let adjustmentInFlight = false;
 let closeInFlight = false;
 let lastEntryAttemptAt = 0;
 let lastLoggedMtm: number | null = null;
+let lastNoSubscriberSafetyAt = 0;
+let lastNoSubscriberBlockLogAt = 0;
+
+const NO_SUBSCRIBER_FLATTEN_COOLDOWN_MS = 60_000;
+const NO_SUBSCRIBER_BLOCK_LOG_MS = 300_000;
+
+function logMasterOpenBlocked(reason: string): void {
+  const now = Date.now();
+  if (now - lastNoSubscriberBlockLogAt < NO_SUBSCRIBER_BLOCK_LOG_MS) return;
+  lastNoSubscriberBlockLogAt = now;
+  console.warn(`[future-hedge-engine] master opens BLOCKED: ${reason}`);
+}
+
+/** Master hedge opens require an active strategy and at least one copy subscriber. */
+async function assertMasterHedgeOpensAllowed(
+  prisma: PrismaClient,
+  strategy?: { isActive: boolean },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const strat =
+    strategy ??
+    (await prisma.strategy.findFirst({
+      where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+      select: { isActive: true },
+    }));
+  if (!strat?.isActive) {
+    return { ok: false, reason: "strategy paused (isActive=false)" };
+  }
+  const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+  if (subs.length === 0) {
+    return {
+      ok: false,
+      reason: "no active copy subscribers — refusing master entry/adjustment",
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * When nobody is copying, never leave a bot-opened master book exposed.
+ * Flattens reduce-only (throttled) and clears batch state.
+ */
+export async function enforceNoSubscriberMasterSafety(
+  prisma: PrismaClient,
+): Promise<void> {
+  const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+  if (subs.length > 0) return;
+
+  const strategy = await prisma.strategy.findFirst({
+    where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
+    include: { futureHedgeConfig: true },
+  });
+  const apiKey = strategy?.masterApiKey?.trim() ?? "";
+  const apiSecret = strategy?.masterApiSecret?.trim() ?? "";
+  if (!apiKey || !apiSecret) return;
+
+  let open: DeltaLivePosition[];
+  try {
+    open = await fetchDeltaOpenPositions(apiKey, apiSecret, { skipCache: true });
+  } catch {
+    return;
+  }
+
+  const liveLegs = open.filter((p) => Math.abs(p.contracts) >= 1e-12);
+  if (liveLegs.length === 0) {
+    if (strategy?.futureHedgeConfig?.currentBatchId) {
+      await clearFutureHedgeActiveBatch(prisma, "no-subscribers-exchange-flat");
+    }
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastNoSubscriberSafetyAt < NO_SUBSCRIBER_FLATTEN_COOLDOWN_MS) {
+    return;
+  }
+  lastNoSubscriberSafetyAt = now;
+
+  console.warn(
+    `[future-hedge-engine] 0 copy subscribers but master has ${liveLegs.length} open leg(s) — ` +
+      `flattening reduce-only to prevent orphan exposure`,
+  );
+
+  const { closed, errors } = await forceCloseBatchPositions(
+    apiKey,
+    apiSecret,
+    liveLegs.map((p) => ({
+      symbol: p.symbolKey,
+      side: p.side,
+      contracts: p.contracts,
+      unrealizedPnl: p.unrealizedPnl ?? 0,
+    })),
+  );
+
+  if (errors.length > 0) {
+    console.error(
+      `[future-hedge-engine] no-subscriber flatten partial closed=${closed}/${liveLegs.length}: ${errors.join("; ")}`,
+    );
+  } else {
+    console.log(
+      `[future-hedge-engine] no-subscriber flatten complete closed=${closed} leg(s)`,
+    );
+  }
+
+  await clearFutureHedgeActiveBatch(prisma, "no-subscribers-flatten");
+}
 
 function generateBatchId(): string {
   return `fh-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -269,6 +374,7 @@ export async function forceCloseBatchPositions(
     try {
       const res = await executeTrade(apiKey, apiSecret, symbol, closeSide, lots, {
         reduceOnly: true,
+        orderSource: "future-hedge-engine:flatten",
       });
       if (!res.success) {
         errors.push(`${symbol}: ${res.error ?? "close failed"}`);
@@ -437,6 +543,7 @@ async function rollbackLeg(
   try {
     await executeTrade(apiKey, apiSecret, symbol, closeSide, lots, {
       reduceOnly: true,
+      orderSource: "future-hedge-engine:rollback",
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -448,6 +555,7 @@ async function rollbackLeg(
 }
 
 async function executePerpAndOption(
+  prisma: PrismaClient,
   apiKey: string,
   apiSecret: string,
   perpSide: TradeSide,
@@ -460,9 +568,19 @@ async function executePerpAndOption(
   optOrderId?: string;
   error?: string;
 }> {
+  const openGate = await assertMasterHedgeOpensAllowed(prisma);
+  if (!openGate.ok) {
+    logMasterOpenBlocked(openGate.reason);
+    return { ok: false, perpFill: null, error: openGate.reason };
+  }
+
   const [perpRes, optRes] = await Promise.all([
-    executeTrade(apiKey, apiSecret, FUTURE_HEDGE_BTC_SYMBOL, perpSide, lots),
-    executeTrade(apiKey, apiSecret, optionProductId, "SELL", lots),
+    executeTrade(apiKey, apiSecret, FUTURE_HEDGE_BTC_SYMBOL, perpSide, lots, {
+      orderSource: "future-hedge-engine:perp-open",
+    }),
+    executeTrade(apiKey, apiSecret, optionProductId, "SELL", lots, {
+      orderSource: "future-hedge-engine:option-open",
+    }),
   ]);
 
   if (!perpRes.success || !optRes.success) {
@@ -547,6 +665,14 @@ export async function tryExecuteFreshEntry(
     if (!config.isAutoEnabled) {
       return { ok: false, error: "Automation disabled" };
     }
+    if (!strategy.isActive) {
+      return { ok: false, error: "Strategy paused (isActive=false)" };
+    }
+    const openGate = await assertMasterHedgeOpensAllowed(prisma, strategy);
+    if (!openGate.ok) {
+      logMasterOpenBlocked(openGate.reason);
+      return { ok: false, error: openGate.reason };
+    }
     if (config.currentBatchId) {
       return { ok: false, error: "Batch already active" };
     }
@@ -602,6 +728,7 @@ export async function tryExecuteFreshEntry(
     );
 
     const exec = await executePerpAndOption(
+      prisma,
       apiKey,
       apiSecret,
       perpSide,
@@ -706,6 +833,14 @@ export async function tryExecuteAdjustment(
     if (!config.isAutoEnabled || !config.currentBatchId) {
       return { ok: false, error: "No active batch" };
     }
+    if (!strategy.isActive) {
+      return { ok: false, error: "Strategy paused (isActive=false)" };
+    }
+    const openGate = await assertMasterHedgeOpensAllowed(prisma, strategy);
+    if (!openGate.ok) {
+      logMasterOpenBlocked(openGate.reason);
+      return { ok: false, error: openGate.reason };
+    }
     if (config.batchTrend == null) {
       return { ok: false, error: "Batch trend not set" };
     }
@@ -753,6 +888,7 @@ export async function tryExecuteAdjustment(
     );
 
     const exec = await executePerpAndOption(
+      prisma,
       apiKey,
       apiSecret,
       perpSide,
@@ -824,6 +960,13 @@ async function mtmTick(prisma: PrismaClient): Promise<void> {
   if (destroyed || entryInFlight || adjustmentInFlight || closeInFlight) return;
 
   try {
+    await enforceNoSubscriberMasterSafety(prisma);
+
+    const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+    if (subs.length === 0) {
+      return;
+    }
+
     const strategy = await prisma.strategy.findFirst({
       where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
       include: { futureHedgeConfig: true },
@@ -871,6 +1014,13 @@ async function engineTick(prisma: PrismaClient): Promise<void> {
   if (destroyed || entryInFlight || adjustmentInFlight || closeInFlight) return;
 
   try {
+    await enforceNoSubscriberMasterSafety(prisma);
+
+    const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+    if (subs.length === 0) {
+      return;
+    }
+
     const config = await prisma.futureHedgeConfig.findFirst({
       where: {
         strategy: { title: FUTURE_HEDGE_STRATEGY_TITLE },

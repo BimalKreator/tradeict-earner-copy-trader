@@ -1991,11 +1991,19 @@ export async function executeTrade(
   symbol: string,
   side: TradeSide,
   size: number,
-  opts?: { reduceOnly?: boolean; clientOrderId?: string },
+  opts?: {
+    reduceOnly?: boolean;
+    clientOrderId?: string;
+    /** Admin / manual ops — bypass master open policy gate. */
+    bypassMasterOpenPolicy?: boolean;
+    /** Logged on order ack for tracing caller. */
+    orderSource?: string;
+  },
 ): Promise<ExecuteTradeResult> {
   const clientOrderId = opts?.clientOrderId?.trim() || undefined;
   const inputSymbol = normalizeDeltaPerpProductRef(symbol.trim());
   const reduceOnly = opts?.reduceOnly === true;
+  const orderSource = opts?.orderSource?.trim() || "unspecified";
   try {
     const apiKey = decryptDeltaSecretOrPlain(encryptedApiKey);
     const secret = decryptDeltaSecretOrPlain(encryptedApiSecret);
@@ -2004,6 +2012,22 @@ export async function executeTrade(
         success: false,
         error: "Invalid or undecryptable Delta API credentials",
       };
+    }
+
+    const { assertMasterExchangeOpenAllowed } = await import(
+      "./masterOrderPolicy.js"
+    );
+    const policy = assertMasterExchangeOpenAllowed(
+      apiKey,
+      reduceOnly,
+      opts?.bypassMasterOpenPolicy === true,
+    );
+    if (!policy.ok) {
+      console.warn(
+        `[copy-exec] BLOCKED master open symbol="${inputSymbol}" side=${side} lots=${size} ` +
+          `source=${orderSource} reason=${policy.error}`,
+      );
+      return { success: false, error: policy.error };
     }
 
     const isOptionOrder =
@@ -2021,7 +2045,8 @@ export async function executeTrade(
       );
       if (restResult.success) {
         console.log(
-          `[copy-exec] REST market order ok symbol="${inputSymbol}" lots=${size} orderId=${restResult.orderId ?? "none"}`,
+          `[copy-exec] REST market order ok symbol="${inputSymbol}" lots=${size} ` +
+            `orderId=${restResult.orderId ?? "none"} source=${orderSource} reduceOnly=${reduceOnly}`,
         );
         return restResult;
       }

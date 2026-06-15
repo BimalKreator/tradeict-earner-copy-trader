@@ -404,6 +404,15 @@ async function triggerMasterOpenCopy(
   if (args.masterContracts <= 0) return;
 
   if (args.adminForceSync !== true) {
+    const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+    if (subs.length === 0) {
+      const logTagEarly =
+        args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
+      console.log(
+        `${logTagEarly} skip open copy — no active copy subscribers strategyId=${strategyId}`,
+      );
+      return;
+    }
     if (syncMonitorOpensBlocked(strategyId)) {
       const logTagEarly =
         args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
@@ -3624,6 +3633,11 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
         return;
       }
 
+      const subs = await findActiveFutureHedgeCopySubscribers(prisma);
+      if (subs.length === 0) {
+        return;
+      }
+
       let masterLegs: MasterLedTrade[];
       try {
         masterLegs = await fetchMasterOpenPositions(
@@ -3650,8 +3664,6 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           `[SYNC-MONITOR] master snapshot empty — skip all catch-up open orders strategyId=${strat.id}`,
         );
       }
-
-      const subs = await findActiveFutureHedgeCopySubscribers(prisma);
 
       type ReconcileCatchUpJob = {
         userId: string;
