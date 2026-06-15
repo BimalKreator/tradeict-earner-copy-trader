@@ -90,8 +90,17 @@ export async function markSubscriptionSyncFailed(
 
 /** Block SYNC-MONITOR / reconcile opens while master flat close is in flight. */
 const MASTER_FLATTING_BLOCK_MS = 60_000;
+/** After auto-exit / breakeven — block all new master + follower opens. */
+export const POST_EXIT_ENTRY_BLOCK_MS =
+  Number(process.env.FUTURE_HEDGE_POST_EXIT_BLOCK_MS) || 180_000;
+/** Extra block after breakeven exit until price returns inside the band. */
+const BREAKEVEN_REARM_BLOCK_MS =
+  Number(process.env.FUTURE_HEDGE_BREAKEVEN_REARM_MS) || 300_000;
+
 const masterFlattingUntilByStrategy = new Map<string, number>();
 const legClosingUntilByKey = new Map<string, number>();
+let postExitEntryBlockedUntil = 0;
+let breakevenHedgeEntryLatched = false;
 
 function legClosingKey(
   strategyId: string,
@@ -108,6 +117,38 @@ function pruneExpiredLocks(now = Date.now()): void {
   for (const [key, until] of legClosingUntilByKey) {
     if (now >= until) legClosingUntilByKey.delete(key);
   }
+  if (now >= postExitEntryBlockedUntil) {
+    postExitEntryBlockedUntil = 0;
+  }
+}
+
+/** Block fresh entries after any master flat (auto-exit, breakeven, manual). */
+export function markPostExitEntryBlock(
+  durationMs: number = POST_EXIT_ENTRY_BLOCK_MS,
+): void {
+  postExitEntryBlockedUntil = Math.max(
+    postExitEntryBlockedUntil,
+    Date.now() + durationMs,
+  );
+}
+
+export function isPostExitEntryBlocked(): boolean {
+  pruneExpiredLocks();
+  return Date.now() < postExitEntryBlockedUntil;
+}
+
+/** After breakeven exit — require price to leave exit zone before new hedge entry. */
+export function latchBreakevenHedgeEntryBlock(): void {
+  breakevenHedgeEntryLatched = true;
+  markPostExitEntryBlock(BREAKEVEN_REARM_BLOCK_MS);
+}
+
+export function isBreakevenHedgeEntryLatched(): boolean {
+  return breakevenHedgeEntryLatched;
+}
+
+export function clearBreakevenHedgeEntryLatch(): void {
+  breakevenHedgeEntryLatched = false;
 }
 
 /**
@@ -167,9 +208,14 @@ export function isLegClosingBlocked(
   return false;
 }
 
-/** SYNC-MONITOR and reconcile must not place new open legs while this is true. */
+/** SYNC-MONITOR, reconcile, and follower catch-up must not open while frozen. */
 export function syncMonitorOpensBlocked(strategyId: string): boolean {
-  return isMasterFlatting(strategyId);
+  pruneExpiredLocks();
+  return (
+    isMasterFlatting(strategyId) ||
+    isPostExitEntryBlocked() ||
+    breakevenHedgeEntryLatched
+  );
 }
 
 export async function markSubscriptionSyncError(

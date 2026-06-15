@@ -1,10 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
+import { clearFutureHedgeActiveBatch } from "./futureHedgeEngine.js";
 import {
   EXIT_REASON,
   markBotInitiatedClose,
   setPendingStrategyExitReason,
 } from "../constants/exitReasons.js";
-import { clearFutureHedgeActiveBatch, markFutureHedgePostExitEntryBlock } from "./futureHedgeEngine.js";
 import {
   FUTURE_HEDGE_BTC_SYMBOL,
   getLiveFuturePrice,
@@ -19,8 +19,12 @@ import type { DeltaLivePosition } from "./exchangeService.js";
 import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
+  latchBreakevenHedgeEntryBlock,
   markLegClosing,
   markMasterFlatting,
+  markPostExitEntryBlock,
+  POST_EXIT_ENTRY_BLOCK_MS,
+  clearBreakevenHedgeEntryLatch,
 } from "./subscriptionSyncService.js";
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
@@ -221,8 +225,11 @@ async function executeMasterFlatAutoExit(args: {
     logDetail,
   } = args;
 
-  markMasterFlatting(strategyId);
-  markFutureHedgePostExitEntryBlock();
+  markMasterFlatting(strategyId, POST_EXIT_ENTRY_BLOCK_MS);
+  markPostExitEntryBlock();
+  if (exitReason === EXIT_REASON.AUTO_EXIT_BREAKEVEN) {
+    latchBreakevenHedgeEntryBlock();
+  }
   for (const leg of legs) {
     markLegClosing(strategyId, leg.symbolKey, leg.side);
     markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
@@ -506,6 +513,15 @@ export async function runBreakevenExitCheck(
 
   if (legs.length === 0) {
     breakevenBreachCounters.set(strategyId, 0);
+    const breachedAtZero = evaluateBreakevenPriceBreach({
+      livePrice,
+      prevPrice,
+      breakevenPrice1: hasP1 ? p1 : null,
+      breakevenPrice2: hasP2 ? p2 : null,
+    });
+    if (!breachedAtZero) {
+      clearBreakevenHedgeEntryLatch();
+    }
     return;
   }
 
@@ -529,6 +545,7 @@ export async function runBreakevenExitCheck(
 
   if (!breached) {
     breakevenBreachCounters.set(strategyId, 0);
+    clearBreakevenHedgeEntryLatch();
     return;
   }
 

@@ -23,16 +23,26 @@ import {
 } from "./futureHedgeDataService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 import { findActiveFutureHedgeCopySubscribers } from "./strategySubscriptionService.js";
-import { isMasterFlatting } from "./subscriptionSyncService.js";
+import {
+  clearBreakevenHedgeEntryLatch,
+  isBreakevenHedgeEntryLatched,
+  isMasterFlatting,
+  markMasterFlatting,
+  markPostExitEntryBlock,
+  isPostExitEntryBlocked,
+  POST_EXIT_ENTRY_BLOCK_MS,
+} from "./subscriptionSyncService.js";
+import {
+  assertMasterHedgeEntryGate,
+  isBreakevenZoneBlockingHedgeEntry,
+  isMasterEntryFrozen,
+} from "./masterEntryGate.js";
 
 const ENGINE_TICK_MS =
   Number(process.env.FUTURE_HEDGE_ENGINE_TICK_MS) || 5_000;
 const MTM_TICK_MS = Number(process.env.FUTURE_HEDGE_MTM_TICK_MS) || 1_000;
 const ENTRY_COOLDOWN_MS =
   Number(process.env.FUTURE_HEDGE_ENTRY_COOLDOWN_MS) || 120_000;
-/** After auto-exit / breakeven flat — block fresh hedge entries even if EMA trend fires. */
-const POST_EXIT_ENTRY_BLOCK_MS =
-  Number(process.env.FUTURE_HEDGE_POST_EXIT_BLOCK_MS) || 180_000;
 const BATCH_EXPIRY_MATCH_TOLERANCE_MS = 86_400_000;
 
 export type FutureHedgeEntryResult = {
@@ -82,7 +92,6 @@ let entryInFlight = false;
 let adjustmentInFlight = false;
 let closeInFlight = false;
 let lastEntryAttemptAt = 0;
-let postExitEntryBlockedUntil = 0;
 let lastLoggedMtm: number | null = null;
 let lastNoSubscriberSafetyAt = 0;
 let lastNoSubscriberBlockLogAt = 0;
@@ -97,47 +106,26 @@ function logMasterOpenBlocked(reason: string): void {
   console.warn(`[future-hedge-engine] master opens BLOCKED: ${reason}`);
 }
 
-/** Block fresh hedge entries after auto-exit / breakeven / manual master flat. */
+/** @deprecated Use markPostExitEntryBlock from subscriptionSyncService */
 export function markFutureHedgePostExitEntryBlock(
   durationMs: number = POST_EXIT_ENTRY_BLOCK_MS,
 ): void {
-  postExitEntryBlockedUntil = Math.max(
-    postExitEntryBlockedUntil,
-    Date.now() + durationMs,
-  );
+  markPostExitEntryBlock(durationMs);
   lastEntryAttemptAt = Date.now();
 }
 
+/** @deprecated Use isPostExitEntryBlocked from subscriptionSyncService */
 export function isFutureHedgePostExitEntryBlocked(): boolean {
-  return Date.now() < postExitEntryBlockedUntil;
+  return isPostExitEntryBlocked();
 }
 
-/** Master hedge opens require an active strategy and at least one copy subscriber. */
+/** Master hedge opens require gate pass + active strategy + copy subscribers. */
 async function assertMasterHedgeOpensAllowed(
   prisma: PrismaClient,
   strategy?: { id: string; isActive: boolean },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const strat =
-    strategy ??
-    (await prisma.strategy.findFirst({
-      where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
-      select: { id: true, isActive: true },
-    }));
-  if (!strat?.isActive) {
-    return { ok: false, reason: "strategy paused (isActive=false)" };
-  }
-  if (isMasterFlatting(strat.id)) {
-    return {
-      ok: false,
-      reason: "master flatting lock active — hedge entry blocked",
-    };
-  }
-  if (isFutureHedgePostExitEntryBlocked()) {
-    return {
-      ok: false,
-      reason: "post-exit entry cooldown active — hedge entry blocked",
-    };
-  }
+  const gate = await assertMasterHedgeEntryGate(prisma, strategy);
+  if (!gate.ok) return gate;
   const subs = await findActiveFutureHedgeCopySubscribers(prisma);
   if (subs.length === 0) {
     return {
@@ -371,7 +359,8 @@ export async function clearFutureHedgeActiveBatch(
   prisma: PrismaClient,
   reason: string,
 ): Promise<boolean> {
-  markFutureHedgePostExitEntryBlock();
+  markPostExitEntryBlock();
+  lastEntryAttemptAt = Date.now();
 
   const config = await prisma.futureHedgeConfig.findFirst({
     where: { strategy: { title: FUTURE_HEDGE_STRATEGY_TITLE } },
@@ -518,6 +507,9 @@ export async function tryExecuteTargetExit(
 
     await clearActiveBatch(prisma, config.id);
 
+    markPostExitEntryBlock();
+    markMasterFlatting(strategy.id, POST_EXIT_ENTRY_BLOCK_MS);
+    lastEntryAttemptAt = Date.now();
     lastLoggedMtm = null;
 
     console.log(
@@ -1071,11 +1063,21 @@ async function engineTick(prisma: PrismaClient): Promise<void> {
       where: { title: FUTURE_HEDGE_STRATEGY_TITLE },
       select: { id: true },
     });
-    if (strategyRow && isMasterFlatting(strategyRow.id)) {
-      return;
-    }
-    if (isFutureHedgePostExitEntryBlocked()) {
-      return;
+    if (strategyRow) {
+      if (isMasterEntryFrozen(strategyRow.id)) {
+        return;
+      }
+      if (isBreakevenHedgeEntryLatched()) {
+        const stillInZone = await isBreakevenZoneBlockingHedgeEntry(
+          prisma,
+          strategyRow.id,
+        );
+        if (!stillInZone) {
+          clearBreakevenHedgeEntryLatch();
+        } else {
+          return;
+        }
+      }
     }
 
     const config = await prisma.futureHedgeConfig.findFirst({
@@ -1102,6 +1104,7 @@ async function engineTick(prisma: PrismaClient): Promise<void> {
         );
         if (snapshot && snapshot.legCount === 0) {
           await clearActiveBatch(prisma, config.id);
+          markPostExitEntryBlock();
           lastEntryAttemptAt = Date.now();
           lastLoggedMtm = null;
           console.log(

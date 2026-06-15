@@ -3,8 +3,11 @@ import type { PrismaClient } from "@prisma/client";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 import { findActiveFutureHedgeCopySubscribers } from "./strategySubscriptionService.js";
-import { isMasterFlatting } from "./subscriptionSyncService.js";
-import { isFutureHedgePostExitEntryBlocked } from "./futureHedgeEngine.js";
+import {
+  isBreakevenHedgeEntryLatched,
+  isMasterFlatting,
+  isPostExitEntryBlocked,
+} from "./subscriptionSyncService.js";
 
 export function masterApiKeyFingerprint(apiKeyPlain: string): string {
   return createHash("sha256")
@@ -47,8 +50,14 @@ export function assertMasterExchangeOpenAllowed(
   if (state.strategyId && isMasterFlatting(state.strategyId)) {
     return { ok: false, error: "master flatting lock active — open blocked" };
   }
-  if (isFutureHedgePostExitEntryBlocked()) {
+  if (isPostExitEntryBlocked()) {
     return { ok: false, error: "post-exit entry cooldown active — open blocked" };
+  }
+  if (isBreakevenHedgeEntryLatched()) {
+    return {
+      ok: false,
+      error: "breakeven re-arm latch active — open blocked",
+    };
   }
   if (!state.opensAllowed) {
     return {
@@ -99,15 +108,36 @@ export async function refreshMasterOrderPolicy(
   const flattingLock =
     strategyId != null && isMasterFlatting(strategyId);
 
+  let breakevenZoneBlock = false;
+  if (strategyId && config?.isBreakevenExitEnabled) {
+    try {
+      const { isBreakevenZoneBlockingHedgeEntry } = await import(
+        "./masterEntryGate.js"
+      );
+      breakevenZoneBlock = await isBreakevenZoneBlockingHedgeEntry(
+        prisma,
+        strategyId,
+      );
+    } catch {
+      /* best effort */
+    }
+  }
+
   if (!strategyActive) {
     state.opensAllowed = false;
     state.blockReason = "strategy paused (isActive=false)";
   } else if (flattingLock) {
     state.opensAllowed = false;
     state.blockReason = "master flatting lock active";
-  } else if (isFutureHedgePostExitEntryBlocked()) {
+  } else if (isPostExitEntryBlocked()) {
     state.opensAllowed = false;
     state.blockReason = "post-exit entry cooldown active";
+  } else if (isBreakevenHedgeEntryLatched()) {
+    state.opensAllowed = false;
+    state.blockReason = "breakeven re-arm latch active";
+  } else if (breakevenZoneBlock) {
+    state.opensAllowed = false;
+    state.blockReason = "breakeven exit zone active at current BTC price";
   } else if (!autoEnabled) {
     state.opensAllowed = false;
     state.blockReason = "Future Hedge isAutoEnabled=false";
