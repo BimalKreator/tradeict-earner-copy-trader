@@ -2548,6 +2548,18 @@ async function pollMasterPositionsFallback(
 
       tracker.clearPendingFlat(masterLegKey(m.deltaSymbol, m.side));
 
+      const legK = masterLegKey(m.deltaSymbol, m.side);
+      const prevRest =
+        tracker.lastRestContractsByLeg.get(legK) ?? m.masterContracts;
+      const isMasterScaleIn =
+        wasBaselineSeeded &&
+        prevRest > 0 &&
+        m.masterContracts > prevRest + 1e-9;
+      const isMasterPartialTrim =
+        wasBaselineSeeded &&
+        prevRest > m.masterContracts + 1e-9 &&
+        m.masterContracts > 0;
+
       if (wasBaselineSeeded) {
         const isNewLeg = tracker.isNewLegThisSession(m.deltaSymbol, m.side);
         tracker.noteLegObserved(m.deltaSymbol, m.side, m.openedAt, isNewLeg);
@@ -2591,7 +2603,10 @@ async function pollMasterPositionsFallback(
           continue;
         }
 
-        const missingOnFollowers = await followersMissingOpenLeg(
+        const missingOnFollowers =
+          !isMasterScaleIn &&
+          !isMasterPartialTrim &&
+          (await followersMissingOpenLeg(
           prisma,
           strat.id,
           m.deltaSymbol,
@@ -2600,7 +2615,7 @@ async function pollMasterPositionsFallback(
           m.openedAt,
           locallyFirstSeenAt,
           restPreExistingUnknown,
-        );
+        ));
 
         if (missingOnFollowers) {
           if (
@@ -2650,21 +2665,15 @@ async function pollMasterPositionsFallback(
         }
       }
 
-      const legK = masterLegKey(m.deltaSymbol, m.side);
-      const prevRest =
-        tracker.lastRestContractsByLeg.get(legK) ?? m.masterContracts;
-
-      if (
-        wasBaselineSeeded &&
-        prevRest > 0 &&
-        m.masterContracts > prevRest + 1e-9 &&
-        !restForceCopyOnCooldown(
-          strat.id,
-          m.deltaSymbol,
-          m.side,
-          m.masterContracts,
-        )
-      ) {
+      if (isMasterScaleIn) {
+        if (
+          !restForceCopyOnCooldown(
+            strat.id,
+            m.deltaSymbol,
+            m.side,
+            m.masterContracts,
+          )
+        ) {
         const incrementLots = Math.floor(m.masterContracts - prevRest);
         if (incrementLots > 0) {
           const scaleIsNewLeg = tracker.isNewLegThisSession(m.deltaSymbol, m.side);
@@ -2715,12 +2724,11 @@ async function pollMasterPositionsFallback(
             );
           }
         }
+        }
       }
 
       if (
-        wasBaselineSeeded &&
-        prevRest > m.masterContracts + 1e-9 &&
-        m.masterContracts > 0 &&
+        isMasterPartialTrim &&
         !restPartialTrimOnCooldown(strat.id, m.deltaSymbol, m.side)
       ) {
         const masterTrimLots = Math.floor(prevRest - m.masterContracts);
@@ -3347,10 +3355,6 @@ class StrategyMasterSocket {
           const decreased = prev > next;
           const increased = next > prev;
           this.tracker.writeTracked(snap, next);
-          this.tracker.lastRestContractsByLeg.set(
-            masterLegKey(snap.symbol, snap.side),
-            next,
-          );
 
           if (copyEnabled && increased) {
             console.log(
