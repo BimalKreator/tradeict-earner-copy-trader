@@ -230,6 +230,48 @@ function symbolsAlign(tradeSymbol: string, positionKey: string): boolean {
   return ba != null && bb != null && ba === bb;
 }
 
+/**
+ * Copy-trading soul: follower opens require the master Delta book to show this leg on REST.
+ * WS/tracker/DB cache alone must never authorize a new market order.
+ */
+export async function masterLegOpenOnExchangeRest(
+  prisma: PrismaClient,
+  args: {
+    strategyId: string;
+    symbol: string;
+    side: TradeSide;
+    minMasterLots?: number;
+  },
+): Promise<boolean> {
+  const strat = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+    select: { masterApiKey: true, masterApiSecret: true },
+  });
+  if (!strat?.masterApiKey?.trim() || !strat?.masterApiSecret?.trim()) {
+    return false;
+  }
+  const minLots = Math.max(1, Math.floor(args.minMasterLots ?? 1));
+  try {
+    const positions = await fetchDeltaOpenPositions(
+      strat.masterApiKey,
+      strat.masterApiSecret,
+      { lite: true, skipCache: true },
+    );
+    for (const p of positions) {
+      if (p.side !== args.side) continue;
+      if (!symbolsAlign(args.symbol, p.symbolKey)) continue;
+      if (Math.abs(p.contracts) >= minLots - 1e-9) return true;
+    }
+  } catch (err) {
+    console.warn(
+      `[copy] master REST leg check failed ${args.symbol} ${args.side}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+  return false;
+}
+
 /** Open leg size in exchange **contract lots** (must match {@link executeTrade} amount). */
 export async function followerExchangeLegContracts(
   apiKeyStored: string,
@@ -2150,6 +2192,30 @@ export async function executeFollowerTradeWithVerification(
     args.liveMasterFill === true ||
     args.reduceOnly === true;
   const isOptionLeg = isDeltaOptionProductId(symbol);
+
+  if (
+    args.strategyId &&
+    args.reduceOnly !== true &&
+    args.adminForceSync !== true &&
+    args.forceRestSync !== true
+  ) {
+    const masterOk = await masterLegOpenOnExchangeRest(prisma, {
+      strategyId: args.strategyId,
+      symbol,
+      side,
+    });
+    if (!masterOk) {
+      console.warn(
+        `[copy] Block open user=${userId} ${symbol} ${side} — master REST book has no matching leg`,
+      );
+      return {
+        success: false,
+        error: "Master leg not open on exchange (REST)",
+        attempts: 0,
+        verified: false,
+      };
+    }
+  }
 
   if (args.strategyId) {
     const strat = await prisma.strategy.findUnique({

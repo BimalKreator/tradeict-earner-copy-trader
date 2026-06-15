@@ -13,6 +13,7 @@ import {
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
+import { computePerTradeRevenueShareAmt } from "./dashboardMetricsService.js";
 import {
   sumOpenFollowerBotQuantity,
   tradePositionSymbolsAlign,
@@ -69,15 +70,6 @@ export async function realizedPnlUsd(args: {
   const realBaseSize = Math.abs(args.contracts) * contractFactor;
   const diff = args.exitPrice - args.entryPrice;
   return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
-}
-
-function computeRevenueShareAmt(
-  realizedPnl: number,
-  profitSharePct: number,
-): number {
-  if (!Number.isFinite(realizedPnl) || realizedPnl <= 0) return 0;
-  if (!Number.isFinite(profitSharePct) || profitSharePct <= 0) return 0;
-  return realizedPnl * (profitSharePct / 100);
 }
 
 /**
@@ -221,7 +213,10 @@ export async function settleOpenCopyTradesForLeg(
     const totalTradingFee =
       Math.max(0, Number(open.tradingFee ?? 0)) + legExitFee;
     const netPnl = grossPnl - totalTradingFee;
-    const revenueShareAmt = computeRevenueShareAmt(netPnl, profitSharePct);
+    const revenueShareAmt = computePerTradeRevenueShareAmt(
+      netPnl,
+      profitSharePct,
+    );
 
     await prisma.trade.update({
       where: { id: open.id },

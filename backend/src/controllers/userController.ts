@@ -6,6 +6,8 @@ import {
   computeUserBookedPnlAndRevenueDue,
   fetchUserCapitalBreakdown,
   pnlPercentOfCapital,
+  realizedTradePnl,
+  resolveStoredOrComputedTradeRevenueShare,
   resolveUserDeltaCreds,
   startOfUtcMonth,
   computeTodaysPnl,
@@ -657,11 +659,13 @@ export function createUserController(prisma: PrismaClient) {
           revenueShareAmt: true,
           status: true,
           exitReason: true,
-          strategy: { select: { title: true } },
+          strategy: { select: { title: true, profitShare: true } },
         },
       });
 
-      const trades = rows.map((r) => ({
+      const trades = rows.map((r) => {
+        const netPnl = realizedTradePnl(r);
+        return {
         id: r.id,
         createdAt: r.createdAt.toISOString(),
         strategyId: r.strategyId,
@@ -672,12 +676,17 @@ export function createUserController(prisma: PrismaClient) {
         entryPrice: r.entryPrice,
         exitPrice: r.exitPrice,
         pnl: r.pnl,
-        tradePnl: r.tradePnl,
+        tradePnl: netPnl,
         tradingFee: r.tradingFee,
-        revenueShareAmt: r.revenueShareAmt,
+        revenueShareAmt: resolveStoredOrComputedTradeRevenueShare({
+          realizedPnl: netPnl,
+          profitSharePct: r.strategy.profitShare,
+          revenueShareAmt: r.revenueShareAmt,
+        }),
         status: r.status,
         exitReason: r.exitReason,
-      }));
+      };
+      });
 
       const booked = await computeUserBookedPnlAndRevenueDue(prisma, userId, null);
 

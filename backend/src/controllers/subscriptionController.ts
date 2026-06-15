@@ -30,7 +30,7 @@ export type RecordTradePnlResult = {
   commissionsSkipped: number;
 };
 
-/** Persists realized trade PnL for billing: stores profit and strategy profit-share commission. */
+/** Persists realized trade PnL for billing: per-trade commission (±) on every close. */
 export async function recordTradePnl(
   prisma: PrismaClient,
   args: {
@@ -62,7 +62,7 @@ export async function recordTradePnl(
   const booked = await computeUserBookedPnlAndRevenueDue(prisma, args.userId, null);
 
   let commissionAmount = 0;
-  if (args.tradeProfit > 0 && strategy.profitShare > 0) {
+  if (strategy.profitShare > 0) {
     commissionAmount = (args.tradeProfit * strategy.profitShare) / 100;
   }
 
@@ -83,7 +83,7 @@ export async function recordTradePnl(
     );
   }
 
-  if (booked.grossPnl <= 0) {
+  if (booked.appRevenue <= 0) {
     await voidPendingEarnedCommissionsForSourceUser(prisma, args.userId);
     return {
       pnlRecordId: row.id,

@@ -22,6 +22,7 @@ const TRADE_LOG_MARKERS = [
   "[granular-sync]",
   "[live-trades]",
   "[SYNC-MONITOR]",
+  "[COPY-SYNC]",
   "[BOOT]",
   "[tradeEngine]",
   "[affiliateCommission]",

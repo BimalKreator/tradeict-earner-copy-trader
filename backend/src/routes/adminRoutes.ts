@@ -27,6 +27,11 @@ import {
   applyNoStoreCacheHeaders,
   createAdminController,
 } from "../controllers/adminController.js";
+import {
+  computeUserBookedPnlAndRevenueDue,
+  realizedTradePnl,
+  resolveStoredOrComputedTradeRevenueShare,
+} from "../services/dashboardMetricsService.js";
 import { createSettingsController } from "../controllers/settingsController.js";
 import { createCouponController } from "../controllers/couponController.js";
 import { createAdminNotificationController } from "../controllers/adminNotificationController.js";
@@ -57,11 +62,6 @@ function parsePerformanceMetrics(
   if (v === null) return undefined;
   if (typeof v === "object") return v as Prisma.InputJsonValue;
   return undefined;
-}
-
-function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
-  if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
-  return Number.isFinite(trade.pnl ?? NaN) ? (trade.pnl as number) : 0;
 }
 
 export function createAdminRoutes(prisma: PrismaClient): Router {
@@ -555,12 +555,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
       const normalizedTrades = trades.map((t) => {
         const realized = realizedTradePnl(t);
-        const adminRevenue =
-          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
-            ? t.revenueShareAmt
-            : realized > 0
-              ? realized * (t.strategy.profitShare / 100)
-              : 0;
+        const adminRevenue = resolveStoredOrComputedTradeRevenueShare({
+          realizedPnl: realized,
+          profitSharePct: t.strategy.profitShare,
+          revenueShareAmt: t.revenueShareAmt,
+        });
         return {
           id: t.id,
           createdAt: t.createdAt,
@@ -577,10 +576,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         };
       });
 
-      const totalPnl = normalizedTrades.reduce((s, t) => s + t.pnl, 0);
-      const totalAdminCommission = normalizedTrades.reduce(
-        (s, t) => s + t.adminRevenue,
-        0,
+      const allTimeBooked = await computeUserBookedPnlAndRevenueDue(
+        prisma,
+        id,
+        null,
       );
       const [paidAgg, dueAgg] = await Promise.all([
         prisma.invoice.aggregate({
@@ -597,8 +596,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         user,
         trades: normalizedTrades,
         billingSummary: {
-          totalPnlToDate: totalPnl,
-          totalAdminCommissionEarned: totalAdminCommission,
+          totalPnlToDate: allTimeBooked.grossPnl,
+          totalAdminCommissionEarned: allTimeBooked.appRevenue,
           amountPaid: paidAgg._sum.amountDue ?? 0,
           balanceDue: dueAgg._sum.amountDue ?? 0,
         },

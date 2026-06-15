@@ -6,7 +6,7 @@ import {
 } from "@prisma/client";
 import { EXIT_REASON } from "../constants/exitReasons.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
-import { computeUserBookedPnlAndRevenueDue } from "./dashboardMetricsService.js";
+import { computePerTradeRevenueShareAmt, computeUserBookedPnlAndRevenueDue } from "./dashboardMetricsService.js";
 
 const DEFAULT_INJECT_SYMBOL = "DUMMY-INJECT";
 
@@ -163,10 +163,10 @@ export async function injectTrade(
   }
 
   const profitSharePct = strategy.profitShare;
-  const revenueShareAmt =
-    grossPnl > 0 && profitSharePct > 0
-      ? grossPnl * (profitSharePct / 100)
-      : 0;
+  const revenueShareAmt = computePerTradeRevenueShareAmt(
+    grossPnl,
+    profitSharePct,
+  );
 
   const clientOrderId = `dummy-${randomUUID()}`;
 

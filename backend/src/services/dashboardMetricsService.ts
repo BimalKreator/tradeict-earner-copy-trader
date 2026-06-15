@@ -112,6 +112,35 @@ export function realizedTradePnl(trade: {
   return Number.isFinite(trade.pnl ?? NaN) ? (trade.pnl as number) : 0;
 }
 
+/** Per-trade app revenue share — positive on wins, negative on losses (hedge legs net at billing). */
+export function computePerTradeRevenueShareAmt(
+  realizedPnl: number,
+  profitSharePct: number,
+): number {
+  if (!Number.isFinite(realizedPnl)) return 0;
+  if (!Number.isFinite(profitSharePct) || profitSharePct <= 0) return 0;
+  return realizedPnl * (profitSharePct / 100);
+}
+
+/** Prefer stored per-trade share when set; recompute for legacy loss rows stored as 0. */
+export function resolveStoredOrComputedTradeRevenueShare(args: {
+  realizedPnl: number;
+  profitSharePct: number;
+  revenueShareAmt?: number | null;
+}): number {
+  const stored = args.revenueShareAmt;
+  if (Number.isFinite(stored) && stored !== 0) {
+    return stored as number;
+  }
+  return computePerTradeRevenueShareAmt(args.realizedPnl, args.profitSharePct);
+}
+
+/** Billable app revenue — never charge a negative commission to the client. */
+export function floorRevenueShareDue(rawTotal: number): number {
+  if (!Number.isFinite(rawTotal)) return 0;
+  return Math.max(0, rawTotal);
+}
+
 export function strategyShortName(title: string): string {
   const t = title.trim();
   if (t.length <= 28) return t;
@@ -290,9 +319,8 @@ export type PnlBreakdown = {
   /** Sum of realized trade PnL on CLOSED trades before app revenue share. */
   grossPnl: number;
   /**
-   * Per-strategy: max(0, strategy gross) × profitShare%, summed across strategies.
-   * Zero when overall gross PnL ≤ 0. Falls back to summed `revenueShareAmt` when
-   * strategy profitShare is unset but per-trade fees were recorded at close.
+   * Sum of per-trade profitShare% on every closed leg (losses reduce the total),
+   * floored at zero — only positive net commission is billable.
    */
   appRevenue: number;
   /** grossPnl − appRevenue — user's net take-home. */
@@ -337,33 +365,20 @@ export function computeBookedPnlAndRevenueDueFromTrades(
   }
 
   let grossPnl = 0;
-  const pnlByStrategy = new Map<string, number>();
-  let appRevenueFromRows = 0;
+  let rawAppRevenue = 0;
 
   for (const t of trades) {
     const pnl = realizedTradePnl(t);
     grossPnl += pnl;
-    pnlByStrategy.set(
-      t.strategyId,
-      (pnlByStrategy.get(t.strategyId) ?? 0) + pnl,
-    );
-    const rowShare = t.revenueShareAmt ?? 0;
-    if (Number.isFinite(rowShare) && rowShare > 0) {
-      appRevenueFromRows += rowShare;
-    }
+    const pct = profitShareByStrategyId.get(t.strategyId) ?? 0;
+    rawAppRevenue += resolveStoredOrComputedTradeRevenueShare({
+      realizedPnl: pnl,
+      profitSharePct: pct,
+      ...(t.revenueShareAmt != null ? { revenueShareAmt: t.revenueShareAmt } : {}),
+    });
   }
 
-  let appRevenue = 0;
-  if (grossPnl > 0) {
-    for (const [strategyId, strategyGross] of pnlByStrategy) {
-      if (strategyGross <= 0) continue;
-      const pct = profitShareByStrategyId.get(strategyId) ?? 0;
-      appRevenue += strategyGross * (pct / 100);
-    }
-    if (appRevenue <= 0 && appRevenueFromRows > 0) {
-      appRevenue = appRevenueFromRows;
-    }
-  }
+  const appRevenue = floorRevenueShareDue(rawAppRevenue);
 
   return withPnlAliases({
     grossPnl,

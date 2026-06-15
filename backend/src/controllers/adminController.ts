@@ -10,10 +10,15 @@ import {
 import {
   aggregateUsersAum,
   ADMIN_DELTA_BALANCE_CONCURRENCY,
+  computeUserBookedPnlAndRevenueDue,
+  computeUsersBookedPnlAndRevenueDue,
   fetchUserDeltaBalanceForAdmin,
   fetchUserAvailableCapital,
   fetchUserCapitalBreakdown,
   masterApiHealth,
+  realizedTradePnl,
+  resolveStoredOrComputedTradeRevenueShare,
+  floorRevenueShareDue,
   resolveUserDeltaCreds,
   startOfUtcDay,
   startOfUtcMonth,
@@ -72,11 +77,6 @@ import {
   listPendingMemberUpgradeRequests,
   rejectMemberUpgradeRequest,
 } from "../services/affiliateUpgradeRequestService.js";
-
-function realizedTradePnl(trade: { tradePnl: number; pnl: number | null }): number {
-  if (Number.isFinite(trade.tradePnl) && trade.tradePnl !== 0) return trade.tradePnl;
-  return Number.isFinite(trade.pnl ?? NaN) ? (trade.pnl as number) : 0;
-}
 
 /** Prevent CDN/proxy/browser caching of live admin dashboards (PnL must be fresh). */
 export function applyNoStoreCacheHeaders(res: Response): void {
@@ -161,12 +161,11 @@ export function createAdminController(prisma: PrismaClient) {
         };
         row.totalTrades += 1;
         if (realized > 0) row.wins += 1;
-        row.revenueForAdmin +=
-          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
-            ? t.revenueShareAmt
-            : realized > 0
-              ? realized * (t.strategy.profitShare / 100)
-              : 0;
+        row.revenueForAdmin += resolveStoredOrComputedTradeRevenueShare({
+          realizedPnl: realized,
+          profitSharePct: t.strategy.profitShare,
+          revenueShareAmt: t.revenueShareAmt,
+        });
         strategyAgg.set(t.strategyId, row);
       }
 
@@ -180,7 +179,7 @@ export function createAdminController(prisma: PrismaClient) {
         strategyWisePerformance: Array.from(strategyAgg.values()).map((r) => ({
           strategyName: r.strategyName,
           totalTrades: r.totalTrades,
-          totalRevenueForAdmin: r.revenueForAdmin,
+          totalRevenueForAdmin: floorRevenueShareDue(r.revenueForAdmin),
           winRate: r.totalTrades > 0 ? (r.wins / r.totalTrades) * 100 : 0,
         })),
       });
@@ -235,12 +234,11 @@ export function createAdminController(prisma: PrismaClient) {
 
       const normalizedTrades = trades.map((t) => {
         const realized = realizedTradePnl(t);
-        const adminRevenue =
-          Number.isFinite(t.revenueShareAmt) && t.revenueShareAmt > 0
-            ? t.revenueShareAmt
-            : realized > 0
-              ? realized * (t.strategy.profitShare / 100)
-              : 0;
+        const adminRevenue = resolveStoredOrComputedTradeRevenueShare({
+          realizedPnl: realized,
+          profitSharePct: t.strategy.profitShare,
+          revenueShareAmt: t.revenueShareAmt,
+        });
         return {
           id: t.id,
           createdAt: t.createdAt,
@@ -260,11 +258,14 @@ export function createAdminController(prisma: PrismaClient) {
         };
       });
 
-      const totalPnlToDate = normalizedTrades.reduce((s, t) => s + t.pnl, 0);
-      const totalAdminCommissionEarned = normalizedTrades.reduce(
-        (s, t) => s + t.adminRevenue,
-        0,
+      const allTimeBooked = await computeUserBookedPnlAndRevenueDue(
+        prisma,
+        userId,
+        null,
       );
+
+      const totalPnlToDate = allTimeBooked.grossPnl;
+      const totalAdminCommissionEarned = allTimeBooked.appRevenue;
 
       const [paidAgg, dueAgg] = await Promise.all([
         prisma.invoice.aggregate({
@@ -444,12 +445,14 @@ export function createAdminController(prisma: PrismaClient) {
           status: true,
           exitReason: true,
           user: { select: { email: true, name: true } },
-          strategy: { select: { title: true } },
+          strategy: { select: { title: true, profitShare: true } },
         },
       });
 
       res.json({
-        trades: rows.map((r) => ({
+        trades: rows.map((r) => {
+          const realized = realizedTradePnl(r);
+          return {
           id: r.id,
           createdAt: r.createdAt.toISOString(),
           userId: r.userId,
@@ -463,12 +466,17 @@ export function createAdminController(prisma: PrismaClient) {
           entryPrice: r.entryPrice,
           exitPrice: r.exitPrice,
           pnl: r.pnl,
-          tradePnl: r.tradePnl,
+          tradePnl: realized,
           tradingFee: r.tradingFee,
-          revenueShareAmt: r.revenueShareAmt,
+          revenueShareAmt: resolveStoredOrComputedTradeRevenueShare({
+            realizedPnl: realized,
+            profitSharePct: r.strategy.profitShare,
+            revenueShareAmt: r.revenueShareAmt,
+          }),
           status: r.status,
           exitReason: r.exitReason,
-        })),
+        };
+        }),
       });
     } catch (err) {
       next(err);
@@ -541,12 +549,11 @@ export function createAdminController(prisma: PrismaClient) {
         orderBy: { createdAt: "desc" },
       });
 
-      const pnlAgg = await prisma.trade.groupBy({
-        by: ["userId"],
-        _sum: { tradePnl: true },
-      });
-      const pnlByUser = new Map<string, number>(
-        pnlAgg.map((r) => [r.userId, r._sum.tradePnl ?? 0]),
+      const userIds = users.map((u) => u.id);
+      const bookedByUser = await computeUsersBookedPnlAndRevenueDue(
+        prisma,
+        userIds,
+        null,
       );
 
       const deltaByUserId = new Map<
@@ -576,7 +583,7 @@ export function createAdminController(prisma: PrismaClient) {
             role: u.role,
             status: u.status,
             createdAt: u.createdAt,
-            totalPnlToDate: pnlByUser.get(u.id) ?? 0,
+            totalPnlToDate: bookedByUser.get(u.id)?.grossPnl ?? 0,
             walletBalance: u.wallet?.balance ?? 0,
             deltaBalance: delta.deltaBalance,
             deltaConnected: delta.deltaConnected,

@@ -24,7 +24,18 @@ import {
   resolveClosureOrigin,
   type ExitReasonValue,
 } from "../constants/exitReasons.js";
-import { isHardExecutionError } from "./followerTradeExecution.js";
+import {
+  COPY_EMPTY_BOOK_POLLS_REQUIRED,
+  COPY_FLAT_CONFIRM_MS,
+  COPY_FLAT_MISS_POLLS_REQUIRED,
+  COPY_FLAT_WS_CONFIRM_MS,
+  COPY_FORCE_SYNC_COOLDOWN_MS,
+  COPY_MASTER_REST_POLL_MS,
+  COPY_QTY_RECONCILE_MS,
+  COPY_REST_IMMEDIATE_DEBOUNCE_MS,
+  COPY_ROLL_SUPPRESS_MS,
+  deferFollowerTrimMasterLegAbsent,
+} from "./copySyncPolicy.js";
 import {
   reconcileStaleOpenTradesForUser,
   settleOpenCopyTradesForLeg,
@@ -53,6 +64,7 @@ import {
   syncMasterPartialTrimToFollowers,
   isFollowerCopyInflight,
   followerExchangeLegContracts,
+  isHardExecutionError,
 } from "./followerTradeExecution.js";
 import {
   findActiveCopySubscriptionForUser,
@@ -120,27 +132,27 @@ const SAFETY_RECONCILE_MS = 30_000;
 /** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
 const AUTO_EXIT_CHECK_MS = 1_000;
 /** Align follower contract counts with master × multiplier (REST safety net). */
-const POSITION_QTY_RECONCILE_MS = 60_000;
-/** REST reconciliation interval — live copy is WS-driven (orders / user_trades). */
-const MASTER_REST_POLL_MS = 30_000;
+const POSITION_QTY_RECONCILE_MS = COPY_QTY_RECONCILE_MS;
+/** REST reconciliation interval — WS hints trigger immediate poll; this is the backup. */
+const MASTER_REST_POLL_MS = COPY_MASTER_REST_POLL_MS;
 /** Require a leg to be absent from REST for this long before closing followers (WS/REST lag). */
-const MASTER_FLAT_CONFIRM_MS = 15_000;
-/** Same minimum wait even when WS hinted flat — avoids 5s false exits on position delete. */
-const MASTER_FLAT_WS_CONFIRM_MS = 15_000;
+const MASTER_FLAT_CONFIRM_MS = COPY_FLAT_CONFIRM_MS;
+/** Same minimum wait even when WS hinted flat — avoids fast false exits on position delete. */
+const MASTER_FLAT_WS_CONFIRM_MS = COPY_FLAT_WS_CONFIRM_MS;
 /** Consecutive REST polls with leg missing before flat close is allowed. */
-const MASTER_FLAT_REST_MISS_POLLS_REQUIRED = 3;
+const MASTER_FLAT_REST_MISS_POLLS_REQUIRED = COPY_FLAT_MISS_POLLS_REQUIRED;
 /** After ignored hedge roll fills, defer flat detection for this symbol. */
-const MASTER_FLAT_SUPPRESS_AFTER_ROLL_MS = 90_000;
+const MASTER_FLAT_SUPPRESS_AFTER_ROLL_MS = COPY_ROLL_SUPPRESS_MS;
 /** Consecutive empty REST reads before orphan follower reconcile. */
-const MASTER_EMPTY_BOOK_POLLS_REQUIRED = 3;
+const MASTER_EMPTY_BOOK_POLLS_REQUIRED = COPY_EMPTY_BOOK_POLLS_REQUIRED;
 /** Debounce REST partial-trim for the same master leg. */
 const REST_PARTIAL_TRIM_COOLDOWN_MS = 30_000;
 
 const restPartialTrimLastAttempt = new Map<string, number>();
 /** Debounce immediate REST poll triggered by WS position deltas. */
-const MASTER_REST_IMMEDIATE_DEBOUNCE_MS = 350;
+const MASTER_REST_IMMEDIATE_DEBOUNCE_MS = COPY_REST_IMMEDIATE_DEBOUNCE_MS;
 /** Do not re-trigger REST force-copy for the same master leg within this window. */
-const REST_FORCE_COPY_COOLDOWN_MS = 45_000;
+const REST_FORCE_COPY_COOLDOWN_MS = COPY_FORCE_SYNC_COOLDOWN_MS;
 
 const restForceCopyLastAttempt = new Map<string, number>();
 
@@ -378,17 +390,12 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
-    const legK = masterLegKey(args.symbol, args.side);
-    const baselineReplay =
-      isLiveMasterFill &&
-      tracker != null &&
-      tracker.legsAtBaseline.has(legK);
-
-    if (baselineReplay) {
+    if (isLiveMasterFill && args.adminForceSync !== true) {
       console.log(
-        `${logTag} skip live fill copy ${args.symbol} ${args.side} — ` +
-          `leg pre-existing at REST baseline (REST catch-up only)`,
+        `${logTag} [COPY-SYNC] WS hint ${args.symbol} ${args.side} qty=${args.masterContracts} — ` +
+          `scheduling REST sync (orders only after master REST confirms)`,
       );
+      requestImmediateMasterRestPoll(`ws-hint:${args.symbol}:${args.side}`);
     } else {
       await copyMasterFillToSubscribers(prisma, strategyId, {
       symbol: args.symbol,
@@ -398,7 +405,6 @@ async function triggerMasterOpenCopy(
       masterFillKey: args.masterFillKey,
       ...(forceRestSync ? { forceRestSync: true, masterTotalLots: args.masterContracts } : {}),
       ...(args.adminForceSync ? { adminForceSync: true } : {}),
-      ...(isLiveMasterFill ? { liveMasterFill: true } : {}),
       ...(args.masterOpenedAt !== undefined
         ? { masterOpenedAt: args.masterOpenedAt }
         : {}),
@@ -3061,30 +3067,10 @@ class StrategyMasterSocket {
           if (copyEnabled && decreased) {
             const masterTrimLots = Math.floor(prev - next);
             if (masterTrimLots > 0) {
-              const trimKey = `ws-trim:${buildMasterFillKey([
-                snap.symbol,
-                snap.side,
-                String(next),
-                String(masterTrimLots),
-              ])}`;
               console.log(
-                `[MASTER-WS] partial trim ${snap.symbol} ${snap.side} -${masterTrimLots} (${prev}→${next})`,
+                `[MASTER-WS] partial trim hint ${snap.symbol} ${snap.side} -${masterTrimLots} (${prev}→${next}) — scheduling REST sync`,
               );
-              void syncMasterPartialTrimToFollowers(this.prisma, {
-                symbol: snap.symbol,
-                side: snap.side,
-                masterTrimLots,
-                masterFillKey: trimKey,
-                masterEntryPrice:
-                  snap.avgEntry != null && Number.isFinite(snap.avgEntry)
-                    ? snap.avgEntry
-                    : 0,
-              }).catch((err) => {
-                console.error(
-                  `[MASTER-WS] partial trim failed ${snap.symbol} ${snap.side}:`,
-                  err instanceof Error ? err.message : err,
-                );
-              });
+              requestImmediateMasterRestPoll("ws-position-decrease");
             }
           }
         }
@@ -3463,6 +3449,14 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               continue;
             }
 
+            if (deferFollowerTrimMasterLegAbsent(master != null)) {
+              console.log(
+                `[RECONCILE] defer trim user ${sub.userId} ${legSymbol} — ` +
+                  `master REST has no leg (lag window; close path uses flat-confirm)`,
+              );
+              continue;
+            }
+
             const trimLots = exchangeLots - expectedContracts;
             if (
               isFollowerCopyInflight({
@@ -3544,6 +3538,88 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
           if (outOfSync.length > 0) {
             console.log(
               `[SYNC-MONITOR] user=${sub.userId} out of sync: ${outOfSync.join("; ")}`,
+            );
+          }
+        }
+
+        for (const m of masterLegs) {
+          if (cancelled.value) return;
+          if (restForceCopyOnCooldown(strat.id, m.deltaSymbol, m.side)) {
+            continue;
+          }
+          let legDeficit = false;
+          for (const sub of subs) {
+            const subCreds = resolveSubscriptionCreds(sub);
+            const expected = followerContractsFromMaster(
+              m.masterContracts,
+              subscriptionMultiplier(sub),
+            );
+            const deficit = await followerBotOpenDeficitLots(prisma, {
+              strategyId: strat.id,
+              userId: sub.userId,
+              symbol: m.deltaSymbol,
+              side: m.side,
+              targetLots: expected,
+              ...(subCreds
+                ? { apiKey: subCreds.apiKey, apiSecret: subCreds.apiSecret }
+                : {}),
+            });
+            if (deficit > 0) {
+              legDeficit = true;
+              break;
+            }
+          }
+          if (!legDeficit) continue;
+
+          const isNewLeg = masterPositionTracker.isNewLegThisSession(
+            m.deltaSymbol,
+            m.side,
+          );
+          masterPositionTracker.noteLegObserved(
+            m.deltaSymbol,
+            m.side,
+            m.openedAt,
+            isNewLeg,
+          );
+          const locallyFirstSeenAt = masterPositionTracker.resolveLegOpenedAt(
+            m.deltaSymbol,
+            m.side,
+            m.openedAt,
+          );
+          if (
+            !isMasterLegFreshForRestCatchup(
+              m.openedAt,
+              locallyFirstSeenAt,
+              isNewLeg,
+            )
+          ) {
+            continue;
+          }
+          markRestForceCopyAttempt(strat.id, m.deltaSymbol, m.side);
+          const fillKey = `sync-monitor:${buildMasterFillKey([
+            m.deltaSymbol,
+            m.side,
+            String(m.masterContracts),
+          ])}`;
+          console.log(
+            `[SYNC-MONITOR] REST catch-up ${m.deltaSymbol} ${m.side} masterLots=${m.masterContracts}`,
+          );
+          try {
+            await triggerMasterOpenCopy(prisma, strat.id, {
+              symbol: m.deltaSymbol,
+              side: m.side,
+              masterContracts: m.masterContracts,
+              avgPrice: Number.isFinite(m.entryPrice) ? m.entryPrice : null,
+              masterFillKey: fillKey,
+              source: "rest",
+              forceRestSync: true,
+              masterOpenedAt: m.openedAt,
+              locallyFirstSeenAt,
+            });
+          } catch (syncErr) {
+            console.error(
+              `[SYNC-MONITOR] catch-up failed ${m.deltaSymbol} ${m.side}:`,
+              syncErr instanceof Error ? syncErr.message : syncErr,
             );
           }
         }
