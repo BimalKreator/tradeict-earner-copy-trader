@@ -453,13 +453,13 @@ export async function sendBroadcastNotificationEmail(
 export type TeamMemberRoleLabel =
   | "Team Executive"
   | "Team Manager"
-  | "Team Director";
+  | "Senior Manager";
 
 export function teamMemberRoleLabel(
-  role: "EXECUTIVE" | "MANAGER" | "DIRECTOR",
+  role: "EXECUTIVE" | "MANAGER" | "SENIOR_MANAGER",
 ): TeamMemberRoleLabel {
   if (role === "MANAGER") return "Team Manager";
-  if (role === "DIRECTOR") return "Team Director";
+  if (role === "SENIOR_MANAGER") return "Senior Manager";
   return "Team Executive";
 }
 
@@ -582,12 +582,12 @@ function buildWelcomeTeamMemberHtml(args: {
 }
 
 /**
- * Welcome email when an admin upgrades a user to Executive, Manager, or Director.
+ * Welcome email when an admin upgrades a user to Executive, Manager, or Senior Manager.
  */
 export async function sendWelcomeToTeamMemberEmail(
   userEmail: string,
   userName: string,
-  newRole: "EXECUTIVE" | "MANAGER" | "DIRECTOR",
+  newRole: "EXECUTIVE" | "MANAGER" | "SENIOR_MANAGER",
   referralCode: string,
 ): Promise<void> {
   const designation = teamMemberRoleLabel(newRole);

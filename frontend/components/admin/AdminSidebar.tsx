@@ -13,6 +13,7 @@ import {
   FolderOpen,
   GitBranch,
   GitCompare,
+  Inbox,
   LayoutDashboard,
   LineChart,
   MessageSquare,
@@ -23,6 +24,7 @@ import {
   Users,
   UsersRound,
   Wallet,
+  Award,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -62,6 +64,8 @@ const navGroups: NavGroup[] = [
     items: [
       { href: "/admin/users", label: "Users", icon: Users },
       { href: "/admin/members", label: "Members", icon: UsersRound },
+      { href: "/admin/referral-requests", label: "Referral Requests", icon: Inbox },
+      { href: "/admin/tier-settings", label: "Tier Settings", icon: Award },
       { href: "/admin/network", label: "Network Tree", icon: GitBranch },
     ],
   },

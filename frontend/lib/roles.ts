@@ -2,7 +2,7 @@
 export const SALES_TEAM_ROLES = [
   "EXECUTIVE",
   "MANAGER",
-  "DIRECTOR",
+  "SENIOR_MANAGER",
 ] as const;
 
 export type SalesTeamRole = (typeof SALES_TEAM_ROLES)[number];
@@ -16,17 +16,27 @@ export function isSalesTeamMember(
   role: string | null | undefined,
 ): role is SalesTeamRole {
   const r = normalizeUserRole(role);
-  return r === "EXECUTIVE" || r === "MANAGER" || r === "DIRECTOR";
+  return r === "EXECUTIVE" || r === "MANAGER" || r === "SENIOR_MANAGER";
 }
 
-/** Directors and Managers may submit team-member nominations. */
+/** Senior Managers and Managers may submit team-member nominations. */
 export function canNominateMembers(role: string | null | undefined): boolean {
   const r = normalizeUserRole(role);
-  return r === "DIRECTOR" || r === "MANAGER";
+  return r === "SENIOR_MANAGER" || r === "MANAGER";
 }
 
 export const SALES_TEAM_ROLE_LABELS: Record<SalesTeamRole, string> = {
   EXECUTIVE: "Team Executive",
   MANAGER: "Team Manager",
-  DIRECTOR: "Team Director",
+  SENIOR_MANAGER: "Senior Manager",
 };
+
+/** Accept legacy JWT/API role until tokens refresh after deploy. */
+export function normalizeSalesTeamRole(
+  role: string | null | undefined,
+): SalesTeamRole | null {
+  const r = normalizeUserRole(role);
+  if (r === "DIRECTOR") return "SENIOR_MANAGER";
+  if (isSalesTeamMember(r)) return r;
+  return null;
+}

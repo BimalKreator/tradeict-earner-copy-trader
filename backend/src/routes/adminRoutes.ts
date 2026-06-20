@@ -155,6 +155,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     "/upgrade-requests/:id/reject",
     adminController.rejectMemberUpgradeRequest,
   );
+  router.get("/referral-requests", adminController.listReferralRequests);
+  router.patch(
+    "/referral-requests/:id",
+    adminController.patchReferralRequestStatus,
+  );
+  router.get("/tier-config", adminController.getTierConfig);
+  router.put("/tier-config", adminController.putTierConfig);
   router.get("/network-tree", adminController.getNetworkTree);
 
   router.get("/payouts", adminController.listPartnerPayouts);

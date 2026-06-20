@@ -66,7 +66,7 @@ function fmtUsd(n: number): string {
 }
 
 function roleBadgeClass(role: string): string {
-  if (role === "DIRECTOR") return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
+  if (role === "SENIOR_MANAGER") return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
   if (role === "MANAGER") return "bg-sky-500/15 text-sky-200 ring-sky-500/30";
   if (role === "EXECUTIVE") return "bg-emerald-500/15 text-emerald-200 ring-emerald-500/30";
   return "bg-white/10 text-white/70 ring-white/20";
@@ -74,7 +74,7 @@ function roleBadgeClass(role: string): string {
 
 function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
   if (nodeType === "acquired") return "Acquired User";
-  if (role === "DIRECTOR") return "Director";
+  if (role === "SENIOR_MANAGER") return "Senior Manager";
   if (role === "MANAGER") return "Manager";
   if (role === "EXECUTIVE") return "Executive";
   return role;
@@ -314,7 +314,7 @@ export default function AdminNetworkPage() {
               Network Tree
             </h1>
             <p className="mt-1 text-sm text-white/50">
-              Sales hierarchy and acquired traders — Directors → Managers →
+              Sales hierarchy and acquired traders — Senior Managers → Managers →
               Executives → Users
             </p>
           </div>

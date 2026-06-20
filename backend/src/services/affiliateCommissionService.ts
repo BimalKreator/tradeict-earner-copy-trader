@@ -36,7 +36,7 @@ type AncestorNode = {
 
 function roleToSalesTier(role: SalesMemberRole): SalesTier {
   if (role === Role.MANAGER) return SalesTier.MANAGER;
-  if (role === Role.DIRECTOR) return SalesTier.DIRECTOR;
+  if (role === Role.SENIOR_MANAGER) return SalesTier.SENIOR_MANAGER;
   return SalesTier.EXECUTIVE;
 }
 
@@ -147,7 +147,7 @@ async function resolveCommissionChainFromAcquirer(
     });
 
     const manager = findFirstAncestorWithRole(ancestors, Role.MANAGER);
-    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+    const director = findFirstAncestorWithRole(ancestors, Role.SENIOR_MANAGER);
 
     if (manager) {
       slices.push({
@@ -164,7 +164,7 @@ async function resolveCommissionChainFromAcquirer(
       slices.push({
         beneficiaryUserId: director.id,
         commissionRate: directorRate,
-        beneficiaryTier: SalesTier.DIRECTOR,
+        beneficiaryTier: SalesTier.SENIOR_MANAGER,
       });
     }
   } else if (direct.role === Role.MANAGER) {
@@ -174,19 +174,19 @@ async function resolveCommissionChainFromAcquirer(
       beneficiaryTier: SalesTier.MANAGER,
     });
 
-    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+    const director = findFirstAncestorWithRole(ancestors, Role.SENIOR_MANAGER);
     if (director) {
       slices.push({
         beneficiaryUserId: director.id,
         commissionRate: cfg.directorUnderManagerPct,
-        beneficiaryTier: SalesTier.DIRECTOR,
+        beneficiaryTier: SalesTier.SENIOR_MANAGER,
       });
     }
-  } else if (direct.role === Role.DIRECTOR) {
+  } else if (direct.role === Role.SENIOR_MANAGER) {
     slices.push({
       beneficiaryUserId: direct.id,
       commissionRate: cfg.directorDirectPct,
-      beneficiaryTier: SalesTier.DIRECTOR,
+      beneficiaryTier: SalesTier.SENIOR_MANAGER,
     });
   }
 
@@ -217,7 +217,7 @@ async function resolveCommissionChainFromPartnerSelfTrade(
 
   if (source.role === Role.EXECUTIVE) {
     const manager = findFirstAncestorWithRole(ancestors, Role.MANAGER);
-    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+    const director = findFirstAncestorWithRole(ancestors, Role.SENIOR_MANAGER);
 
     if (manager) {
       slices.push({
@@ -234,16 +234,16 @@ async function resolveCommissionChainFromPartnerSelfTrade(
       slices.push({
         beneficiaryUserId: director.id,
         commissionRate: directorRate,
-        beneficiaryTier: SalesTier.DIRECTOR,
+        beneficiaryTier: SalesTier.SENIOR_MANAGER,
       });
     }
   } else if (source.role === Role.MANAGER) {
-    const director = findFirstAncestorWithRole(ancestors, Role.DIRECTOR);
+    const director = findFirstAncestorWithRole(ancestors, Role.SENIOR_MANAGER);
     if (director) {
       slices.push({
         beneficiaryUserId: director.id,
         commissionRate: cfg.directorUnderManagerPct,
-        beneficiaryTier: SalesTier.DIRECTOR,
+        beneficiaryTier: SalesTier.SENIOR_MANAGER,
       });
     }
   }
@@ -264,7 +264,7 @@ export type CommissionChainSource = {
  * Build commission % slices for any trading account holder.
  * - USER: `acquiredById` partner chain (direct + upline rates)
  * - EXECUTIVE / MANAGER: `parentId` upline only (self-trade rates)
- * - DIRECTOR / ADMIN: no partner commissions
+ * - SENIOR_MANAGER / ADMIN: no partner commissions
  */
 export async function resolveCommissionChain(
   prisma: PrismaClient,
@@ -273,7 +273,7 @@ export async function resolveCommissionChain(
 ): Promise<CommissionChainSlice[]> {
   const cfg = rates ?? (await getPartnerCommissionRates(prisma));
 
-  if (source.role === Role.ADMIN || source.role === Role.DIRECTOR) {
+  if (source.role === Role.ADMIN || source.role === Role.SENIOR_MANAGER) {
     return [];
   }
 

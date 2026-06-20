@@ -33,7 +33,7 @@ export type AdminNetworkTreeResponse = {
 };
 
 const ROLE_SORT: Record<string, number> = {
-  DIRECTOR: 0,
+  SENIOR_MANAGER: 0,
   MANAGER: 1,
   EXECUTIVE: 2,
   USER: 3,

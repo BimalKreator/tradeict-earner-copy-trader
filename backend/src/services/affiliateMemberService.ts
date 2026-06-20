@@ -13,7 +13,7 @@ import { sendWelcomeToTeamMemberEmail } from "./emailService.js";
 export const SALES_MEMBER_ROLES = [
   Role.EXECUTIVE,
   Role.MANAGER,
-  Role.DIRECTOR,
+  Role.SENIOR_MANAGER,
 ] as const;
 
 export type SalesMemberRole = (typeof SALES_MEMBER_ROLES)[number];
@@ -25,7 +25,7 @@ export function isSalesMemberRole(role: Role): role is SalesMemberRole {
   return (
     role === Role.EXECUTIVE ||
     role === Role.MANAGER ||
-    role === Role.DIRECTOR
+    role === Role.SENIOR_MANAGER
   );
 }
 
@@ -246,7 +246,7 @@ export async function changeUserAcquiredBy(
       return {
         ok: false,
         status: 400,
-        error: "Referrer must be a team member (Executive, Manager, or Director)",
+        error: "Referrer must be a team member (Executive, Manager, or Senior Manager)",
       };
     }
     if (
@@ -337,32 +337,32 @@ export function validateParentForSalesRole(
   newRole: SalesMemberRole,
   parent: { id: string; role: Role } | null,
 ): string | null {
-  // Directors sit at the top of the tree — upline is fully optional.
-  if (newRole === Role.DIRECTOR) {
+  // Senior Managers sit at the top of the tree — upline is fully optional.
+  if (newRole === Role.SENIOR_MANAGER) {
     if (!parent) {
       return null;
     }
-    if (parent.role !== Role.DIRECTOR) {
-      return "A Director's upline must be another Director";
+    if (parent.role !== Role.SENIOR_MANAGER) {
+      return "A Senior Manager's upline must be another Senior Manager";
     }
     return null;
   }
 
   if (!parent) {
     return newRole === Role.EXECUTIVE
-      ? "An Executive must be assigned to a Manager or Director"
-      : "A Manager must be assigned to a Director";
+      ? "An Executive must be assigned to a Manager or Senior Manager"
+      : "A Manager must be assigned to a Senior Manager";
   }
 
   if (newRole === Role.EXECUTIVE) {
-    if (parent.role !== Role.MANAGER && parent.role !== Role.DIRECTOR) {
-      return "An Executive's upline must be a Manager or Director";
+    if (parent.role !== Role.MANAGER && parent.role !== Role.SENIOR_MANAGER) {
+      return "An Executive's upline must be a Manager or Senior Manager";
     }
     return null;
   }
 
-  if (newRole === Role.MANAGER && parent.role !== Role.DIRECTOR) {
-    return "A Manager's upline must be a Director";
+  if (newRole === Role.MANAGER && parent.role !== Role.SENIOR_MANAGER) {
+    return "A Manager's upline must be a Senior Manager";
   }
 
   return null;
@@ -498,7 +498,7 @@ export async function upgradeUserToSalesMember(
       return {
         ok: false,
         status: 400,
-        error: "Upline must be an existing team member (Executive, Manager, or Director)",
+        error: "Upline must be an existing team member (Executive, Manager, or Senior Manager)",
       };
     }
   }

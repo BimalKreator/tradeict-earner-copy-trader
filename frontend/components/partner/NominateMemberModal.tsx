@@ -265,7 +265,7 @@ export function NominateMemberModal({
                 ))}
               </select>
               {requestedRole === "EXECUTIVE" &&
-              options.requesterRole === "DIRECTOR" &&
+              options.requesterRole === "SENIOR_MANAGER" &&
               !uplineLocked ? (
                 <p className="mt-1.5 text-xs text-white/40">
                   Choose yourself or one of your Managers as the Executive&apos;s

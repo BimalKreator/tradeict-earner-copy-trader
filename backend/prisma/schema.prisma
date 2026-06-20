@@ -14,7 +14,7 @@ enum Role {
   USER
   EXECUTIVE
   MANAGER
-  DIRECTOR
+  SENIOR_MANAGER
 }
 
 /** Partner commission wallet state machine (Earned → Payable → Withdrawable). */
@@ -30,7 +30,14 @@ enum CommissionLedgerStatus {
 enum SalesTier {
   EXECUTIVE
   MANAGER
-  DIRECTOR
+  SENIOR_MANAGER
+}
+
+/** Member referral nomination lifecycle (Phase 1 — admin approves in Phase 2). */
+enum ReferralRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 /** Partner monthly payout request lifecycle (Phase 9). */
@@ -45,7 +52,7 @@ enum AffiliateProfileStatus {
   SUSPENDED
 }
 
-/** Sales role a partner may nominate a user for (Director / Manager requests). */
+/** Sales role a partner may nominate a user for (Senior Manager / Manager requests). */
 enum NominatedSalesRole {
   MANAGER
   EXECUTIVE
@@ -123,7 +130,7 @@ model User {
   panNumber     String?
   aadhaarNumber String?
   role          Role                @default(USER)
-  /** Immediate upline in the sales hierarchy (Executive→Manager, Manager→Director). */
+  /** Immediate upline in the sales hierarchy (Executive→Manager, Manager→Senior Manager). */
   parentId      String?
   /** Team member who referred/acquired this user (set at signup — Phase 4). */
   acquiredById  String?
@@ -177,6 +184,7 @@ model User {
   partnerPayoutsCompleted PayoutRequest[]    @relation("PayoutCompletedBy")
   upgradeRequestsSubmitted MemberUpgradeRequest[] @relation("UpgradeRequestRequester")
   upgradeRequestsAsParent  MemberUpgradeRequest[] @relation("UpgradeRequestAssignedParent")
+  referralRequestsSubmitted ReferralRequest[]     @relation("ReferralRequestSponsor")
 
   @@index([parentId])
   @@index([acquiredById])
@@ -563,8 +571,42 @@ model PnLRecord {
   commissionLedgers CommissionLedger[]
 }
 
+/** Admin-managed tier benefits, commission rates, and promotion thresholds. */
+model TierConfig {
+  id                    String    @id @default(uuid())
+  tierLevel             SalesTier @unique
+  /** Direct referral / acquisition commission %. */
+  directCommissionRate  Float
+  /** Team (downline) override commission %. */
+  teamCommissionRate    Float
+  /** Network / upline commission %. */
+  networkCommissionRate Float
+  /** Active direct referrals required to reach this tier. */
+  minReferralsRequired  Int       @default(0)
+  /** Display benefits for partner milestone UI (JSON string array). */
+  benefits              Json      @default("[]")
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+/** Partner submits a referred email; admin approves in Phase 2. */
+model ReferralRequest {
+  id            String                @id @default(uuid())
+  sponsorId     String
+  referredEmail String
+  status        ReferralRequestStatus @default(PENDING)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  sponsor User @relation("ReferralRequestSponsor", fields: [sponsorId], references: [id], onDelete: Cascade)
+
+  @@index([sponsorId])
+  @@index([status, createdAt])
+  @@index([referredEmail])
+}
+
 /**
- * Partner / IB profile — one row per upgraded team member (Executive, Manager, Director).
+ * Partner / IB profile — one row per upgraded team member (Executive, Manager, Senior Manager).
  * Stats are cached for dashboards; authoritative counts can be recomputed from relations.
  */
 model AffiliateProfile {

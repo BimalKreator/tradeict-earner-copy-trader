@@ -55,6 +55,10 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.get("/partner/network-details", jwtAuth, user.getPartnerNetworkDetails);
   router.get("/partner/nomination-options", jwtAuth, user.getPartnerNominationOptions);
   router.post("/partner/nominate-member", jwtAuth, user.nominatePartnerMember);
+  router.post("/partner/referral-request", jwtAuth, user.createPartnerReferralRequest);
+  router.post("/referral-request", jwtAuth, user.createPartnerReferralRequest);
+  router.get("/partner/tier-info", jwtAuth, user.getPartnerTierInfo);
+  router.get("/partner/referral-requests", jwtAuth, user.listPartnerReferralRequests);
   router.post("/partner/request-payout", jwtAuth, user.requestPartnerPayout);
 
   return router;

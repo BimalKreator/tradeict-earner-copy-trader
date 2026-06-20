@@ -377,7 +377,7 @@ function sortNetworkNodes(a: PartnerNetworkNode, b: PartnerNetworkNode): number 
     return a.nodeType === "member" ? -1 : 1;
   }
   const roleOrder: Record<string, number> = {
-    DIRECTOR: 0,
+    SENIOR_MANAGER: 0,
     MANAGER: 1,
     EXECUTIVE: 2,
     USER: 3,
@@ -448,7 +448,7 @@ async function collectPartnerDownline(
     return { members: executives, users };
   }
 
-  if (viewerRole === Role.DIRECTOR) {
+  if (viewerRole === Role.SENIOR_MANAGER) {
     const managers = await prisma.user.findMany({
       where: { role: Role.MANAGER, parentId: viewerId },
       select: {
@@ -561,7 +561,7 @@ function buildPartnerNetworkTree(
     return tree;
   }
 
-  if (viewerRole === Role.DIRECTOR) {
+  if (viewerRole === Role.SENIOR_MANAGER) {
     const managers = members.filter((m) => m.role === Role.MANAGER);
     const executives = members.filter((m) => m.role === Role.EXECUTIVE);
     const executivesByManager = new Map<string, MemberRow[]>();

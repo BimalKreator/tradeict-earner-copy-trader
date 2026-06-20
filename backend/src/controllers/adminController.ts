@@ -83,6 +83,16 @@ import {
   listPendingMemberUpgradeRequests,
   rejectMemberUpgradeRequest,
 } from "../services/affiliateUpgradeRequestService.js";
+import {
+  listReferralRequests,
+  updateReferralRequestStatus,
+} from "../services/referralRequestService.js";
+import {
+  listTierConfigs,
+  updateTierConfigs,
+  type TierConfigUpdateInput,
+} from "../services/tierConfigService.js";
+import { ReferralRequestStatus, SalesTier } from "@prisma/client";
 
 /** Prevent CDN/proxy/browser caching of live admin dashboards (PnL must be fresh). */
 export function applyNoStoreCacheHeaders(res: Response): void {
@@ -3262,7 +3272,7 @@ export function createAdminController(prisma: PrismaClient) {
 
       if (!SALES_MEMBER_ROLES.includes(newRoleRaw as SalesMemberRole)) {
         res.status(400).json({
-          error: "newRole must be EXECUTIVE, MANAGER, or DIRECTOR",
+          error: "newRole must be EXECUTIVE, MANAGER, or SENIOR_MANAGER",
         });
         return;
       }
@@ -3515,6 +3525,156 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listReferralRequestsHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const statusRaw =
+        typeof req.query.status === "string"
+          ? req.query.status.trim().toUpperCase()
+          : "";
+      let statusFilter: ReferralRequestStatus | undefined;
+      if (statusRaw) {
+        if (
+          statusRaw !== "PENDING" &&
+          statusRaw !== "APPROVED" &&
+          statusRaw !== "REJECTED"
+        ) {
+          res.status(400).json({
+            error: "status must be PENDING, APPROVED, or REJECTED",
+          });
+          return;
+        }
+        statusFilter = statusRaw as ReferralRequestStatus;
+      }
+
+      const requests = await listReferralRequests(
+        prisma,
+        statusFilter ? { status: statusFilter } : undefined,
+      );
+      applyNoStoreCacheHeaders(res);
+      res.json({ requests });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function patchReferralRequestStatusHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const id = typeof req.params.id === "string" ? req.params.id.trim() : "";
+      if (!id) {
+        res.status(400).json({ error: "Request id is required" });
+        return;
+      }
+
+      const body = req.body as { status?: unknown };
+      const statusRaw =
+        typeof body.status === "string" ? body.status.trim().toUpperCase() : "";
+
+      if (statusRaw !== "APPROVED" && statusRaw !== "REJECTED") {
+        res.status(400).json({ error: "status must be APPROVED or REJECTED" });
+        return;
+      }
+
+      const outcome = await updateReferralRequestStatus(
+        prisma,
+        id,
+        statusRaw as "APPROVED" | "REJECTED",
+        adminUserId,
+      );
+
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.json({ ok: true, ...outcome.data });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getTierConfigHandler(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const tiers = await listTierConfigs(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json({ tiers });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function putTierConfigHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as { tiers?: unknown };
+      if (!Array.isArray(body.tiers)) {
+        res.status(400).json({ error: "Body must include tiers array" });
+        return;
+      }
+
+      const tiers: TierConfigUpdateInput[] = [];
+      for (const raw of body.tiers) {
+        if (typeof raw !== "object" || raw === null) {
+          res.status(400).json({ error: "Each tier must be an object" });
+          return;
+        }
+        const row = raw as Record<string, unknown>;
+        const tierLevel =
+          typeof row.tierLevel === "string" ? row.tierLevel.trim().toUpperCase() : "";
+        if (
+          tierLevel !== SalesTier.EXECUTIVE &&
+          tierLevel !== SalesTier.MANAGER &&
+          tierLevel !== SalesTier.SENIOR_MANAGER
+        ) {
+          res.status(400).json({
+            error: "Each tier must include tierLevel EXECUTIVE, MANAGER, or SENIOR_MANAGER",
+          });
+          return;
+        }
+        tiers.push({
+          tierLevel,
+          directCommissionRate: Number(row.directCommissionRate),
+          teamCommissionRate: Number(row.teamCommissionRate),
+          networkCommissionRate: Number(row.networkCommissionRate),
+          minReferralsRequired: Number(row.minReferralsRequired),
+          benefits: Array.isArray(row.benefits)
+            ? row.benefits.filter((b): b is string => typeof b === "string")
+            : [],
+        });
+      }
+
+      const outcome = await updateTierConfigs(prisma, tiers);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.json({ ok: true, tiers: outcome.data.tiers });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getRevenueAnalytics,
     getUserTradesBilling,
@@ -3527,6 +3687,10 @@ export function createAdminController(prisma: PrismaClient) {
     listMemberUpgradeRequests,
     approveMemberUpgradeRequest: approveMemberUpgradeRequestHandler,
     rejectMemberUpgradeRequest: rejectMemberUpgradeRequestHandler,
+    listReferralRequests: listReferralRequestsHandler,
+    patchReferralRequestStatus: patchReferralRequestStatusHandler,
+    getTierConfig: getTierConfigHandler,
+    putTierConfig: putTierConfigHandler,
     getNetworkTree,
     changeUserReferrer,
     deleteUserSafely,

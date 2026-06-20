@@ -109,8 +109,8 @@ function uplineLabel(user: {
 }): string {
   const name = user.name?.trim();
   const roleLabel =
-    user.role === Role.DIRECTOR
-      ? "Director"
+    user.role === Role.SENIOR_MANAGER
+      ? "Senior Manager"
       : user.role === Role.MANAGER
         ? "Manager"
         : "Executive";
@@ -146,7 +146,7 @@ export async function getPartnerNominationOptions(
     };
   }
 
-  if (requester.role === Role.DIRECTOR) {
+  if (requester.role === Role.SENIOR_MANAGER) {
     const managers = await prisma.user.findMany({
       where: { role: Role.MANAGER, parentId: requester.id },
       select: { id: true, name: true, email: true, role: true },
@@ -206,7 +206,7 @@ async function validateNominationAssignment(
     return { ok: true, data: { assignedParentId: requester.id } };
   }
 
-  if (requester.role === Role.DIRECTOR) {
+  if (requester.role === Role.SENIOR_MANAGER) {
     if (requestedRole === NominatedSalesRole.MANAGER) {
       if (assignedParentId !== requester.id) {
         return {
@@ -245,7 +245,7 @@ async function validateNominationAssignment(
   return {
     ok: false,
     status: 403,
-    error: "Only Directors and Managers may submit nominations",
+    error: "Only Senior Managers and Managers may submit nominations",
   };
 }
 
@@ -278,11 +278,11 @@ export async function createMemberUpgradeRequest(
       return { ok: false, status: 404, error: "Requester not found" };
     }
 
-    if (requester.role !== Role.MANAGER && requester.role !== Role.DIRECTOR) {
+    if (requester.role !== Role.MANAGER && requester.role !== Role.SENIOR_MANAGER) {
       return {
         ok: false,
         status: 403,
-        error: "Only Directors and Managers may submit nominations",
+        error: "Only Senior Managers and Managers may submit nominations",
       };
     }
 

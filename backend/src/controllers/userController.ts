@@ -35,6 +35,8 @@ import {
   createMemberUpgradeRequest,
   getPartnerNominationOptions,
 } from "../services/affiliateUpgradeRequestService.js";
+import { createReferralRequest, listReferralRequestsForSponsor } from "../services/referralRequestService.js";
+import { getPartnerTierInfo } from "../services/affiliateUpgradeService.js";
 import { NominatedSalesRole } from "@prisma/client";
 
 const DEFAULT_TRADE_LIMIT = 100;
@@ -1129,6 +1131,102 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function createPartnerReferralRequestHandler(
+    req: Request,
+    res: Response,
+    _next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { referredEmail?: unknown };
+      const referredEmail =
+        typeof body.referredEmail === "string" ? body.referredEmail : "";
+
+      if (!referredEmail.trim()) {
+        res.status(400).json({ error: "referredEmail is required" });
+        return;
+      }
+
+      const outcome = await createReferralRequest(
+        prisma,
+        userId,
+        referredEmail,
+      );
+
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      res.status(201).json({ ok: true, requestId: outcome.data.id });
+    } catch (err) {
+      console.error("[POST /api/user/partner/referral-request] unhandled error:", err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Referral request failed";
+      res.status(500).json({ error: message });
+    }
+  }
+
+  async function getPartnerTierInfoHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const info = await getPartnerTierInfo(prisma, userId);
+      if (!info) {
+        res.status(403).json({ error: "Partner access required" });
+        return;
+      }
+
+      applyNoStoreCacheHeaders(res);
+      res.json(info);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listPartnerReferralRequestsHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const metrics = await getPartnerMetrics(prisma, userId);
+      if (!metrics) {
+        res.status(403).json({ error: "Partner access required" });
+        return;
+      }
+
+      const requests = await listReferralRequestsForSponsor(prisma, userId);
+      applyNoStoreCacheHeaders(res);
+      res.json({ requests });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
     patchMe,
@@ -1148,6 +1246,9 @@ export function createUserController(prisma: PrismaClient) {
     getPartnerNetworkDetails: getPartnerNetworkDetailsHandler,
     getPartnerNominationOptions: getPartnerNominationOptionsHandler,
     nominatePartnerMember: nominatePartnerMemberHandler,
+    createPartnerReferralRequest: createPartnerReferralRequestHandler,
+    getPartnerTierInfo: getPartnerTierInfoHandler,
+    listPartnerReferralRequests: listPartnerReferralRequestsHandler,
     requestPartnerPayout: requestPartnerPayoutHandler,
     setProfileReferrer,
   };

@@ -11,6 +11,8 @@ import {
   Loader2,
   Lock,
   RefreshCw,
+  Sparkles,
+  Target,
   Timer,
   TrendingUp,
   Users,
@@ -21,6 +23,8 @@ import {
   NominateMemberModal,
   NominateTeamMemberButton,
 } from "@/components/partner/NominateMemberModal";
+import { MilestoneTracker } from "@/components/partner/MilestoneTracker";
+import { ReferralSubmissionForm } from "@/components/partner/ReferralSubmissionForm";
 import { useAuth } from "@/context/AuthContext";
 import { resolveApiBase } from "@/lib/apiBase";
 import {
@@ -131,7 +135,7 @@ function referralSignupUrl(code: string): string {
 }
 
 function roleBadgeClass(role: string): string {
-  if (role === "DIRECTOR") {
+  if (role === "SENIOR_MANAGER") {
     return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
   }
   if (role === "MANAGER") {
@@ -145,7 +149,7 @@ function roleBadgeClass(role: string): string {
 
 function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
   if (nodeType === "user") return "Trader";
-  if (role === "DIRECTOR") return "Director";
+  if (role === "SENIOR_MANAGER") return "Senior Manager";
   if (role === "MANAGER") return "Manager";
   if (role === "EXECUTIVE") return "Executive";
   return role;
@@ -375,10 +379,12 @@ export default function PartnerDashboardPage() {
     null,
   );
   const [nominateOpen, setNominateOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"overview" | "growth">("overview");
+  const [milestoneRefreshKey, setMilestoneRefreshKey] = useState(0);
 
   /** Directors & Managers only — never hide when header already shows Team Director/Manager. */
   const canNominate = useMemo(() => {
-    if (salesTeamRole === "DIRECTOR" || salesTeamRole === "MANAGER") {
+    if (salesTeamRole === "SENIOR_MANAGER" || salesTeamRole === "MANAGER") {
       return true;
     }
     if (canNominateMembers(user?.role) || canNominateMembers(network?.viewerRole)) {
@@ -400,7 +406,7 @@ export default function PartnerDashboardPage() {
 
   const hierarchyHint = useMemo(() => {
     const role = (network?.viewerRole ?? salesTeamRole) as SalesTeamRole | undefined;
-    if (role === "DIRECTOR") {
+    if (role === "SENIOR_MANAGER") {
       return "Managers → Executives → Traders across your full downline";
     }
     if (role === "MANAGER") {
@@ -601,6 +607,51 @@ export default function PartnerDashboardPage() {
         </div>
       ) : null}
 
+      <div className="flex flex-wrap gap-2 rounded-xl border border-glassBorder bg-white/[0.03] p-1">
+        <button
+          type="button"
+          onClick={() => setActiveTab("overview")}
+          className={`inline-flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+            activeTab === "overview"
+              ? "bg-primary/15 text-primary ring-1 ring-primary/40"
+              : "text-white/60 hover:bg-white/5 hover:text-white"
+          }`}
+        >
+          <Wallet className="h-4 w-4" aria-hidden />
+          Overview
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("growth")}
+          className={`inline-flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition sm:flex-none ${
+            activeTab === "growth"
+              ? "bg-primary/15 text-primary ring-1 ring-primary/40"
+              : "text-white/60 hover:bg-white/5 hover:text-white"
+          }`}
+        >
+          <Target className="h-4 w-4" aria-hidden />
+          Milestones & Referrals
+        </button>
+      </div>
+
+      {activeTab === "growth" ? (
+        <section className="space-y-8">
+          <MilestoneTracker
+            key={milestoneRefreshKey}
+            apiBase={apiBase}
+            token={token}
+          />
+          <ReferralSubmissionForm
+            apiBase={apiBase}
+            token={token}
+            refreshKey={milestoneRefreshKey}
+            onSubmitted={() => setMilestoneRefreshKey((k) => k + 1)}
+          />
+        </section>
+      ) : null}
+
+      {activeTab === "overview" ? (
+        <>
       <section className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/15 via-violet-500/10 to-transparent p-6 shadow-xl sm:p-8">
         <div
           className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/20 blur-3xl"
@@ -860,6 +911,8 @@ export default function PartnerDashboardPage() {
               </div>
             )}
           </section>
+        </>
+      ) : null}
         </>
       ) : null}
 

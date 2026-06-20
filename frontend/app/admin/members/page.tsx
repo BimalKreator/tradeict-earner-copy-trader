@@ -56,7 +56,7 @@ type TeamMember = {
   upgradedAt: string | null;
 };
 
-type SalesRole = "EXECUTIVE" | "MANAGER" | "DIRECTOR";
+type SalesRole = "EXECUTIVE" | "MANAGER" | "SENIOR_MANAGER";
 
 type NominatedRole = "EXECUTIVE" | "MANAGER";
 
@@ -89,7 +89,7 @@ type UpgradeRequestRow = {
 const ROLE_LABELS: Record<SalesRole, string> = {
   EXECUTIVE: "Team Executive",
   MANAGER: "Team Manager",
-  DIRECTOR: "Team Director",
+  SENIOR_MANAGER: "Senior Manager",
 };
 
 const NOMINATED_ROLE_LABELS: Record<NominatedRole, string> = {
@@ -117,7 +117,7 @@ const usdFmt = new Intl.NumberFormat("en-US", {
 });
 
 function roleBadgeClass(role: string): string {
-  if (role === "DIRECTOR") return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
+  if (role === "SENIOR_MANAGER") return "bg-violet-500/15 text-violet-200 ring-violet-500/30";
   if (role === "MANAGER") return "bg-sky-500/15 text-sky-200 ring-sky-500/30";
   if (role === "EXECUTIVE") return "bg-emerald-500/15 text-emerald-200 ring-emerald-500/30";
   return "bg-white/10 text-white/70 ring-white/20";
@@ -233,18 +233,18 @@ export default function AdminMembersPage() {
   }, [apiBase, modalOpen, userQuery]);
 
   const parentOptions = useMemo(() => {
-    if (newRole === "DIRECTOR") {
-      return members.filter((m) => m.role === "DIRECTOR");
+    if (newRole === "SENIOR_MANAGER") {
+      return members.filter((m) => m.role === "SENIOR_MANAGER");
     }
     if (newRole === "MANAGER") {
-      return members.filter((m) => m.role === "DIRECTOR");
+      return members.filter((m) => m.role === "SENIOR_MANAGER");
     }
     return members.filter(
-      (m) => m.role === "MANAGER" || m.role === "DIRECTOR",
+      (m) => m.role === "MANAGER" || m.role === "SENIOR_MANAGER",
     );
   }, [members, newRole]);
 
-  const parentRequired = newRole !== "DIRECTOR";
+  const parentRequired = newRole !== "SENIOR_MANAGER";
 
   function resetModal() {
     setFormError(null);
@@ -729,14 +729,14 @@ export default function AdminMembersPage() {
                 >
                   <option value="EXECUTIVE">Team Executive (5% / 2% / 1%)</option>
                   <option value="MANAGER">Team Manager (6% / 2%)</option>
-                  <option value="DIRECTOR">Team Director (8%)</option>
+                  <option value="SENIOR_MANAGER">Senior Manager (8%)</option>
                 </select>
               </label>
 
               <label className="block">
                 <span className="text-xs font-medium text-white/60">
                   Upline (parent)
-                  {!parentRequired ? " — optional for Directors" : " — required"}
+                  {!parentRequired ? " — optional for Senior Managers" : " — required"}
                 </span>
                 <select
                   value={parentId}
@@ -747,7 +747,7 @@ export default function AdminMembersPage() {
                   <option value="">
                     {parentRequired
                       ? "Select upline…"
-                      : "No upline (top-level Director)"}
+                      : "No upline (top-level Senior Manager)"}
                   </option>
                   {parentOptions.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -757,7 +757,7 @@ export default function AdminMembersPage() {
                 </select>
                 {parentRequired && parentOptions.length === 0 ? (
                   <p className="mt-1 text-xs text-amber-200/90">
-                    No eligible upline yet. Add a Director first, or assign a Manager
+                    No eligible upline yet. Add a Senior Manager first, or assign a Manager
                     before upgrading Executives.
                   </p>
                 ) : null}

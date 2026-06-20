@@ -22,7 +22,7 @@ export type AuthUser = {
   id: string;
   email: string;
   name: string | null;
-  /** USER | ADMIN | EXECUTIVE | MANAGER | DIRECTOR */
+  /** USER | ADMIN | EXECUTIVE | MANAGER | SENIOR_MANAGER */
   role: string;
   mobile?: string | null;
   address?: string | null;
@@ -37,7 +37,7 @@ type AuthContextValue = {
   isAuthenticated: boolean;
   token: string | null;
   user: AuthUser | null;
-  /** True when role is EXECUTIVE, MANAGER, or DIRECTOR. */
+  /** True when role is EXECUTIVE, MANAGER, or SENIOR_MANAGER. */
   isSalesTeamMember: boolean;
   salesTeamRole: SalesTeamRole | null;
   setSession: (token: string, user?: AuthUser | null) => void;
