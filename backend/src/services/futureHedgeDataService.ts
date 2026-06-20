@@ -5,6 +5,7 @@ import {
   initializeDeltaClient,
   resolveCcxtSymbol,
 } from "./exchangeService.js";
+import { extractStrictMarkPrice } from "./liveMarkPriceCache.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 
 /** Compact Delta India perp key (BTC linear perp). */
@@ -55,6 +56,15 @@ let ohlcvTimer: ReturnType<typeof setInterval> | null = null;
 let configTimer: ReturnType<typeof setInterval> | null = null;
 let ohlcvInFlight = false;
 let ccxtSymbolCached: string | null = null;
+let wsConnected = false;
+
+type BtcPriceTickListener = (price: number) => void;
+let btcPriceTickListener: BtcPriceTickListener | null = null;
+
+/** Register instant breakeven handler on every WS BTC price update. */
+export function onBtcPriceTick(listener: BtcPriceTickListener): void {
+  btcPriceTickListener = listener;
+}
 
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -101,6 +111,9 @@ function setLivePrice(price: number, source: "ws" | "rest"): void {
   livePriceUpdatedAt = Date.now();
   priceSource = source;
   recomputeTrend();
+  if (source === "ws") {
+    btcPriceTickListener?.(price);
+  }
 }
 
 /**
@@ -200,6 +213,11 @@ function ingestWsTickerMessage(raw: unknown): void {
   const msg = raw as Record<string, unknown>;
   const type = String(msg.type ?? "");
 
+  if (type === "mark_price") {
+    ingestWsMarkPriceMessage(msg);
+    return;
+  }
+
   if (type !== "ticker" && type !== "v2/ticker") return;
 
   const layers: unknown[] = [msg.d, msg.data];
@@ -211,26 +229,49 @@ function ingestWsTickerMessage(raw: unknown): void {
   for (const layer of layers) {
     if (Array.isArray(layer)) {
       for (const row of layer) {
-        const r = asRecord(row);
-        if (!r) continue;
-        const sym = String(
-          r.s ?? r.symbol ?? r.product_symbol ?? r.sy ?? "",
-        ).trim();
-        if (!symbolMatchesBtc(sym)) continue;
-        const last = extractTickerLastPrice(r);
-        if (last != null) setLivePrice(last, "ws");
+        ingestWsTickerRow(row);
       }
     } else {
-      const r = asRecord(layer);
-      if (!r) continue;
-      const sym = String(
-        r.s ?? r.symbol ?? r.product_symbol ?? r.sy ?? "",
-      ).trim();
-      if (!symbolMatchesBtc(sym)) continue;
-      const last = extractTickerLastPrice(r);
-      if (last != null) setLivePrice(last, "ws");
+      ingestWsTickerRow(layer);
     }
   }
+}
+
+function ingestWsMarkPriceMessage(msg: Record<string, unknown>): void {
+  const layers: unknown[] = [msg.d, msg.data, msg];
+  const payload = asRecord(msg.payload);
+  if (payload) {
+    layers.push(payload.d, payload.data, payload);
+  }
+  for (const layer of layers) {
+    if (Array.isArray(layer)) {
+      for (const row of layer) ingestWsMarkPriceRow(row);
+    } else {
+      ingestWsMarkPriceRow(layer);
+    }
+  }
+}
+
+function ingestWsMarkPriceRow(row: unknown): void {
+  const r = asRecord(row);
+  if (!r) return;
+  const sym = String(
+    r.sy ?? r.s ?? r.symbol ?? r.product_symbol ?? "",
+  ).trim();
+  if (!symbolMatchesBtc(sym)) return;
+  const mark = extractStrictMarkPrice(r) ?? num(r.p);
+  if (mark != null && mark > 0) setLivePrice(mark, "ws");
+}
+
+function ingestWsTickerRow(row: unknown): void {
+  const r = asRecord(row);
+  if (!r) return;
+  const sym = String(
+    r.s ?? r.symbol ?? r.product_symbol ?? r.sy ?? "",
+  ).trim();
+  if (!symbolMatchesBtc(sym)) return;
+  const last = extractTickerLastPrice(r) ?? extractStrictMarkPrice(r);
+  if (last != null) setLivePrice(last, "ws");
 }
 
 function clearHeartbeat(): void {
@@ -283,6 +324,7 @@ function connectWebSocket(): void {
   socket.on("open", () => {
     if (destroyed) return;
     reconnectAttempt = 0;
+    wsConnected = true;
     socket.send(JSON.stringify({ type: "enable_heartbeat" }));
     socket.send(
       JSON.stringify({
@@ -291,13 +333,17 @@ function connectWebSocket(): void {
           channels: [
             { name: "ticker", symbols: [FUTURE_HEDGE_BTC_SYMBOL] },
             { name: "v2/ticker", symbols: [FUTURE_HEDGE_BTC_SYMBOL] },
+            {
+              name: "mark_price",
+              symbols: [`MARK:${FUTURE_HEDGE_BTC_SYMBOL}`, "MARK:BTCUSD"],
+            },
           ],
         },
       }),
     );
     armHeartbeat();
     console.log(
-      `[future-hedge-data] WS subscribed ticker for ${FUTURE_HEDGE_BTC_SYMBOL}`,
+      `[future-hedge-data] WS subscribed ticker+mark for ${FUTURE_HEDGE_BTC_SYMBOL}`,
     );
   });
 
@@ -322,6 +368,7 @@ function connectWebSocket(): void {
   });
 
   socket.on("close", () => {
+    wsConnected = false;
     tearDownSocket();
     if (!destroyed) scheduleReconnect();
   });
@@ -348,7 +395,9 @@ function startLoops(prisma: PrismaClient): void {
     refreshEmaFromExchange(emaPeriodConfigured),
   );
 
+  /** REST ticker is fallback only when WS is down or price is stale. */
   tickerPollTimer = setInterval(() => {
+    if (wsConnected && !isPriceStale()) return;
     void pollTickerRest();
   }, TICKER_POLL_MS);
 
@@ -438,6 +487,8 @@ export function startFutureHedgeDataEngine(prisma: PrismaClient): () => void {
 
   return () => {
     destroyed = true;
+    wsConnected = false;
+    btcPriceTickListener = null;
     stopLoops();
     tearDownSocket();
     console.log("[future-hedge-data] engine stopped");

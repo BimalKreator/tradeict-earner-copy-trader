@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { SubscriptionStatus, type PrismaClient } from "@prisma/client";
 import { fetchDeltaOpenPositions } from "./exchangeService.js";
+import { FUTURE_HEDGE_BTC_SYMBOL } from "./futureHedgeDataService.js";
 import {
   cacheLiveMarkPrice,
   ingestLivePriceWsMessage,
@@ -205,6 +206,11 @@ function scheduleSymbolRefresh(prisma: PrismaClient): void {
 /** Start public WS mark/ticker feed + periodic symbol discovery from master accounts. */
 export function startLivePriceTracker(prisma: PrismaClient): () => void {
   destroyed = false;
+  registerSymbolsForLivePrices([
+    FUTURE_HEDGE_BTC_SYMBOL,
+    "BTCUSD",
+    "BTCUSDT",
+  ]);
   connect();
   void refreshSymbolsFromMasterAccounts(prisma).finally(() => syncSubscriptions());
   scheduleSymbolRefresh(prisma);

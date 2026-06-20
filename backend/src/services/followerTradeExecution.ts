@@ -1047,7 +1047,10 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         return;
       }
 
-      if (await followerFillAlreadyCopied(prisma, clientOrderId)) {
+      if (
+        fill.liveMasterFill !== true &&
+        (await followerFillAlreadyCopied(prisma, clientOrderId))
+      ) {
         console.log(
           `[copy] Skip duplicate master fill user=${sub.userId} ${fill.symbol} clientOrderId=${clientOrderId}`,
         );
@@ -1059,35 +1062,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       let lotsToOrder: number;
 
       if (isLiveIncrement) {
-        const botQty = await sumOpenFollowerBotQuantity(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-        });
-        let exchangeLots = 0;
-        try {
-          exchangeLots = Math.floor(
-            await followerLegContracts(
-              creds.apiKey,
-              creds.apiSecret,
-              fill.symbol,
-              fill.side,
-              { skipCache: true },
-            ),
-          );
-        } catch {
-          /* deficit uses bot qty only */
-        }
-        const effective = Math.max(Math.floor(botQty), exchangeLots);
-        expectedLots = effective + incrementLots;
-        if (effective >= expectedLots) {
-          console.log(
-            `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
-              `(effective=${effective}, increment +${incrementLots} already applied)`,
-          );
-          return;
-        }
+        expectedLots = followerLotsFromMaster(masterTargetLots, sub);
         lotsToOrder = incrementLots;
       } else {
         expectedLots = followerLotsFromMaster(masterTargetLots, sub);
@@ -1131,11 +1106,6 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
           `clientOrderId=${job.clientOrderId}`,
       );
 
-      await markSubscriptionSyncPending(prisma, {
-        userId: job.sub.userId,
-        strategyId,
-      });
-
       const result = await executeFollowerTradeWithVerification(prisma, {
         strategyId,
         userId: job.sub.userId,
@@ -1149,6 +1119,38 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
         clientOrderId: job.clientOrderId,
         liveMasterFill: fill.liveMasterFill === true,
       });
+
+      return { job, result };
+    }),
+  );
+
+  void Promise.all(
+    settled.map(async (outcome) => {
+      if (outcome.status !== "fulfilled") return;
+      const { job, result } = outcome.value;
+      if (fill.liveMasterFill === true) {
+        if (!result.success) {
+          await markSubscriptionSyncFailed(prisma, {
+            userId: job.sub.userId,
+            strategyId,
+            error: result.error ?? "Copy trade execution failed",
+          });
+          await persistCopyTradeRow(prisma, {
+            userId: job.sub.userId,
+            strategyId,
+            symbol: fill.symbol,
+            side: fill.side,
+            size: job.lots,
+            entryPrice: entryForCopy,
+            status: TradeStatus.FAILED,
+            clientOrderId: job.clientOrderId,
+            exitReason: isHardExecutionError(result.error ?? "")
+              ? EXIT_REASON.INSUFFICIENT_MARGIN
+              : EXIT_REASON.EXECUTION_FAILED,
+          });
+        }
+        return;
+      }
 
       if (result.success && result.verified) {
         await markSubscriptionSynced(prisma, {
@@ -1201,10 +1203,13 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
             }
           : {}),
       });
-
-      return result;
     }),
-  );
+  ).catch((err) => {
+    console.error(
+      `[copy] deferred open persistence failed ${fill.symbol}:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
 
   for (const outcome of settled) {
     if (outcome.status === "rejected") {
@@ -2455,7 +2460,8 @@ export async function executeFollowerTradeWithVerification(
     args.strategyId &&
     args.reduceOnly !== true &&
     args.adminForceSync !== true &&
-    args.forceRestSync !== true
+    args.forceRestSync !== true &&
+    args.liveMasterFill !== true
   ) {
     const masterOk = await masterLegOpenOnExchangeRest(prisma, {
       strategyId: args.strategyId,
@@ -2489,53 +2495,151 @@ export async function executeFollowerTradeWithVerification(
       };
     }
 
-    const sub = args.adminForceSync
-      ? await findCopySubscriptionForUser(prisma, {
-          strategyId: args.strategyId,
+    if (args.liveMasterFill !== true) {
+      const sub = args.adminForceSync
+        ? await findCopySubscriptionForUser(prisma, {
+            strategyId: args.strategyId,
+            userId: args.userId,
+          })
+        : await findActiveCopySubscriptionForUser(prisma, {
+            strategyId: args.strategyId,
+            userId: args.userId,
+          });
+      if (!sub) {
+        await markSubscriptionSyncError(prisma, {
           userId: args.userId,
-        })
-      : await findActiveCopySubscriptionForUser(prisma, {
           strategyId: args.strategyId,
-          userId: args.userId,
+          label: "Subscription Inactive",
         });
-    if (!sub) {
-      await markSubscriptionSyncError(prisma, {
-        userId: args.userId,
-        strategyId: args.strategyId,
-        label: "Subscription Inactive",
-      });
-      return {
-        success: false,
-        error: args.adminForceSync
-          ? "User is not subscribed to this strategy"
-          : "No active subscription for this strategy",
-        attempts: 0,
-        verified: false,
-      };
-    }
-    if (args.adminForceSync && !sub.isActive) {
-      return {
-        success: false,
-        error: "User copy subscription is inactive (isActive is false).",
-        attempts: 0,
-        verified: false,
-      };
-    }
+        return {
+          success: false,
+          error: args.adminForceSync
+            ? "User is not subscribed to this strategy"
+            : "No active subscription for this strategy",
+          attempts: 0,
+          verified: false,
+        };
+      }
+      if (args.adminForceSync && !sub.isActive) {
+        return {
+          success: false,
+          error: "User copy subscription is inactive (isActive is false).",
+          attempts: 0,
+          verified: false,
+        };
+      }
 
-    if (
-      !skipSyncStatusGate &&
-      subscriptionSyncBlocksReconcile(sub.syncStatus)
-    ) {
-      console.log(
-        `[RETRY_LOOP] skip copy user=${args.userId} syncStatus=${sub.syncStatus}`,
-      );
-      return {
-        success: false,
-        error: `Subscription sync blocked (${sub.syncStatus})`,
-        attempts: 0,
-        verified: false,
-      };
+      if (
+        !skipSyncStatusGate &&
+        subscriptionSyncBlocksReconcile(sub.syncStatus)
+      ) {
+        console.log(
+          `[RETRY_LOOP] skip copy user=${args.userId} syncStatus=${sub.syncStatus}`,
+        );
+        return {
+          success: false,
+          error: `Subscription sync blocked (${sub.syncStatus})`,
+          attempts: 0,
+          verified: false,
+        };
+      }
     }
+  }
+
+  if (
+    args.liveMasterFill === true &&
+    args.reduceOnly !== true &&
+    args.strategyId
+  ) {
+    const strategyId = args.strategyId;
+    const openClientOrderId =
+      args.clientOrderId ??
+      buildStableCopyClientOrderId({
+        strategyId,
+        userId: args.userId,
+        masterFillKey: `${symbol}:${side}:open`,
+        symbol,
+        side,
+        leg: "open",
+      });
+    const legLockKey = copyLegLockKey({
+      userId: args.userId,
+      strategyId,
+      symbol,
+      side,
+    });
+
+    markFollowerCopyInflight(
+      {
+        userId: args.userId,
+        strategyId,
+        symbol,
+        side,
+      },
+      Date.now() + FOLLOWER_ENTRY_INFLIGHT_MS,
+    );
+
+    return withCopyLegExecutionLock(legLockKey, async () => {
+      const lastResult = await placeFollowerOrder(
+        apiKey,
+        apiSecret,
+        symbol,
+        side,
+        orderLots,
+        openClientOrderId ? { clientOrderId: openClientOrderId } : undefined,
+      );
+
+      if (lastResult.success) {
+        void finalizeOptimisticFollowerOpen(prisma, {
+          strategyId,
+          userId: args.userId,
+          symbol,
+          side,
+          targetContracts: orderLots,
+          ...(args.entryPrice != null ? { entryPrice: args.entryPrice } : {}),
+          openClientOrderId,
+          lastResult,
+          totalFee: lastResult.feeCost ?? 0,
+          attempts: 1,
+        }).catch((err) => {
+          console.warn(
+            `[copy-exec] deferred live open persist user=${args.userId} ${symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+        void persistCopyTradeRow(prisma, {
+          userId: args.userId,
+          strategyId,
+          symbol,
+          side,
+          size: orderLots,
+          entryPrice: args.entryPrice ?? 0,
+          status: TradeStatus.OPEN,
+          tradingFee: lastResult.feeCost ?? 0,
+          clientOrderId: openClientOrderId,
+        }).catch((err) => {
+          console.warn(
+            `[copy-exec] deferred live trade row user=${args.userId} ${symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+      } else if (isHardExecutionError(lastResult.error ?? "")) {
+        void markFollowerOrderFailure(prisma, {
+          strategyId,
+          userId: args.userId,
+          symbol,
+          error: lastResult.error ?? "unknown",
+        }).catch(() => undefined);
+      }
+
+      return {
+        ...lastResult,
+        attempts: 1,
+        verified: lastResult.success,
+        ...(lastResult.success ? { verifiedQty: orderLots } : {}),
+        persistedOpen: false,
+      };
+    });
   }
 
   if (args.reduceOnly === true) {

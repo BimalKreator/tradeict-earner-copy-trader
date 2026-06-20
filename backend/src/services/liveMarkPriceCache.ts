@@ -1,6 +1,26 @@
 /** Delta product symbol → latest **mark** price (USD). Never stores LTP / bid / ask. */
 export const liveMarkPrices = new Map<string, number>();
 
+type BtcMarkPriceListener = (price: number) => void;
+let btcMarkPriceListener: BtcMarkPriceListener | null = null;
+
+/** Secondary BTC tick source from mark_price WS channel (feeds breakeven). */
+export function onBtcMarkPriceTick(listener: BtcMarkPriceListener): void {
+  btcMarkPriceListener = listener;
+}
+
+function isBtcProductSymbol(raw: string): boolean {
+  const s = raw.trim().toUpperCase();
+  if (!s) return false;
+  const compact = s.startsWith("MARK:") ? s.slice(5) : s;
+  return (
+    compact === "BTCUSDT" ||
+    compact === "BTCUSD" ||
+    compact === "BTC/USDT" ||
+    compact === "BTC/USD:USD"
+  );
+}
+
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && v.trim()) {
@@ -50,6 +70,10 @@ export function cacheLiveMarkPrice(productSymbol: string, price: number): void {
 
   for (const k of keys) {
     liveMarkPrices.set(k, price);
+  }
+
+  if (isBtcProductSymbol(raw) || isBtcProductSymbol(base)) {
+    btcMarkPriceListener?.(price);
   }
 }
 

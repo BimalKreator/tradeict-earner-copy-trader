@@ -47,6 +47,20 @@ export type CopySubscriptionRow = Prisma.UserStrategySubscriptionGetPayload<{
   include: typeof COPY_SUBSCRIPTION_INCLUDE;
 }>;
 
+const SUBSCRIBER_CACHE_TTL_MS = 3_000;
+let subscriberCache: {
+  strategyId: string;
+  rows: CopySubscriptionRow[];
+  fetchedAt: number;
+} | null = null;
+let strategyIdCache: { id: string | null; fetchedAt: number } | null = null;
+
+/** Bust in-memory copy roster after subscription deploy/undeploy/sync changes. */
+export function invalidateCopySubscriberCache(): void {
+  subscriberCache = null;
+  strategyIdCache = null;
+}
+
 export async function findActiveCopySubscribersForStrategy(
   prisma: PrismaClient,
   strategyId: string,
@@ -104,13 +118,26 @@ export function followerLotsFromMaster(
 export async function resolveFutureHedgeStrategyId(
   prisma: PrismaClient,
 ): Promise<string | null> {
+  const now = Date.now();
+  if (
+    strategyIdCache &&
+    now - strategyIdCache.fetchedAt < SUBSCRIBER_CACHE_TTL_MS
+  ) {
+    return strategyIdCache.id;
+  }
+
   const id = await resolveCanonicalFutureHedgeStrategyId(prisma);
-  if (!id) return null;
+  if (!id) {
+    strategyIdCache = { id: null, fetchedAt: now };
+    return null;
+  }
   const row = await prisma.strategy.findUnique({
     where: { id },
     select: { isActive: true },
   });
-  return row?.isActive ? id : null;
+  const activeId = row?.isActive ? id : null;
+  strategyIdCache = { id: activeId, fetchedAt: now };
+  return activeId;
 }
 
 export { normalizeFutureHedgeStrategyId } from "./futureHedgeService.js";
@@ -133,7 +160,19 @@ export async function findActiveFutureHedgeCopySubscribers(
 ): Promise<CopySubscriptionRow[]> {
   const strategyId = await resolveFutureHedgeStrategyId(prisma);
   if (!strategyId) return [];
-  return findActiveCopySubscribersForStrategy(prisma, strategyId);
+
+  const now = Date.now();
+  if (
+    subscriberCache &&
+    subscriberCache.strategyId === strategyId &&
+    now - subscriberCache.fetchedAt < SUBSCRIBER_CACHE_TTL_MS
+  ) {
+    return subscriberCache.rows;
+  }
+
+  const rows = await findActiveCopySubscribersForStrategy(prisma, strategyId);
+  subscriberCache = { strategyId, rows, fetchedAt: now };
+  return rows;
 }
 
 export function resolveCopySubscriptionCreds(

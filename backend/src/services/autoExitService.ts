@@ -29,8 +29,14 @@ import {
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
 const AUTO_EXIT_COOLDOWN_MS = 15_000;
-/** Consecutive poll ticks above/below threshold before closing. */
+/** Consecutive poll ticks above/below threshold before PnL auto-exit closes. */
 const SUSTAINED_BREACH_TICKS = 3;
+/** Breakeven exits fire on the first price tick past bounds (WS-driven). */
+const BREAKEVEN_SUSTAINED_TICKS = 1;
+/** In-memory breakeven strategy roster refresh interval. */
+const BREAKEVEN_STRATEGY_CACHE_MS = 10_000;
+/** Cached master legs TTL — avoids REST on every WS tick. */
+const MASTER_LEGS_CACHE_TTL_MS = 4_000;
 /** Pause after new master legs — margined UPNL can lag realtime overlay ~10s. */
 const POSITION_SETTLE_GRACE_MS = 12_000;
 
@@ -54,6 +60,162 @@ const lastBtcPriceByStrategy = new Map<string, number>();
 
 /** USD tolerance when a single breakeven level is configured. */
 const BREAKEVEN_TOUCH_EPSILON_USD = 1.0;
+
+type BreakevenWatchStrategy = {
+  id: string;
+  title: string;
+  masterApiKey: string;
+  masterApiSecret: string;
+  futureHedgeConfig: {
+    isBreakevenExitEnabled: boolean;
+    breakevenPrice1: number | null;
+    breakevenPrice2: number | null;
+  } | null;
+};
+
+let breakevenWatchPrisma: PrismaClient | null = null;
+let breakevenStrategyCache: BreakevenWatchStrategy[] = [];
+let breakevenCacheTimer: ReturnType<typeof setInterval> | null = null;
+const masterLegsCache = new Map<
+  string,
+  { legs: MasterLegCloseTarget[]; totalPnlUsd: number; fetchedAt: number }
+>();
+const breakevenExitInFlight = new Set<string>();
+let lastBtcTickPrice = 0;
+let lastBtcTickAt = 0;
+
+/** Boot WS-driven breakeven watcher (call once from trade engine). */
+export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
+  breakevenWatchPrisma = prisma;
+  void refreshBreakevenStrategyCache(prisma);
+  breakevenCacheTimer = setInterval(() => {
+    void refreshBreakevenStrategyCache(prisma);
+  }, BREAKEVEN_STRATEGY_CACHE_MS);
+
+  return () => {
+    breakevenWatchPrisma = null;
+    if (breakevenCacheTimer != null) {
+      clearInterval(breakevenCacheTimer);
+      breakevenCacheTimer = null;
+    }
+    breakevenStrategyCache = [];
+    masterLegsCache.clear();
+    breakevenExitInFlight.clear();
+  };
+}
+
+async function loadBreakevenStrategies(
+  prisma: PrismaClient,
+): Promise<BreakevenWatchStrategy[]> {
+  return prisma.strategy.findMany({
+    where: {
+      isActive: true,
+      futureHedgeConfig: {
+        is: {
+          isBreakevenExitEnabled: true,
+          OR: [
+            { breakevenPrice1: { not: null } },
+            { breakevenPrice2: { not: null } },
+          ],
+        },
+      },
+    },
+    select: {
+      id: true,
+      title: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+      futureHedgeConfig: {
+        select: {
+          isBreakevenExitEnabled: true,
+          breakevenPrice1: true,
+          breakevenPrice2: true,
+        },
+      },
+    },
+  });
+}
+
+async function refreshBreakevenStrategyCache(prisma: PrismaClient): Promise<void> {
+  try {
+    breakevenStrategyCache = await loadBreakevenStrategies(prisma);
+    for (const strat of breakevenStrategyCache) {
+      void prefetchMasterLegsCache(
+        strat.id,
+        strat.masterApiKey,
+        strat.masterApiSecret,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[breakeven-exit] strategy cache refresh failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+async function prefetchMasterLegsCache(
+  strategyId: string,
+  masterApiKey: string,
+  masterApiSecret: string,
+): Promise<void> {
+  try {
+    const snap = await fetchMasterLegsWithTotalLivePnl(
+      masterApiKey,
+      masterApiSecret,
+    );
+    masterLegsCache.set(strategyId, {
+      legs: snap.legs,
+      totalPnlUsd: snap.totalPnlUsd,
+      fetchedAt: Date.now(),
+    });
+  } catch {
+    /* optional prefetch */
+  }
+}
+
+async function resolveCachedMasterLegs(
+  strategyId: string,
+  masterApiKey: string,
+  masterApiSecret: string,
+): Promise<{ legs: MasterLegCloseTarget[]; totalPnlUsd: number }> {
+  const cached = masterLegsCache.get(strategyId);
+  if (cached && Date.now() - cached.fetchedAt < MASTER_LEGS_CACHE_TTL_MS) {
+    return { legs: cached.legs, totalPnlUsd: cached.totalPnlUsd };
+  }
+  const snap = await fetchMasterLegsWithTotalLivePnl(
+    masterApiKey,
+    masterApiSecret,
+  );
+  masterLegsCache.set(strategyId, {
+    legs: snap.legs,
+    totalPnlUsd: snap.totalPnlUsd,
+    fetchedAt: Date.now(),
+  });
+  return snap;
+}
+
+/** Instant breakeven evaluation on Delta WS BTC tick (no poll delay). */
+export function notifyLiveBtcPriceTick(livePrice: number): void {
+  if (
+    !breakevenWatchPrisma ||
+    !Number.isFinite(livePrice) ||
+    livePrice <= 0
+  ) {
+    return;
+  }
+  const now = Date.now();
+  if (livePrice === lastBtcTickPrice && now - lastBtcTickAt < 50) {
+    return;
+  }
+  lastBtcTickPrice = livePrice;
+  lastBtcTickAt = now;
+
+  const prisma = breakevenWatchPrisma;
+  for (const strat of breakevenStrategyCache) {
+    void runBreakevenExitCheckOnPrice(prisma, strat, livePrice, "ws");
+  }
+}
 
 function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   const cached = resolveLiveMarkPrice(pos.symbolKey);
@@ -294,20 +456,40 @@ export async function closeAllMasterPositionsMarket(
   const errors: string[] = [];
   let closed = 0;
 
-  for (const leg of legs) {
-    const closeSide: TradeSide = leg.side === "BUY" ? "SELL" : "BUY";
-    const result = await executeTrade(
-      apiKeyStored,
-      apiSecretStored,
-      leg.symbolKey,
-      closeSide,
-      leg.contracts,
-      { reduceOnly: true },
-    );
-    if (result.success) {
-      closed += 1;
+  const outcomes = await Promise.allSettled(
+    legs.map(async (leg) => {
+      const closeSide: TradeSide = leg.side === "BUY" ? "SELL" : "BUY";
+      const result = await executeTrade(
+        apiKeyStored,
+        apiSecretStored,
+        leg.symbolKey,
+        closeSide,
+        leg.contracts,
+        { reduceOnly: true },
+      );
+      if (result.success) {
+        return { ok: true as const };
+      }
+      return {
+        ok: false as const,
+        error: `${leg.symbolKey} ${leg.side}: ${result.error ?? "unknown"}`,
+      };
+    }),
+  );
+
+  for (const outcome of outcomes) {
+    if (outcome.status === "fulfilled") {
+      if (outcome.value.ok) {
+        closed += 1;
+      } else {
+        errors.push(outcome.value.error);
+      }
     } else {
-      errors.push(`${leg.symbolKey} ${leg.side}: ${result.error ?? "unknown"}`);
+      errors.push(
+        outcome.reason instanceof Error
+          ? outcome.reason.message
+          : String(outcome.reason),
+      );
     }
   }
 
@@ -460,22 +642,14 @@ export async function runStrategyAutoExitCheck(
 }
 
 /**
- * Poll-driven breakeven exit: compare live BTCUSD price to configured bounds
+ * Breakeven exit: compare live BTCUSD price to configured bounds
  * and market-close every open master leg when breached.
  */
-export async function runBreakevenExitCheck(
+async function runBreakevenExitCheckOnPrice(
   prisma: PrismaClient,
-  strategy: {
-    id: string;
-    title: string;
-    masterApiKey: string;
-    masterApiSecret: string;
-    futureHedgeConfig: {
-      isBreakevenExitEnabled: boolean;
-      breakevenPrice1: number | null;
-      breakevenPrice2: number | null;
-    } | null;
-  },
+  strategy: BreakevenWatchStrategy,
+  livePrice: number,
+  source: "ws" | "poll",
 ): Promise<void> {
   const config = strategy.futureHedgeConfig;
   if (!config?.isBreakevenExitEnabled) return;
@@ -490,17 +664,17 @@ export async function runBreakevenExitCheck(
   const secret = strategy.masterApiSecret?.trim() ?? "";
   if (!key || !secret) return;
 
-  const livePrice = await resolveLiveBtcUsdPrice();
-  if (livePrice == null) return;
-
   const strategyId = strategy.id;
+  if (breakevenExitInFlight.has(strategyId)) return;
+
   const prevPrice = lastBtcPriceByStrategy.get(strategyId) ?? null;
   lastBtcPriceByStrategy.set(strategyId, livePrice);
 
   let totalPnlUsd: number;
   let legs: MasterLegCloseTarget[];
   try {
-    const snap = await fetchMasterLegsWithTotalLivePnl(
+    const snap = await resolveCachedMasterLegs(
+      strategyId,
       strategy.masterApiKey,
       strategy.masterApiSecret,
     );
@@ -555,12 +729,14 @@ export async function runBreakevenExitCheck(
   const count = (breakevenBreachCounters.get(strategyId) ?? 0) + 1;
   breakevenBreachCounters.set(strategyId, count);
 
-  console.warn(
-    `[breakeven-exit] Price breach for strategy ${strategyId}. Verifying... (${count}/${SUSTAINED_BREACH_TICKS} ticks) ` +
-      `livePrice=${livePrice.toFixed(2)} p1=${hasP1 ? p1 : "—"} p2=${hasP2 ? p2 : "—"} totalPnl=$${totalPnlUsd.toFixed(2)}`,
-  );
+  if (source === "poll") {
+    console.warn(
+      `[breakeven-exit] Price breach (poll backstop) strategy ${strategyId} ` +
+        `(${count}/${BREAKEVEN_SUSTAINED_TICKS}) livePrice=${livePrice.toFixed(2)}`,
+    );
+  }
 
-  if (count < SUSTAINED_BREACH_TICKS) {
+  if (count < BREAKEVEN_SUSTAINED_TICKS) {
     return;
   }
 
@@ -570,56 +746,53 @@ export async function runBreakevenExitCheck(
   }
 
   breakevenBreachCounters.set(strategyId, 0);
+  breakevenExitInFlight.add(strategyId);
 
-  await executeMasterFlatAutoExit({
-    prisma,
-    strategyId,
-    strategyTitle: strategy.title,
-    masterApiKey: strategy.masterApiKey,
-    masterApiSecret: strategy.masterApiSecret,
-    legs,
-    exitReason: EXIT_REASON.AUTO_EXIT_BREAKEVEN,
-    logTag: "breakeven-exit",
-    logDetail:
-      `livePrice=${livePrice.toFixed(2)} breakeven1=${hasP1 ? p1 : "—"} ` +
-      `breakeven2=${hasP2 ? p2 : "—"}`,
-  });
+  try {
+    console.warn(
+      `[breakeven-exit] THRESHOLD HIT strategyId=${strategyId} source=${source} ` +
+        `livePrice=${livePrice.toFixed(2)} p1=${hasP1 ? p1 : "—"} p2=${hasP2 ? p2 : "—"} ` +
+        `totalPnl=$${totalPnlUsd.toFixed(2)} openLegs=${legs.length}`,
+    );
+
+    await executeMasterFlatAutoExit({
+      prisma,
+      strategyId,
+      strategyTitle: strategy.title,
+      masterApiKey: strategy.masterApiKey,
+      masterApiSecret: strategy.masterApiSecret,
+      legs,
+      exitReason: EXIT_REASON.AUTO_EXIT_BREAKEVEN,
+      logTag: "breakeven-exit",
+      logDetail:
+        `livePrice=${livePrice.toFixed(2)} breakeven1=${hasP1 ? p1 : "—"} ` +
+        `breakeven2=${hasP2 ? p2 : "—"} source=${source}`,
+    });
+  } finally {
+    breakevenExitInFlight.delete(strategyId);
+  }
+}
+
+export async function runBreakevenExitCheck(
+  prisma: PrismaClient,
+  strategy: BreakevenWatchStrategy,
+): Promise<void> {
+  const livePrice = await resolveLiveBtcUsdPrice();
+  if (livePrice == null) return;
+  await runBreakevenExitCheckOnPrice(prisma, strategy, livePrice, "poll");
 }
 
 export async function runAllBreakevenExitChecks(
   prisma: PrismaClient,
 ): Promise<void> {
-  const strategies = await prisma.strategy.findMany({
-    where: {
-      isActive: true,
-      futureHedgeConfig: {
-        is: {
-          isBreakevenExitEnabled: true,
-          OR: [
-            { breakevenPrice1: { not: null } },
-            { breakevenPrice2: { not: null } },
-          ],
-        },
-      },
-    },
-    select: {
-      id: true,
-      title: true,
-      masterApiKey: true,
-      masterApiSecret: true,
-      futureHedgeConfig: {
-        select: {
-          isBreakevenExitEnabled: true,
-          breakevenPrice1: true,
-          breakevenPrice2: true,
-        },
-      },
-    },
-  });
+  const strategies =
+    breakevenStrategyCache.length > 0
+      ? breakevenStrategyCache
+      : await loadBreakevenStrategies(prisma);
 
-  for (const strat of strategies) {
-    await runBreakevenExitCheck(prisma, strat);
-  }
+  await Promise.all(
+    strategies.map((strat) => runBreakevenExitCheck(prisma, strat)),
+  );
 }
 
 export async function runAllStrategyAutoExitChecks(

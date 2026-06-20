@@ -57,7 +57,9 @@ import {
 } from "../prisma/strategySelect.js";
 import { notifyTradeExecuted } from "./telegramService.js";
 import { logUserActivity } from "./userActivityService.js";
-import { runAllStrategyAutoExitChecks, runAllBreakevenExitChecks } from "./autoExitService.js";
+import { runAllStrategyAutoExitChecks, runAllBreakevenExitChecks, initBreakevenExitWatcher, notifyLiveBtcPriceTick } from "./autoExitService.js";
+import { onBtcPriceTick } from "./futureHedgeDataService.js";
+import { onBtcMarkPriceTick } from "./liveMarkPriceCache.js";
 import {
   assertStrategyActiveForCopy,
   executeFollowerTradeWithVerification,
@@ -494,11 +496,29 @@ async function triggerMasterOpenCopy(
 
   if (!skipCopy && entryPrice != null) {
     if (isLiveMasterFill && args.adminForceSync !== true) {
-      console.log(
-        `${logTag} [COPY-SYNC] WS hint ${args.symbol} ${args.side} qty=${args.masterContracts} — ` +
-          `scheduling REST sync (orders only after master REST confirms)`,
+      void copyMasterFillToSubscribers(prisma, strategyId, {
+        symbol: args.symbol,
+        side: args.side,
+        masterContracts: args.masterContracts,
+        masterTotalLots: args.masterTotalLots ?? args.masterContracts,
+        avgPrice: entryPrice,
+        masterFillKey: args.masterFillKey,
+        liveMasterFill: true,
+        ...(args.masterOpenedAt !== undefined
+          ? { masterOpenedAt: args.masterOpenedAt }
+          : {}),
+        ...(args.locallyFirstSeenAt !== undefined
+          ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
+          : {}),
+      }).catch((err) => {
+        console.error(
+          `${logTag} live WS fan-out failed ${args.symbol} ${args.side}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+      requestImmediateMasterRestPoll(
+        `ws-reconcile:${args.symbol}:${args.side}`,
       );
-      requestImmediateMasterRestPoll(`ws-hint:${args.symbol}:${args.side}`);
     } else {
       await copyMasterFillToSubscribers(prisma, strategyId, {
       symbol: args.symbol,
@@ -3506,6 +3526,10 @@ class StrategyMasterSocket {
 export function startTradeEngine(prisma: PrismaClient): () => void {
   const cancelled = { value: false };
   const stopLivePriceTracker = startLivePriceTracker(prisma);
+  const stopBreakevenWatcher = initBreakevenExitWatcher(prisma);
+  const handleBtcPriceTick = (price: number) => notifyLiveBtcPriceTick(price);
+  onBtcPriceTick(handleBtcPriceTick);
+  onBtcMarkPriceTick(handleBtcPriceTick);
   const masterPositionTracker = new MasterPositionTracker();
   const sockets = new Map<string, StrategyMasterSocket>();
   let rosterTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -4269,6 +4293,9 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
       masterRestPollDebounce = null;
     }
     stopLivePriceTracker();
+    stopBreakevenWatcher();
+    onBtcPriceTick(() => undefined);
+    onBtcMarkPriceTick(() => undefined);
     if (masterRestPollInterval != null) {
       clearInterval(masterRestPollInterval);
       masterRestPollInterval = null;
