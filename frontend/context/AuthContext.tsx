@@ -11,8 +11,7 @@ import {
 } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
 import {
-  isSalesTeamMember,
-  normalizeUserRole,
+  normalizeSalesTeamRole,
   type SalesTeamRole,
 } from "@/lib/roles";
 
@@ -197,9 +196,7 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
   }, []);
 
   const salesTeamRole = useMemo((): SalesTeamRole | null => {
-    if (!user?.role) return null;
-    const normalized = normalizeUserRole(user.role);
-    return isSalesTeamMember(normalized) ? (normalized as SalesTeamRole) : null;
+    return normalizeSalesTeamRole(user?.role);
   }, [user?.role]);
 
   const value = useMemo<AuthContextValue>(

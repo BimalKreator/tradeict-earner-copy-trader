@@ -9,7 +9,9 @@ export type SalesTeamRole = (typeof SALES_TEAM_ROLES)[number];
 
 /** Normalize API / JWT role strings for comparisons. */
 export function normalizeUserRole(role: string | null | undefined): string {
-  return (role ?? "").trim().toUpperCase();
+  const r = (role ?? "").trim().toUpperCase();
+  if (r === "DIRECTOR" || r === "TEAM_DIRECTOR") return "SENIOR_MANAGER";
+  return r;
 }
 
 export function isSalesTeamMember(
@@ -36,7 +38,6 @@ export function normalizeSalesTeamRole(
   role: string | null | undefined,
 ): SalesTeamRole | null {
   const r = normalizeUserRole(role);
-  if (r === "DIRECTOR") return "SENIOR_MANAGER";
   if (isSalesTeamMember(r)) return r;
   return null;
 }

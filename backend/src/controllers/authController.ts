@@ -17,6 +17,7 @@ import {
   incrementAffiliateDirectAcquiredCount,
   resolveAffiliateUserIdByReferralCode,
 } from "../services/affiliateMemberService.js";
+import { normalizeAffiliateRoleEnum } from "../utils/roleNormalize.js";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const BCRYPT_ROUNDS = 12;
@@ -35,11 +36,12 @@ function sanitizeUser(user: {
   name: string | null;
   role: Role;
 }) {
+  const role = normalizeAffiliateRoleEnum(user.role) ?? user.role;
   return {
     id: user.id,
     email: user.email,
     name: user.name,
-    role: user.role,
+    role,
   };
 }
 

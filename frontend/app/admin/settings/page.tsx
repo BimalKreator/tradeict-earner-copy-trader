@@ -476,7 +476,7 @@ export default function AdminSettingsPage() {
               Percent of <strong className="font-medium text-white/75">app revenue</strong>{" "}
               (not gross trade PnL) paid to each tier when a referred trader books profit.
               Example: $3.42 gross × 50% app share = $1.71 app revenue → Executive 5% =
-              $0.09, Manager 2% = $0.03, Director 1% = $0.02.
+              $0.09, Manager 2% = $0.03, Senior Manager 1% = $0.02.
             </p>
             <form onSubmit={handleSavePartnerCommission} className="mt-6 space-y-6">
               <div>
@@ -520,7 +520,7 @@ export default function AdminSettingsPage() {
                     />
                   </label>
                   <label className="block text-sm text-white/70">
-                    Director (upline)
+                    Senior Manager (upline)
                     <input
                       type="number"
                       min={0}
@@ -564,7 +564,7 @@ export default function AdminSettingsPage() {
                       />
                     </label>
                     <label className="block text-sm text-white/70">
-                      Director (upline)
+                      Senior Manager (upline)
                       <input
                         type="number"
                         min={0}
@@ -586,10 +586,10 @@ export default function AdminSettingsPage() {
                 </div>
                 <div>
                   <h3 className="text-sm font-medium text-white/80">
-                    Director acquired the trader
+                    Senior Manager acquired the trader
                   </h3>
                   <label className="mt-3 block text-sm text-white/70">
-                    Director (direct)
+                    Senior Manager (direct)
                     <input
                       type="number"
                       min={0}

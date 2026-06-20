@@ -382,7 +382,7 @@ export default function PartnerDashboardPage() {
   const [activeTab, setActiveTab] = useState<"overview" | "growth">("overview");
   const [milestoneRefreshKey, setMilestoneRefreshKey] = useState(0);
 
-  /** Directors & Managers only — never hide when header already shows Team Director/Manager. */
+  /** Senior Managers & Managers only — never hide when header already shows Senior Manager/Manager. */
   const canNominate = useMemo(() => {
     if (salesTeamRole === "SENIOR_MANAGER" || salesTeamRole === "MANAGER") {
       return true;

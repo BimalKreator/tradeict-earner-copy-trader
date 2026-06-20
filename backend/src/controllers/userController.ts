@@ -37,6 +37,7 @@ import {
 } from "../services/affiliateUpgradeRequestService.js";
 import { createReferralRequest, listReferralRequestsForSponsor } from "../services/referralRequestService.js";
 import { getPartnerTierInfo } from "../services/affiliateUpgradeService.js";
+import { normalizeAffiliateRoleEnum } from "../utils/roleNormalize.js";
 import { NominatedSalesRole } from "@prisma/client";
 
 const DEFAULT_TRADE_LIMIT = 100;
@@ -215,7 +216,8 @@ export function createUserController(prisma: PrismaClient) {
           : null;
 
       const { acquiredBy: _acquiredBy, ...rest } = user;
-      res.json({ ...rest, referrer, pendingApprovalFields: pendingFields });
+      const role = normalizeAffiliateRoleEnum(user.role) ?? user.role;
+      res.json({ ...rest, role, referrer, pendingApprovalFields: pendingFields });
     } catch (err) {
       next(err);
     }
@@ -1054,7 +1056,7 @@ export function createUserController(prisma: PrismaClient) {
 
       const options = await getPartnerNominationOptions(prisma, userId);
       if (!options) {
-        res.status(403).json({ error: "Nomination is available to Directors and Managers only" });
+        res.status(403).json({ error: "Nomination is available to Senior Managers and Managers only" });
         return;
       }
 

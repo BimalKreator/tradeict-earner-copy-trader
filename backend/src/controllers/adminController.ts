@@ -67,12 +67,12 @@ import {
   assertUserSafeToDelete,
   changeUserAcquiredBy,
   listSalesMembers,
-  SALES_MEMBER_ROLES,
   normalizeUpgradeParentId,
   syncAffiliateProfileOnRoleChange,
   upgradeUserToSalesMember,
   type SalesMemberRole,
 } from "../services/affiliateMemberService.js";
+import { parseSalesMemberRoleInput } from "../utils/roleNormalize.js";
 import { buildAdminNetworkTree } from "../services/affiliateNetworkService.js";
 import {
   completePartnerPayout,
@@ -3270,14 +3270,15 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
-      if (!SALES_MEMBER_ROLES.includes(newRoleRaw as SalesMemberRole)) {
+      const parsedRole = parseSalesMemberRoleInput(newRoleRaw);
+      if (!parsedRole) {
         res.status(400).json({
           error: "newRole must be EXECUTIVE, MANAGER, or SENIOR_MANAGER",
         });
         return;
       }
 
-      const newRole = newRoleRaw as SalesMemberRole;
+      const newRole = parsedRole as SalesMemberRole;
 
       if (
         body.parentId !== null &&
