@@ -7,10 +7,10 @@ import {
 } from "../constants/exitReasons.js";
 import {
   fetchDeltaOpenPositions,
-  fetchDeltaSettlementExitPrice,
-  fetchDeltaSwapContractSize,
-  fetchDeltaTicker,
+  fetchDeltaRecentLegCloseSettlement,
+  type DeltaCloseSettlement,
   type DeltaLivePosition,
+  type ExecuteTradeResult,
   type TradeSide,
 } from "./exchangeService.js";
 import { computePerTradeRevenueShareAmt } from "./dashboardMetricsService.js";
@@ -27,6 +27,33 @@ export type MasterOpenLegRef = {
   side: TradeSide;
   masterContracts: number;
 };
+
+/** Delta-native settlement payload for booking a closed copy leg. */
+export type TradeLegSettlement = {
+  exitPrice: number;
+  exitFee: number;
+  grossRealizedPnl: number;
+};
+
+export function settlementFromDeltaClose(
+  delta: DeltaCloseSettlement,
+): TradeLegSettlement {
+  return {
+    exitPrice: delta.exitPrice,
+    exitFee: delta.exitFee,
+    grossRealizedPnl: delta.grossRealizedPnl,
+  };
+}
+
+/** Build settlement from a reduce-only {@link executeTrade} result. */
+export function settlementFromExecuteResult(
+  result: ExecuteTradeResult,
+): TradeLegSettlement | null {
+  if (result.closeSettlement) {
+    return settlementFromDeltaClose(result.closeSettlement);
+  }
+  return null;
+}
 
 function masterStillHasOpenLeg(
   masterLegs: MasterOpenLegRef[] | undefined,
@@ -45,31 +72,6 @@ function masterStillHasOpenLeg(
 export function entryPriceMatches(stored: number, leader: number): boolean {
   const eps = Math.max(1e-8, Math.abs(leader) * 1e-6);
   return Math.abs(stored - leader) <= eps;
-}
-
-function deltaContractSizeFallback(symbol: string): number {
-  const u = symbol.toUpperCase();
-  if (u.includes("BTC")) return 0.001;
-  if (u.includes("ETH")) return 0.01;
-  return 1;
-}
-
-export async function realizedPnlUsd(args: {
-  symbol: string;
-  side: TradeSide;
-  entryPrice: number;
-  exitPrice: number;
-  contracts: number;
-}): Promise<number> {
-  let contractFactor = deltaContractSizeFallback(args.symbol);
-  try {
-    contractFactor = await fetchDeltaSwapContractSize(args.symbol);
-  } catch {
-    /* keep fallback */
-  }
-  const realBaseSize = Math.abs(args.contracts) * contractFactor;
-  const diff = args.exitPrice - args.entryPrice;
-  return args.side === "BUY" ? diff * realBaseSize : -diff * realBaseSize;
 }
 
 /**
@@ -123,8 +125,7 @@ export type SettleOpenCopyTradesArgs = {
   strategyId: string;
   symbol: string;
   side: TradeSide;
-  exitPrice: number;
-  exitFee?: number;
+  settlement: TradeLegSettlement;
   exitReason?: ExitReasonValue | null | undefined;
   /** Prefer trades whose entry matches the master leg (optional). */
   masterEntryPrice?: number | null;
@@ -136,7 +137,7 @@ export type SettleOpenCopyTradesArgs = {
 
 /**
  * Book realized PnL + commission for OPEN {@link Trade} rows when a copy leg closes.
- * Uses flexible symbol matching (same as TradePosition ledger).
+ * Uses Delta exchange settlement only (no local price × qty math).
  */
 export async function settleOpenCopyTradesForLeg(
   prisma: PrismaClient,
@@ -190,7 +191,7 @@ export async function settleOpenCopyTradesForLeg(
     select: { profitShare: true },
   });
   const profitSharePct = strategyMeta?.profitShare ?? 0;
-  const exitFeeTotal = Math.max(0, Number(args.exitFee ?? 0));
+  const exitFeeTotal = Math.max(0, Number(args.settlement.exitFee ?? 0));
 
   let closed = 0;
   for (let i = 0; i < toClose.length; i += 1) {
@@ -203,13 +204,7 @@ export async function settleOpenCopyTradesForLeg(
         : 0;
     if (contracts <= 0) continue;
 
-    const grossPnl = await realizedPnlUsd({
-      symbol: open.symbol,
-      side: args.side,
-      entryPrice: open.entryPrice,
-      exitPrice: args.exitPrice,
-      contracts,
-    });
+    const grossPnl = args.settlement.grossRealizedPnl;
     const totalTradingFee =
       Math.max(0, Number(open.tradingFee ?? 0)) + legExitFee;
     const netPnl = grossPnl - totalTradingFee;
@@ -221,7 +216,7 @@ export async function settleOpenCopyTradesForLeg(
     await prisma.trade.update({
       where: { id: open.id },
       data: {
-        exitPrice: args.exitPrice,
+        exitPrice: args.settlement.exitPrice,
         tradingFee: totalTradingFee,
         pnl: netPnl,
         tradePnl: netPnl,
@@ -248,31 +243,12 @@ export async function settleOpenCopyTradesForLeg(
     });
     console.log(
       `[trade-settlement] CLOSED ${closed} trade(s) user=${args.userId} ` +
-        `${args.symbol} ${args.side} exit=${args.exitPrice}`,
+        `${args.symbol} ${args.side} exit=${args.settlement.exitPrice} ` +
+        `gross=${args.settlement.grossRealizedPnl.toFixed(4)}`,
     );
   }
 
   return closed;
-}
-
-async function resolveSettlementExitPrice(
-  symbol: string,
-  side: TradeSide,
-  entryPrice: number,
-): Promise<number> {
-  const fromMarket = await fetchDeltaSettlementExitPrice(symbol, side);
-  if (fromMarket != null && Number.isFinite(fromMarket) && fromMarket > 0) {
-    return fromMarket;
-  }
-  try {
-    const tick = await fetchDeltaTicker(symbol);
-    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
-      return tick.last;
-    }
-  } catch {
-    /* optional */
-  }
-  return entryPrice > 0 ? entryPrice : 0;
 }
 
 function exchangeLegStillOpen(
@@ -379,19 +355,27 @@ export async function reconcileStaleOpenTradesForUser(
       continue;
     }
 
-    const exitPrice = await resolveSettlementExitPrice(
+    const deltaSettlement = await fetchDeltaRecentLegCloseSettlement(
+      args.apiKey,
+      args.apiSecret,
       trade.symbol,
       side,
-      trade.entryPrice,
     );
+    if (!deltaSettlement) {
+      console.warn(
+        `[trade-settlement] stale reconcile — no Delta settlement user=${args.userId} ` +
+          `${trade.symbol} ${side} tradeId=${trade.id}`,
+      );
+      skippedStillOpen += 1;
+      continue;
+    }
 
     const closed = await settleOpenCopyTradesForLeg(prisma, {
       userId: args.userId,
       strategyId: trade.strategyId,
       symbol: trade.symbol,
       side,
-      exitPrice,
-      exitFee: 0,
+      settlement: settlementFromDeltaClose(deltaSettlement),
       exitReason: EXIT_REASON.RECONCILE_GHOST,
       tradeId: trade.id,
     });
@@ -411,7 +395,7 @@ export async function reconcileStaleOpenTradesForUser(
       where: { id: trade.id },
       data: {
         status: TradeStatus.FAILED,
-        exitPrice: exitPrice > 0 ? exitPrice : trade.entryPrice,
+        exitPrice: deltaSettlement.exitPrice,
         pnl: 0,
         tradePnl: 0,
         revenueShareAmt: 0,

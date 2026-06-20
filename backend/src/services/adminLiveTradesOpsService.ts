@@ -7,7 +7,6 @@ import {
 import {
   executeTrade,
   fetchDeltaOpenPositions,
-  fetchDeltaTicker,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
@@ -21,22 +20,13 @@ import {
   syncFollowerUserToMasterPositions,
 } from "./tradeEngine.js";
 import { closeTradePositionsForLeg } from "./tradePositionService.js";
-import { reconcileStaleOpenTradesForUser } from "./tradeSettlementService.js";
+import {
+  reconcileStaleOpenTradesForUser,
+  settlementFromExecuteResult,
+} from "./tradeSettlementService.js";
 
 function oppositeSide(side: TradeSide): TradeSide {
   return side === "BUY" ? "SELL" : "BUY";
-}
-
-async function resolveExitPrice(symbol: string, openSide: TradeSide): Promise<number> {
-  try {
-    const tick = await fetchDeltaTicker(symbol);
-    if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
-      return tick.last;
-    }
-  } catch {
-    /* optional */
-  }
-  return 0;
 }
 
 async function closeLiveLegsOnExchange(
@@ -80,7 +70,6 @@ async function closeLiveLegsOnExchange(
     }
 
     closed += 1;
-    const exitPrice = (await resolveExitPrice(pos.symbolKey, openSide)) || pos.entryPrice || 0;
 
     await closeTradePositionsForLeg(prisma, {
       strategyId: args.strategyId,
@@ -90,13 +79,19 @@ async function closeLiveLegsOnExchange(
     });
 
     if (!args.isMaster && args.userId) {
+      const settlement = settlementFromExecuteResult(result);
+      if (!settlement) {
+        errors.push(
+          `user=${args.userId} ${pos.symbolKey} ${openSide}: missing Delta close settlement`,
+        );
+        continue;
+      }
       await closeOpenTradesForManualAdmin(prisma, {
         userId: args.userId,
         strategyId: args.strategyId,
         symbol: pos.symbolKey,
         side: openSide,
-        exitPrice,
-        exitFee: result.feeCost ?? 0,
+        settlement,
       });
     }
   }

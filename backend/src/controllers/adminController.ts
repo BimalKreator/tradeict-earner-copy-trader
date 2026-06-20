@@ -39,12 +39,12 @@ import {
   setPendingStrategyExitReason,
 } from "../constants/exitReasons.js";
 import { closeOpenTradesForManualAdmin } from "../services/tradeEngine.js";
+import { settlementFromExecuteResult } from "../services/tradeSettlementService.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
   executeTrade,
-  fetchDeltaTicker,
   fetchDeltaTotalBalanceUsd,
   type TradeSide,
 } from "../services/exchangeService.js";
@@ -1151,27 +1151,14 @@ export function createAdminController(prisma: PrismaClient) {
 
       let dbClosed = 0;
       if (!isMaster && userId) {
-        let exitPrice = 0;
-        try {
-          const tick = await fetchDeltaTicker(symbol);
-          if (tick.last != null && Number.isFinite(tick.last)) {
-            exitPrice = tick.last;
-          }
-        } catch {
-          /* fallback below */
-        }
-        if (exitPrice <= 0) {
-          const open = await prisma.trade.findFirst({
-            where: {
-              userId,
-              strategyId,
-              symbol,
-              side: sideRaw,
-              status: TradeStatus.OPEN,
-            },
-            select: { entryPrice: true },
+        const settlement = settlementFromExecuteResult(result);
+        if (!settlement) {
+          res.status(502).json({
+            error:
+              "Close order placed but Delta settlement data (fill price / commission / realized PnL) is not available yet",
+            orderId: result.orderId ?? null,
           });
-          exitPrice = open?.entryPrice ?? 0;
+          return;
         }
 
         dbClosed = await closeOpenTradesForManualAdmin(prisma, {
@@ -1179,8 +1166,7 @@ export function createAdminController(prisma: PrismaClient) {
           strategyId,
           symbol,
           side: sideRaw as TradeSide,
-          exitPrice,
-          exitFee: result.feeCost ?? 0,
+          settlement,
         });
       }
 

@@ -652,81 +652,6 @@ export default function PartnerDashboardPage() {
 
       {activeTab === "overview" ? (
         <>
-      <section className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/15 via-violet-500/10 to-transparent p-6 shadow-xl sm:p-8">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/20 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-6">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold uppercase tracking-widest text-primary/80">
-                Your referral link
-              </p>
-              {loading && !metrics ? (
-                <div className="mt-3 flex items-center gap-2 text-sm text-white/45">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden />
-                  Loading referral code…
-                </div>
-              ) : (
-                <>
-                  <p className="mt-2 font-mono text-lg font-medium text-white sm:text-xl">
-                    {metrics?.referralCode ?? "—"}
-                  </p>
-                  <p className="mt-2 max-w-xl text-sm text-white/50">
-                    Share this code with traders. When they sign up and subscribe, you
-                    earn commission on their revenue share.
-                  </p>
-                  {metrics?.referralCode ? (
-                    <p className="mt-3 truncate font-mono text-xs text-white/35">
-                      {referralSignupUrl(metrics.referralCode)}
-                    </p>
-                  ) : null}
-                </>
-              )}
-            </div>
-            <div className="flex w-full flex-col gap-3 sm:w-auto sm:min-w-[280px]">
-              <button
-                type="button"
-                onClick={() => void copyReferralLink()}
-                disabled={!metrics?.referralCode}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-4 w-4" aria-hidden />
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-4 w-4" aria-hidden />
-                    Copy Link
-                  </>
-                )}
-              </button>
-              {canNominate ? (
-                <NominateTeamMemberButton
-                  className="w-full"
-                  onClick={() => setNominateOpen(true)}
-                />
-              ) : null}
-            </div>
-          </div>
-
-          {canNominate ? (
-            <div className="relative rounded-xl border border-violet-500/25 bg-violet-500/10 px-4 py-4 sm:px-5">
-              <p className="text-sm font-medium text-violet-100">
-                Grow your downline
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-white/50">
-                Nominate a user who already has an active strategy subscription.
-                An admin will review and approve the upgrade.
-              </p>
-            </div>
-          ) : null}
-        </div>
-      </section>
-
       {loading ? (
         <div className="flex justify-center rounded-2xl border border-glassBorder py-24">
           <Loader2 className="h-9 w-9 animate-spin text-primary" aria-label="Loading" />
@@ -824,6 +749,72 @@ export default function PartnerDashboardPage() {
               sub="Earned (EARNED) / Payable (PAYABLE + WITHDRAWABLE)"
               icon={<Wallet className="h-6 w-6" aria-hidden />}
             />
+          </section>
+
+          <section className="relative overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/15 via-violet-500/10 to-transparent p-6 shadow-xl sm:p-8">
+            <div
+              className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/20 blur-3xl"
+              aria-hidden
+            />
+            <div className="relative flex flex-col gap-6">
+              <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-primary/80">
+                    Your referral link
+                  </p>
+                  <p className="mt-2 font-mono text-lg font-medium text-white sm:text-xl">
+                    {metrics.referralCode ?? "—"}
+                  </p>
+                  <p className="mt-2 max-w-xl text-sm text-white/50">
+                    Share this code with traders. When they sign up and subscribe, you
+                    earn commission on their revenue share.
+                  </p>
+                  {metrics.referralCode ? (
+                    <p className="mt-3 truncate font-mono text-xs text-white/35">
+                      {referralSignupUrl(metrics.referralCode)}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex w-full flex-col gap-3 sm:w-auto sm:min-w-[280px]">
+                  <button
+                    type="button"
+                    onClick={() => void copyReferralLink()}
+                    disabled={!metrics.referralCode}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="h-4 w-4" aria-hidden />
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-4 w-4" aria-hidden />
+                        Copy Link
+                      </>
+                    )}
+                  </button>
+                  {canNominate ? (
+                    <NominateTeamMemberButton
+                      className="w-full"
+                      onClick={() => setNominateOpen(true)}
+                    />
+                  ) : null}
+                </div>
+              </div>
+
+              {canNominate ? (
+                <div className="relative rounded-xl border border-violet-500/25 bg-violet-500/10 px-4 py-4 sm:px-5">
+                  <p className="text-sm font-medium text-violet-100">
+                    Grow your downline
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-white/50">
+                    Nominate a user who already has an active strategy subscription.
+                    An admin will review and approve the upgrade.
+                  </p>
+                </div>
+              ) : null}
+            </div>
           </section>
 
           <section className="glass-card overflow-hidden border border-glassBorder">

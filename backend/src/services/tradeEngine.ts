@@ -4,7 +4,6 @@ import { type PrismaClient, TradeStatus } from "@prisma/client";
 import {
   extractDeltaProductSymbolFromPayload,
   fetchDeltaOpenPositions,
-  fetchDeltaSettlementExitPrice,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
@@ -47,6 +46,7 @@ import {
 import {
   reconcileStaleOpenTradesForUser,
   settleOpenCopyTradesForLeg,
+  type TradeLegSettlement,
 } from "./tradeSettlementService.js";
 import {
   STRATEGY_SELECT_IS_ACTIVE,
@@ -1464,8 +1464,7 @@ async function closeFollowerTradeAndRecordPnl(
     side: TradeSide;
     masterEntryPrice: number;
     sizedPosition: number;
-    exitPrice: number;
-    exitFee: number;
+    settlement: TradeLegSettlement;
     exitReason?: ExitReasonValue | null;
   },
 ): Promise<void> {
@@ -1474,8 +1473,7 @@ async function closeFollowerTradeAndRecordPnl(
     strategyId: args.strategyId,
     symbol: args.symbol,
     side: args.side,
-    exitPrice: args.exitPrice,
-    exitFee: args.exitFee,
+    settlement: args.settlement,
     exitReason: args.exitReason,
     masterEntryPrice: args.masterEntryPrice,
     closeAllMatching: true,
@@ -1490,8 +1488,7 @@ export async function closeOpenTradesForManualAdmin(
     strategyId: string;
     symbol: string;
     side: TradeSide;
-    exitPrice: number;
-    exitFee: number;
+    settlement: TradeLegSettlement;
   },
 ): Promise<number> {
   return settleOpenCopyTradesForLeg(prisma, {
@@ -1499,8 +1496,7 @@ export async function closeOpenTradesForManualAdmin(
     strategyId: args.strategyId,
     symbol: args.symbol,
     side: args.side,
-    exitPrice: args.exitPrice,
-    exitFee: args.exitFee,
+    settlement: args.settlement,
     exitReason: EXIT_REASON.ADMIN_PANEL,
     closeAllMatching: true,
   });
@@ -2201,8 +2197,7 @@ async function notifyMasterFlat(
           side: closed.side,
           masterEntryPrice: closed.masterEntryPrice,
           sizedPosition: closed.sizedPosition,
-          exitPrice: closed.exitPrice,
-          exitFee: closed.exitFee,
+          settlement: closed.settlement,
           exitReason: closureOrigin,
         });
       },
@@ -3047,8 +3042,7 @@ async function pollMasterPositionsFallback(
                 side: closed.side,
                 masterEntryPrice: closed.masterEntryPrice,
                 sizedPosition: closed.sizedPosition,
-                exitPrice: closed.exitPrice,
-                exitFee: closed.exitFee,
+                settlement: closed.settlement,
                 exitReason: closed.exitReason ?? EXIT_REASON.MASTER_CLOSED,
               });
             },

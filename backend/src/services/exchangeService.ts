@@ -7,6 +7,17 @@ import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
 
+export type TradeSide = "BUY" | "SELL";
+
+function numberOrNull(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 /** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
 const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
 
@@ -135,40 +146,372 @@ async function fetchDeltaOrderById(
   return null;
 }
 
+const SETTLEMENT_POLL_ATTEMPTS = 8;
+const SETTLEMENT_POLL_INTERVAL_MS = 400;
+
 /** Poll filled order for Delta `paid_commission` + average fill (POST ack can omit them). */
 async function enrichRestOrderFillDetails(
   apiKey: string,
   secret: string,
   initial: Record<string, unknown>,
-  contractSize: number,
-  lots: number,
-): Promise<{ fillPrice: number | null; feeCost: number }> {
+  _contractSize: number,
+  _lots: number,
+): Promise<{ fillPrice: number | null; feeCost: number | null }> {
   let row = initial;
   const orderId = String(initial.id ?? "").trim();
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < SETTLEMENT_POLL_ATTEMPTS; attempt += 1) {
     const fillPrice = parseOrderFillPrice(row);
     const fee = parseOrderCommission(row);
-    if (fillPrice != null && fee != null) {
+    if (fillPrice != null && fillPrice > 0 && fee != null) {
       return { fillPrice, feeCost: Math.abs(fee) };
     }
-    if (attempt >= 4 || !orderId) break;
-    await new Promise((r) => setTimeout(r, 350));
+    if (attempt >= SETTLEMENT_POLL_ATTEMPTS - 1 || !orderId) break;
+    await new Promise((r) => setTimeout(r, SETTLEMENT_POLL_INTERVAL_MS));
     const fresh = await fetchDeltaOrderById(apiKey, secret, orderId);
     if (fresh) row = fresh;
   }
 
   const fillPrice = parseOrderFillPrice(row);
-  let feeCost = parseOrderCommission(row);
-  if (feeCost == null && fillPrice != null && fillPrice > 0) {
-    // Delta India taker ≈ 0.05% + GST (~0.059%) when API commission not yet available.
-    feeCost = lots * contractSize * fillPrice * 0.00059;
+  const feeCost = parseOrderCommission(row);
+  return {
+    fillPrice: fillPrice != null && fillPrice > 0 ? fillPrice : null,
+    feeCost:
+      feeCost != null && Number.isFinite(feeCost) ? Math.max(0, Math.abs(feeCost)) : null,
+  };
+}
+
+function normalizeDeltaApiRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) {
+    return result.filter(
+      (r): r is Record<string, unknown> => r != null && typeof r === "object",
+    );
+  }
+  return [];
+}
+
+function parseDeltaRealizedPnl(position: Record<string, unknown>): number | null {
+  const candidates = [
+    position.realized_pnl,
+    position.realizedPnl,
+    position.realised_pnl,
+  ];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === null) continue;
+    const n = parseFloat(String(raw));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+export type DeltaPositionPnlSnapshot = {
+  realizedPnl: number | null;
+  unrealizedPnl: number | null;
+};
+
+export type DeltaCloseSettlement = {
+  orderId: string;
+  exitPrice: number;
+  exitFee: number;
+  /** Gross realized PnL from Delta position delta / crystallized UPL (before entry fees). */
+  grossRealizedPnl: number;
+  fillCount: number;
+};
+
+function aggregateFillSummary(fills: Record<string, unknown>[]): {
+  exitPrice: number | null;
+  exitFee: number;
+} {
+  let totalSize = 0;
+  let weightedPrice = 0;
+  let totalFee = 0;
+  for (const f of fills) {
+    const size = numberOrNull(f.size) ?? 0;
+    const price = numberOrNull(f.price) ?? 0;
+    const comm = numberOrNull(f.commission) ?? 0;
+    if (size > 0 && price > 0) {
+      weightedPrice += price * size;
+      totalSize += size;
+    }
+    if (comm > 0) totalFee += Math.abs(comm);
   }
   return {
-    fillPrice,
-    feeCost:
-      feeCost != null && Number.isFinite(feeCost) ? Math.max(0, Math.abs(feeCost)) : 0,
+    exitPrice: totalSize > 0 ? weightedPrice / totalSize : null,
+    exitFee: totalFee,
   };
+}
+
+async function fetchDeltaFillsRaw(
+  apiKey: string,
+  secret: string,
+  params: Record<string, string | number>,
+): Promise<Record<string, unknown>[]> {
+  const query: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params)) {
+    query[k] = String(v);
+  }
+  const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+    apiKey,
+    secret,
+    method: "GET",
+    path: "/v2/fills",
+    query,
+  });
+  return normalizeDeltaApiRows(response.result);
+}
+
+/** Fills for a specific order — filters recent page when API has no order_id query param. */
+export async function fetchDeltaFillsForOrder(
+  apiKey: string,
+  secret: string,
+  orderId: string,
+): Promise<Record<string, unknown>[]> {
+  const id = orderId.trim();
+  if (!id) return [];
+  try {
+    const fills = await fetchDeltaFillsRaw(apiKey, secret, { page_size: 50 });
+    const matched = fills.filter((f) => String(f.order_id ?? "").trim() === id);
+    if (matched.length > 0) return matched;
+    return fills.filter((f) => String(f.order_id ?? "").trim() === id);
+  } catch (err) {
+    console.warn(
+      `[exchangeService] fetchDeltaFillsForOrder failed orderId=${id}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
+}
+
+/** Read Delta native realized + unrealized PnL for one open leg (REST pass-through). */
+export async function snapshotDeltaPositionPnl(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  symbol: string,
+  side: TradeSide,
+): Promise<DeltaPositionPnlSnapshot | null> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  const positions = await fetchDeltaMarginedPositionSnapshotRaw(apiKey, secret);
+  const { tradePositionSymbolsAlign } = await import("./tradePositionService.js");
+
+  for (const row of positions) {
+    const rawSize = numberOrNull(row.size);
+    if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
+    const productSymbol = String(row.product_symbol ?? "").trim();
+    if (!productSymbol) continue;
+    const legSide = tradeSideFromSignedSize(rawSize);
+    if (legSide !== side) continue;
+    if (!tradePositionSymbolsAlign(symbol, productSymbol)) continue;
+    return {
+      realizedPnl: parseDeltaRealizedPnl(row),
+      unrealizedPnl: parseDeltaPositionUnrealizedPnl(row),
+    };
+  }
+  return { realizedPnl: null, unrealizedPnl: null };
+}
+
+/** Gross realized PnL for a close from Delta position snapshots (no local price math). */
+export function computeDeltaCloseGrossRealizedPnl(
+  pre: DeltaPositionPnlSnapshot | null | undefined,
+  post: DeltaPositionPnlSnapshot | null | undefined,
+): number | null {
+  if (!pre) return null;
+  const preR = pre.realizedPnl ?? 0;
+  const preU = pre.unrealizedPnl ?? 0;
+  if (post != null) {
+    const postR = post.realizedPnl ?? 0;
+    const postU = post.unrealizedPnl ?? 0;
+    const delta = postR - preR + (preU - postU);
+    return Number.isFinite(delta) ? delta : null;
+  }
+  if (preU !== 0) return preU;
+  return preR !== 0 ? null : 0;
+}
+
+async function fetchDeltaProductCashflowSince(
+  apiKey: string,
+  secret: string,
+  productId: number,
+  startTimeMicros: number,
+): Promise<number | null> {
+  try {
+    const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+      apiKey,
+      secret,
+      method: "GET",
+      path: "/v2/wallet/transactions",
+      query: {
+        start_time: String(startTimeMicros),
+        page_size: "50",
+      },
+    });
+    const rows = normalizeDeltaApiRows(response.result);
+    let sum = 0;
+    let found = false;
+    for (const row of rows) {
+      const pid = numberOrNull(row.product_id);
+      if (pid !== productId) continue;
+      const tt = String(row.transaction_type ?? "").toLowerCase();
+      if (tt !== "cashflow" && tt !== "fill_appropriation") continue;
+      const amt = parseFloat(String(row.amount ?? "0"));
+      if (Number.isFinite(amt)) {
+        sum += amt;
+        found = true;
+      }
+    }
+    return found ? sum : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll Delta order + fills until exit price, commission, and gross realized PnL are available.
+ */
+export async function fetchDeltaCloseSettlement(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  orderId: string,
+  opts: {
+    symbol: string;
+    openSide: TradeSide;
+    preSnapshot?: DeltaPositionPnlSnapshot | null;
+    productId?: number;
+    fillCreatedAtMicros?: number;
+  },
+): Promise<DeltaCloseSettlement | null> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  const id = orderId.trim();
+  if (!id) return null;
+
+  for (let attempt = 0; attempt < SETTLEMENT_POLL_ATTEMPTS; attempt += 1) {
+    const order = await fetchDeltaOrderById(apiKey, secret, id);
+    const fills = await fetchDeltaFillsForOrder(apiKey, secret, id);
+    const fillAgg = aggregateFillSummary(fills);
+    const exitPrice =
+      (order ? parseOrderFillPrice(order) : null) ?? fillAgg.exitPrice;
+    const orderFee = order ? parseOrderCommission(order) : null;
+    const exitFee =
+      orderFee != null
+        ? Math.abs(orderFee)
+        : fillAgg.exitFee > 0
+          ? fillAgg.exitFee
+          : null;
+
+    const state = String(order?.state ?? "").toLowerCase();
+    const filled =
+      state === "closed" ||
+      (exitPrice != null && exitPrice > 0 && (exitFee != null || fills.length > 0));
+
+    if (filled && exitPrice != null && exitPrice > 0 && exitFee != null) {
+      const post = await snapshotDeltaPositionPnl(
+        apiKeyStored,
+        apiSecretStored,
+        opts.symbol,
+        opts.openSide,
+      );
+      let gross =
+        computeDeltaCloseGrossRealizedPnl(opts.preSnapshot, post) ??
+        computeDeltaCloseGrossRealizedPnl(opts.preSnapshot, null);
+
+      if (gross == null && opts.productId != null && opts.fillCreatedAtMicros != null) {
+        gross = await fetchDeltaProductCashflowSince(
+          apiKey,
+          secret,
+          opts.productId,
+          opts.fillCreatedAtMicros,
+        );
+      }
+
+      if (gross != null && Number.isFinite(gross)) {
+        return {
+          orderId: id,
+          exitPrice,
+          exitFee,
+          grossRealizedPnl: gross,
+          fillCount: fills.length,
+        };
+      }
+    }
+
+    if (attempt < SETTLEMENT_POLL_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, SETTLEMENT_POLL_INTERVAL_MS));
+    }
+  }
+
+  console.warn(
+    `[exchangeService] fetchDeltaCloseSettlement incomplete orderId=${id} symbol=${opts.symbol}`,
+  );
+  return null;
+}
+
+/** Ghost reconcile — latest closing fill for a flat leg (no pre-snapshot). */
+export async function fetchDeltaRecentLegCloseSettlement(
+  apiKeyStored: string,
+  apiSecretStored: string,
+  symbol: string,
+  openSide: TradeSide,
+): Promise<DeltaCloseSettlement | null> {
+  const apiKey = decryptDeltaSecretOrPlain(apiKeyStored);
+  const secret = decryptDeltaSecretOrPlain(apiSecretStored);
+  const closeSide: TradeSide = openSide === "BUY" ? "SELL" : "BUY";
+  const resolved = await resolveDeltaProductNumericId(symbol);
+  if (!resolved) return null;
+
+  const startMicros = (Date.now() - 24 * 60 * 60 * 1000) * 1000;
+  let fills: Record<string, unknown>[] = [];
+  try {
+    fills = await fetchDeltaFillsRaw(apiKey, secret, {
+      product_ids: String(resolved.productId),
+      start_time: startMicros,
+      page_size: 50,
+    });
+  } catch {
+    return null;
+  }
+
+  const closing = fills
+    .filter((f) => {
+      const s = String(f.side ?? "").toLowerCase();
+      return s === closeSide.toLowerCase() || s === (closeSide === "BUY" ? "buy" : "sell");
+    })
+    .sort((a, b) => {
+      const ta = parseFloat(String(a.created_at ?? "0"));
+      const tb = parseFloat(String(b.created_at ?? "0"));
+      return tb - ta;
+    });
+
+  const latest = closing[0];
+  if (!latest) return null;
+  const orderId = String(latest.order_id ?? "").trim();
+  if (!orderId) return null;
+  const createdMicros = parseFloat(String(latest.created_at ?? "0"));
+
+  return fetchDeltaCloseSettlement(apiKeyStored, apiSecretStored, orderId, {
+    symbol,
+    openSide,
+    preSnapshot: null,
+    productId: resolved.productId,
+    ...(Number.isFinite(createdMicros) ? { fillCreatedAtMicros: createdMicros } : {}),
+  });
+}
+
+/** Raw margined rows for internal snapshot helpers (no CCXT parse). */
+async function fetchDeltaMarginedPositionSnapshotRaw(
+  apiKey: string,
+  secret: string,
+): Promise<Record<string, unknown>[]> {
+  const response = await deltaIndiaSignedRequest<{ result?: unknown }>({
+    apiKey,
+    secret,
+    method: "GET",
+    path: "/v2/positions/margined",
+    query: {
+      contract_types: "perpetual_futures,call_options,put_options",
+    },
+  });
+  return normalizeDeltaApiRows(response.result);
 }
 
 async function resolveDeltaProductNumericId(
@@ -292,26 +635,34 @@ async function executeDeltaMarketOrderViaRest(
     }
 
     const isOptionOrder = isDeltaOptionProductId(resolved.symbol);
-    let fillPrice: number | null;
-    let feeCost: number;
-    if (isOptionOrder) {
-      fillPrice = parseOrderFillPrice(order);
-      const fee = parseOrderCommission(order);
-      feeCost =
-        fee != null && Number.isFinite(fee)
-          ? Math.max(0, Math.abs(fee))
-          : 0;
-    } else {
-      const enriched = await enrichRestOrderFillDetails(
+    const openSide: TradeSide | null = opts?.reduceOnly
+      ? side === "BUY"
+        ? "SELL"
+        : "BUY"
+      : null;
+    let preSnapshot: DeltaPositionPnlSnapshot | null = null;
+    if (openSide != null) {
+      preSnapshot = await snapshotDeltaPositionPnl(
         apiKey,
         secret,
-        order,
-        resolved.contractSize,
-        lots,
+        resolved.symbol,
+        openSide,
       );
-      fillPrice = enriched.fillPrice;
-      feeCost = enriched.feeCost;
     }
+
+    let fillPrice: number | null = parseOrderFillPrice(order);
+    let feeCost: number | null = parseOrderCommission(order);
+    if (feeCost != null) feeCost = Math.abs(feeCost);
+
+    const enriched = await enrichRestOrderFillDetails(
+      apiKey,
+      secret,
+      order,
+      resolved.contractSize,
+      lots,
+    );
+    fillPrice = enriched.fillPrice ?? fillPrice;
+    feeCost = enriched.feeCost ?? feeCost;
 
     const orderIdRaw = order.id;
     const orderId =
@@ -319,12 +670,35 @@ async function executeDeltaMarketOrderViaRest(
         ? String(orderIdRaw)
         : undefined;
 
+    let closeSettlement: DeltaCloseSettlement | undefined;
+    if (opts?.reduceOnly === true && orderId && openSide != null) {
+      const settlement = await fetchDeltaCloseSettlement(apiKey, secret, orderId, {
+        symbol: resolved.symbol,
+        openSide,
+        preSnapshot,
+        productId: resolved.productId,
+      });
+      if (settlement) {
+        closeSettlement = settlement;
+        fillPrice = settlement.exitPrice;
+        feeCost = settlement.exitFee;
+      }
+    }
+
     return {
       success: true,
       ...(orderId ? { orderId } : {}),
       ...(clientOrderId ? { clientOrderId } : {}),
       ...(fillPrice != null && fillPrice > 0 ? { fillPrice } : {}),
-      feeCost: Number.isFinite(feeCost) ? Math.max(0, feeCost!) : 0,
+      ...(feeCost != null && Number.isFinite(feeCost)
+        ? { feeCost: Math.max(0, feeCost) }
+        : {}),
+      ...(closeSettlement
+        ? {
+            closeSettlement,
+            grossRealizedPnl: closeSettlement.grossRealizedPnl,
+          }
+        : {}),
       raw: order,
     };
   } catch (err) {
@@ -682,8 +1056,6 @@ export function clearDeltaAuthClientCache(): void {
   _optionMarketCache.clear();
 }
 
-export type TradeSide = "BUY" | "SELL";
-
 /** Delta India: positive signed size/lots = long (BUY), negative = short (SELL). */
 export function tradeSideFromSignedSize(rawSize: number): TradeSide {
   if (rawSize > 0) return "BUY";
@@ -696,9 +1068,14 @@ export interface ExecuteTradeResult {
   orderId?: string;
   /** Correlates exchange order ↔ {@link TradePosition.clientOrderId}. */
   clientOrderId?: string;
-  /** Actual average fill from CCXT order (preferred over LTP for PnL). */
+  /** Delta average fill price from order / fills REST. */
   fillPrice?: number;
+  /** Delta `paid_commission` on the closing order (exit leg only). */
   feeCost?: number;
+  /** Delta gross realized PnL for reduce-only closes (position delta). */
+  grossRealizedPnl?: number;
+  /** Full polled settlement when closing a position leg. */
+  closeSettlement?: DeltaCloseSettlement;
   raw?: unknown;
   error?: string;
 }
@@ -712,15 +1089,6 @@ function extractFillPriceFromOrder(raw: unknown): number | null {
     numberOrNull(o.last) ??
     null
   );
-}
-
-function numberOrNull(v: unknown): number | null {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  if (typeof v === "string") {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
 }
 
 function extractDeltaMarkPrice(position: Record<string, unknown>): number | null {
@@ -784,169 +1152,6 @@ function extractDeltaBidOffer(position: Record<string, unknown>): {
     return fromPosition;
   }
   return extractDeltaQuotesBidOffer(product);
-}
-
-/**
- * Delta terminal options UPNL: longs mark at **bid**, shorts at **offer** (not mid mark).
- */
-async function resolveOptionUpnlPrice(
-  exchange: InstanceType<typeof ccxt.delta>,
-  unified: string,
-  position: Record<string, unknown>,
-  side: TradeSide,
-  displayMark: number | null,
-): Promise<{ price: number | null; source: string }> {
-  const { bid, offer } = extractDeltaBidOffer(position);
-
-  if (side === "BUY" && bid != null && bid > 0) {
-    return { price: bid, source: "bid" };
-  }
-  if (side === "SELL" && offer != null && offer > 0) {
-    return { price: offer, source: "offer" };
-  }
-
-  try {
-    const ticker = await exchange.fetchTicker(unified);
-    if (side === "BUY") {
-      const tbid = numberOrNull(ticker.bid);
-      if (tbid != null && tbid > 0) return { price: tbid, source: "ticker_bid" };
-    } else {
-      const task = numberOrNull(ticker.ask);
-      if (task != null && task > 0) return { price: task, source: "ticker_ask" };
-    }
-  } catch {
-    /* use display mark */
-  }
-
-  return { price: displayMark, source: "mark_fallback" };
-}
-
-/**
- * Options UPNL price without CCXT ticker — bid (long) / offer (short) from margined REST.
- * Matches {@link resolveOptionUpnlPrice} when payload includes bid/offer; falls back to mark.
- */
-function resolveOptionUpnlPriceSync(
-  position: Record<string, unknown>,
-  side: TradeSide,
-  displayMark: number | null,
-): number | null {
-  const { bid, offer } = extractDeltaBidOffer(position);
-  if (side === "BUY" && bid != null && bid > 0) return bid;
-  if (side === "SELL" && offer != null && offer > 0) return offer;
-  return displayMark;
-}
-
-type OptionTickerQuote = { bid: number | null; ask: number | null };
-
-/** Prefetch bid/ask for open options — Delta terminal UPNL uses bid (long) / offer (short), not mark. */
-async function prefetchOptionTickerQuotes(
-  productSymbols: string[],
-): Promise<Map<string, OptionTickerQuote>> {
-  const cache = new Map<string, OptionTickerQuote>();
-  const unique = [...new Set(productSymbols.map((s) => s.trim()).filter(Boolean))];
-  if (unique.length === 0) return cache;
-
-  const exchange = await getPublicClient();
-  await Promise.all(
-    unique.map(async (sym) => {
-      if (isDeltaOptionProductId(sym) || /^\d+$/.test(sym)) {
-        const { bid, offer } = await fetchFreshOptionBidOffer(sym);
-        cache.set(sym, { bid, ask: offer });
-        return;
-      }
-      try {
-        const ccxtSymbol = resolveCcxtSymbol(exchange, sym);
-        const ticker = await exchange.fetchTicker(ccxtSymbol);
-        cache.set(sym, {
-          bid: numberOrNull(ticker.bid),
-          ask: numberOrNull(ticker.ask),
-        });
-      } catch {
-        cache.set(sym, { bid: null, ask: null });
-      }
-    }),
-  );
-  return cache;
-}
-
-function collectOpenOptionProductSymbols(rawList: unknown[]): string[] {
-  const out: string[] = [];
-  for (const row of rawList) {
-    if (!row || typeof row !== "object") continue;
-    const position = row as Record<string, unknown>;
-    const info =
-      position.info != null && typeof position.info === "object"
-        ? (position.info as Record<string, unknown>)
-        : null;
-    const rawSize =
-      numberOrNull(position.size) ??
-      numberOrNull(info?.size) ??
-      numberOrNull(position.contracts);
-    if (rawSize === null || Math.abs(rawSize) < 1e-12) continue;
-    const productSymbol = String(
-      position.product_symbol ?? position.product_id ?? "",
-    ).trim();
-    if (productSymbol && isDeltaOptionProductId(productSymbol)) {
-      out.push(productSymbol);
-    }
-  }
-  return out;
-}
-
-/**
- * Live bid/offer for UPL — prefer fresh ticker/L2 cache over margined row `quotes`
- * (margined API can lag ~10s and diverge from Delta terminal UPL@Offer).
- */
-function resolveOptionUpnlPriceLite(
-  position: Record<string, unknown>,
-  side: TradeSide,
-  displayMark: number | null,
-  productSymbol: string,
-  tickerCache: Map<string, OptionTickerQuote>,
-): number | null {
-  const cached = tickerCache.get(productSymbol.trim());
-  if (cached) {
-    if (side === "BUY" && cached.bid != null && cached.bid > 0) return cached.bid;
-    if (side === "SELL" && cached.ask != null && cached.ask > 0) return cached.ask;
-  }
-
-  return resolveOptionUpnlPriceSync(position, side, displayMark);
-}
-
-function computePositionUnrealizedPnl(args: {
-  isOption: boolean;
-  side: TradeSide;
-  entryPrice: number | null;
-  markPrice: number | null;
-  realBaseSize: number;
-  position: Record<string, unknown>;
-  lite: boolean;
-}): number | null {
-  const { isOption, side, entryPrice, markPrice, realBaseSize, position, lite } =
-    args;
-
-  if (entryPrice === null) return null;
-
-  let upnlPrice: number | null = markPrice;
-  if (isOption) {
-    upnlPrice = resolveOptionUpnlPriceSync(position, side, markPrice);
-  }
-
-  if (upnlPrice === null) {
-    if (!isOption && lite) {
-      return parseApiUnrealizedPnl(position);
-    }
-    return null;
-  }
-
-  const sign = side === "SELL" ? -1 : 1;
-  let unrealizedPnl = realBaseSize * (upnlPrice - entryPrice) * sign;
-
-  const funding = parseFloat(String(position.unrealized_funding_pnl ?? "0"));
-  if (!Number.isNaN(funding)) unrealizedPnl += funding;
-
-  if (Number.isNaN(unrealizedPnl)) return null;
-  return unrealizedPnl;
 }
 
 function deltaContractValueFromMarket(
@@ -1087,6 +1292,8 @@ export interface DeltaLivePosition {
   entryPrice: number | null;
   markPrice: number | null;
   unrealizedPnl: number | null;
+  /** Delta REST `realized_pnl` — cumulative since position opened. */
+  realizedPnl: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
   entryTime: string | null;
@@ -1173,174 +1380,6 @@ function optionSignedBaseSize(rawSize: number, contractValue: number): number {
   if (!Number.isInteger(abs) && abs <= 10) return rawSize;
 
   return rawSize * contractValue;
-}
-
-/** Match Delta terminal — round per-leg UPL to cents before display / auto-exit sum. */
-function roundOptionUpnlUsd(pnl: number): number {
-  if (!Number.isFinite(pnl)) return pnl;
-  return Math.round(pnl * 100) / 100;
-}
-
-/** Fresh L2 top-of-book + ticker `quotes` — UPL@Offer uses orderbook best ask/bid. */
-async function fetchFreshOptionBidOffer(
-  productSymbol: string,
-): Promise<{ bid: number | null; offer: number | null }> {
-  const ref = productSymbol.trim();
-  if (!ref) return { bid: null, offer: null };
-
-  const [rest, l2] = await Promise.all([
-    fetchDeltaTickerFromRestApi(ref),
-    fetchDeltaL2BestQuotes(ref),
-  ]);
-  return {
-    bid: l2.bid ?? rest.bid,
-    offer: l2.ask ?? rest.ask,
-  };
-}
-
-/** Bid/offer UPNL estimate — only when Delta API field is absent (~new realtime legs). */
-function estimateOptionUnrealizedPnlFromQuotes(args: {
-  position: Record<string, unknown>;
-  side: TradeSide;
-  entryPrice: number | null;
-  productSymbol: string;
-  rawSignedSize: number;
-  contractValue: number;
-  upnlPriceOverride?: number | null;
-  tickerCache: Map<string, OptionTickerQuote>;
-}): number | null {
-  if (args.entryPrice === null) return null;
-
-  const upnlPrice =
-    args.upnlPriceOverride ??
-    resolveOptionUpnlPriceLite(
-      args.position,
-      args.side,
-      null,
-      args.productSymbol,
-      args.tickerCache,
-    );
-  if (upnlPrice === null) return null;
-
-  return computeOptionUpnlFromQuotePrice({
-    entryPrice: args.entryPrice,
-    upnlPrice,
-    rawSignedSize: args.rawSignedSize,
-    contractValue: args.contractValue,
-    position: args.position,
-  });
-}
-
-/**
- * Delta short-option API bug (GH delta-exchange-mcp#9): `unrealized_pnl` is unsigned
- * `mark_price × |size| × contract_value` (premium value), not signed UPL@Offer.
- */
-function isDeltaShortOptionUnsignedUpnl(
-  apiUpnl: number,
-  position: Record<string, unknown>,
-  rawSize: number,
-  contractValue: number,
-): boolean {
-  const mark = extractDeltaMarkPrice(position);
-  if (mark === null || mark <= 0) return true;
-  const absSize = Math.abs(rawSize);
-  if (absSize < 1e-12 || contractValue <= 0) return true;
-  const unsignedPremium = mark * absSize * contractValue;
-  if (!Number.isFinite(unsignedPremium) || unsignedPremium <= 0) return true;
-  return Math.abs(apiUpnl - unsignedPremium) <= Math.max(0.002, unsignedPremium * 0.08);
-}
-
-/**
- * Per-leg UPNL aligned with Delta terminal UPL@Offer.
- * Futures/perps: REST `unrealized_pnl`. Options: live L2 best bid/offer (not mark).
- */
-async function resolvePositionUnrealizedPnl(args: {
-  position: Record<string, unknown>;
-  isOption: boolean;
-  side: TradeSide;
-  rawSize: number;
-  entryPrice: number | null;
-  productSymbol: string;
-  contractValue: number;
-  tickerCache: Map<string, OptionTickerQuote>;
-}): Promise<number | null> {
-  const apiUpnl = parseDeltaPositionUnrealizedPnl(args.position);
-
-  if (!args.isOption) {
-    return apiUpnl;
-  }
-
-  if (args.entryPrice === null) {
-    return apiUpnl !== null ? roundOptionUpnlUsd(apiUpnl) : null;
-  }
-
-  const isShort = args.side === "SELL" || args.rawSize < -1e-12;
-  let upnlPriceOverride: number | null = null;
-
-  const fresh = await fetchFreshOptionBidOffer(args.productSymbol);
-  if (isShort && fresh.offer != null && fresh.offer > 0) {
-    upnlPriceOverride = fresh.offer;
-  } else if (!isShort && fresh.bid != null && fresh.bid > 0) {
-    upnlPriceOverride = fresh.bid;
-  }
-
-  if (upnlPriceOverride != null) {
-    args.tickerCache.set(args.productSymbol.trim(), {
-      bid: fresh.bid,
-      ask: fresh.offer,
-    });
-  }
-
-  const fromQuotes = estimateOptionUnrealizedPnlFromQuotes({
-    position: args.position,
-    side: args.side,
-    entryPrice: args.entryPrice,
-    productSymbol: args.productSymbol,
-    rawSignedSize: args.rawSize,
-    contractValue: args.contractValue,
-    upnlPriceOverride,
-    tickerCache: args.tickerCache,
-  });
-  if (fromQuotes !== null) {
-    return roundOptionUpnlUsd(fromQuotes);
-  }
-
-  if (isShort) {
-    const apiLooksUnsigned =
-      apiUpnl !== null &&
-      isDeltaShortOptionUnsignedUpnl(
-        apiUpnl,
-        args.position,
-        args.rawSize,
-        args.contractValue,
-      );
-    if (apiLooksUnsigned) return null;
-  }
-
-  if (apiUpnl !== null) return roundOptionUpnlUsd(apiUpnl);
-  return null;
-}
-
-/** @deprecated Use {@link resolvePositionUnrealizedPnl}. */
-function resolveDeltaTerminalUnrealizedPnl(
-  position: Record<string, unknown>,
-): number | null {
-  return parseDeltaPositionUnrealizedPnl(position);
-}
-
-/** Delta UPL@Offer — `(exitBidOrOffer - entry) × signedLots × contract_value`. */
-function computeOptionUpnlFromQuotePrice(args: {
-  entryPrice: number;
-  upnlPrice: number;
-  rawSignedSize: number;
-  contractValue: number;
-  position: Record<string, unknown>;
-}): number {
-  let unrealizedPnl =
-    (args.upnlPrice - args.entryPrice) * args.rawSignedSize * args.contractValue;
-  const funding = parseFloat(String(args.position.unrealized_funding_pnl ?? "0"));
-  if (!Number.isNaN(funding)) unrealizedPnl += funding;
-  return unrealizedPnl;
 }
 
 export function deltaLiveLegKey(symbolKey: string, side: TradeSide): string {
@@ -2123,35 +2162,11 @@ export async function executeTrade(
       };
     }
 
-    const orderObj = order as {
-      average?: unknown;
-      price?: unknown;
-      last?: unknown;
-    };
     const explicitFee = extractFeeCostFromOrder(order);
-    let feeCost = explicitFee ?? 0;
-    if (!(Number.isFinite(feeCost) && feeCost > 0)) {
-      const fallbackCs = deltaContractSizeFallback(inputSymbol);
-      let contractSize = fallbackCs;
-      try {
-        const m = exchange.market(ccxtSymbol);
-        const cs = Number(m.contractSize ?? NaN);
-        if (Number.isFinite(cs) && cs > 0) {
-          contractSize = fallbackCs < 1 && cs >= 1 ? fallbackCs : cs;
-        }
-      } catch {
-        contractSize = fallbackCs;
-      }
-      const executedPrice =
-        numberOrNull(orderObj.average) ??
-        numberOrNull(orderObj.price) ??
-        numberOrNull(orderObj.last);
-      if (executedPrice != null && Number.isFinite(executedPrice) && executedPrice > 0) {
-        feeCost = Math.abs(size) * contractSize * executedPrice * 0.00059;
-      } else {
-        feeCost = 0;
-      }
-    }
+    const feeCost =
+      explicitFee != null && Number.isFinite(explicitFee) && explicitFee > 0
+        ? Math.abs(explicitFee)
+        : undefined;
 
     const fillPrice = extractFillPriceFromOrder(order);
 
@@ -2160,7 +2175,7 @@ export async function executeTrade(
       orderId: order.id ?? undefined,
       ...(clientOrderId ? { clientOrderId } : {}),
       ...(fillPrice != null ? { fillPrice } : {}),
-      feeCost,
+      ...(feeCost != null ? { feeCost } : {}),
       raw: order,
     };
   } catch (err) {
@@ -2285,34 +2300,6 @@ export async function fetchDeltaSwapContractSize(symbol: string): Promise<number
   } catch {
     return fallback;
   }
-}
-
-/** Exit price for booking realized PnL — options use bid/offer, perps use last/mark. */
-export async function fetchDeltaSettlementExitPrice(
-  symbol: string,
-  side: TradeSide,
-): Promise<number | null> {
-  const ref = symbol.trim();
-  if (!ref) return null;
-
-  if (isDeltaOptionProductId(ref)) {
-    const [l2, rest] = await Promise.all([
-      fetchDeltaL2BestQuotes(ref),
-      fetchDeltaTickerFromRestApi(ref),
-    ]);
-    if (side === "SELL" && l2.ask != null && l2.ask > 0) return l2.ask;
-    if (side === "BUY" && l2.bid != null && l2.bid > 0) return l2.bid;
-    if (side === "SELL" && rest.ask != null && rest.ask > 0) return rest.ask;
-    if (side === "BUY" && rest.bid != null && rest.bid > 0) return rest.bid;
-    if (rest.last != null && rest.last > 0) return rest.last;
-    return null;
-  }
-
-  const tick = await fetchDeltaTicker(ref);
-  if (tick.last != null && Number.isFinite(tick.last) && tick.last > 0) {
-    return tick.last;
-  }
-  return null;
 }
 
 function extractMarkFromCcxtTicker(ticker: {
@@ -2570,10 +2557,6 @@ async function fetchDeltaMarginedPositionSnapshotInner(
     exchange = await getAuthClient(apiKey, secret);
   }
 
-  const optionTickerCache = await prefetchOptionTickerQuotes(
-    collectOpenOptionProductSymbols(rawList),
-  );
-
   const open: DeltaLivePosition[] = [];
   const explicitFlatLegKeys: string[] = [];
 
@@ -2685,57 +2668,22 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         numberOrNull(position.entry_price) ??
         numberOrNull(position.average_price);
 
-      let markPrice: number | null = null;
-      if (position.mark_price !== undefined && position.mark_price !== null) {
-        const parsed = parseFloat(String(position.mark_price));
-        markPrice = Number.isFinite(parsed) ? parsed : null;
-      } else if (position.markPrice !== undefined && position.markPrice !== null) {
-        const parsed = Number(position.markPrice);
-        markPrice = Number.isFinite(parsed) ? parsed : null;
-      }
+      const markPrice = extractDeltaMarkPrice(position);
 
-      if (markPrice === null && !isOption && !lite) {
-        try {
-          const ticker = await exchange.fetchTicker(unified);
-          markPrice = extractMarkFromCcxtTicker(ticker);
-        } catch {
-          /* perp mark stays null */
-        }
-      }
-
-      const apiUpnlRaw = position.unrealized_pnl;
-      let unrealizedPnl = await resolvePositionUnrealizedPnl({
-        position,
-        isOption,
-        side,
-        rawSize: contractLots,
-        entryPrice,
-        productSymbol,
-        contractValue,
-        tickerCache: optionTickerCache,
-      });
-
-      if (isOption && unrealizedPnl != null) {
-        const cached = optionTickerCache.get(productSymbol.trim());
-        const offerUsed = side === "SELL" ? cached?.ask : cached?.bid;
-        console.log(
-          `[exchangeService] option UPL@Offer ${productSymbol} side=${side} ` +
-            `entry=${entryPrice} ${side === "SELL" ? "offer" : "bid"}=${offerUsed ?? "n/a"} ` +
-            `mark=${markPrice ?? "n/a"} pnl=$${unrealizedPnl.toFixed(2)} ` +
-            `api_unrealized_pnl=${apiUpnlRaw ?? "n/a"}`,
-        );
-      }
+      const unrealizedPnl = parseDeltaPositionUnrealizedPnl(position);
+      const realizedPnl = parseDeltaRealizedPnl(position);
 
       if (!lite && unrealizedPnl === null) {
-        const { bid, offer } = extractDeltaBidOffer(position);
         console.log(
           `[PNL_TRACKER] ${unified} option=${isOption} side=${side} ` +
-            `lots=${contractLotCount} api_unrealized_pnl=${apiUpnlRaw ?? "n/a"} ` +
-            `mark=${markPrice} bid=${bid ?? "n/a"} offer=${offer ?? "n/a"}`,
+            `lots=${contractLotCount} api_unrealized_pnl=${position.unrealized_pnl ?? "n/a"} ` +
+            `mark=${markPrice ?? "n/a"}`,
         );
       }
 
-      if (Number.isNaN(unrealizedPnl as number)) unrealizedPnl = null;
+      if (Number.isNaN(unrealizedPnl as number)) {
+        /* keep null */
+      }
 
       let stopLoss: number | null = null;
       let takeProfit: number | null = null;
@@ -2773,6 +2721,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
           unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
             ? unrealizedPnl
             : null,
+        realizedPnl,
         stopLoss,
         takeProfit,
         entryTime,

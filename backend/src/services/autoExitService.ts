@@ -68,12 +68,12 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   return null;
 }
 
-/** Same PnL as admin live-trades / Delta terminal (`exchangeService` resolver output). */
-function legPnlUsd(pos: DeltaLivePosition): number {
+/** Delta-native unrealized PnL only — null when the API did not provide a value. */
+function legPnlUsd(pos: DeltaLivePosition): number | null {
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }
-  return 0;
+  return null;
 }
 
 export type MasterLegCloseTarget = {
@@ -99,7 +99,10 @@ export async function fetchMasterLegsWithTotalLivePnl(
     const contracts = Math.abs(pos.contracts);
     if (!Number.isFinite(contracts) || contracts < 1e-12) continue;
 
-    totalPnlUsd += legPnlUsd(pos);
+    const legUpnl = legPnlUsd(pos);
+    if (legUpnl != null) {
+      totalPnlUsd += legUpnl;
+    }
 
     const entryPrice =
       pos.entryPrice != null && Number.isFinite(pos.entryPrice)

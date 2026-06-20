@@ -4,7 +4,7 @@ import {
   executeTrade,
   fetchDeltaOpenPositions,
   fetchDeltaOrderAckByClientOrderId,
-  fetchDeltaSettlementExitPrice,
+  fetchDeltaRecentLegCloseSettlement,
   fetchDeltaTicker,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
@@ -48,7 +48,12 @@ import {
   incrementOrRecordMasterTradePosition,
   tradePositionSymbolsAlign,
 } from "./tradePositionService.js";
-import { settleOpenCopyTradesForLeg } from "./tradeSettlementService.js";
+import {
+  settleOpenCopyTradesForLeg,
+  settlementFromExecuteResult,
+  settlementFromDeltaClose,
+  type TradeLegSettlement,
+} from "./tradeSettlementService.js";
 import {
   buildMasterNoCopyClientOrderId,
   registerMasterNoCopyRestSuppress,
@@ -1735,28 +1740,23 @@ async function bookFollowerLegSettlementWhenFlat(
     symbol: string;
     side: TradeSide;
     masterEntryPrice: number;
+    apiKey: string;
+    apiSecret: string;
     exitReason?: ExitReasonValue;
   },
 ): Promise<void> {
-  let exitPrice = 0;
-  const fromMarket = await fetchDeltaSettlementExitPrice(
+  const deltaSettlement = await fetchDeltaRecentLegCloseSettlement(
+    args.apiKey,
+    args.apiSecret,
     args.symbol,
     args.side,
   );
-  if (fromMarket != null && Number.isFinite(fromMarket) && fromMarket > 0) {
-    exitPrice = fromMarket;
-  } else {
-    try {
-      const tick = await fetchDeltaTicker(args.symbol);
-      if (tick.last != null && Number.isFinite(tick.last)) {
-        exitPrice = tick.last;
-      }
-    } catch {
-      /* optional */
-    }
-  }
-  if (exitPrice <= 0 && args.masterEntryPrice > 0) {
-    exitPrice = args.masterEntryPrice;
+  if (!deltaSettlement) {
+    console.warn(
+      `[copy] flat leg settlement skipped — no Delta close data user=${args.userId} ` +
+        `${args.symbol} ${args.side}`,
+    );
+    return;
   }
 
   await settleOpenCopyTradesForLeg(prisma, {
@@ -1764,12 +1764,24 @@ async function bookFollowerLegSettlementWhenFlat(
     strategyId: args.strategyId,
     symbol: args.symbol,
     side: args.side,
-    exitPrice,
-    exitFee: 0,
+    settlement: settlementFromDeltaClose(deltaSettlement),
     exitReason: args.exitReason,
     masterEntryPrice: args.masterEntryPrice,
     closeAllMatching: true,
   });
+}
+
+function requireCloseSettlement(
+  closeResult: ExecuteTradeResult,
+  context: string,
+): TradeLegSettlement | null {
+  const settlement = settlementFromExecuteResult(closeResult);
+  if (!settlement) {
+    console.warn(
+      `[copy] ${context} — missing Delta close settlement orderId=${closeResult.orderId ?? "none"}`,
+    );
+  }
+  return settlement;
 }
 
 /**
@@ -1785,8 +1797,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
     side: TradeSide;
     masterEntryPrice: number;
     sizedPosition: number;
-    exitPrice: number;
-    exitFee: number;
+    settlement: TradeLegSettlement;
     exitReason?: ExitReasonValue;
   }) => Promise<void>,
   options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
@@ -1891,14 +1902,6 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           return;
         }
 
-        let exitPrice = closeResult.fillPrice ?? null;
-        if (exitPrice == null || !Number.isFinite(exitPrice)) {
-          exitPrice =
-            Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
-              ? snap.masterEntryPrice
-              : 0;
-        }
-
         await closeTradePositionsForLeg(prisma, {
           strategyId,
           userId: sub.userId,
@@ -1907,6 +1910,12 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           clientOrderId: closeClientOrderId,
         });
 
+        const settlement = requireCloseSettlement(
+          closeResult,
+          `instant close user=${sub.userId} ${snap.symbol}`,
+        );
+        if (!settlement) return;
+
         await onFollowerClosed({
           userId: sub.userId,
           strategyId,
@@ -1914,8 +1923,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           side: snap.side,
           masterEntryPrice: snap.masterEntryPrice,
           sizedPosition: closeLots,
-          exitPrice,
-          exitFee: closeResult.feeCost ?? 0,
+          settlement,
           ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
         });
         closedCount += 1;
@@ -1976,6 +1984,8 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           symbol: snap.symbol,
           side: snap.side,
           masterEntryPrice: snap.masterEntryPrice,
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
           ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
         });
         return;
@@ -2014,24 +2024,6 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         return;
       }
 
-      let exitPrice = closeResult.fillPrice ?? null;
-      if (exitPrice == null || !Number.isFinite(exitPrice)) {
-        try {
-          const tick = await fetchDeltaTicker(snap.symbol);
-          if (tick.last != null && Number.isFinite(tick.last)) {
-            exitPrice = tick.last;
-          }
-        } catch {
-          /* fallback below */
-        }
-      }
-      if (exitPrice == null || !Number.isFinite(exitPrice)) {
-        exitPrice =
-          Number.isFinite(snap.masterEntryPrice) && snap.masterEntryPrice > 0
-            ? snap.masterEntryPrice
-            : 0;
-      }
-
       await closeTradePositionsForLeg(prisma, {
         strategyId,
         userId: sub.userId,
@@ -2040,6 +2032,12 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         ...(closeClientOrderId ? { clientOrderId: closeClientOrderId } : {}),
       });
 
+      const settlement = requireCloseSettlement(
+        closeResult,
+        `follower close user=${sub.userId} ${snap.symbol}`,
+      );
+      if (!settlement) return;
+
       await onFollowerClosed({
         userId: sub.userId,
         strategyId,
@@ -2047,8 +2045,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         side: snap.side,
         masterEntryPrice: snap.masterEntryPrice,
         sizedPosition: lots,
-        exitPrice,
-        exitFee: closeResult.feeCost ?? 0,
+        settlement,
         ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
       });
       closedCount += 1;
@@ -2088,8 +2085,7 @@ export async function reconcileFollowersToEmptyMasterBook(
     side: TradeSide;
     masterEntryPrice: number;
     sizedPosition: number;
-    exitPrice: number;
-    exitFee: number;
+    settlement: TradeLegSettlement;
     exitReason?: ExitReasonValue;
   }) => Promise<void>,
   options?: { exitReason?: ExitReasonValue },

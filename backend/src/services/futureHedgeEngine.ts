@@ -312,17 +312,19 @@ export async function computeCombinedBatchMtm(
   for (const pos of open) {
     if (!positionMatchesBatch(pos, batchSymbols, config)) continue;
 
-    const upnl =
-      pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)
-        ? pos.unrealizedPnl
-        : 0;
+    if (
+      pos.unrealizedPnl == null ||
+      !Number.isFinite(pos.unrealizedPnl)
+    ) {
+      return null;
+    }
 
-    combinedMtm += upnl;
+    combinedMtm += pos.unrealizedPnl;
     legs.push({
       symbol: pos.symbolKey,
       side: pos.side,
       contracts: pos.contracts,
-      unrealizedPnl: upnl,
+      unrealizedPnl: pos.unrealizedPnl,
     });
   }
 

@@ -1,5 +1,3 @@
-import type { TradeSide } from "./exchangeService.js";
-
 /** Delta product symbol → latest **mark** price (USD). Never stores LTP / bid / ask. */
 export const liveMarkPrices = new Map<string, number>();
 
@@ -78,28 +76,6 @@ export function deltaContractSizeFallback(symbol: string): number {
   if (u.includes("BTC")) return 0.001;
   if (u.includes("ETH")) return 0.01;
   return 1;
-}
-
-/**
- * Unrealized PnL from mark price (Delta formula):
- * BUY:  (mark - entry) × |contracts| × contractSize
- * SELL: (entry - mark) × |contracts| × contractSize
- */
-export function estimateLivePnlUsd(args: {
-  symbolKey: string;
-  side: TradeSide;
-  entryPrice: number;
-  contracts: number;
-  markPrice: number;
-  contractSize?: number;
-}): number {
-  const cs =
-    args.contractSize != null && Number.isFinite(args.contractSize) && args.contractSize > 0
-      ? args.contractSize
-      : deltaContractSizeFallback(args.symbolKey);
-  const realBaseSize = Math.abs(args.contracts) * cs;
-  const sign = args.side === "BUY" ? 1 : -1;
-  return (args.markPrice - args.entryPrice) * realBaseSize * sign;
 }
 
 function ingestTickerRow(row: unknown): void {
