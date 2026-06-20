@@ -715,8 +715,7 @@ const MARGINED_POSITION_CONTRACT_TYPES =
   "perpetual_futures,call_options,put_options";
 
 /**
- * Overlay realtime size/entry only — never replace margined `unrealized_pnl` / `contract_value`.
- * Realtime rows are sparse; spreading `rt.row` overwrote correct margined UPNL with stale values.
+ * Overlay realtime size/entry only — never copy UPNL from `/v2/positions` (margined API is terminal source).
  */
 function overlayRealtimeSizeOnMarginedRow(
   margined: Record<string, unknown>,
@@ -727,19 +726,6 @@ function overlayRealtimeSizeOnMarginedRow(
     size: rt.size,
   };
   if (rt.entryPrice != null) out.entry_price = rt.entryPrice;
-
-  const marginedUpnl = margined.unrealized_pnl;
-  if (marginedUpnl === undefined || marginedUpnl === null) {
-    if (rt.row.unrealized_pnl !== undefined && rt.row.unrealized_pnl !== null) {
-      out.unrealized_pnl = rt.row.unrealized_pnl;
-    }
-    if (
-      rt.row.unrealized_funding_pnl !== undefined &&
-      rt.row.unrealized_funding_pnl !== null
-    ) {
-      out.unrealized_funding_pnl = rt.row.unrealized_funding_pnl;
-    }
-  }
   return out;
 }
 
@@ -857,11 +843,20 @@ function mergeRealtimeIntoMarginedPositions(
     if (Math.abs(rt.size) < 1e-12) continue;
     added += 1;
     merged.push({
-      ...rt.row,
+      product_id: rt.row.product_id,
       product_symbol:
         String(rt.row.product_symbol ?? "").trim() || key.replace(/^pid:/, ""),
       size: rt.size,
       ...(rt.entryPrice != null ? { entry_price: rt.entryPrice } : {}),
+      ...(rt.row.unrealized_pnl !== undefined && rt.row.unrealized_pnl !== null
+        ? { unrealized_pnl: rt.row.unrealized_pnl }
+        : {}),
+      ...(rt.row.mark_price !== undefined && rt.row.mark_price !== null
+        ? { mark_price: rt.row.mark_price }
+        : {}),
+      ...(rt.row.average_price !== undefined && rt.row.average_price !== null
+        ? { average_price: rt.row.average_price }
+        : {}),
     });
   }
 
@@ -908,10 +903,6 @@ function restoreMarginedUpnlFields(
   if (!key) return row;
   const size = numberOrNull(row.size) ?? numberOrNull(row.contracts);
   if (size === null || Math.abs(size) < 1e-12) return row;
-
-  if (row.unrealized_pnl !== undefined && row.unrealized_pnl !== null) {
-    return row;
-  }
 
   const saved = baseline.get(key);
   if (!saved) return row;
@@ -1341,24 +1332,16 @@ function fastFlatLegSymbolKey(productSymbol: string): string {
 }
 
 /**
- * Delta exchange terminal UPNL — read directly from position REST payload.
- * Used for live UI, auto-exit, and downstream billing (no local mark-price math when present).
+ * Delta exchange terminal UPNL — strict pass-through of `unrealized_pnl` only (total USD for the leg).
+ * Do not read `upl`, CCXT `unrealizedPnl`, or apply qty / contract_size math.
  */
 export function parseDeltaPositionUnrealizedPnl(
   position: Record<string, unknown>,
 ): number | null {
-  const candidates = [
-    position.unrealized_pnl,
-    position.unrealizedPnl,
-    position.upl,
-    position.unrealized_pnl_usd,
-  ];
-  for (const raw of candidates) {
-    if (raw === undefined || raw === null) continue;
-    const upnl = parseFloat(String(raw));
-    if (Number.isFinite(upnl)) return upnl;
-  }
-  return null;
+  const raw = position.unrealized_pnl;
+  if (raw === undefined || raw === null) return null;
+  const upnl = Number(raw);
+  return Number.isFinite(upnl) ? upnl : null;
 }
 
 /** @deprecated Use {@link parseDeltaPositionUnrealizedPnl}. */
