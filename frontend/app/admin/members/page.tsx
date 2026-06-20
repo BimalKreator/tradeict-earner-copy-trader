@@ -4,6 +4,7 @@ import {
   Check,
   ClipboardList,
   Loader2,
+  Pencil,
   RefreshCw,
   UserPlus,
   UsersRound,
@@ -123,6 +124,49 @@ function roleBadgeClass(role: string): string {
   return "bg-white/10 text-white/70 ring-white/20";
 }
 
+function getDescendantIds(members: TeamMember[], rootId: string): Set<string> {
+  const byParent = new Map<string, string[]>();
+  for (const m of members) {
+    if (m.parentId) {
+      const list = byParent.get(m.parentId) ?? [];
+      list.push(m.id);
+      byParent.set(m.parentId, list);
+    }
+  }
+  const out = new Set<string>();
+  const stack = [...(byParent.get(rootId) ?? [])];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    stack.push(...(byParent.get(id) ?? []));
+  }
+  return out;
+}
+
+function eligibleUplineOptions(
+  members: TeamMember[],
+  member: TeamMember,
+): TeamMember[] {
+  const role = member.role as SalesRole;
+  const descendants = getDescendantIds(members, member.id);
+  let base: TeamMember[];
+  if (role === "SENIOR_MANAGER") {
+    base = members.filter((m) => m.role === "SENIOR_MANAGER");
+  } else if (role === "MANAGER") {
+    base = members.filter((m) => m.role === "SENIOR_MANAGER");
+  } else {
+    base = members.filter(
+      (m) => m.role === "MANAGER" || m.role === "SENIOR_MANAGER",
+    );
+  }
+  return base.filter((m) => m.id !== member.id && !descendants.has(m.id));
+}
+
+function uplineRequiredForRole(role: string): boolean {
+  return role !== "SENIOR_MANAGER";
+}
+
 export default function AdminMembersPage() {
   const apiBase = useMemo(() => resolveAdminApiBase(), []);
 
@@ -147,6 +191,13 @@ export default function AdminMembersPage() {
   const [selectedUser, setSelectedUser] = useState<SearchUser | null>(null);
   const [newRole, setNewRole] = useState<SalesRole>("EXECUTIVE");
   const [parentId, setParentId] = useState<string>("");
+
+  const [uplineModalMember, setUplineModalMember] = useState<TeamMember | null>(
+    null,
+  );
+  const [uplineParentId, setUplineParentId] = useState("");
+  const [uplineSubmitting, setUplineSubmitting] = useState(false);
+  const [uplineFormError, setUplineFormError] = useState<string | null>(null);
 
   const loadMembers = useCallback(async () => {
     setError(null);
@@ -246,6 +297,15 @@ export default function AdminMembersPage() {
 
   const parentRequired = newRole !== "SENIOR_MANAGER";
 
+  const uplineEditOptions = useMemo(() => {
+    if (!uplineModalMember) return [];
+    return eligibleUplineOptions(members, uplineModalMember);
+  }, [members, uplineModalMember]);
+
+  const uplineEditRequired = uplineModalMember
+    ? uplineRequiredForRole(uplineModalMember.role)
+    : true;
+
   function resetModal() {
     setFormError(null);
     setUserQuery("");
@@ -258,6 +318,60 @@ export default function AdminMembersPage() {
   function openModal() {
     resetModal();
     setModalOpen(true);
+  }
+
+  function openUplineModal(member: TeamMember) {
+    setUplineModalMember(member);
+    setUplineParentId(member.parentId ?? "");
+    setUplineFormError(null);
+  }
+
+  function closeUplineModal() {
+    setUplineModalMember(null);
+    setUplineParentId("");
+    setUplineFormError(null);
+  }
+
+  async function handleChangeUpline(e: React.FormEvent) {
+    e.preventDefault();
+    if (!uplineModalMember) return;
+    if (uplineEditRequired && !uplineParentId) {
+      setUplineFormError("Select an upline (parent) for this role.");
+      return;
+    }
+
+    setUplineSubmitting(true);
+    setUplineFormError(null);
+    try {
+      const res = await fetch(
+        `${apiBase}/admin/members/${encodeURIComponent(uplineModalMember.id)}/upline`,
+        {
+          method: "PATCH",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            parentId: uplineParentId || null,
+          }),
+        },
+      );
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to update upline");
+      }
+      const label =
+        uplineModalMember.name?.trim() || uplineModalMember.email;
+      closeUplineModal();
+      setToast({
+        type: "ok",
+        text: `Upline updated for ${label}.`,
+      });
+      await loadMembers();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to update upline";
+      setUplineFormError(msg);
+      setToast({ type: "err", text: msg });
+    } finally {
+      setUplineSubmitting(false);
+    }
   }
 
   async function handleUpgrade(e: React.FormEvent) {
@@ -449,19 +563,20 @@ export default function AdminMembersPage() {
                 <th className="px-4 py-3 font-medium text-white/70">Direct acquired</th>
                 <th className="px-4 py-3 font-medium text-white/70">Network AUM</th>
                 <th className="px-4 py-3 font-medium text-white/70">Referral code</th>
+                <th className="px-4 py-3 font-medium text-white/70">Actions</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-12 text-center text-white/45">
                     <Loader2 className="mx-auto h-6 w-6 animate-spin" aria-hidden />
                     <span className="mt-2 block">Loading team members…</span>
                   </td>
                 </tr>
               ) : members.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-white/45">
+                  <td colSpan={8} className="px-4 py-12 text-center text-white/45">
                     No team members yet. Upgrade a subscribed user to get started.
                   </td>
                 </tr>
@@ -502,6 +617,17 @@ export default function AdminMembersPage() {
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-primary/90">
                       {m.referralCode ?? "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => openUplineModal(m)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-white/80 transition hover:bg-white/10"
+                        title="Change upline"
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden />
+                        Change upline
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -783,6 +909,108 @@ export default function AdminMembersPage() {
                     </>
                   ) : (
                     "Upgrade member"
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {uplineModalMember ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="change-upline-title"
+        >
+          <div className="glass-card max-h-[90vh] w-full max-w-lg overflow-y-auto border border-glassBorder p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2
+                  id="change-upline-title"
+                  className="text-lg font-semibold text-white"
+                >
+                  Change upline
+                </h2>
+                <p className="mt-1 text-sm text-white/50">
+                  {uplineModalMember.name?.trim() || uplineModalMember.email}
+                  {" · "}
+                  {ROLE_LABELS[uplineModalMember.role as SalesRole] ??
+                    uplineModalMember.role}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeUplineModal}
+                className="rounded-lg border border-white/10 p-2 text-white/60 hover:bg-white/10 hover:text-white"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => void handleChangeUpline(e)}
+              className="mt-6 space-y-4"
+            >
+              {uplineFormError ? (
+                <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {uplineFormError}
+                </p>
+              ) : null}
+
+              <label className="block">
+                <span className="text-xs font-medium text-white/60">
+                  Upline (parent)
+                  {!uplineEditRequired
+                    ? " — optional for Senior Managers"
+                    : " — required"}
+                </span>
+                <select
+                  value={uplineParentId}
+                  onChange={(e) => setUplineParentId(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+                  disabled={!uplineEditRequired && uplineEditOptions.length === 0}
+                >
+                  <option value="">
+                    {uplineEditRequired
+                      ? "Select upline…"
+                      : "No upline (top-level Senior Manager)"}
+                  </option>
+                  {uplineEditOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {(p.name?.trim() || p.email) + ` — ${p.role}`}
+                    </option>
+                  ))}
+                </select>
+                {uplineEditRequired && uplineEditOptions.length === 0 ? (
+                  <p className="mt-1 text-xs text-amber-200/90">
+                    No eligible upline available for this role.
+                  </p>
+                ) : null}
+              </label>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeUplineModal}
+                  className="rounded-lg px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/10"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={uplineSubmitting}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
+                >
+                  {uplineSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      Saving…
+                    </>
+                  ) : (
+                    "Save upline"
                   )}
                 </button>
               </div>

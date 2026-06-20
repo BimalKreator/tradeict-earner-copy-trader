@@ -565,6 +565,125 @@ export async function upgradeUserToSalesMember(
   return { ok: true, member };
 }
 
+export type ChangeMemberUplineOutcome =
+  | { ok: true; member: AdminMemberRow }
+  | { ok: false; status: number; error: string };
+
+/** Walk upline chain — true if `ancestorId` appears above `startId`. */
+async function isAncestorInUplineChain(
+  prisma: PrismaClient,
+  startId: string,
+  ancestorId: string,
+): Promise<boolean> {
+  let currentId: string | null = startId;
+  const seen = new Set<string>();
+  while (currentId) {
+    if (currentId === ancestorId) return true;
+    if (seen.has(currentId)) break;
+    seen.add(currentId);
+    const row: { parentId: string | null } | null = await prisma.user.findUnique({
+      where: { id: currentId },
+      select: { parentId: true },
+    });
+    currentId = row?.parentId ?? null;
+  }
+  return false;
+}
+
+/** Admin: reassign a team member's sales hierarchy upline (`parentId`). */
+export async function changeMemberUpline(
+  prisma: PrismaClient,
+  userId: string,
+  rawParentId: string | null | undefined,
+): Promise<ChangeMemberUplineOutcome> {
+  const parentId = normalizeUpgradeParentId(rawParentId);
+
+  const member = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, role: true, parentId: true },
+  });
+  if (!member) {
+    return { ok: false, status: 404, error: "Member not found" };
+  }
+  if (!isSalesMemberRole(member.role)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "User is not a team member",
+    };
+  }
+
+  if (parentId === member.parentId) {
+    const unchanged = await prisma.user.findUnique({
+      where: { id: userId },
+      select: memberUserSelect,
+    });
+    if (!unchanged) {
+      return { ok: false, status: 404, error: "Member not found" };
+    }
+    return { ok: true, member: unchanged };
+  }
+
+  if (parentId === userId) {
+    return { ok: false, status: 400, error: "A user cannot be their own upline" };
+  }
+
+  let parent: { id: string; role: Role } | null = null;
+  if (parentId !== null) {
+    parent = await prisma.user.findUnique({
+      where: { id: parentId },
+      select: { id: true, role: true },
+    });
+    if (!parent) {
+      return { ok: false, status: 400, error: "Selected upline (parent) was not found" };
+    }
+    if (!isSalesMemberRole(parent.role)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Upline must be an existing team member (Executive, Manager, or Senior Manager)",
+      };
+    }
+
+    const createsCycle = await isAncestorInUplineChain(
+      prisma,
+      parentId,
+      userId,
+    );
+    if (createsCycle) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Selected upline cannot be a downline member of this user",
+      };
+    }
+  }
+
+  const parentError = validateParentForSalesRole(member.role, parent);
+  if (parentError) {
+    return { ok: false, status: 400, error: parentError };
+  }
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { parentId },
+  });
+
+  const updated = await prisma.user.findUnique({
+    where: { id: userId },
+    select: memberUserSelect,
+  });
+  if (!updated) {
+    return {
+      ok: false,
+      status: 500,
+      error: "Upline updated but member could not be loaded",
+    };
+  }
+
+  return { ok: true, member: updated };
+}
+
 /**
  * When a team member is downgraded to USER, suspend (never delete) their affiliate profile.
  */

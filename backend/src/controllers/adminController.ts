@@ -65,6 +65,7 @@ import {
 } from "../services/futureHedgeService.js";
 import {
   assertUserSafeToDelete,
+  changeMemberUpline,
   changeUserAcquiredBy,
   listSalesMembers,
   normalizeUpgradeParentId,
@@ -3323,6 +3324,58 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function changeTeamMemberUpline(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const userId = (Array.isArray(rawId) ? rawId[0] : rawId)?.trim();
+      if (!userId) {
+        res.status(400).json({ error: "Member id is required" });
+        return;
+      }
+
+      const body = req.body as { parentId?: unknown };
+      let parentId: string | null = null;
+      if (body.parentId === null || body.parentId === undefined) {
+        parentId = null;
+      } else if (typeof body.parentId === "string") {
+        parentId = normalizeUpgradeParentId(body.parentId);
+      } else {
+        res.status(400).json({ error: "parentId must be a string or null" });
+        return;
+      }
+
+      const outcome = await changeMemberUpline(prisma, userId, parentId);
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+
+      const m = outcome.member;
+      applyNoStoreCacheHeaders(res);
+      res.json({
+        ok: true,
+        member: {
+          id: m.id,
+          name: m.name,
+          email: m.email,
+          role: m.role,
+          parentId: m.parentId,
+          parent: m.parent,
+          directAcquiredCount: m.affiliateProfile?.directAcquiredCount ?? 0,
+          networkAum: m.affiliateProfile?.networkAum ?? 0,
+          referralCode: m.affiliateProfile?.referralCode ?? null,
+          upgradedAt: m.affiliateProfile?.upgradedAt ?? null,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getNetworkTree(
     req: Request,
     res: Response,
@@ -3685,6 +3738,7 @@ export function createAdminController(prisma: PrismaClient) {
     searchUsers,
     listTeamMembers,
     upgradeTeamMember,
+    changeTeamMemberUpline,
     listMemberUpgradeRequests,
     approveMemberUpgradeRequest: approveMemberUpgradeRequestHandler,
     rejectMemberUpgradeRequest: rejectMemberUpgradeRequestHandler,

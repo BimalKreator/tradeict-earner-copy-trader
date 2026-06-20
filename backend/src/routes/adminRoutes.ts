@@ -146,6 +146,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/members", adminController.listTeamMembers);
   router.post("/members/upgrade", adminController.upgradeTeamMember);
+  router.patch("/members/:id/upline", adminController.changeTeamMemberUpline);
   router.get("/upgrade-requests", adminController.listMemberUpgradeRequests);
   router.post(
     "/upgrade-requests/:id/approve",
