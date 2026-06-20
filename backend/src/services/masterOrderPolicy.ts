@@ -151,19 +151,7 @@ export async function refreshMasterOrderPolicy(
 
   state.refreshedAt = Date.now();
 
-  if (!hasSubs) {
-    try {
-      const { enforceNoSubscriberMasterSafety } = await import(
-        "./futureHedgeEngine.js"
-      );
-      await enforceNoSubscriberMasterSafety(prisma);
-    } catch (err) {
-      console.warn(
-        "[master-order-policy] no-subscriber safety failed:",
-        err instanceof Error ? err.message : err,
-      );
-    }
-  } else if (!state.opensAllowed && config?.currentBatchId) {
+  if (!state.opensAllowed && config?.currentBatchId) {
     try {
       const { clearFutureHedgeActiveBatch } = await import(
         "./futureHedgeEngine.js"

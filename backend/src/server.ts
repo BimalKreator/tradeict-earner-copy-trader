@@ -245,9 +245,9 @@ app.listen(PORT, "0.0.0.0", () => {
     `[BOOT] Admin API http://0.0.0.0:${PORT} deltaEthUSDT→ccxt=${DELTA_INDIA_CCXT_SAMPLE_SYMBOL} | verify: curl -s http://127.0.0.1:${PORT}/api/health/build`,
   );
   console.log("[BOOT] Trade engine (master Delta WebSocket copy) is running.");
-  console.log("[BOOT] Future Hedge market data engine (BTC EMA) is running.");
+  console.log("[BOOT] Future Hedge market data engine (BTC price / EMA) is running.");
   console.log(
-    "[BOOT] Future Hedge engine running (entry, adjustments, 1s MTM target exit).",
+    "[BOOT] Future Hedge autonomous engine is DISABLED (SL/TP/breakeven/admin exits only).",
   );
   console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
 });
