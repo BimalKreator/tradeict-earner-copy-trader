@@ -2177,6 +2177,19 @@ async function copyMasterFillToSubscribers(
   });
 }
 
+/** Debounce duplicate follower fan-out for the same master leg. */
+const NOTIFY_MASTER_FLAT_DEBOUNCE_MS = 8_000;
+const notifyMasterFlatInFlight = new Set<string>();
+const notifyMasterFlatRecentAt = new Map<string, number>();
+
+function notifyMasterFlatDedupeKey(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): string {
+  return `${strategyId}|${compactSymbolKey(symbol)}|${side}`;
+}
+
 async function notifyMasterFlat(
   prisma: PrismaClient,
   strategyId: string,
@@ -2188,69 +2201,97 @@ async function notifyMasterFlat(
   },
   options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
 ): Promise<boolean> {
-  // Follower closes — also invoked from masterSyncService priority REST verification.
-  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
-    return false;
-  }
+  const dedupeKey = notifyMasterFlatDedupeKey(strategyId, snap.symbol, snap.side);
+  const now = Date.now();
 
-  const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
-  if (!futureHedgeId || strategyId !== futureHedgeId) {
+  if (notifyMasterFlatInFlight.has(dedupeKey)) {
     console.log(
-      `[tradeEngine] Ignoring master flat for non-Future-Hedge strategyId=${strategyId}`,
+      `[EXECUTION] notifyMasterFlat skipped (in-flight) strategyId=${strategyId} ${snap.symbol} ${snap.side}`,
     );
     return false;
   }
 
-  const closureOrigin = resolveClosureOrigin(
-    strategyId,
-    snap.symbol,
-    options?.exitReason,
-  );
+  const lastAt = notifyMasterFlatRecentAt.get(dedupeKey) ?? 0;
+  if (now - lastAt < NOTIFY_MASTER_FLAT_DEBOUNCE_MS) {
+    console.log(
+      `[EXECUTION] notifyMasterFlat skipped (debounce ${NOTIFY_MASTER_FLAT_DEBOUNCE_MS}ms) strategyId=${strategyId} ${snap.symbol} ${snap.side}`,
+    );
+    return false;
+  }
 
-  console.log(
-    `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice} origin="${closureOrigin}"`,
-  );
-
-  markLegClosing(strategyId, snap.symbol, snap.side);
-  markMasterFlatting(strategyId);
-
-  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
-  evictMasterLivePositionLeg(strategyId, snap.symbol, snap.side);
+  notifyMasterFlatInFlight.add(dedupeKey);
+  notifyMasterFlatRecentAt.set(dedupeKey, now);
 
   try {
-    const result = await syncMasterCloseToFutureHedgeFollowers(
-      prisma,
-      {
-        symbol: snap.symbol,
-        side: snap.side,
-        masterLots: snap.masterContracts,
-        masterEntryPrice: snap.masterEntryPrice,
-      },
-      async (closed) => {
-        await closeFollowerTradeAndRecordPnl(prisma, {
-          userId: closed.userId,
-          strategyId: closed.strategyId,
-          symbol: closed.symbol,
-          side: closed.side,
-          masterEntryPrice: closed.masterEntryPrice,
-          sizedPosition: closed.sizedPosition,
-          settlement: closed.settlement,
-          exitReason: closureOrigin,
-        });
-      },
-      { exitReason: closureOrigin, ...(options?.instantClose ? { instantClose: true } : {}) },
-    );
-    if (!result) return false;
-    if (result.remainingExchangeLots > 0) {
-      console.warn(
-        `[EXECUTION] notifyMasterFlat ${snap.symbol} ${snap.side} — ` +
-          `${result.remainingExchangeLots} follower lot(s) still open on exchange; will retry`,
+    // Follower closes — also invoked from masterSyncService priority REST verification.
+    if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
+      return false;
+    }
+
+    const futureHedgeId = await resolveFutureHedgeStrategyId(prisma);
+    if (!futureHedgeId || strategyId !== futureHedgeId) {
+      console.log(
+        `[tradeEngine] Ignoring master flat for non-Future-Hedge strategyId=${strategyId}`,
       );
       return false;
     }
-    return true;
+
+    const closureOrigin = resolveClosureOrigin(
+      strategyId,
+      snap.symbol,
+      options?.exitReason,
+    );
+
+    console.log(
+      `[EXECUTION] notifyMasterFlat enter strategyId=${strategyId} ${snap.symbol} ${snap.side} contracts=${snap.masterContracts} entry=${snap.masterEntryPrice} origin="${closureOrigin}"`,
+    );
+
+    markLegClosing(strategyId, snap.symbol, snap.side);
+    markMasterFlatting(strategyId);
+
+    const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
+    evictMasterLivePositionLeg(strategyId, snap.symbol, snap.side);
+
+    try {
+      const result = await syncMasterCloseToFutureHedgeFollowers(
+        prisma,
+        {
+          symbol: snap.symbol,
+          side: snap.side,
+          masterLots: snap.masterContracts,
+          masterEntryPrice: snap.masterEntryPrice,
+        },
+        async (closed) => {
+          await closeFollowerTradeAndRecordPnl(prisma, {
+            userId: closed.userId,
+            strategyId: closed.strategyId,
+            symbol: closed.symbol,
+            side: closed.side,
+            masterEntryPrice: closed.masterEntryPrice,
+            sizedPosition: closed.sizedPosition,
+            settlement: closed.settlement,
+            exitReason: closureOrigin,
+          });
+        },
+        { exitReason: closureOrigin, ...(options?.instantClose ? { instantClose: true } : {}) },
+      );
+      if (!result) return false;
+      if (result.remainingExchangeLots > 0) {
+        console.warn(
+          `[EXECUTION] notifyMasterFlat ${snap.symbol} ${snap.side} — ` +
+            `${result.remainingExchangeLots} follower lot(s) still open on exchange; will retry`,
+        );
+        return false;
+      }
+      return true;
+    } finally {
+      consumeBotInitiatedCloseReason(strategyId, snap.symbol);
+    }
   } finally {
-    consumeBotInitiatedCloseReason(strategyId, snap.symbol);
+    notifyMasterFlatInFlight.delete(dedupeKey);
+    setTimeout(() => {
+      notifyMasterFlatRecentAt.delete(dedupeKey);
+    }, NOTIFY_MASTER_FLAT_DEBOUNCE_MS);
   }
 }
 

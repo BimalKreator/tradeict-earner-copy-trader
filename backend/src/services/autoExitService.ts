@@ -31,6 +31,8 @@ import {
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
 const AUTO_EXIT_COOLDOWN_MS = 15_000;
+/** Strategy-level execution lock TTL — prevents duplicate close bursts. */
+const ACTIVE_EXIT_LOCK_TTL_MS = 10_000;
 /** Consecutive poll ticks above/below threshold before PnL auto-exit closes. */
 const SUSTAINED_BREACH_TICKS = 3;
 /** Breakeven exits fire on the first price tick past bounds (WS-driven). */
@@ -44,6 +46,49 @@ const POSITION_SETTLE_GRACE_MS = 12_000;
 
 /** strategyId → timestamp when auto-exit last fired (prevents duplicate close bursts). */
 const lastAutoExitAt = new Map<string, number>();
+
+/** strategyId currently executing an auto-exit close burst (in-memory mutex). */
+const activeExits = new Set<string>();
+
+/** strategyId → timeout handle for activeExits cleanup. */
+const activeExitLockTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Acquire a strategy-level auto-exit lock. Returns false if an exit is already
+ * in progress for this strategy (debounces parallel WS ticks / poll passes).
+ */
+function tryAcquireAutoExitLock(strategyId: string): boolean {
+  if (activeExits.has(strategyId)) {
+    return false;
+  }
+  activeExits.add(strategyId);
+
+  const prevTimer = activeExitLockTimers.get(strategyId);
+  if (prevTimer != null) {
+    clearTimeout(prevTimer);
+  }
+  const timer = setTimeout(() => {
+    activeExits.delete(strategyId);
+    activeExitLockTimers.delete(strategyId);
+  }, ACTIVE_EXIT_LOCK_TTL_MS);
+  activeExitLockTimers.set(strategyId, timer);
+
+  return true;
+}
+
+function releaseAutoExitLock(strategyId: string): void {
+  const timer = activeExitLockTimers.get(strategyId);
+  if (timer != null) {
+    clearTimeout(timer);
+    activeExitLockTimers.delete(strategyId);
+  }
+  activeExits.delete(strategyId);
+}
+
+/** True while a PnL/breakeven auto-exit close burst is in flight for this strategy. */
+export function isAutoExitInProgress(strategyId: string): boolean {
+  return activeExits.has(strategyId);
+}
 
 /** strategyId → consecutive poll ticks where PnL stayed past target/stop. */
 const breachCounters = new Map<string, number>();
@@ -83,6 +128,8 @@ const masterLegsCache = new Map<
   { legs: MasterLegCloseTarget[]; totalPnlUsd: number; fetchedAt: number }
 >();
 const breakevenExitInFlight = new Set<string>();
+/** symbolKey|side → master reduce-only close already submitted. */
+const masterLegCloseInFlight = new Set<string>();
 let lastBtcTickPrice = 0;
 let lastBtcTickAt = 0;
 /** strategyId → open leg symbol keys (for WS bid/ask targeted auto-exit). */
@@ -91,7 +138,7 @@ const legSymbolsByStrategy = new Map<string, Set<string>>();
 const lastBidAskTickByStrategy = new Map<string, number>();
 let stopBidAskTickListener: (() => void) | null = null;
 
-const AUTO_EXIT_BID_ASK_DEBOUNCE_MS = 40;
+const AUTO_EXIT_BID_ASK_DEBOUNCE_MS = 100;
 
 /** Boot WS-driven breakeven watcher (call once from trade engine). */
 export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
@@ -120,6 +167,12 @@ export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
     breakevenExitInFlight.clear();
     legSymbolsByStrategy.clear();
     lastBidAskTickByStrategy.clear();
+    masterLegCloseInFlight.clear();
+    for (const timer of activeExitLockTimers.values()) {
+      clearTimeout(timer);
+    }
+    activeExitLockTimers.clear();
+    activeExits.clear();
   };
 }
 
@@ -281,12 +334,19 @@ async function notifyLiveBidAskTickForAutoExit(
     });
     if (!matches) continue;
 
+    if (activeExits.has(strat.id)) continue;
+
     const lastTick = lastBidAskTickByStrategy.get(strat.id) ?? 0;
     if (now - lastTick < AUTO_EXIT_BID_ASK_DEBOUNCE_MS) continue;
     lastBidAskTickByStrategy.set(strat.id, now);
 
     masterLegsCache.delete(strat.id);
-    void runStrategyAutoExitCheck(prisma, strat);
+    void runStrategyAutoExitCheck(prisma, strat).catch((err) => {
+      console.warn(
+        `[auto-exit] WS bid/ask check failed strategyId=${strat.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
   }
 }
 
@@ -526,22 +586,35 @@ export async function closeAllMasterPositionsMarket(
 
   const outcomes = await Promise.allSettled(
     legs.map(async (leg) => {
-      const closeSide: TradeSide = leg.side === "BUY" ? "SELL" : "BUY";
-      const result = await executeTrade(
-        apiKeyStored,
-        apiSecretStored,
-        leg.symbolKey,
-        closeSide,
-        leg.contracts,
-        { reduceOnly: true },
-      );
-      if (result.success) {
-        return { ok: true as const };
+      const legKey = `${leg.symbolKey.trim().toUpperCase()}|${leg.side}`;
+      if (masterLegCloseInFlight.has(legKey)) {
+        return {
+          ok: false as const,
+          error: `${leg.symbolKey} ${leg.side}: close already in flight`,
+          skipped: true as const,
+        };
       }
-      return {
-        ok: false as const,
-        error: `${leg.symbolKey} ${leg.side}: ${result.error ?? "unknown"}`,
-      };
+      masterLegCloseInFlight.add(legKey);
+      try {
+        const closeSide: TradeSide = leg.side === "BUY" ? "SELL" : "BUY";
+        const result = await executeTrade(
+          apiKeyStored,
+          apiSecretStored,
+          leg.symbolKey,
+          closeSide,
+          leg.contracts,
+          { reduceOnly: true },
+        );
+        if (result.success) {
+          return { ok: true as const };
+        }
+        return {
+          ok: false as const,
+          error: `${leg.symbolKey} ${leg.side}: ${result.error ?? "unknown"}`,
+        };
+      } finally {
+        setTimeout(() => masterLegCloseInFlight.delete(legKey), ACTIVE_EXIT_LOCK_TTL_MS);
+      }
     }),
   );
 
@@ -549,7 +622,7 @@ export async function closeAllMasterPositionsMarket(
     if (outcome.status === "fulfilled") {
       if (outcome.value.ok) {
         closed += 1;
-      } else {
+      } else if (!("skipped" in outcome.value && outcome.value.skipped)) {
         errors.push(outcome.value.error);
       }
     } else {
@@ -689,6 +762,14 @@ export async function runStrategyAutoExitCheck(
     return;
   }
 
+  if (!tryAcquireAutoExitLock(strategyId)) {
+    console.log(
+      `[auto-exit] skip strategyId=${strategyId} — exit already in progress`,
+    );
+    return;
+  }
+
+  lastAutoExitAt.set(strategyId, Date.now());
   breachCounters.set(strategyId, 0);
 
   const exitReason =
@@ -696,19 +777,23 @@ export async function runStrategyAutoExitCheck(
       ? EXIT_REASON.AUTO_EXIT_TARGET
       : EXIT_REASON.AUTO_EXIT_STOP_LOSS;
 
-  await executeMasterFlatAutoExit({
-    prisma,
-    strategyId,
-    strategyTitle: strategy.title,
-    masterApiKey: strategy.masterApiKey,
-    masterApiSecret: strategy.masterApiSecret,
-    legs,
-    exitReason,
-    logTag: "auto-exit",
-    logDetail:
-      `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
-      `threshold=${breach.thresholdUsd}`,
-  });
+  try {
+    await executeMasterFlatAutoExit({
+      prisma,
+      strategyId,
+      strategyTitle: strategy.title,
+      masterApiKey: strategy.masterApiKey,
+      masterApiSecret: strategy.masterApiSecret,
+      legs,
+      exitReason,
+      logTag: "auto-exit",
+      logDetail:
+        `reason=${breach.reason} totalPnl=${breach.totalPnlUsd.toFixed(2)} ` +
+        `threshold=${breach.thresholdUsd}`,
+    });
+  } finally {
+    releaseAutoExitLock(strategyId);
+  }
 }
 
 /**
@@ -815,6 +900,11 @@ async function runBreakevenExitCheckOnPrice(
     return;
   }
 
+  if (!tryAcquireAutoExitLock(strategyId)) {
+    return;
+  }
+
+  lastAutoExitAt.set(strategyId, Date.now());
   breakevenBreachCounters.set(strategyId, 0);
   breakevenExitInFlight.add(strategyId);
 
@@ -840,6 +930,7 @@ async function runBreakevenExitCheckOnPrice(
     });
   } finally {
     breakevenExitInFlight.delete(strategyId);
+    releaseAutoExitLock(strategyId);
   }
 }
 
