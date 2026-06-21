@@ -216,10 +216,6 @@ export function upsertMasterLivePositionFromWs(
   });
 }
 
-/**
- * Drop one master leg immediately after a confirmed flat close.
- * Blocks stale margined REST from re-adding the leg until TTL or explicit flat.
- */
 export function evictMasterLivePositionLeg(
   strategyId: string,
   symbol: string,
@@ -244,6 +240,19 @@ export function evictMasterLivePositionLeg(
     `[live-trades] master leg WS-evicted strategyId=${strategyId} ` +
       `symbol=${symbol} side=${side} keys=${denyKeys.join(",")}`,
   );
+}
+
+/** True when WS-fed live-trades cache still holds non-evicted open master legs. */
+export function masterLiveCacheHasOpenWsLegs(strategyId: string): boolean {
+  const cache = lastKnownMasterPositions.get(strategyId);
+  if (!cache || cache.size === 0) return false;
+  for (const [key, entry] of cache) {
+    const size = entry.row.size;
+    if (size != null && size > 0 && !isLegWsEvicted(strategyId, key)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 type MasterLiveFetchOpts = {

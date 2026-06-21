@@ -15,12 +15,10 @@ import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ExcelJS from "exceljs";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
-import pkg from "xlsx";
-
-const { readFile, utils } = pkg;
 
 const TARGET_EMAIL = "bimal.vishwakarma@gmail.com";
 const SHEET_NAME = "Arbitrage Data";
@@ -56,6 +54,16 @@ function resolveExcelPath(): string {
   );
 }
 
+function cellValue(cell: ExcelJS.Cell): unknown {
+  const v = cell.value;
+  if (v == null) return "";
+  if (typeof v === "object" && v !== null && "result" in v) {
+    return (v as { result?: unknown }).result ?? "";
+  }
+  if (v instanceof Date) return v.toISOString();
+  return v;
+}
+
 function parsePriceDex(cell: unknown, label: string): { price: number; dex: string } {
   const raw = String(cell ?? "").trim();
   if (!raw) {
@@ -89,9 +97,15 @@ function num(cell: unknown, label: string): number {
   return n;
 }
 
-type RawRow = unknown[];
+function rowValues(row: ExcelJS.Row): unknown[] {
+  const out: unknown[] = [];
+  row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+    out[colNumber - 1] = cellValue(cell);
+  });
+  return out;
+}
 
-function isWithdrawalRow(row: RawRow): boolean {
+function isWithdrawalRow(row: unknown[]): boolean {
   return String(row[0] ?? "").trim().toUpperCase() === "WITHDRAWAL";
 }
 
@@ -105,23 +119,24 @@ async function main(): Promise<void> {
   const excelPath = resolveExcelPath();
   console.log(`[import-arbitrage] Reading ${excelPath}`);
 
-  const workbook = readFile(excelPath);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(excelPath);
   const sheet =
-    workbook.Sheets[SHEET_NAME] ??
-    workbook.Sheets[workbook.SheetNames[0] ?? ""];
+    workbook.getWorksheet(SHEET_NAME) ?? workbook.worksheets[0];
   if (!sheet) {
     throw new Error(`Sheet "${SHEET_NAME}" not found`);
   }
 
-  const matrix = utils.sheet_to_json<RawRow>(sheet, {
-    header: 1,
-    defval: "",
+  const dataRows: unknown[][] = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    dataRows.push(rowValues(row));
   });
-  if (matrix.length < 2) {
+
+  if (dataRows.length === 0) {
     throw new Error("Excel sheet has no data rows");
   }
 
-  const dataRows = matrix.slice(1);
   const pool = new pg.Pool({ connectionString });
   const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({ adapter });

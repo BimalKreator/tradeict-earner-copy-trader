@@ -37,7 +37,7 @@ function createDepositUpload() {
 
 export function createPaymentRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const payments = createPaymentController(prisma);
   const upload = createDepositUpload();
 

@@ -99,6 +99,8 @@ const BREAKEVEN_REARM_BLOCK_MS =
 
 const masterFlattingUntilByStrategy = new Map<string, number>();
 const legClosingUntilByKey = new Map<string, number>();
+/** Per master leg — blocks redundant WS/REST/auto-exit close orchestration. */
+const masterLegCloseInProgress = new Set<string>();
 let postExitEntryBlockedUntil = 0;
 let breakevenHedgeEntryLatched = false;
 
@@ -176,6 +178,44 @@ export function markLegClosing(
   const prev = legClosingUntilByKey.get(key) ?? 0;
   legClosingUntilByKey.set(key, Math.max(prev, until));
   markMasterFlatting(strategyId, durationMs);
+}
+
+/**
+ * Acquire unified in-progress close lock for one master leg.
+ * Returns false when auto-exit or another close path already owns the leg.
+ */
+export function tryAcquireMasterLegCloseInProgress(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+  source?: string,
+): boolean {
+  const key = legClosingKey(strategyId, symbol, side);
+  if (masterLegCloseInProgress.has(key)) {
+    console.log(
+      `[close-lock] skip ${source ?? "unknown"} — leg close in progress ${key}`,
+    );
+    return false;
+  }
+  masterLegCloseInProgress.add(key);
+  return true;
+}
+
+export function releaseMasterLegCloseInProgress(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): void {
+  masterLegCloseInProgress.delete(legClosingKey(strategyId, symbol, side));
+}
+
+/** True while a master leg close burst is actively running (auto-exit / notifyMasterFlat). */
+export function isMasterLegCloseInProgress(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): boolean {
+  return masterLegCloseInProgress.has(legClosingKey(strategyId, symbol, side));
 }
 
 /** True while the master flatting window is active for this strategy. */

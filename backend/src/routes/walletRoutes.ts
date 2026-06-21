@@ -8,7 +8,7 @@ import {
 
 export function createWalletRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const adminOnly = [jwtAuth, requireAdmin(prisma)];
 
   const wallet = createWalletController(prisma);

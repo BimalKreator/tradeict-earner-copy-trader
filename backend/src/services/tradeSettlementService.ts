@@ -213,8 +213,8 @@ export async function settleOpenCopyTradesForLeg(
       profitSharePct,
     );
 
-    await prisma.trade.update({
-      where: { id: open.id },
+    const settled = await prisma.trade.updateMany({
+      where: { id: open.id, status: TradeStatus.OPEN },
       data: {
         exitPrice: args.settlement.exitPrice,
         tradingFee: totalTradingFee,
@@ -225,6 +225,9 @@ export async function settleOpenCopyTradesForLeg(
         exitReason,
       },
     });
+    if (settled.count !== 1) {
+      continue;
+    }
 
     await recordTradePnl(prisma, {
       userId: args.userId,

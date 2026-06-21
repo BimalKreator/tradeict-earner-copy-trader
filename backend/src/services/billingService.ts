@@ -389,16 +389,20 @@ export async function generateMonthlyInvoices(
 
         const wallet = await tx.wallet.findUnique({
           where: { userId: sub.userId },
+          select: { id: true },
         });
 
-        if (!wallet || wallet.balance < amountDue) {
+        if (!wallet) {
           return false;
         }
 
-        await tx.wallet.update({
-          where: { id: wallet.id },
+        const deduct = await tx.wallet.updateMany({
+          where: { id: wallet.id, balance: { gte: amountDue } },
           data: { balance: { decrement: amountDue } },
         });
+        if (deduct.count !== 1) {
+          return false;
+        }
         await tx.walletTransaction.create({
           data: {
             walletId: wallet.id,
@@ -614,6 +618,7 @@ export async function payInvoiceFromWallet(
 
     const wallet = await tx.wallet.findUnique({
       where: { userId: args.userId },
+      select: { id: true },
     });
     if (!wallet) {
       return {
@@ -622,7 +627,12 @@ export async function payInvoiceFromWallet(
         message: "Wallet not found. Top up first.",
       } as const;
     }
-    if (wallet.balance < invoice.amountDue) {
+
+    const deduct = await tx.wallet.updateMany({
+      where: { id: wallet.id, balance: { gte: invoice.amountDue } },
+      data: { balance: { decrement: invoice.amountDue } },
+    });
+    if (deduct.count !== 1) {
       return {
         ok: false,
         status: 400,
@@ -630,10 +640,16 @@ export async function payInvoiceFromWallet(
       } as const;
     }
 
-    const updatedWallet = await tx.wallet.update({
+    const updatedWallet = await tx.wallet.findUnique({
       where: { id: wallet.id },
-      data: { balance: { decrement: invoice.amountDue } },
     });
+    if (!updatedWallet) {
+      return {
+        ok: false,
+        status: 400,
+        message: "Wallet not found. Top up first.",
+      } as const;
+    }
     await tx.walletTransaction.create({
       data: {
         walletId: wallet.id,

@@ -5,7 +5,7 @@ import { authenticateJwt } from "../middleware/authMiddleware.js";
 
 export function createAnalyticsRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
 
   router.get("/calendar", jwtAuth, async (req, res, next) => {
     try {

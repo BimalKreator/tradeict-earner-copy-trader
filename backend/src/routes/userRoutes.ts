@@ -8,7 +8,7 @@ import { createUserController } from "../controllers/userController.js";
 
 export function createUserRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const user = createUserController(prisma);
   const uploadDir = path.resolve(process.cwd(), "public", "uploads");
   fs.mkdirSync(uploadDir, { recursive: true });

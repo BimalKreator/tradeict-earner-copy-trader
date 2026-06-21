@@ -9,7 +9,7 @@ import { authenticateJwt } from "../middleware/authMiddleware.js";
  */
 export function createSubscriptionRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const subscription = createSubscriptionController(prisma);
 
   router.post("/coupons/validate", jwtAuth, subscription.validateCoupon);

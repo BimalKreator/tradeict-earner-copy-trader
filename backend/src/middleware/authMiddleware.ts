@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import type { PrismaClient } from "@prisma/client";
-import { Role } from "@prisma/client";
+import { Role, UserStatus } from "@prisma/client";
 import { AUTH_COOKIE_NAME } from "../utils/authToken.js";
 
 function extractBearerToken(req: Request): string | null {
@@ -20,14 +20,15 @@ function extractBearerToken(req: Request): string | null {
 
 /**
  * Requires a valid JWT from `Authorization: Bearer` or httpOnly `auth_token` cookie.
+ * Loads the user from the DB and rejects suspended accounts.
  * Sets `req.userId` from the `sub` claim.
  */
-export function authenticateJwt(): (
+export function authenticateJwt(prisma: PrismaClient): (
   req: Request,
   res: Response,
   next: NextFunction,
 ) => void {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const token = extractBearerToken(req);
     if (!token) {
       res.status(401).json({ error: "Missing or invalid Authorization header" });
@@ -49,7 +50,23 @@ export function authenticateJwt(): (
         res.status(401).json({ error: "Invalid token payload" });
         return;
       }
-      req.userId = (decoded as { sub: string }).sub;
+
+      const userId = (decoded as { sub: string }).sub;
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, status: true },
+      });
+
+      if (!user) {
+        res.status(401).json({ error: "User not found" });
+        return;
+      }
+      if (user.status !== UserStatus.ACTIVE) {
+        res.status(403).json({ error: "Account suspended" });
+        return;
+      }
+
+      req.userId = userId;
       next();
     } catch {
       res.status(401).json({ error: "Invalid or expired token" });

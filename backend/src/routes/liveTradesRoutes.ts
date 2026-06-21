@@ -9,7 +9,7 @@ import { createUserController } from "../controllers/userController.js";
 
 export function createLiveTradesRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateToken();
+  const jwtAuth = authenticateToken(prisma);
   const adminOnly = [jwtAuth, isAdmin(prisma)];
   const admin = createAdminController(prisma);
   const user = createUserController(prisma);

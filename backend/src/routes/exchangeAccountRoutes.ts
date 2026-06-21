@@ -5,7 +5,7 @@ import { createExchangeAccountController } from "../controllers/exchangeAccountC
 
 export function createExchangeAccountRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const ctrl = createExchangeAccountController(prisma);
 
   router.get("/", jwtAuth, ctrl.list);

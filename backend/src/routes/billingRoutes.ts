@@ -17,7 +17,7 @@ import { triggerMarkCommissionsAsPayable } from "../services/affiliateCommission
  */
 export function createBillingRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
 
   /**
    * GET /api/billing/live-cycle?strategyId=...

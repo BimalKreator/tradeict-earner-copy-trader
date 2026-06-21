@@ -21,12 +21,16 @@ import type { DeltaLivePosition } from "./exchangeService.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import { onLiveBidAskTick } from "./liveMarkPriceCache.js";
 import {
+  isLegClosingBlocked,
+  isMasterLegCloseInProgress,
   latchBreakevenHedgeEntryBlock,
   markLegClosing,
   markMasterFlatting,
   markPostExitEntryBlock,
   POST_EXIT_ENTRY_BLOCK_MS,
   clearBreakevenHedgeEntryLatch,
+  releaseMasterLegCloseInProgress,
+  tryAcquireMasterLegCloseInProgress,
 } from "./subscriptionSyncService.js";
 
 /** After a successful auto-exit close burst, ignore re-triggers briefly. */
@@ -128,8 +132,6 @@ const masterLegsCache = new Map<
   { legs: MasterLegCloseTarget[]; totalPnlUsd: number; fetchedAt: number }
 >();
 const breakevenExitInFlight = new Set<string>();
-/** symbolKey|side → master reduce-only close already submitted. */
-const masterLegCloseInFlight = new Set<string>();
 let lastBtcTickPrice = 0;
 let lastBtcTickAt = 0;
 /** strategyId → open leg symbol keys (for WS bid/ask targeted auto-exit). */
@@ -167,7 +169,6 @@ export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
     breakevenExitInFlight.clear();
     legSymbolsByStrategy.clear();
     lastBidAskTickByStrategy.clear();
-    masterLegCloseInFlight.clear();
     for (const timer of activeExitLockTimers.values()) {
       clearTimeout(timer);
     }
@@ -523,9 +524,21 @@ async function executeMasterFlatAutoExit(args: {
   if (exitReason === EXIT_REASON.AUTO_EXIT_BREAKEVEN) {
     latchBreakevenHedgeEntryBlock();
   }
+
+  const closeLockLegs: Array<{ symbolKey: string; side: TradeSide }> = [];
   for (const leg of legs) {
     markLegClosing(strategyId, leg.symbolKey, leg.side);
     markBotInitiatedClose(strategyId, leg.symbolKey, exitReason);
+    if (
+      tryAcquireMasterLegCloseInProgress(
+        strategyId,
+        leg.symbolKey,
+        leg.side,
+        logTag,
+      )
+    ) {
+      closeLockLegs.push({ symbolKey: leg.symbolKey, side: leg.side });
+    }
   }
   setPendingStrategyExitReason(strategyId, exitReason);
 
@@ -534,44 +547,51 @@ async function executeMasterFlatAutoExit(args: {
       `${logDetail} openLegs=${legs.length} — closing ALL master positions`,
   );
 
-  const { closed, errors } = await closeAllMasterPositionsMarket(
-    masterApiKey,
-    masterApiSecret,
-    legs,
-  );
-
-  if (closed > 0 || errors.length === 0) {
-    lastAutoExitAt.set(strategyId, Date.now());
-  }
-
-  if (errors.length > 0) {
-    console.error(
-      `[${logTag}] partial close strategyId=${strategyId} closed=${closed}/${legs.length} errors=${errors.join("; ")}`,
+  try {
+    const { closed, errors } = await closeAllMasterPositionsMarket(
+      masterApiKey,
+      masterApiSecret,
+      legs,
+      strategyId,
     );
-  } else {
-    console.log(
-      `[${logTag}] master flat complete strategyId=${strategyId} closed=${closed} leg(s)`,
-    );
-  }
 
-  if (closed > 0) {
-    try {
-      await clearFutureHedgeActiveBatch(prisma, `${logTag}:flat`);
-    } catch (batchErr) {
-      console.warn(
-        `[${logTag}] Future Hedge batch reset failed strategyId=${strategyId}:`,
-        batchErr instanceof Error ? batchErr.message : batchErr,
+    if (closed > 0 || errors.length === 0) {
+      lastAutoExitAt.set(strategyId, Date.now());
+    }
+
+    if (errors.length > 0) {
+      console.error(
+        `[${logTag}] partial close strategyId=${strategyId} closed=${closed}/${legs.length} errors=${errors.join("; ")}`,
+      );
+    } else {
+      console.log(
+        `[${logTag}] master flat complete strategyId=${strategyId} closed=${closed} leg(s)`,
       );
     }
 
-    try {
-      const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
-      await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);
-    } catch (err) {
-      console.error(
-        `[${logTag}] follower fan-out failed strategyId=${strategyId}:`,
-        err instanceof Error ? err.message : err,
-      );
+    if (closed > 0) {
+      try {
+        await clearFutureHedgeActiveBatch(prisma, `${logTag}:flat`);
+      } catch (batchErr) {
+        console.warn(
+          `[${logTag}] Future Hedge batch reset failed strategyId=${strategyId}:`,
+          batchErr instanceof Error ? batchErr.message : batchErr,
+        );
+      }
+
+      try {
+        const { fanOutMasterFlatCloses } = await import("./tradeEngine.js");
+        await fanOutMasterFlatCloses(prisma, strategyId, legs, exitReason);
+      } catch (err) {
+        console.error(
+          `[${logTag}] follower fan-out failed strategyId=${strategyId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  } finally {
+    for (const leg of closeLockLegs) {
+      releaseMasterLegCloseInProgress(strategyId, leg.symbolKey, leg.side);
     }
   }
 }
@@ -580,21 +600,34 @@ export async function closeAllMasterPositionsMarket(
   apiKeyStored: string,
   apiSecretStored: string,
   legs: MasterLegCloseTarget[],
+  strategyId?: string,
 ): Promise<{ closed: number; errors: string[] }> {
   const errors: string[] = [];
   let closed = 0;
 
   const outcomes = await Promise.allSettled(
     legs.map(async (leg) => {
-      const legKey = `${leg.symbolKey.trim().toUpperCase()}|${leg.side}`;
-      if (masterLegCloseInFlight.has(legKey)) {
-        return {
-          ok: false as const,
-          error: `${leg.symbolKey} ${leg.side}: close already in flight`,
-          skipped: true as const,
-        };
+      let acquiredHere = false;
+      if (strategyId != null) {
+        if (isMasterLegCloseInProgress(strategyId, leg.symbolKey, leg.side)) {
+          /* Parent auto-exit holds the unified close lock — proceed without re-acquire. */
+        } else if (
+          tryAcquireMasterLegCloseInProgress(
+            strategyId,
+            leg.symbolKey,
+            leg.side,
+            "closeAllMasterPositionsMarket",
+          )
+        ) {
+          acquiredHere = true;
+        } else {
+          return {
+            ok: false as const,
+            error: `${leg.symbolKey} ${leg.side}: close already in flight`,
+            skipped: true as const,
+          };
+        }
       }
-      masterLegCloseInFlight.add(legKey);
       try {
         const closeSide: TradeSide = leg.side === "BUY" ? "SELL" : "BUY";
         const result = await executeTrade(
@@ -613,7 +646,9 @@ export async function closeAllMasterPositionsMarket(
           error: `${leg.symbolKey} ${leg.side}: ${result.error ?? "unknown"}`,
         };
       } finally {
-        setTimeout(() => masterLegCloseInFlight.delete(legKey), ACTIVE_EXIT_LOCK_TTL_MS);
+        if (acquiredHere && strategyId != null) {
+          releaseMasterLegCloseInProgress(strategyId, leg.symbolKey, leg.side);
+        }
       }
     }),
   );

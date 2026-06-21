@@ -62,6 +62,22 @@ const PORT = 5000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function parseAllowedOrigins(): string[] {
+  const raw = process.env.ALLOWED_ORIGINS?.trim();
+  if (!raw) {
+    console.warn(
+      "[BOOT] ALLOWED_ORIGINS is not set — defaulting to http://localhost:3000",
+    );
+    return ["http://localhost:3000"];
+  }
+  return raw
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+}
+
+const allowedOrigins = parseAllowedOrigins();
+
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error("DATABASE_URL is not set");
@@ -144,7 +160,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: true,
+    origin: allowedOrigins,
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -197,7 +213,7 @@ app.use("/live-trades", liveTradesRoutes);
 
 app.use("/api/analytics", createAnalyticsRoutes(prisma));
 
-const arbitrageRoutes = createArbitrageRoutes();
+const arbitrageRoutes = createArbitrageRoutes(prisma);
 app.use("/api/arbitrage", arbitrageRoutes);
 app.use("/arbitrage", arbitrageRoutes);
 

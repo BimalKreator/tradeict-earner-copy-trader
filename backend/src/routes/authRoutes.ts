@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { type PrismaClient } from "@prisma/client";
 import { authenticateJwt } from "../middleware/authMiddleware.js";
 import { createAuthController } from "../controllers/authController.js";
@@ -7,21 +8,31 @@ import {
   telegramLinkExpiry,
 } from "../services/telegramService.js";
 
+/** Brute-force guard for credential and OTP endpoints (5 attempts / 10 min). */
+export const authSensitiveRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many attempts. Try again in 10 minutes." },
+});
+
 export function createAuthRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const auth = createAuthController(prisma);
+  const jwtAuth = authenticateJwt(prisma);
 
   router.post("/send-otp", auth.sendSignupOtp);
   router.post("/register", auth.registerWithOtp);
-  router.post("/login", auth.login);
+  router.post("/login", authSensitiveRateLimiter, auth.login);
   /** @deprecated Use POST /auth/login with email + password */
-  router.post("/send-login-otp", auth.login);
-  router.post("/verify-otp", auth.verifyOtp);
+  router.post("/send-login-otp", authSensitiveRateLimiter, auth.login);
+  router.post("/verify-otp", authSensitiveRateLimiter, auth.verifyOtp);
   router.post("/logout", auth.logout);
-  router.post("/forgot-password", auth.forgotPassword);
+  router.post("/forgot-password", authSensitiveRateLimiter, auth.forgotPassword);
   router.post("/reset-password", auth.resetPassword);
 
-  router.post("/telegram-link-token", authenticateJwt(), async (req, res, next) => {
+  router.post("/telegram-link-token", jwtAuth, async (req, res, next) => {
     try {
       const userId = req.userId;
       if (!userId) {

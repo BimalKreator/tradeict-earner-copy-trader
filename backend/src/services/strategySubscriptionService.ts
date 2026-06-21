@@ -175,6 +175,57 @@ export async function findActiveFutureHedgeCopySubscribers(
   return rows;
 }
 
+export type ActiveCopyTradingStrategy = {
+  id: string;
+  title: string;
+  masterApiKey: string;
+  masterApiSecret: string;
+  slippage: number;
+  isActive: boolean;
+};
+
+/**
+ * All strategies eligible for the copy engine: active, master keys configured,
+ * and at least one active subscriber deployment.
+ */
+export async function findActiveCopyTradingStrategies(
+  prisma: PrismaClient,
+): Promise<ActiveCopyTradingStrategy[]> {
+  const candidates = await prisma.strategy.findMany({
+    where: {
+      isActive: true,
+      masterApiKey: { not: "" },
+      masterApiSecret: { not: "" },
+    },
+    select: {
+      id: true,
+      title: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+      slippage: true,
+      isActive: true,
+    },
+  });
+
+  const out: ActiveCopyTradingStrategy[] = [];
+  for (const row of candidates) {
+    if (!row.masterApiKey?.trim() || !row.masterApiSecret?.trim()) continue;
+    const subs = await findActiveCopySubscribersForStrategy(prisma, row.id);
+    if (subs.length > 0) out.push(row);
+  }
+  return out;
+}
+
+export async function loadStrategyCopyMeta(
+  prisma: PrismaClient,
+  strategyId: string,
+): Promise<{ id: string; isActive: boolean; slippage: number } | null> {
+  return prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { id: true, isActive: true, slippage: true },
+  });
+}
+
 export function resolveCopySubscriptionCreds(
   sub: CopySubscriptionRow,
 ): { apiKey: string; apiSecret: string } | null {

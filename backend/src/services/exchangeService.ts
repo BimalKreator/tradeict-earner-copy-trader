@@ -53,6 +53,36 @@ const deltaAxios = axios.create({
   httpsAgent: deltaHttpsAgent,
 });
 
+const DELTA_429_MAX_RETRIES = 3;
+const DELTA_429_BASE_DELAY_MS = 500;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(headers: Record<string, unknown>): number | null {
+  const raw = headers["retry-after"];
+  if (raw == null) return null;
+  const value = String(raw).trim();
+  const asSeconds = Number(value);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+    return Math.ceil(asSeconds * 1000);
+  }
+  const asDate = Date.parse(value);
+  if (Number.isFinite(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+  return null;
+}
+
+function isAxios429(err: unknown): boolean {
+  return (
+    axios.isAxiosError(err) &&
+    err.response != null &&
+    err.response.status === 429
+  );
+}
+
 /** Delta India REST auth — METHOD + timestamp + path + query + body (see Delta API docs). */
 function deltaIndiaRestSignature(
   secret: string,
@@ -75,45 +105,72 @@ async function deltaIndiaSignedRequest<T>(args: {
   query?: Record<string, string>;
   body?: Record<string, unknown>;
 }): Promise<T> {
-  const timestampSec = Math.floor(Date.now() / 1000).toString();
-  const queryString = args.query
-    ? `?${new URLSearchParams(args.query).toString()}`
-    : "";
-  const bodyStr =
-    args.body && args.method !== "GET" ? JSON.stringify(args.body) : "";
-  const signature = deltaIndiaRestSignature(
-    args.secret,
-    args.method,
-    timestampSec,
-    args.path,
-    queryString,
-    bodyStr,
-  );
+  let lastError: unknown;
 
-  const { data } = await deltaAxios.request<T & { success?: boolean; error?: unknown }>({
-    method: args.method,
-    url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "api-key": args.apiKey,
-      timestamp: timestampSec,
-      signature,
-    },
-    data: bodyStr.length > 0 ? bodyStr : undefined,
-    timeout: 25_000,
-  });
+  for (let attempt = 0; attempt <= DELTA_429_MAX_RETRIES; attempt += 1) {
+    const timestampSec = Math.floor(Date.now() / 1000).toString();
+    const queryString = args.query
+      ? `?${new URLSearchParams(args.query).toString()}`
+      : "";
+    const bodyStr =
+      args.body && args.method !== "GET" ? JSON.stringify(args.body) : "";
+    const signature = deltaIndiaRestSignature(
+      args.secret,
+      args.method,
+      timestampSec,
+      args.path,
+      queryString,
+      bodyStr,
+    );
 
-  const row = data as { success?: boolean; error?: unknown };
-  if (row.success === false) {
-    const errMsg =
-      typeof row.error === "object" && row.error !== null && "code" in row.error
-        ? JSON.stringify(row.error)
-        : String(row.error ?? "Delta REST request failed");
-    throw new Error(errMsg);
+    try {
+      const { data } = await deltaAxios.request<
+        T & { success?: boolean; error?: unknown }
+      >({
+        method: args.method,
+        url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "api-key": args.apiKey,
+          timestamp: timestampSec,
+          signature,
+        },
+        data: bodyStr.length > 0 ? bodyStr : undefined,
+        timeout: 25_000,
+      });
+
+      const row = data as { success?: boolean; error?: unknown };
+      if (row.success === false) {
+        const errMsg =
+          typeof row.error === "object" && row.error !== null && "code" in row.error
+            ? JSON.stringify(row.error)
+            : String(row.error ?? "Delta REST request failed");
+        throw new Error(errMsg);
+      }
+
+      return data;
+    } catch (err) {
+      lastError = err;
+      if (isAxios429(err) && attempt < DELTA_429_MAX_RETRIES) {
+        const retryAfter = axios.isAxiosError(err)
+          ? parseRetryAfterMs(
+              (err.response?.headers ?? {}) as Record<string, unknown>,
+            )
+          : null;
+        const delay =
+          retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
+        console.warn(
+          `[delta] HTTP 429 on ${args.method} ${args.path} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
+        );
+        await sleepMs(delay);
+        continue;
+      }
+      throw err;
+    }
   }
 
-  return data;
+  throw lastError ?? new Error("Delta REST request failed after retries");
 }
 
 function parseOrderCommission(order: Record<string, unknown>): number | null {
@@ -1023,35 +1080,56 @@ async function getPublicClient(): Promise<InstanceType<typeof ccxt.delta>> {
 
 const _authClientCache = new Map<
   string,
-  { client: InstanceType<typeof ccxt.delta>; marketsLoaded: boolean }
+  {
+    client: InstanceType<typeof ccxt.delta>;
+    marketsLoaded: boolean;
+    lastUsedAt: number;
+  }
 >();
+
+/** Evict decrypted CCXT clients idle longer than this (memory + secret exposure). */
+const AUTH_CLIENT_CACHE_TTL_MS = 12 * 60 * 1000;
+
+function evictStaleAuthClients(now = Date.now()): void {
+  for (const [key, entry] of _authClientCache) {
+    if (now - entry.lastUsedAt > AUTH_CLIENT_CACHE_TTL_MS) {
+      _authClientCache.delete(key);
+    }
+  }
+}
 
 async function getAuthClient(
   apiKey: string,
   secret: string,
 ): Promise<InstanceType<typeof ccxt.delta>> {
+  evictStaleAuthClients();
+
   // Debug: confirm the credentials CCXT actually receives match the keys
   // stored in the admin panel. `apiKey` here is post-decryption plaintext;
   // mismatched output → encryption key drift or stale cache, not a CCXT bug.
-  const maskedKey =
-    apiKey.length > 5 ? apiKey.substring(0, 5) + "***" : "INVALID_LENGTH";
+  const maskedKey = apiKey.length > 0 ? "***" : "MISSING";
   console.log(
-    `[DEBUG_AUTH] Initializing CCXT for API Key starting with: ${maskedKey}`,
+    `[DEBUG_AUTH] Initializing CCXT client (credentials redacted) key=${maskedKey}`,
   );
 
   const cacheKey = `${apiKey}::${secret}`;
+  const now = Date.now();
   let entry = _authClientCache.get(cacheKey);
   if (!entry) {
     entry = {
       client: initializeDeltaClient(apiKey, secret),
       marketsLoaded: false,
+      lastUsedAt: now,
     };
     _authClientCache.set(cacheKey, entry);
+  } else {
+    entry.lastUsedAt = now;
   }
   if (!entry.marketsLoaded) {
     await entry.client.loadMarkets();
     entry.marketsLoaded = true;
   }
+  entry.lastUsedAt = Date.now();
   return entry.client;
 }
 

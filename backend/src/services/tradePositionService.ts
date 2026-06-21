@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  Prisma,
   type PrismaClient,
   TradePositionStatus,
 } from "@prisma/client";
@@ -104,6 +105,26 @@ export function buildStableCopyClientOrderId(args: {
   return hashClientOrderId(raw);
 }
 
+/** Deterministic master-leg client order id keyed on the master fill event. */
+export function buildStableMasterClientOrderId(args: {
+  strategyId: string;
+  masterFillKey: string;
+  symbol: string;
+  side: TradeSide | string;
+}): string {
+  const sym = compactSymbolKey(args.symbol).slice(0, 24);
+  const side = String(args.side).toUpperCase();
+  const raw = [
+    args.strategyId,
+    "M",
+    "open",
+    args.masterFillKey.trim(),
+    sym,
+    side,
+  ].join("|");
+  return hashClientOrderId(raw);
+}
+
 export type RecordTradePositionOpenArgs = {
   strategyId: string;
   userId?: string | null;
@@ -172,26 +193,59 @@ export async function recordTradePositionOpen(
     return reopened;
   }
 
-  const row = await prisma.tradePosition.create({
-    data: {
-      userId: isMaster ? null : args.userId!,
-      isMaster,
-      strategyId: args.strategyId,
-      symbol: args.symbol,
-      side: String(args.side).toUpperCase(),
-      quantity: qty,
-      entryPrice: entry,
-      clientOrderId,
-      status: TradePositionStatus.OPEN,
-    },
-    select: { id: true, clientOrderId: true },
-  });
+  try {
+    const row = await prisma.tradePosition.create({
+      data: {
+        userId: isMaster ? null : args.userId!,
+        isMaster,
+        strategyId: args.strategyId,
+        symbol: args.symbol,
+        side: String(args.side).toUpperCase(),
+        quantity: qty,
+        entryPrice: entry,
+        clientOrderId,
+        status: TradePositionStatus.OPEN,
+      },
+      select: { id: true, clientOrderId: true },
+    });
 
-  console.log(
-    `[tradePosition] OPEN ${isMaster ? "master" : `user=${args.userId}`} strategyId=${args.strategyId} ${args.symbol} ${args.side} qty=${qty} clientOrderId=${clientOrderId}`,
-  );
+    console.log(
+      `[tradePosition] OPEN ${isMaster ? "master" : `user=${args.userId}`} strategyId=${args.strategyId} ${args.symbol} ${args.side} qty=${qty} clientOrderId=${clientOrderId}`,
+    );
 
-  return row;
+    return row;
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      const raced = await prisma.tradePosition.findUnique({
+        where: { clientOrderId },
+        select: { id: true, clientOrderId: true, status: true },
+      });
+      if (raced) {
+        if (raced.status === TradePositionStatus.OPEN) {
+          return { id: raced.id, clientOrderId: raced.clientOrderId };
+        }
+        const reopened = await prisma.tradePosition.update({
+          where: { id: raced.id },
+          data: {
+            status: TradePositionStatus.OPEN,
+            quantity: qty,
+            entryPrice: entry,
+            symbol: args.symbol,
+            side: String(args.side).toUpperCase(),
+          },
+          select: { id: true, clientOrderId: true },
+        });
+        console.log(
+          `[tradePosition] REOPEN (race) ${isMaster ? "master" : `user=${args.userId}`} strategyId=${args.strategyId} ${args.symbol} ${args.side} qty=${qty} clientOrderId=${clientOrderId}`,
+        );
+        return reopened;
+      }
+    }
+    throw err;
+  }
 }
 
 export type CloseTradePositionLegArgs = {

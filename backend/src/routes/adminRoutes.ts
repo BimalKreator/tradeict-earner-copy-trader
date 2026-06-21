@@ -74,7 +74,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const adminEmail = createAdminEmailController(prisma);
   const futureHedge = createFutureHedgeController(prisma);
 
-  router.use(authenticateToken(), isAdmin(prisma));
+  router.use(authenticateToken(prisma), isAdmin(prisma));
 
   router.post("/resend-registration-email", adminEmail.resendRegistrationEmail);
   router.post("/send-custom-email", adminEmail.sendCustomEmailToUser);

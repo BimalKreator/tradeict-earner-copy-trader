@@ -9,7 +9,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { syncMasterPartialTrimToFollowers } from "./followerTradeExecution.js";
-import { isLegClosingBlocked } from "./subscriptionSyncService.js";
+import { isLegClosingBlocked, isMasterLegCloseInProgress } from "./subscriptionSyncService.js";
 import { tradePositionSymbolsAlign } from "./tradePositionService.js";
 
 export type MasterRestLeg = {
@@ -171,7 +171,10 @@ export async function executeMasterLegCloseAfterRestCheck(
   tracker.markPriorityFlatVerified(legKey);
 
   if (!restOpen || restContracts <= 0) {
-    if (isLegClosingBlocked(strategyId, args.symbol, args.openSide)) {
+    if (
+      isLegClosingBlocked(strategyId, args.symbol, args.openSide) ||
+      isMasterLegCloseInProgress(strategyId, args.symbol, args.openSide)
+    ) {
       console.log(
         `[MASTER-REST-SYNC] defer priority flat ${args.symbol} ${args.openSide} (${args.source}) — close in flight, keep tracker`,
       );
@@ -216,7 +219,7 @@ export async function executeMasterLegCloseAfterRestCheck(
     args.source,
   ]);
   try {
-    await syncMasterPartialTrimToFollowers(prisma, {
+    await syncMasterPartialTrimToFollowers(prisma, strategyId, {
       symbol: args.symbol,
       side: args.openSide,
       masterTrimLots: trimLots,

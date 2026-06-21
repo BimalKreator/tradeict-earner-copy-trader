@@ -1,4 +1,16 @@
 import CryptoJS from "crypto-js";
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  scryptSync,
+} from "node:crypto";
+
+/** Prefix for AES-256-GCM payloads (IV + auth tag + ciphertext, base64). */
+export const GCM_SECRET_PREFIX = "gcm:v1:";
+
+const GCM_IV_BYTES = 12;
+const GCM_TAG_BYTES = 16;
 
 function getEncryptionKey(): string {
   const key = process.env.PROCESS_ENCRYPTION_KEY;
@@ -6,6 +18,58 @@ function getEncryptionKey(): string {
     throw new Error("PROCESS_ENCRYPTION_KEY is required for Delta API key encryption");
   }
   return key;
+}
+
+function deriveGcmKey(): Buffer {
+  return scryptSync(getEncryptionKey(), "tradeict-delta-gcm-v1", 32);
+}
+
+export function isGcmSecret(stored: string): boolean {
+  return stored.trim().startsWith(GCM_SECRET_PREFIX);
+}
+
+/**
+ * Encrypt using AES-256-GCM with a unique random IV prepended to the ciphertext.
+ */
+export function encryptSecretGCM(plaintext: string): string {
+  const key = deriveGcmKey();
+  const iv = randomBytes(GCM_IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  const payload = Buffer.concat([iv, tag, encrypted]).toString("base64");
+  return `${GCM_SECRET_PREFIX}${payload}`;
+}
+
+/**
+ * Decrypt ciphertext produced by {@link encryptSecretGCM}.
+ */
+export function decryptSecretGCM(ciphertext: string): string {
+  const trimmed = ciphertext.trim();
+  if (!trimmed.startsWith(GCM_SECRET_PREFIX)) {
+    throw new Error("Not a GCM ciphertext");
+  }
+  const raw = Buffer.from(trimmed.slice(GCM_SECRET_PREFIX.length), "base64");
+  if (raw.length <= GCM_IV_BYTES + GCM_TAG_BYTES) {
+    throw new Error("GCM payload too short");
+  }
+  const iv = raw.subarray(0, GCM_IV_BYTES);
+  const tag = raw.subarray(GCM_IV_BYTES, GCM_IV_BYTES + GCM_TAG_BYTES);
+  const encrypted = raw.subarray(GCM_IV_BYTES + GCM_TAG_BYTES);
+  const key = deriveGcmKey();
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString("utf8");
+  if (!plain) {
+    throw new Error("GCM decryption produced empty plaintext");
+  }
+  return plain;
 }
 
 /**
@@ -53,13 +117,26 @@ function isCryptoJsAesCiphertext(stored: string): boolean {
 /**
  * Decrypt stored Delta credentials, or return sanitized plaintext (legacy rows).
  *
- * Must stay aligned with {@link decryptDeltaSecret} used by "Test connection" —
- * if AES decrypt succeeds, the sanitized plaintext is returned even when the
- * secret contains punctuation outside `[A-Za-z0-9_\-+/=:.]` (e.g. `!@#%`).
+ * Supports GCM (`gcm:v1:`), legacy CryptoJS AES-CBC, and plaintext rows.
  */
 export function decryptDeltaSecretOrPlain(stored: string): string {
   if (!stored) return "";
   const trimmed = stored.trim();
+
+  if (isGcmSecret(trimmed)) {
+    try {
+      const decrypted = hardSanitizeKey(decryptSecretGCM(trimmed));
+      if (isUsableCredential(decrypted)) {
+        return decrypted;
+      }
+    } catch (err) {
+      console.error(
+        "[encryption] GCM credential decryption failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return "";
+  }
 
   let decryptFailed = false;
   let decrypted = "";
@@ -110,5 +187,5 @@ export function normalizeStoredDeltaSecret(plaintextOrStored: string): string {
       "Could not read API credential — re-paste from Delta Exchange India without extra spaces.",
     );
   }
-  return encryptDeltaSecret(plain);
+  return encryptSecretGCM(plain);
 }

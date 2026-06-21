@@ -5,7 +5,7 @@ import { createTicketController } from "../controllers/ticketController.js";
 
 export function createTicketRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const tickets = createTicketController(prisma);
 
   router.post("/", jwtAuth, tickets.createTicket);
@@ -19,7 +19,7 @@ export function createTicketRoutes(prisma: PrismaClient): Router {
 
 export function createAdminTicketRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const admin = requireAdmin(prisma);
   const tickets = createTicketController(prisma);
 

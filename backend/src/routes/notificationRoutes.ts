@@ -5,7 +5,7 @@ import { createNotificationController } from "../controllers/notificationControl
 
 export function createNotificationRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt();
+  const jwtAuth = authenticateJwt(prisma);
   const notification = createNotificationController(prisma);
 
   router.get("/", jwtAuth, notification.listNotifications);

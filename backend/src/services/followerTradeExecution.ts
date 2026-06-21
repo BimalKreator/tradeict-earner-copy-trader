@@ -16,14 +16,15 @@ import { EXIT_REASON, type ExitReasonValue } from "../constants/exitReasons.js";
 import { STRATEGY_SELECT_IS_ACTIVE } from "../prisma/strategySelect.js";
 import {
   findActiveCopySubscriptionForUser,
+  findActiveCopySubscribersForStrategy,
   findActiveFutureHedgeCopySubscribers,
   findCopySubscriptionForUser,
   followerLotsFromMaster,
   isStrategyCopyTradingActive,
+  loadStrategyCopyMeta,
   resolveCopySubscriptionCreds,
   resolveFutureHedgeStrategyId,
 } from "./strategySubscriptionService.js";
-import { resolveFutureHedgeStrategy } from "./futureHedgeService.js";
 import { logUserActivity } from "./userActivityService.js";
 import {
   markSubscriptionSynced,
@@ -37,6 +38,7 @@ import {
 import {
   buildClientOrderId,
   buildStableCopyClientOrderId,
+  buildStableMasterClientOrderId,
   closeTradePositionsForLeg,
   incrementOrRecordFollowerTradePosition,
   recordTradePositionOpen,
@@ -59,6 +61,10 @@ import {
   registerMasterNoCopyRestSuppress,
   registerPendingMasterNoCopyOrderId,
 } from "./masterNoCopyOrders.js";
+import {
+  FANOUT_CONCURRENCY,
+  mapAllSettledWithConcurrency,
+} from "../utils/concurrency.js";
 
 /** REST poll interval while waiting for Delta to confirm fill qty (5–20s window). */
 const POST_ORDER_VERIFY_WAIT_MS = 5_000;
@@ -807,16 +813,18 @@ export type MasterPartialTrimArgs = {
  */
 export async function syncMasterPartialTrimToFollowers(
   prisma: PrismaClient,
+  strategyId: string,
   args: MasterPartialTrimArgs,
 ): Promise<{ trimmedUsers: number } | null> {
   const masterTrimLots = Math.floor(args.masterTrimLots);
   if (masterTrimLots <= 0) return null;
 
-  const strategyId = await resolveFutureHedgeStrategyId(prisma);
-  if (!strategyId) return null;
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) return null;
 
-  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  const subscribers = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
+  );
   if (subscribers.length === 0) return { trimmedUsers: 0 };
 
   console.log(
@@ -919,27 +927,29 @@ export async function assertStrategyActiveForCopy(
 }
 
 /**
- * Fan-out a master open fill to every active Future Hedge subscriber.
+ * Fan-out a master open fill to every active subscriber of `strategyId`.
  * Follower size = floor(master lots × {@link UserStrategySubscription.multiplier}).
  */
-export async function syncMasterOpenFillToFutureHedgeFollowers(
+export async function syncMasterOpenFillToFollowers(
   prisma: PrismaClient,
+  strategyId: string,
   fill: MasterOpenFillArgs,
 ): Promise<{ strategyId: string; fanoutCount: number } | null> {
   if (fill.forceRestSync) {
-    return forceSyncMasterOpenToFollowers(prisma, fill);
+    return forceSyncMasterOpenToFollowers(prisma, strategyId, fill);
   }
 
-  const strategy = await resolveFutureHedgeStrategy(prisma);
-  if (!strategy.isActive) {
-    console.log("[copy] Future Hedge paused — skip master open fan-out");
+  const strategy = await loadStrategyCopyMeta(prisma, strategyId);
+  if (!strategy?.isActive) {
+    console.log(
+      `[copy] Strategy paused — skip master open fan-out strategyId=${strategyId}`,
+    );
     return null;
   }
-  if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
+  if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
     return null;
   }
 
-  const strategyId = strategy.id;
   if (
     fill.adminForceSync !== true &&
     (syncMonitorOpensBlocked(strategyId) ||
@@ -951,9 +961,14 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     return null;
   }
 
-  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  const subscribers = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
+  );
   if (subscribers.length === 0) {
-    console.log("[copy] No active Future Hedge subscribers for master open");
+    console.log(
+      `[copy] No active subscribers for master open strategyId=${strategyId}`,
+    );
     return { strategyId, fanoutCount: 0 };
   }
 
@@ -964,6 +979,12 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
     side: fill.side,
     quantity: fill.masterLots,
     entryPrice: fill.avgPrice,
+    clientOrderId: buildStableMasterClientOrderId({
+      strategyId,
+      masterFillKey: fill.masterFillKey,
+      symbol: fill.symbol,
+      side: fill.side,
+    }),
   }).catch((err) => {
     console.warn(
       `[copy] master TradePosition ledger skipped ${fill.symbol}:`,
@@ -1115,12 +1136,14 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   }
 
   console.log(
-    `[copy] parallel fan-out ${jobs.length} follower order(s) ${fill.symbol} ${fill.side} ` +
-      `(liveMasterFill=${fill.liveMasterFill === true})`,
+    `[copy] bounded fan-out ${jobs.length} follower order(s) ${fill.symbol} ${fill.side} ` +
+      `(liveMasterFill=${fill.liveMasterFill === true}, concurrency=${FANOUT_CONCURRENCY})`,
   );
 
-  const settled = await Promise.allSettled(
-    jobs.map(async (job) => {
+  const settled = await mapAllSettledWithConcurrency(
+    jobs,
+    FANOUT_CONCURRENCY,
+    async (job) => {
       console.log(
         `[copy] Future Hedge open user=${job.sub.userId} ${fill.symbol} ${fill.side} ` +
           `deficit=${job.lots} (target ${job.expectedLots}, fill +${fill.masterLots}` +
@@ -1143,7 +1166,7 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
       });
 
       return { job, result };
-    }),
+    },
   );
 
   void Promise.all(
@@ -1247,25 +1270,37 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
   return { strategyId, fanoutCount: jobs.length };
 }
 
+/** @deprecated Prefer {@link syncMasterOpenFillToFollowers} with an explicit strategyId. */
+export async function syncMasterOpenFillToFutureHedgeFollowers(
+  prisma: PrismaClient,
+  fill: MasterOpenFillArgs,
+): Promise<{ strategyId: string; fanoutCount: number } | null> {
+  const strategyId = await resolveFutureHedgeStrategyId(prisma);
+  if (!strategyId) return null;
+  return syncMasterOpenFillToFollowers(prisma, strategyId, fill);
+}
+
 /**
  * REST force-sync: align followers to master runtime positions using DB bot qty
  * as source of truth. Bypasses slippage, syncStatus blocks, and stable fill dedup.
  */
 export async function forceSyncMasterOpenToFollowers(
   prisma: PrismaClient,
+  strategyId: string,
   fill: MasterOpenFillArgs,
 ): Promise<{ strategyId: string; fanoutCount: number } | null> {
   try {
-    const strategy = await resolveFutureHedgeStrategy(prisma);
-    if (!strategy.isActive) {
-      console.log("[FORCE-SYNC] Future Hedge paused — skip force open sync");
+    const strategy = await loadStrategyCopyMeta(prisma, strategyId);
+    if (!strategy?.isActive) {
+      console.log(
+        `[FORCE-SYNC] Strategy paused — skip force open sync strategyId=${strategyId}`,
+      );
       return null;
     }
-    if (!(await assertStrategyActiveForCopy(prisma, strategy.id))) {
+    if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
       return null;
     }
 
-    const strategyId = strategy.id;
     if (
       fill.adminForceSync !== true &&
       (syncMonitorOpensBlocked(strategyId) ||
@@ -1277,7 +1312,10 @@ export async function forceSyncMasterOpenToFollowers(
       return null;
     }
 
-    const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+    const subscribers = await findActiveCopySubscribersForStrategy(
+      prisma,
+      strategyId,
+    );
     if (subscribers.length === 0) {
       return { strategyId, fanoutCount: 0 };
     }
@@ -1347,7 +1385,7 @@ export async function forceSyncMasterOpenToFollowers(
     }
 
     console.log(
-      `[FORCE-SYNC] parallel fan-out ${pending.length} follower order(s) on ${fill.symbol} ${fill.side}`,
+      `[FORCE-SYNC] bounded fan-out ${pending.length} follower order(s) on ${fill.symbol} ${fill.side} (concurrency=${FANOUT_CONCURRENCY})`,
     );
 
     try {
@@ -1358,11 +1396,11 @@ export async function forceSyncMasterOpenToFollowers(
         side: fill.side,
         quantity: fill.masterLots,
         entryPrice: fill.avgPrice,
-        clientOrderId: buildClientOrderId({
+        clientOrderId: buildStableMasterClientOrderId({
           strategyId,
-          isMaster: true,
+          masterFillKey: fill.masterFillKey,
           symbol: fill.symbol,
-          exchangeOrderId: fill.masterFillKey,
+          side: fill.side,
         }),
       });
     } catch (masterLegErr) {
@@ -1384,8 +1422,10 @@ export async function forceSyncMasterOpenToFollowers(
     const entryPrice =
       tickLast != null && tickLast > 0 ? tickLast : fill.avgPrice;
 
-    await Promise.allSettled(
-      pending.map(async ({ sub, lots }) => {
+    await mapAllSettledWithConcurrency(
+      pending,
+      FANOUT_CONCURRENCY,
+      async ({ sub, lots }) => {
         try {
           const creds = resolveCopySubscriptionCreds(sub);
           const clientOrderId = buildStableCopyClientOrderId({
@@ -1497,7 +1537,7 @@ export async function forceSyncMasterOpenToFollowers(
             subErr instanceof Error ? subErr.message : subErr,
           );
         }
-      }),
+      },
     );
 
     return { strategyId, fanoutCount: pending.length };
@@ -1812,10 +1852,11 @@ function requireCloseSettlement(
 }
 
 /**
- * Place reduce-only closes for each Future Hedge follower when the master leg flats.
+ * Place reduce-only closes for each follower when the master leg flats.
  */
-export async function syncMasterCloseToFutureHedgeFollowers(
+export async function syncMasterCloseToFollowers(
   prisma: PrismaClient,
+  strategyId: string,
   snap: MasterCloseFillArgs,
   onFollowerClosed: (args: {
     userId: string;
@@ -1829,22 +1870,21 @@ export async function syncMasterCloseToFutureHedgeFollowers(
   }) => Promise<void>,
   options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
 ): Promise<MasterCloseFanoutResult | null> {
-  const strategyId = await resolveFutureHedgeStrategyId(prisma);
-  if (!strategyId) return null;
-
-  const strat = await prisma.strategy.findUnique({
-    where: { id: strategyId },
-    select: STRATEGY_SELECT_IS_ACTIVE,
-  });
+  const strat = await loadStrategyCopyMeta(prisma, strategyId);
   if (!strat?.isActive) {
-    console.log("[copy] Future Hedge paused — skip master close fan-out");
+    console.log(
+      `[copy] Strategy paused — skip master close fan-out strategyId=${strategyId}`,
+    );
     return null;
   }
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) {
     return null;
   }
 
-  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  const subscribers = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
+  );
   const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
   const instantClose = options?.instantClose === true;
   let closedCount = 0;
@@ -2125,11 +2165,39 @@ export async function syncMasterCloseToFutureHedgeFollowers(
   };
 }
 
+/** @deprecated Prefer {@link syncMasterCloseToFollowers} with an explicit strategyId. */
+export async function syncMasterCloseToFutureHedgeFollowers(
+  prisma: PrismaClient,
+  snap: MasterCloseFillArgs,
+  onFollowerClosed: (args: {
+    userId: string;
+    strategyId: string;
+    symbol: string;
+    side: TradeSide;
+    masterEntryPrice: number;
+    sizedPosition: number;
+    settlement: TradeLegSettlement;
+    exitReason?: ExitReasonValue;
+  }) => Promise<void>,
+  options?: { exitReason?: ExitReasonValue; instantClose?: boolean },
+): Promise<MasterCloseFanoutResult | null> {
+  const strategyId = await resolveFutureHedgeStrategyId(prisma);
+  if (!strategyId) return null;
+  return syncMasterCloseToFollowers(
+    prisma,
+    strategyId,
+    snap,
+    onFollowerClosed,
+    options,
+  );
+}
+
 /**
  * Master REST book is empty but followers still hold legs — close orphans (DB + exchange).
  */
 export async function reconcileFollowersToEmptyMasterBook(
   prisma: PrismaClient,
+  strategyId: string,
   onFollowerClosed: (args: {
     userId: string;
     strategyId: string;
@@ -2142,11 +2210,12 @@ export async function reconcileFollowersToEmptyMasterBook(
   }) => Promise<void>,
   options?: { exitReason?: ExitReasonValue },
 ): Promise<number> {
-  const strategyId = await resolveFutureHedgeStrategyId(prisma);
-  if (!strategyId) return 0;
   if (!(await assertStrategyActiveForCopy(prisma, strategyId))) return 0;
 
-  const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
+  const subscribers = await findActiveCopySubscribersForStrategy(
+    prisma,
+    strategyId,
+  );
   const legKeys = new Map<string, MasterCloseFillArgs>();
 
   for (const sub of subscribers) {
@@ -2196,9 +2265,12 @@ export async function reconcileFollowersToEmptyMasterBook(
 
   if (legKeys.size === 0) return 0;
 
-  const strategy = await resolveFutureHedgeStrategy(prisma);
-  const masterKey = strategy.masterApiKey?.trim();
-  const masterSecret = strategy.masterApiSecret?.trim();
+  const strategyRow = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { masterApiKey: true, masterApiSecret: true },
+  });
+  const masterKey = strategyRow?.masterApiKey?.trim();
+  const masterSecret = strategyRow?.masterApiSecret?.trim();
   if (masterKey && masterSecret) {
     try {
       const masterOpen = await fetchDeltaOpenPositions(masterKey, masterSecret, {
@@ -2229,8 +2301,9 @@ export async function reconcileFollowersToEmptyMasterBook(
 
   let reconciled = 0;
   for (const snap of legKeys.values()) {
-    const result = await syncMasterCloseToFutureHedgeFollowers(
+    const result = await syncMasterCloseToFollowers(
       prisma,
+      strategyId,
       snap,
       onFollowerClosed,
       options,
