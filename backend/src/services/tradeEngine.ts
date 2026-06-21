@@ -16,6 +16,10 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
+import {
+  isDeltaInvalidCredentialsError,
+  logFollowerSkippedInvalidApiKey,
+} from "../utils/deltaAuthErrors.js";
 import { isDeltaRestApiPaused, isDeltaRestPausedError } from "../utils/deltaRateLimiter.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import {
@@ -779,16 +783,25 @@ async function followersMissingOpenLeg(
 
     const expectedLots = followerLotsFromMaster(masterLots, sub);
     const creds = resolveSubscriptionCreds(sub);
-    const deficitLots = await followerBotOpenDeficitLots(prisma, {
-      strategyId,
-      userId: sub.userId,
-      symbol,
-      side: openSide,
-      targetLots: expectedLots,
-      ...(creds
-        ? { apiKey: creds.apiKey, apiSecret: creds.apiSecret }
-        : {}),
-    });
+    let deficitLots = 0;
+    try {
+      deficitLots = await followerBotOpenDeficitLots(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol,
+        side: openSide,
+        targetLots: expectedLots,
+        ...(creds
+          ? { apiKey: creds.apiKey, apiSecret: creds.apiSecret }
+          : {}),
+      });
+    } catch (err) {
+      if (isDeltaInvalidCredentialsError(err)) {
+        logFollowerSkippedInvalidApiKey(sub.userId, "REST partial trim check");
+        continue;
+      }
+      throw err;
+    }
     if (deficitLots > 0) {
       console.log(
         `[MASTER-REST-SYNC] follower user=${sub.userId} needs +${deficitLots} lots on ${symbol} ${openSide} ` +
@@ -2151,7 +2164,7 @@ export async function syncFollowerUserToMasterPositions(
 
   await markSubscriptionSyncPending(prisma, { userId, strategyId });
 
-  let followerPositions: DeltaLivePosition[];
+  let followerPositions: DeltaLivePosition[] | null;
   try {
     followerPositions = await fetchDeltaOpenPositions(
       creds.apiKey,
@@ -2257,43 +2270,67 @@ export async function syncFollowerUserToMasterPositions(
       creds.apiSecret,
       { lite: true, skipCache: true },
     );
-  } catch {
-    followerPositions = [];
+  } catch (err) {
+    if (isDeltaInvalidCredentialsError(err)) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await markSubscriptionSyncFailed(prisma, {
+        userId,
+        strategyId,
+        error: `Invalid API key — orphan check skipped: ${msg}`,
+      });
+      return {
+        ok: false,
+        strategyId,
+        userId,
+        masterLegs: masterLegs.length,
+        adjustmentsMade,
+        syncStatus: "FAILED",
+        syncError: msg,
+        error: msg,
+      };
+    }
+    console.warn(
+      `[manual-sync] follower orphan snapshot failed user=${userId} — skipping orphan close pass:`,
+      err instanceof Error ? err.message : err,
+    );
+    followerPositions = null;
   }
 
-  for (const fp of followerPositions) {
-    const openSide: TradeSide = fp.side === "SELL" ? "SELL" : "BUY";
-    const lots = Math.floor(Math.abs(fp.contracts));
-    if (lots <= 0) continue;
-    const onMasterBook = masterLegs.some(
-      (m) =>
-        m.side === openSide &&
-        tradePositionSymbolsAlign(m.deltaSymbol, fp.symbolKey),
-    );
-    if (onMasterBook) continue;
-
-    const trimSide: TradeSide = openSide === "BUY" ? "SELL" : "BUY";
-    console.log(
-      `[manual-sync] user=${userId} orphan close ${fp.symbolKey} ${openSide} lots=${lots}`,
-    );
-    const orphanClose = await executeFollowerTradeWithVerification(prisma, {
-      strategyId,
-      userId,
-      apiKey: creds.apiKey,
-      apiSecret: creds.apiSecret,
-      symbol: fp.symbolKey,
-      side: trimSide,
-      size: lots,
-      reduceOnly: true,
-      adminForceSync: true,
-    });
-    if (!orphanClose.success) {
-      errors.push(
-        `${fp.symbolKey} orphan close: ${orphanClose.error ?? "execution failed"}`,
+  if (followerPositions != null) {
+    for (const fp of followerPositions) {
+      const openSide: TradeSide = fp.side === "SELL" ? "SELL" : "BUY";
+      const lots = Math.floor(Math.abs(fp.contracts));
+      if (lots <= 0) continue;
+      const onMasterBook = masterLegs.some(
+        (m) =>
+          m.side === openSide &&
+          tradePositionSymbolsAlign(m.deltaSymbol, fp.symbolKey),
       );
-      break;
+      if (onMasterBook) continue;
+
+      const trimSide: TradeSide = openSide === "BUY" ? "SELL" : "BUY";
+      console.log(
+        `[manual-sync] user=${userId} orphan close ${fp.symbolKey} ${openSide} lots=${lots}`,
+      );
+      const orphanClose = await executeFollowerTradeWithVerification(prisma, {
+        strategyId,
+        userId,
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        symbol: fp.symbolKey,
+        side: trimSide,
+        size: lots,
+        reduceOnly: true,
+        adminForceSync: true,
+      });
+      if (!orphanClose.success) {
+        errors.push(
+          `${fp.symbolKey} orphan close: ${orphanClose.error ?? "execution failed"}`,
+        );
+        break;
+      }
+      adjustmentsMade += 1;
     }
-    adjustmentsMade += 1;
   }
 
   if (errors.length > 0) {
@@ -4154,7 +4191,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
             const legSymbol = master?.deltaSymbol ?? botLeg.symbol;
             const legSide = botLeg.side as TradeSide;
 
-            let exchangeLots = 0;
+            let exchangeLots: number | null = null;
             try {
               exchangeLots = Math.floor(
                 await followerExchangeLegContracts(
@@ -4165,10 +4202,18 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
                 ),
               );
             } catch (err) {
+              if (isDeltaInvalidCredentialsError(err)) {
+                logFollowerSkippedInvalidApiKey(sub.userId, "SYNC-MONITOR reconcile");
+                return;
+              }
               console.warn(
                 `[RECONCILE] exchange read failed user=${sub.userId} ${legSymbol}:`,
                 err instanceof Error ? err.message : err,
               );
+            }
+
+            if (exchangeLots === null) {
+              continue;
             }
 
             if (exchangeLots === expectedContracts && dbQty === expectedContracts) {
@@ -4350,15 +4395,24 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               m.masterContracts,
               subscriptionMultiplier(sub),
             );
-            const deficit = await followerBotOpenDeficitLots(prisma, {
-              strategyId: strat.id,
-              userId: sub.userId,
-              symbol: m.deltaSymbol,
-              side: m.side,
-              targetLots: expected,
-              apiKey: creds.apiKey,
-              apiSecret: creds.apiSecret,
-            });
+            let deficit = 0;
+            try {
+              deficit = await followerBotOpenDeficitLots(prisma, {
+                strategyId: strat.id,
+                userId: sub.userId,
+                symbol: m.deltaSymbol,
+                side: m.side,
+                targetLots: expected,
+                apiKey: creds.apiKey,
+                apiSecret: creds.apiSecret,
+              });
+            } catch (err) {
+              if (isDeltaInvalidCredentialsError(err)) {
+                logFollowerSkippedInvalidApiKey(sub.userId, "SYNC-MONITOR deficit check");
+                return;
+              }
+              throw err;
+            }
             if (deficit > 0) {
               outOfSync.push(
                 `${m.deltaSymbol} ${m.side} need+${deficit} (target=${expected})`,
@@ -4548,16 +4602,28 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
               m.masterContracts,
               subscriptionMultiplier(sub),
             );
-            const deficit = await followerBotOpenDeficitLots(prisma, {
-              strategyId: strat.id,
-              userId: sub.userId,
-              symbol: m.deltaSymbol,
-              side: m.side,
-              targetLots: expected,
-              ...(subCreds
-                ? { apiKey: subCreds.apiKey, apiSecret: subCreds.apiSecret }
-                : {}),
-            });
+            let deficit = 0;
+            try {
+              deficit = await followerBotOpenDeficitLots(prisma, {
+                strategyId: strat.id,
+                userId: sub.userId,
+                symbol: m.deltaSymbol,
+                side: m.side,
+                targetLots: expected,
+                ...(subCreds
+                  ? { apiKey: subCreds.apiKey, apiSecret: subCreds.apiSecret }
+                  : {}),
+              });
+            } catch (err) {
+              if (isDeltaInvalidCredentialsError(err)) {
+                logFollowerSkippedInvalidApiKey(
+                  sub.userId,
+                  "SYNC-MONITOR catch-up deficit",
+                );
+                continue;
+              }
+              throw err;
+            }
             if (deficit > 0) {
               legDeficit = true;
               break;

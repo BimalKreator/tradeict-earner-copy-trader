@@ -7,6 +7,11 @@ import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
 import {
+  DeltaInvalidCredentialsError,
+  isDeltaInvalidCredentialsError,
+  toDeltaInvalidCredentialsError,
+} from "../utils/deltaAuthErrors.js";
+import {
   DeltaRestPausedError,
   handleDeltaCdn429,
   isDeltaRestPausedError,
@@ -31,6 +36,12 @@ import {
 } from "./pnlMath.js";
 
 export type TradeSide = "BUY" | "SELL";
+
+export {
+  DeltaInvalidCredentialsError,
+  isDeltaInvalidCredentialsError,
+  toDeltaInvalidCredentialsError,
+} from "../utils/deltaAuthErrors.js";
 
 function numberOrNull(v: unknown): number | null {
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -196,10 +207,18 @@ async function deltaIndiaSignedRequest<T>(args: {
 
       const row = data as { success?: boolean; error?: unknown };
       if (row.success === false) {
+        if (isDeltaInvalidCredentialsError(row.error)) {
+          throw new DeltaInvalidCredentialsError(
+            "Invalid Delta API credentials (invalid_api_key)",
+          );
+        }
         const errMsg =
           typeof row.error === "object" && row.error !== null && "code" in row.error
             ? JSON.stringify(row.error)
             : String(row.error ?? "Delta REST request failed");
+        if (isDeltaInvalidCredentialsError(errMsg)) {
+          throw new DeltaInvalidCredentialsError(errMsg);
+        }
         throw new Error(errMsg);
       }
 
@@ -208,6 +227,9 @@ async function deltaIndiaSignedRequest<T>(args: {
       lastError = err;
       if (isDeltaRestPausedError(err)) {
         throw err;
+      }
+      if (isDeltaInvalidCredentialsError(err)) {
+        throw toDeltaInvalidCredentialsError(err);
       }
       if (isAxios429(err)) {
         if (handleDeltaCdn429(err)) {

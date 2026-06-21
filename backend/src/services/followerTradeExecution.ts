@@ -6,12 +6,16 @@ import {
   fetchDeltaOrderAckByClientOrderId,
   fetchDeltaRecentLegCloseSettlement,
   fetchDeltaTicker,
+  isDeltaInvalidCredentialsError,
   isDeltaOptionProductId,
   isValidDeltaOptionProductSymbol,
   type DeltaClientOrderAck,
   type ExecuteTradeResult,
   type TradeSide,
 } from "./exchangeService.js";
+import {
+  logFollowerSkippedInvalidApiKey,
+} from "../utils/deltaAuthErrors.js";
 import { EXIT_REASON, type ExitReasonValue } from "../constants/exitReasons.js";
 import { STRATEGY_SELECT_IS_ACTIVE } from "../prisma/strategySelect.js";
 import {
@@ -686,6 +690,10 @@ export async function followerBotOpenDeficitLots(
         ),
       );
     } catch (err) {
+      if (isDeltaInvalidCredentialsError(err)) {
+        logFollowerSkippedInvalidApiKey(args.userId, "copy-deficit position read");
+        throw err;
+      }
       console.warn(
         `[copy-deficit] REST position read failed user=${args.userId} ${args.symbol}:`,
         err instanceof Error ? err.message : err,
@@ -1090,15 +1098,24 @@ export async function syncMasterOpenFillToFollowers(
 
       if (isLiveIncrement) {
         expectedLots = followerLotsFromMaster(masterTargetLots, sub);
-        const deficitLots = await followerBotOpenDeficitLots(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-          targetLots: expectedLots,
-          apiKey: creds.apiKey,
-          apiSecret: creds.apiSecret,
-        });
+        let deficitLots = 0;
+        try {
+          deficitLots = await followerBotOpenDeficitLots(prisma, {
+            strategyId,
+            userId: sub.userId,
+            symbol: fill.symbol,
+            side: fill.side,
+            targetLots: expectedLots,
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+          });
+        } catch (err) {
+          if (isDeltaInvalidCredentialsError(err)) {
+            logFollowerSkippedInvalidApiKey(sub.userId, "master open fill");
+            return;
+          }
+          throw err;
+        }
         lotsToOrder = Math.min(incrementLots, deficitLots);
         if (lotsToOrder <= 0) {
           console.log(
@@ -1109,15 +1126,23 @@ export async function syncMasterOpenFillToFollowers(
         }
       } else {
         expectedLots = followerLotsFromMaster(masterTargetLots, sub);
-        lotsToOrder = await followerBotOpenDeficitLots(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-          targetLots: expectedLots,
-          apiKey: creds.apiKey,
-          apiSecret: creds.apiSecret,
-        });
+        try {
+          lotsToOrder = await followerBotOpenDeficitLots(prisma, {
+            strategyId,
+            userId: sub.userId,
+            symbol: fill.symbol,
+            side: fill.side,
+            targetLots: expectedLots,
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+          });
+        } catch (err) {
+          if (isDeltaInvalidCredentialsError(err)) {
+            logFollowerSkippedInvalidApiKey(sub.userId, "master open fill");
+            return;
+          }
+          throw err;
+        }
         if (lotsToOrder <= 0) {
           console.log(
             `[copy] Skip synced user=${sub.userId} ${fill.symbol} ${fill.side} ` +
@@ -1348,19 +1373,28 @@ export async function forceSyncMasterOpenToFollowers(
         const masterTargetLots = fill.masterTotalLots ?? fill.masterLots;
         const expectedLots = followerLotsFromMaster(masterTargetLots, sub);
         const credsForDeficit = resolveCopySubscriptionCreds(sub);
-        const deficitLots = await followerBotOpenDeficitLots(prisma, {
-          strategyId,
-          userId: sub.userId,
-          symbol: fill.symbol,
-          side: fill.side,
-          targetLots: expectedLots,
-          ...(credsForDeficit
-            ? {
-                apiKey: credsForDeficit.apiKey,
-                apiSecret: credsForDeficit.apiSecret,
-              }
-            : {}),
-        });
+        let deficitLots = 0;
+        try {
+          deficitLots = await followerBotOpenDeficitLots(prisma, {
+            strategyId,
+            userId: sub.userId,
+            symbol: fill.symbol,
+            side: fill.side,
+            targetLots: expectedLots,
+            ...(credsForDeficit
+              ? {
+                  apiKey: credsForDeficit.apiKey,
+                  apiSecret: credsForDeficit.apiSecret,
+                }
+              : {}),
+          });
+        } catch (err) {
+          if (isDeltaInvalidCredentialsError(err)) {
+            logFollowerSkippedInvalidApiKey(sub.userId, "FORCE-SYNC deficit");
+            return;
+          }
+          throw err;
+        }
         if (deficitLots > 0) {
           if (
             isFollowerCopyInflight({
@@ -1922,13 +1956,22 @@ export async function syncMasterCloseToFollowers(
         const scaledLots = Math.floor(
           followerLotsFromMaster(snap.masterLots, sub),
         );
-        const { lots: closeLots } = await resolveFollowerReduceOnlyCloseLots({
-          apiKey: creds.apiKey,
-          apiSecret: creds.apiSecret,
-          symbol: snap.symbol,
-          openSide: snap.side,
-          requestedLots: scaledLots,
-        });
+        let closeLots = 0;
+        try {
+          ({ lots: closeLots } = await resolveFollowerReduceOnlyCloseLots({
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+            symbol: snap.symbol,
+            openSide: snap.side,
+            requestedLots: scaledLots,
+          }));
+        } catch (err) {
+          if (isDeltaInvalidCredentialsError(err)) {
+            logFollowerSkippedInvalidApiKey(sub.userId, "instant close position read");
+            return;
+          }
+          throw err;
+        }
 
         if (closeLots <= 0) {
           console.log(
@@ -2010,22 +2053,40 @@ export async function syncMasterCloseToFollowers(
 
       const dbLotsFloor = Math.floor(dbLots);
 
-      const exchangeOpenLots = await followerExchangeOpenLotsLive(
-        creds.apiKey,
-        creds.apiSecret,
-        snap.symbol,
-        snap.side,
-      );
+      let exchangeOpenLots = 0;
+      try {
+        exchangeOpenLots = await followerExchangeOpenLotsLive(
+          creds.apiKey,
+          creds.apiSecret,
+          snap.symbol,
+          snap.side,
+        );
+      } catch (err) {
+        if (isDeltaInvalidCredentialsError(err)) {
+          logFollowerSkippedInvalidApiKey(sub.userId, "master close position read");
+          return;
+        }
+        throw err;
+      }
       const exchangeFloor = Math.floor(exchangeOpenLots);
       const requestedCloseLots = Math.max(dbLotsFloor, exchangeFloor, 1);
 
-      const { lots } = await resolveFollowerReduceOnlyCloseLots({
-        apiKey: creds.apiKey,
-        apiSecret: creds.apiSecret,
-        symbol: snap.symbol,
-        openSide: snap.side,
-        requestedLots: requestedCloseLots,
-      });
+      let lots = 0;
+      try {
+        ({ lots } = await resolveFollowerReduceOnlyCloseLots({
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+          symbol: snap.symbol,
+          openSide: snap.side,
+          requestedLots: requestedCloseLots,
+        }));
+      } catch (err) {
+        if (isDeltaInvalidCredentialsError(err)) {
+          logFollowerSkippedInvalidApiKey(sub.userId, "master close reduce-only read");
+          return;
+        }
+        throw err;
+      }
 
       if (lots <= 0) {
         if (dbLotsFloor > 0) {
@@ -2256,6 +2317,10 @@ export async function reconcileFollowersToEmptyMasterBook(
         }
       }
     } catch (err) {
+      if (isDeltaInvalidCredentialsError(err)) {
+        logFollowerSkippedInvalidApiKey(sub.userId, "orphan reconcile position read");
+        continue;
+      }
       console.warn(
         `[copy] orphan reconcile fetch failed user=${sub.userId}:`,
         err instanceof Error ? err.message : err,
@@ -2778,13 +2843,32 @@ export async function executeFollowerTradeWithVerification(
         : undefined);
 
     const { lots: closeLots, exchangeOpenLots } =
-      await resolveFollowerReduceOnlyCloseLots({
-        apiKey,
-        apiSecret,
-        symbol,
-        openSide,
-        requestedLots: orderLots,
-      });
+      await (async () => {
+        try {
+          return await resolveFollowerReduceOnlyCloseLots({
+            apiKey,
+            apiSecret,
+            symbol,
+            openSide,
+            requestedLots: orderLots,
+          });
+        } catch (err) {
+          if (isDeltaInvalidCredentialsError(err)) {
+            logFollowerSkippedInvalidApiKey(userId, "reduce-only position read");
+            return { lots: -1, exchangeOpenLots: -1 };
+          }
+          throw err;
+        }
+      })();
+
+    if (closeLots < 0) {
+      return {
+        success: false,
+        error: "Invalid Delta API credentials — position read skipped",
+        attempts: 0,
+        verified: false,
+      };
+    }
 
     if (closeLots <= 0) {
       console.log(
