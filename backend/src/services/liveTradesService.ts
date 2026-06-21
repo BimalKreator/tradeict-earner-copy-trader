@@ -4,21 +4,13 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
-  fetchDeltaBestQuotes,
-  fetchDeltaMarkPrice,
   fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
-  isDeltaOptionProductId,
   resolveDeltaLiveUnrealizedPnl,
+  resolveTerminalQuotesForPosition,
   type DeltaLivePosition,
-  type DeltaTerminalQuoteOverrides,
   type TradeSide,
 } from "./exchangeService.js";
-import {
-  cacheLiveQuotes,
-  resolveLiveMarkPrice,
-  resolveLiveQuotes,
-} from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
   COPY_SUBSCRIPTION_INCLUDE,
@@ -280,23 +272,10 @@ async function fetchAndMergeMasterLiveTrades(
       timeoutMs != null
         ? await withDeltaFetchTimeout(promise, label, timeoutMs)
         : await promise;
-    const rows = snapshot.open.map((pos) => {
-      const cached = resolveLiveQuotes(pos.symbolKey);
-      const quoteOverrides: DeltaTerminalQuoteOverrides = {
-        bestBid: cached.bestBid ?? pos.bestBid,
-        bestAsk: cached.bestAsk ?? pos.bestAsk,
-        markPrice: cached.markPrice ?? pos.markPrice,
-      };
-      const livePnl =
-        resolveDeltaLiveUnrealizedPnl(pos, quoteOverrides) ?? pos.unrealizedPnl;
-      return deltaToRow({
-        ...pos,
-        unrealizedPnl: livePnl,
-        markPrice: quoteOverrides.markPrice ?? pos.markPrice,
-        bestBid: quoteOverrides.bestBid ?? pos.bestBid,
-        bestAsk: quoteOverrides.bestAsk ?? pos.bestAsk,
-      });
-    });
+    for (const pos of snapshot.open) {
+      registerSymbolsForLivePrices([pos.symbolKey]);
+    }
+    const rows = await enrichPositionsList(snapshot.open);
     const positions = mergeMasterLiveTradesCache(
       strategyId,
       rows,
@@ -524,62 +503,26 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Top-of-book + mark for UPL@Bid / UPL@Offer (WS cache → position REST → ticker REST). */
-async function resolveQuotesForLiveRow(
-  pos: DeltaLivePosition,
-): Promise<DeltaTerminalQuoteOverrides> {
-  const cached = resolveLiveQuotes(pos.symbolKey);
-  let bestBid = cached.bestBid ?? pos.bestBid;
-  let bestAsk = cached.bestAsk ?? pos.bestAsk;
-  let markPrice = cached.markPrice ?? pos.markPrice;
-
-  const needsRest =
-    isDeltaOptionProductId(pos.symbolKey) &&
-    ((pos.side === "BUY" && (bestBid == null || bestBid <= 0)) ||
-      (pos.side === "SELL" && (bestAsk == null || bestAsk <= 0)));
-
-  if (needsRest) {
-    const rest = await fetchDeltaBestQuotes(pos.symbolKey);
-    bestBid = bestBid ?? rest.bid;
-    bestAsk = bestAsk ?? rest.ask;
-    markPrice = markPrice ?? rest.mark;
-    cacheLiveQuotes(pos.symbolKey, {
-      bid: rest.bid,
-      ask: rest.ask,
-      mark: rest.mark,
-    });
-  } else if (markPrice == null || markPrice <= 0) {
-    if (isDeltaOptionProductId(pos.symbolKey)) {
-      const rest = await fetchDeltaMarkPrice(pos.symbolKey);
-      markPrice = rest.markPrice;
-    } else {
-      markPrice = resolveLiveMarkPrice(pos.symbolKey);
-      if (markPrice == null) {
-        const rest = await fetchDeltaMarkPrice(pos.symbolKey);
-        markPrice = rest.markPrice;
-      }
-    }
-  }
-
-  return { bestBid, bestAsk, markPrice };
-}
-
-/** Terminal UPNL (UPL@Bid / UPL@Offer) with live WS quotes. */
+/** Terminal UPNL (UPL@Bid / UPL@Offer) with live WS + REST quotes. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
-  if (!isDeltaOptionProductId(pos.symbolKey)) {
-    registerSymbolsForLivePrices([pos.symbolKey]);
-  }
+  registerSymbolsForLivePrices([pos.symbolKey]);
 
-  const quotes = await resolveQuotesForLiveRow(pos);
-  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, quotes) ?? pos.unrealizedPnl;
-  const base = deltaToRow({ ...pos, unrealizedPnl: livePnl });
+  const quotes = await resolveTerminalQuotesForPosition(pos);
+  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, quotes);
+  const base = deltaToRow({
+    ...pos,
+    unrealizedPnl: livePnl,
+    markPrice: quotes.markPrice ?? pos.markPrice,
+    bestBid: quotes.bestBid ?? pos.bestBid,
+    bestAsk: quotes.bestAsk ?? pos.bestAsk,
+  });
 
   return {
     ...base,
     markPrice: quotes.markPrice ?? pos.markPrice ?? base.markPrice,
-    livePnl,
+    livePnl: livePnl ?? base.livePnl,
   };
 }
 

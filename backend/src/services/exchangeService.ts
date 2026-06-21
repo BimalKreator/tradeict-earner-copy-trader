@@ -6,6 +6,10 @@ import https from "node:https";
 import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
+import {
+  cacheLiveQuotes,
+  resolveLiveQuotes,
+} from "./liveMarkPriceCache.js";
 
 export type TradeSide = "BUY" | "SELL";
 
@@ -1337,7 +1341,7 @@ function fastFlatLegSymbolKey(productSymbol: string): string {
   return unifiedSymbolToKey(normalizeDeltaPerpSymbolForCcxt(ps));
 }
 
-/** Delta Web Terminal exit price for UPNL — bid for longs, ask for shorts, mark fallback. */
+/** Delta Web Terminal exit price for UPNL — bid for longs, ask for shorts. */
 export function resolveDeltaTerminalExitPrice(
   side: TradeSide,
   quotes: {
@@ -1345,6 +1349,7 @@ export function resolveDeltaTerminalExitPrice(
     bestAsk?: number | null;
     markPrice?: number | null;
   },
+  opts?: { allowMarkFallback?: boolean },
 ): number | null {
   if (side === "BUY") {
     const bid = quotes.bestBid;
@@ -1353,6 +1358,8 @@ export function resolveDeltaTerminalExitPrice(
     const ask = quotes.bestAsk;
     if (ask != null && Number.isFinite(ask) && ask > 0) return ask;
   }
+
+  if (opts?.allowMarkFallback === false) return null;
 
   const mark = quotes.markPrice;
   if (mark != null && Number.isFinite(mark) && mark > 0) return mark;
@@ -1372,13 +1379,19 @@ export function computeDeltaTerminalUnrealizedPnl(args: {
   bestBid?: number | null;
   bestAsk?: number | null;
   markPrice?: number | null;
+  /** When false (options), never substitute mark if bid/ask for the side is missing. */
+  allowMarkFallback?: boolean;
 }): number | null {
   const { side, entryPrice, positionLots, contractValue } = args;
-  const exitPrice = resolveDeltaTerminalExitPrice(side, {
-    bestBid: args.bestBid ?? null,
-    bestAsk: args.bestAsk ?? null,
-    markPrice: args.markPrice ?? null,
-  });
+  const exitPrice = resolveDeltaTerminalExitPrice(
+    side,
+    {
+      bestBid: args.bestBid ?? null,
+      bestAsk: args.bestAsk ?? null,
+      markPrice: args.markPrice ?? null,
+    },
+    { allowMarkFallback: args.allowMarkFallback !== false },
+  );
 
   if (
     entryPrice == null ||
@@ -1405,10 +1418,11 @@ export type DeltaTerminalQuoteOverrides = {
   markPrice?: number | null;
 };
 
-/** Resolve live UPNL — WS/REST bid/ask preferred over mark (matches Delta Terminal). */
+/** Resolve live UPNL — bid/ask for options (UPL@Bid/Offer); mark fallback only for perps. */
 export function resolveDeltaLiveUnrealizedPnl(
   pos: Pick<
     DeltaLivePosition,
+    | "symbolKey"
     | "side"
     | "entryPrice"
     | "markPrice"
@@ -1419,6 +1433,7 @@ export function resolveDeltaLiveUnrealizedPnl(
   >,
   quoteOverrides?: DeltaTerminalQuoteOverrides | null,
 ): number | null {
+  const isOption = isDeltaOptionProductId(pos.symbolKey);
   return computeDeltaTerminalUnrealizedPnl({
     side: pos.side,
     entryPrice: pos.entryPrice,
@@ -1427,6 +1442,7 @@ export function resolveDeltaLiveUnrealizedPnl(
     bestBid: quoteOverrides?.bestBid ?? pos.bestBid,
     bestAsk: quoteOverrides?.bestAsk ?? pos.bestAsk,
     markPrice: quoteOverrides?.markPrice ?? pos.markPrice,
+    allowMarkFallback: !isOption,
   });
 }
 
@@ -2530,10 +2546,11 @@ export async function fetchDeltaBestQuotes(
       ? rest.last
       : null);
 
-  if (
-    (bid == null || ask == null) &&
-    (isDeltaOptionProductId(ref) || /^\d+$/.test(ref))
-  ) {
+  if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
+    const l2 = await fetchDeltaL2BestQuotes(ref);
+    bid = bid ?? l2.bid;
+    ask = ask ?? l2.ask;
+  } else if (bid == null || ask == null) {
     const l2 = await fetchDeltaL2BestQuotes(ref);
     bid = bid ?? l2.bid;
     ask = ask ?? l2.ask;
@@ -2545,6 +2562,48 @@ export async function fetchDeltaBestQuotes(
   }
 
   return { bid, ask, mark };
+}
+
+function optionSideQuoteReady(
+  side: TradeSide,
+  bestBid: number | null | undefined,
+  bestAsk: number | null | undefined,
+): boolean {
+  if (side === "BUY") {
+    return bestBid != null && Number.isFinite(bestBid) && bestBid > 0;
+  }
+  return bestAsk != null && Number.isFinite(bestAsk) && bestAsk > 0;
+}
+
+/**
+ * WS cache → margined row → REST ticker/L2 for options UPL@Bid / UPL@Offer.
+ * Options never rely on mark alone when the side-specific quote can be fetched.
+ */
+export async function resolveTerminalQuotesForPosition(
+  pos: Pick<
+    DeltaLivePosition,
+    "symbolKey" | "side" | "bestBid" | "bestAsk" | "markPrice"
+  >,
+): Promise<DeltaTerminalQuoteOverrides> {
+  const cached = resolveLiveQuotes(pos.symbolKey);
+  let bestBid = cached.bestBid ?? pos.bestBid;
+  let bestAsk = cached.bestAsk ?? pos.bestAsk;
+  let markPrice = cached.markPrice ?? pos.markPrice;
+
+  const isOption = isDeltaOptionProductId(pos.symbolKey);
+  if (isOption && !optionSideQuoteReady(pos.side, bestBid, bestAsk)) {
+    const rest = await fetchDeltaBestQuotes(pos.symbolKey);
+    if (bestBid == null || bestBid <= 0) bestBid = rest.bid;
+    if (bestAsk == null || bestAsk <= 0) bestAsk = rest.ask;
+    if (markPrice == null || markPrice <= 0) markPrice = rest.mark;
+    cacheLiveQuotes(pos.symbolKey, {
+      bid: rest.bid,
+      ask: rest.ask,
+      mark: rest.mark,
+    });
+  }
+
+  return { bestBid, bestAsk, markPrice };
 }
 
 /**
@@ -2800,6 +2859,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         bestBid,
         bestAsk,
         markPrice,
+        allowMarkFallback: !isOption,
       });
       const realizedPnl = parseDeltaRealizedPnl(position);
 

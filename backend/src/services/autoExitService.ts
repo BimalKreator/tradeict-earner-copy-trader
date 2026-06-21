@@ -13,18 +13,11 @@ import {
   executeTrade,
   fetchDeltaOpenPositions,
   fetchDeltaTicker,
+  resolveDeltaLiveUnrealizedPnl,
+  resolveTerminalQuotesForPosition,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
-import {
-  resolveDeltaLiveUnrealizedPnl,
-  type DeltaTerminalQuoteOverrides,
-} from "./exchangeService.js";
-import {
-  resolveLiveBestAsk,
-  resolveLiveBestBid,
-  resolveLiveMarkPrice,
-} from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
   latchBreakevenHedgeEntryBlock,
@@ -225,25 +218,10 @@ export function notifyLiveBtcPriceTick(livePrice: number): void {
   }
 }
 
-function resolveQuotesForPosition(
-  pos: DeltaLivePosition,
-): DeltaTerminalQuoteOverrides {
-  return {
-    bestBid: resolveLiveBestBid(pos.symbolKey) ?? pos.bestBid,
-    bestAsk: resolveLiveBestAsk(pos.symbolKey) ?? pos.bestAsk,
-    markPrice: resolveLiveMarkPrice(pos.symbolKey) ?? pos.markPrice,
-  };
-}
-
-/** Terminal UPNL (UPL@Bid / UPL@Offer) — same formula as Delta Web UI. */
-function legPnlUsd(pos: DeltaLivePosition): number | null {
-  const quotes = resolveQuotesForPosition(pos);
-  const computed = resolveDeltaLiveUnrealizedPnl(pos, quotes);
-  if (computed != null && Number.isFinite(computed)) return computed;
-  if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
-    return pos.unrealizedPnl;
-  }
-  return null;
+/** Terminal UPNL (UPL@Bid / UPL@Offer) — REST-fetches option quotes when WS cache is empty. */
+async function legPnlUsd(pos: DeltaLivePosition): Promise<number | null> {
+  const quotes = await resolveTerminalQuotesForPosition(pos);
+  return resolveDeltaLiveUnrealizedPnl(pos, quotes);
 }
 
 export type MasterLegCloseTarget = {
@@ -269,7 +247,7 @@ export async function fetchMasterLegsWithTotalLivePnl(
     const contracts = Math.abs(pos.contracts);
     if (!Number.isFinite(contracts) || contracts < 1e-12) continue;
 
-    const legUpnl = legPnlUsd(pos);
+    const legUpnl = await legPnlUsd(pos);
     if (legUpnl != null) {
       totalPnlUsd += legUpnl;
     }
@@ -277,11 +255,9 @@ export async function fetchMasterLegsWithTotalLivePnl(
     const entryPrice =
       pos.entryPrice != null && Number.isFinite(pos.entryPrice)
         ? pos.entryPrice
-        : (() => {
-            const quotes = resolveQuotesForPosition(pos);
-            const m = quotes.markPrice;
-            return m != null && Number.isFinite(m) ? m : 0;
-          })();
+        : pos.markPrice != null && Number.isFinite(pos.markPrice)
+          ? pos.markPrice
+          : 0;
 
     legs.push({
       symbolKey: pos.symbolKey,
