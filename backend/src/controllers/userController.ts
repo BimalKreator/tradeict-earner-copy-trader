@@ -39,6 +39,12 @@ import { createReferralRequest, listReferralRequestsForSponsor } from "../servic
 import { getPartnerTierInfo } from "../services/affiliateUpgradeService.js";
 import { normalizeAffiliateRoleEnum } from "../utils/roleNormalize.js";
 import { NominatedSalesRole } from "@prisma/client";
+import {
+  fetchUserProfileRecord,
+  formatProfileResponse,
+  parseProfileUpdateBody,
+  updateUserProfileRecord,
+} from "../services/userProfileService.js";
 
 const DEFAULT_TRADE_LIMIT = 100;
 const MAX_TRADE_LIMIT = 500;
@@ -179,7 +185,7 @@ export function createUserController(prisma: PrismaClient) {
           mobile: true,
           address: true,
           panNumber: true,
-          aadhaarNumber: true,
+          aadharNumber: true,
           role: true,
           status: true,
           acquiredById: true,
@@ -200,12 +206,12 @@ export function createUserController(prisma: PrismaClient) {
       const pending = await prisma.profileUpdateRequest.findFirst({
         where: { userId, status: "PENDING" },
         orderBy: { createdAt: "desc" },
-        select: { address: true, panNumber: true, aadhaarNumber: true },
+        select: { address: true, panNumber: true, aadharNumber: true },
       });
       const pendingFields: string[] = [];
       if (pending?.address != null) pendingFields.push("address");
       if (pending?.panNumber != null) pendingFields.push("panNumber");
-      if (pending?.aadhaarNumber != null) pendingFields.push("aadhaarNumber");
+      if (pending?.aadharNumber != null) pendingFields.push("aadharNumber");
 
       const referrer =
         user.acquiredById && user.acquiredBy?.affiliateProfile
@@ -473,13 +479,13 @@ export function createUserController(prisma: PrismaClient) {
         mobile?: unknown;
         address?: unknown;
         panNumber?: unknown;
-        aadhaarNumber?: unknown;
+        aadharNumber?: unknown;
       };
       const data: { name?: string | null; mobile?: string | null } = {};
       const profileReq: {
         address?: string | null;
         panNumber?: string | null;
-        aadhaarNumber?: string | null;
+        aadharNumber?: string | null;
       } = {};
 
       if ("name" in body) {
@@ -528,14 +534,14 @@ export function createUserController(prisma: PrismaClient) {
           return;
         }
       }
-      if ("aadhaarNumber" in body) {
-        if (body.aadhaarNumber === null || body.aadhaarNumber === undefined) {
-          profileReq.aadhaarNumber = null;
-        } else if (typeof body.aadhaarNumber === "string") {
-          const s = body.aadhaarNumber.trim();
-          profileReq.aadhaarNumber = s.length ? s : null;
+      if ("aadharNumber" in body) {
+        if (body.aadharNumber === null || body.aadharNumber === undefined) {
+          profileReq.aadharNumber = null;
+        } else if (typeof body.aadharNumber === "string") {
+          const s = body.aadharNumber.trim();
+          profileReq.aadharNumber = s.length ? s : null;
         } else {
-          res.status(400).json({ error: "aadhaarNumber must be a string or null" });
+          res.status(400).json({ error: "aadharNumber must be a string or null" });
           return;
         }
       }
@@ -545,7 +551,7 @@ export function createUserController(prisma: PrismaClient) {
       if (!hasDirect && !hasProfileRequest) {
         res.status(400).json({
           error:
-            "Provide at least one field to update: name, mobile, address, panNumber, or aadhaarNumber",
+            "Provide at least one field to update: name, mobile, address, panNumber, or aadharNumber",
         });
         return;
       }
@@ -578,8 +584,8 @@ export function createUserController(prisma: PrismaClient) {
             ...(profileReq.panNumber !== undefined
               ? { panNumber: profileReq.panNumber }
               : {}),
-            ...(profileReq.aadhaarNumber !== undefined
-              ? { aadhaarNumber: profileReq.aadhaarNumber }
+            ...(profileReq.aadharNumber !== undefined
+              ? { aadharNumber: profileReq.aadharNumber }
               : {}),
           },
         });
@@ -1229,8 +1235,66 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function getProfile(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const user = await fetchUserProfileRecord(prisma, userId);
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      res.json({ profile: formatProfileResponse(user) });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function updateProfile(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const body =
+        typeof req.body === "object" && req.body !== null
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const parsed = parseProfileUpdateBody(body);
+      if (!parsed.ok) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      const result = await updateUserProfileRecord(prisma, userId, parsed.data);
+      if (!result.ok) {
+        res.status(409).json({ error: result.error });
+        return;
+      }
+      res.json({
+        profile: formatProfileResponse(result.user),
+        message: "Profile updated successfully.",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getMe,
+    getProfile,
+    updateProfile,
     patchMe,
     listTrades,
     listInvoices,

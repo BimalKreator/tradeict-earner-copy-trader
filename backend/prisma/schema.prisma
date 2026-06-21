@@ -126,9 +126,24 @@ model User {
   password      String
   name          String?
   mobile        String?
+  /** Date of birth (KYC). */
+  dob           DateTime?
+  /** Father's or husband's name (KYC). */
+  guardianName  String?
+  gender        String?
   address       String?
-  panNumber     String?
-  aadhaarNumber String?
+  city          String?
+  state         String?
+  pinCode       String?
+  aadharNumber  String?             @unique
+  panNumber     String?             @unique
+  bankName      String?
+  bankAccountNumber String?
+  bankIfsc      String?
+  upiId         String?
+  nomineeName   String?
+  nomineeRelationship String?
+  nomineeMobile String?
   role          Role                @default(USER)
   /** Immediate upline in the sales hierarchy (Executive→Manager, Manager→Senior Manager). */
   parentId      String?
@@ -422,7 +437,7 @@ model ProfileUpdateRequest {
   userId        String
   address       String?
   panNumber     String?
-  aadhaarNumber String?
+  aadharNumber  String?
   status        ProfileUpdateStatus @default(PENDING)
   createdAt     DateTime            @default(now())
   reviewedAt    DateTime?

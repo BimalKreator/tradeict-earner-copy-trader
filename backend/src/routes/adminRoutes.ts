@@ -187,7 +187,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           mobile: true,
           address: true,
           panNumber: true,
-          aadhaarNumber: true,
+          aadharNumber: true,
           status: true,
           copyTradingPaused: true,
           cryptoArbitrageEnabled: true,
@@ -236,7 +236,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           mobile: user.mobile,
           address: user.address,
           panNumber: user.panNumber,
-          aadhaarNumber: user.aadhaarNumber,
+          aadharNumber: user.aadharNumber,
           status: user.status,
           copyTradingPaused: user.copyTradingPaused,
           cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
@@ -456,14 +456,14 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           id: true,
           address: true,
           panNumber: true,
-          aadhaarNumber: true,
+          aadharNumber: true,
           status: true,
           createdAt: true,
         },
       });
       const current = await prisma.user.findUnique({
         where: { id },
-        select: { address: true, panNumber: true, aadhaarNumber: true },
+        select: { address: true, panNumber: true, aadharNumber: true },
       });
       res.json({ current, requests: rows });
     } catch (err) {
@@ -486,8 +486,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           data: {
             ...(reqRow.address !== null ? { address: reqRow.address } : {}),
             ...(reqRow.panNumber !== null ? { panNumber: reqRow.panNumber } : {}),
-            ...(reqRow.aadhaarNumber !== null
-              ? { aadhaarNumber: reqRow.aadhaarNumber }
+            ...(reqRow.aadharNumber !== null
+              ? { aadharNumber: reqRow.aadharNumber }
               : {}),
           },
         }),
@@ -672,6 +672,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   router.put("/users/:id", adminController.updateUserProfile);
+  router.get("/users/:id/profile", adminController.getUserProfileDetails);
+  router.put("/users/:id/profile", adminController.updateUserProfileDetails);
   router.post(
     "/users/:id/change-referrer",
     adminController.changeUserReferrer,

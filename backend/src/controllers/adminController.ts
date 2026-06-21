@@ -89,6 +89,12 @@ import {
   sendTemplateEmailAsync,
 } from "../services/emailService.js";
 import {
+  fetchUserProfileRecord,
+  formatProfileResponse,
+  parseProfileUpdateBody,
+  updateUserProfileRecord,
+} from "../services/userProfileService.js";
+import {
   listReferralRequests,
   updateReferralRequestStatus,
 } from "../services/referralRequestService.js";
@@ -1063,6 +1069,71 @@ export function createAdminController(prisma: PrismaClient) {
           arbitrageSourceUserId: user.arbitrageSourceUserId,
           createdAt: user.createdAt,
         },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getUserProfileDetails(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      if (!id) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const user = await fetchUserProfileRecord(prisma, id);
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      applyNoStoreCacheHeaders(res);
+      res.json({ profile: formatProfileResponse(user) });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function updateUserProfileDetails(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const id = String(req.params.id ?? "").trim();
+      if (!id) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const existing = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      const body =
+        typeof req.body === "object" && req.body !== null
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const parsed = parseProfileUpdateBody(body);
+      if (!parsed.ok) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      const result = await updateUserProfileRecord(prisma, id, parsed.data);
+      if (!result.ok) {
+        res.status(409).json({ error: result.error });
+        return;
+      }
+      res.json({
+        profile: formatProfileResponse(result.user),
+        message: "User profile updated successfully.",
       });
     } catch (err) {
       next(err);
@@ -3770,6 +3841,8 @@ export function createAdminController(prisma: PrismaClient) {
     listPartnerPayouts,
     completePartnerPayout: completePartnerPayoutHandler,
     updateUserProfile,
+    getUserProfileDetails,
+    updateUserProfileDetails,
     patchStrategyAutoExit,
     closeManualTrade,
     flushUserTrades,

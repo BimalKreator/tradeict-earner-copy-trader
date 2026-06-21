@@ -23,7 +23,7 @@ type UserState = {
   mobile: string | null;
   address: string | null;
   panNumber: string | null;
-  aadhaarNumber: string | null;
+  aadharNumber: string | null;
   status: "ACTIVE" | "SUSPENDED" | string;
   copyTradingPaused?: boolean;
   cryptoArbitrageEnabled?: boolean;
@@ -110,7 +110,7 @@ type ProfileChangeRequest = {
   id: string;
   address: string | null;
   panNumber: string | null;
-  aadhaarNumber: string | null;
+  aadharNumber: string | null;
   createdAt: string;
 };
 
@@ -139,7 +139,7 @@ export default function AdminUserDetails({
   const [currentProfile, setCurrentProfile] = useState<{
     address: string | null;
     panNumber: string | null;
-    aadhaarNumber: string | null;
+    aadharNumber: string | null;
   } | null>(null);
 
   const [statusDraft, setStatusDraft] = useState("ACTIVE");
@@ -239,7 +239,7 @@ export default function AdminUserDetails({
             current?: {
               address: string | null;
               panNumber: string | null;
-              aadhaarNumber: string | null;
+              aadharNumber: string | null;
             };
             requests?: ProfileChangeRequest[];
           })
@@ -990,7 +990,7 @@ export default function AdminUserDetails({
               <InfoField label="Mobile" value={user?.mobile ?? "—"} />
               <InfoField label="Current Address" value={user?.address ?? "—"} />
               <InfoField label="PAN" value={user?.panNumber ?? "—"} />
-              <InfoField label="Aadhaar" value={user?.aadhaarNumber ?? "—"} />
+              <InfoField label="Aadhaar" value={user?.aadharNumber ?? "—"} />
               <InfoField
                 label="Delta Exchange Total Balance"
                 value={
@@ -1709,8 +1709,8 @@ export default function AdminUserDetails({
                           />
                           <RequestField
                             label="Aadhaar"
-                            current={currentProfile?.aadhaarNumber ?? null}
-                            requested={r.aadhaarNumber}
+                            current={currentProfile?.aadharNumber ?? null}
+                            requested={r.aadharNumber}
                           />
                         </div>
                         <div className="mt-3 flex gap-2">

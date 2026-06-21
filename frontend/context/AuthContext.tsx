@@ -26,7 +26,7 @@ export type AuthUser = {
   mobile?: string | null;
   address?: string | null;
   panNumber?: string | null;
-  aadhaarNumber?: string | null;
+  aadharNumber?: string | null;
   status?: string;
   pendingApprovalFields?: string[];
 };
@@ -75,8 +75,8 @@ function parseAuthUser(data: unknown): AuthUser | null {
     mobile: typeof row.mobile === "string" ? row.mobile : null,
     address: typeof row.address === "string" ? row.address : null,
     panNumber: typeof row.panNumber === "string" ? row.panNumber : null,
-    aadhaarNumber:
-      typeof row.aadhaarNumber === "string" ? row.aadhaarNumber : null,
+    aadharNumber:
+      typeof row.aadharNumber === "string" ? row.aadharNumber : null,
     status: typeof row.status === "string" ? row.status : undefined,
     pendingApprovalFields: Array.isArray(row.pendingApprovalFields)
       ? row.pendingApprovalFields.filter((f): f is string => typeof f === "string")

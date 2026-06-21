@@ -38,6 +38,8 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   });
 
   router.get("/me", jwtAuth, user.getMe);
+  router.get("/profile", jwtAuth, user.getProfile);
+  router.put("/profile", jwtAuth, user.updateProfile);
   router.patch("/me", jwtAuth, user.patchMe);
   router.post("/profile/set-referrer", jwtAuth, user.setProfileReferrer);
   router.get("/dashboard-overview", jwtAuth, user.getDashboardOverview);

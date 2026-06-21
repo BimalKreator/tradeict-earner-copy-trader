@@ -6,6 +6,7 @@ import {
   Loader2,
   Mail,
   RefreshCw,
+  UserCog,
   UserPlus,
   Users,
   UsersRound,
@@ -13,8 +14,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AdminProfileEditModal } from "@/components/admin/AdminProfileEditModal";
 import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
 import { EmailManagerModal } from "@/components/admin/EmailManagerModal";
+import { useAdminProfileEdit } from "@/components/admin/useAdminProfileEdit";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -208,6 +211,13 @@ export default function AdminMembersPage() {
     openEmailManager,
     closeEmailManager,
   } = useAdminEmailActions({ onToast: setToast });
+
+  const {
+    profileEditUser,
+    isProfileEditOpen,
+    openProfileEdit,
+    closeProfileEdit,
+  } = useAdminProfileEdit();
 
   const loadMembers = useCallback(async () => {
     setError(null);
@@ -644,6 +654,23 @@ export default function AdminMembersPage() {
                           onClick={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
+                            openProfileEdit({
+                              id: m.id,
+                              email: m.email,
+                              name: m.name,
+                            });
+                          }}
+                          title="View/Edit Profile"
+                          aria-label="View/Edit Profile"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-violet-500/35 bg-violet-500/10 text-violet-100 transition hover:bg-violet-500/20"
+                        >
+                          <UserCog className="h-4 w-4" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
                             openEmailManager({
                               id: m.id,
                               email: m.email,
@@ -1054,6 +1081,16 @@ export default function AdminMembersPage() {
         apiBase={apiBase}
         authHeaders={authHeaders}
         onClose={closeEmailManager}
+        onToast={setToast}
+      />
+
+      <AdminProfileEditModal
+        open={isProfileEditOpen}
+        userId={profileEditUser?.id ?? null}
+        userLabel={profileEditUser?.name ?? profileEditUser?.email}
+        apiBase={apiBase}
+        authHeaders={authHeaders}
+        onClose={closeProfileEdit}
         onToast={setToast}
       />
     </div>
