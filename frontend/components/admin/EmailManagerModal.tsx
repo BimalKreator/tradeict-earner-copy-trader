@@ -2,6 +2,7 @@
 
 import { Loader2, Mail, MessageSquare, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 export type EmailManagerRecipient = {
   id: string;
@@ -32,6 +33,11 @@ export function EmailManagerModal({
   const [resending, setResending] = useState(false);
   const [sendingCustom, setSendingCustom] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -43,7 +49,16 @@ export function EmailManagerModal({
     setSendingCustom(false);
   }, [open, recipient?.id]);
 
-  if (!open || !recipient) return null;
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
+  if (!mounted || !open || !recipient) return null;
 
   const displayName = recipient.name?.trim() || recipient.email;
   const busy = resending || sendingCustom;
@@ -128,14 +143,20 @@ export function EmailManagerModal({
     }
   }
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-labelledby="email-manager-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
     >
-      <div className="glass-card max-h-[90vh] w-full max-w-lg overflow-y-auto border border-glassBorder p-6 shadow-2xl">
+      <div
+        className="glass-card max-h-[90vh] w-full max-w-lg overflow-y-auto border border-glassBorder p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2
@@ -252,6 +273,7 @@ export function EmailManagerModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

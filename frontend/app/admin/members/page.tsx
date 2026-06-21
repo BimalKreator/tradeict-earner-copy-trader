@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
+import { EmailManagerModal } from "@/components/admin/EmailManagerModal";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -201,11 +202,12 @@ export default function AdminMembersPage() {
   const [uplineSubmitting, setUplineSubmitting] = useState(false);
   const [uplineFormError, setUplineFormError] = useState<string | null>(null);
 
-  const { openEmailManager, emailManagerModal } = useAdminEmailActions({
-    apiBase,
-    authHeaders,
-    onToast: setToast,
-  });
+  const {
+    emailManagerUser,
+    isEmailManagerOpen,
+    openEmailManager,
+    closeEmailManager,
+  } = useAdminEmailActions({ onToast: setToast });
 
   const loadMembers = useCallback(async () => {
     setError(null);
@@ -639,16 +641,18 @@ export default function AdminMembersPage() {
                         </button>
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
                             openEmailManager({
                               id: m.id,
                               email: m.email,
                               name: m.name,
-                            })
-                          }
+                            });
+                          }}
                           title="Email Options"
                           aria-label="Email Options"
-                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-100 transition hover:bg-sky-500/20"
+                          className="relative z-10 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-100 transition hover:bg-sky-500/20"
                         >
                           <Mail className="h-4 w-4" aria-hidden />
                         </button>
@@ -1044,7 +1048,14 @@ export default function AdminMembersPage() {
         </div>
       ) : null}
 
-      {emailManagerModal}
+      <EmailManagerModal
+        open={isEmailManagerOpen}
+        recipient={emailManagerUser}
+        apiBase={apiBase}
+        authHeaders={authHeaders}
+        onClose={closeEmailManager}
+        onToast={setToast}
+      />
     </div>
   );
 }

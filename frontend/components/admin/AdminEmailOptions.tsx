@@ -1,25 +1,16 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import {
-  EmailManagerModal,
-  type EmailManagerRecipient,
-} from "./EmailManagerModal";
+import type { EmailManagerRecipient } from "./EmailManagerModal";
 
 export type AdminEmailRecipient = EmailManagerRecipient;
 
 type UseAdminEmailActionsArgs = {
-  apiBase: string;
-  authHeaders: () => HeadersInit;
   onToast?: (toast: { type: "ok" | "err"; text: string }) => void;
 };
 
 /** Shared email manager modal state for admin Members/Users tables. */
-export function useAdminEmailActions({
-  apiBase,
-  authHeaders,
-  onToast,
-}: UseAdminEmailActionsArgs) {
+export function useAdminEmailActions(_args: UseAdminEmailActionsArgs = {}) {
   const [emailManagerUser, setEmailManagerUser] =
     useState<AdminEmailRecipient | null>(null);
 
@@ -31,21 +22,10 @@ export function useAdminEmailActions({
     setEmailManagerUser(null);
   }, []);
 
-  const emailManagerModal = (
-    <EmailManagerModal
-      open={emailManagerUser !== null}
-      recipient={emailManagerUser}
-      apiBase={apiBase}
-      authHeaders={authHeaders}
-      onClose={closeEmailManager}
-      onToast={onToast}
-    />
-  );
-
   return {
     emailManagerUser,
+    isEmailManagerOpen: emailManagerUser !== null,
     openEmailManager,
     closeEmailManager,
-    emailManagerModal,
   };
 }
