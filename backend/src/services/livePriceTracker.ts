@@ -3,11 +3,11 @@ import { SubscriptionStatus, type PrismaClient } from "@prisma/client";
 import { fetchDeltaOpenPositions } from "./exchangeService.js";
 import { FUTURE_HEDGE_BTC_SYMBOL } from "./futureHedgeDataService.js";
 import {
-  cacheLiveMarkPrice,
+  cacheLiveQuotes,
   ingestLivePriceWsMessage,
 } from "./liveMarkPriceCache.js";
 
-/** Delta Exchange India public WebSocket — mark_price + ticker (mark_price field only). */
+/** Delta Exchange India public WebSocket — mark, v2/ticker quotes, L2 top-of-book. */
 const DELTA_INDIA_PUBLIC_WS = "wss://public-socket.india.delta.exchange";
 
 const HEARTBEAT_WATCHDOG_MS = 35_000;
@@ -47,11 +47,10 @@ function sendSubscribe(socket: WebSocket, symbols: string[]): void {
       type: "subscribe",
       payload: {
         channels: [
-          // Authoritative mark feed (~2s); PnL must not use LTP from order book.
           { name: "mark_price", symbols: markSyms },
-          // Ticker carries mark_price / `m` — ingested with strict field filter only.
           { name: "ticker", symbols },
           { name: "v2/ticker", symbols },
+          { name: "l2_orderbook", symbols },
         ],
       },
     }),
@@ -67,7 +66,7 @@ function syncSubscriptions(): void {
   if (symbols.length === 0) return;
   sendSubscribe(ws, symbols);
   console.log(
-    `[livePriceTracker] subscribed mark_price + ticker (mark only) for ${symbols.length} symbol(s)`,
+    `[livePriceTracker] subscribed mark + v2/ticker + l2_orderbook for ${symbols.length} symbol(s)`,
   );
 }
 
@@ -180,13 +179,11 @@ async function refreshSymbolsFromMasterAccounts(
       const positions = await fetchDeltaOpenPositions(key, secret);
       for (const p of positions) {
         registerSymbolsForLivePrices([p.symbolKey]);
-        if (
-          p.markPrice != null &&
-          Number.isFinite(p.markPrice) &&
-          p.markPrice > 0
-        ) {
-          cacheLiveMarkPrice(p.symbolKey, p.markPrice);
-        }
+        cacheLiveQuotes(p.symbolKey, {
+          mark: p.markPrice,
+          bid: p.bestBid,
+          ask: p.bestAsk,
+        });
       }
     } catch {
       /* skip strategy */

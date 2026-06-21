@@ -4,15 +4,21 @@ import {
   UserStatus,
 } from "@prisma/client";
 import {
+  fetchDeltaBestQuotes,
   fetchDeltaMarkPrice,
   fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
   isDeltaOptionProductId,
   resolveDeltaLiveUnrealizedPnl,
   type DeltaLivePosition,
+  type DeltaTerminalQuoteOverrides,
   type TradeSide,
 } from "./exchangeService.js";
-import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
+import {
+  cacheLiveQuotes,
+  resolveLiveMarkPrice,
+  resolveLiveQuotes,
+} from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
   COPY_SUBSCRIPTION_INCLUDE,
@@ -275,13 +281,20 @@ async function fetchAndMergeMasterLiveTrades(
         ? await withDeltaFetchTimeout(promise, label, timeoutMs)
         : await promise;
     const rows = snapshot.open.map((pos) => {
-      const cachedMark = resolveLiveMarkPrice(pos.symbolKey);
+      const cached = resolveLiveQuotes(pos.symbolKey);
+      const quoteOverrides: DeltaTerminalQuoteOverrides = {
+        bestBid: cached.bestBid ?? pos.bestBid,
+        bestAsk: cached.bestAsk ?? pos.bestAsk,
+        markPrice: cached.markPrice ?? pos.markPrice,
+      };
       const livePnl =
-        resolveDeltaLiveUnrealizedPnl(pos, cachedMark) ?? pos.unrealizedPnl;
+        resolveDeltaLiveUnrealizedPnl(pos, quoteOverrides) ?? pos.unrealizedPnl;
       return deltaToRow({
         ...pos,
         unrealizedPnl: livePnl,
-        markPrice: cachedMark ?? pos.markPrice,
+        markPrice: quoteOverrides.markPrice ?? pos.markPrice,
+        bestBid: quoteOverrides.bestBid ?? pos.bestBid,
+        bestAsk: quoteOverrides.bestAsk ?? pos.bestAsk,
       });
     });
     const positions = mergeMasterLiveTradesCache(
@@ -511,31 +524,47 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Mark for display — options use exchange mark only (WS cache aliases break option premiums). */
-async function resolveMarkForLiveRow(
+/** Top-of-book + mark for UPL@Bid / UPL@Offer (WS cache → position REST → ticker REST). */
+async function resolveQuotesForLiveRow(
   pos: DeltaLivePosition,
-): Promise<number | null> {
-  if (
-    pos.markPrice != null &&
-    Number.isFinite(pos.markPrice) &&
-    pos.markPrice > 0
-  ) {
-    return pos.markPrice;
+): Promise<DeltaTerminalQuoteOverrides> {
+  const cached = resolveLiveQuotes(pos.symbolKey);
+  let bestBid = cached.bestBid ?? pos.bestBid;
+  let bestAsk = cached.bestAsk ?? pos.bestAsk;
+  let markPrice = cached.markPrice ?? pos.markPrice;
+
+  const needsRest =
+    isDeltaOptionProductId(pos.symbolKey) &&
+    ((pos.side === "BUY" && (bestBid == null || bestBid <= 0)) ||
+      (pos.side === "SELL" && (bestAsk == null || bestAsk <= 0)));
+
+  if (needsRest) {
+    const rest = await fetchDeltaBestQuotes(pos.symbolKey);
+    bestBid = bestBid ?? rest.bid;
+    bestAsk = bestAsk ?? rest.ask;
+    markPrice = markPrice ?? rest.mark;
+    cacheLiveQuotes(pos.symbolKey, {
+      bid: rest.bid,
+      ask: rest.ask,
+      mark: rest.mark,
+    });
+  } else if (markPrice == null || markPrice <= 0) {
+    if (isDeltaOptionProductId(pos.symbolKey)) {
+      const rest = await fetchDeltaMarkPrice(pos.symbolKey);
+      markPrice = rest.markPrice;
+    } else {
+      markPrice = resolveLiveMarkPrice(pos.symbolKey);
+      if (markPrice == null) {
+        const rest = await fetchDeltaMarkPrice(pos.symbolKey);
+        markPrice = rest.markPrice;
+      }
+    }
   }
 
-  if (isDeltaOptionProductId(pos.symbolKey)) {
-    const rest = await fetchDeltaMarkPrice(pos.symbolKey);
-    return rest.markPrice;
-  }
-
-  const cached = resolveLiveMarkPrice(pos.symbolKey);
-  if (cached != null) return cached;
-
-  const rest = await fetchDeltaMarkPrice(pos.symbolKey);
-  return rest.markPrice;
+  return { bestBid, bestAsk, markPrice };
 }
 
-/** Terminal UPNL with live mark — matches Delta Web UI formula. */
+/** Terminal UPNL (UPL@Bid / UPL@Offer) with live WS quotes. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
@@ -543,13 +572,13 @@ async function enrichPositionLiveRow(
     registerSymbolsForLivePrices([pos.symbolKey]);
   }
 
-  const liveMark = await resolveMarkForLiveRow(pos);
-  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, liveMark) ?? pos.unrealizedPnl;
+  const quotes = await resolveQuotesForLiveRow(pos);
+  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, quotes) ?? pos.unrealizedPnl;
   const base = deltaToRow({ ...pos, unrealizedPnl: livePnl });
 
   return {
     ...base,
-    markPrice: liveMark ?? pos.markPrice ?? base.markPrice,
+    markPrice: quotes.markPrice ?? pos.markPrice ?? base.markPrice,
     livePnl,
   };
 }

@@ -16,8 +16,15 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
-import { resolveDeltaLiveUnrealizedPnl } from "./exchangeService.js";
-import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
+import {
+  resolveDeltaLiveUnrealizedPnl,
+  type DeltaTerminalQuoteOverrides,
+} from "./exchangeService.js";
+import {
+  resolveLiveBestAsk,
+  resolveLiveBestBid,
+  resolveLiveMarkPrice,
+} from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
   latchBreakevenHedgeEntryBlock,
@@ -218,23 +225,20 @@ export function notifyLiveBtcPriceTick(livePrice: number): void {
   }
 }
 
-function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
-  const cached = resolveLiveMarkPrice(pos.symbolKey);
-  if (cached != null) return cached;
-  if (
-    pos.markPrice != null &&
-    Number.isFinite(pos.markPrice) &&
-    pos.markPrice > 0
-  ) {
-    return pos.markPrice;
-  }
-  return null;
+function resolveQuotesForPosition(
+  pos: DeltaLivePosition,
+): DeltaTerminalQuoteOverrides {
+  return {
+    bestBid: resolveLiveBestBid(pos.symbolKey) ?? pos.bestBid,
+    bestAsk: resolveLiveBestAsk(pos.symbolKey) ?? pos.bestAsk,
+    markPrice: resolveLiveMarkPrice(pos.symbolKey) ?? pos.markPrice,
+  };
 }
 
-/** Terminal UPNL with WS mark when fresher than REST snapshot. */
+/** Terminal UPNL (UPL@Bid / UPL@Offer) — same formula as Delta Web UI. */
 function legPnlUsd(pos: DeltaLivePosition): number | null {
-  const mark = resolveMarkForPosition(pos);
-  const computed = resolveDeltaLiveUnrealizedPnl(pos, mark);
+  const quotes = resolveQuotesForPosition(pos);
+  const computed = resolveDeltaLiveUnrealizedPnl(pos, quotes);
   if (computed != null && Number.isFinite(computed)) return computed;
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
@@ -274,7 +278,8 @@ export async function fetchMasterLegsWithTotalLivePnl(
       pos.entryPrice != null && Number.isFinite(pos.entryPrice)
         ? pos.entryPrice
         : (() => {
-            const m = resolveMarkForPosition(pos);
+            const quotes = resolveQuotesForPosition(pos);
+            const m = quotes.markPrice;
             return m != null && Number.isFinite(m) ? m : 0;
           })();
 

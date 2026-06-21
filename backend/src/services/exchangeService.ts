@@ -1282,7 +1282,11 @@ export interface DeltaLivePosition {
   realBaseSize: number;
   entryPrice: number | null;
   markPrice: number | null;
-  /** Delta `contract_value` per lot — used to recalculate terminal UPNL with live mark. */
+  /** L2 best bid from margined/ticker REST — UPL@Bid for longs. */
+  bestBid: number | null;
+  /** L2 best ask (offer) — UPL@Offer for shorts. */
+  bestAsk: number | null;
+  /** Delta `contract_value` per lot — used to recalculate terminal UPNL. */
   contractValue: number;
   unrealizedPnl: number | null;
   /** Delta REST `realized_pnl` — cumulative since position opened. */
@@ -1333,24 +1337,53 @@ function fastFlatLegSymbolKey(productSymbol: string): string {
   return unifiedSymbolToKey(normalizeDeltaPerpSymbolForCcxt(ps));
 }
 
+/** Delta Web Terminal exit price for UPNL — bid for longs, ask for shorts, mark fallback. */
+export function resolveDeltaTerminalExitPrice(
+  side: TradeSide,
+  quotes: {
+    bestBid?: number | null;
+    bestAsk?: number | null;
+    markPrice?: number | null;
+  },
+): number | null {
+  if (side === "BUY") {
+    const bid = quotes.bestBid;
+    if (bid != null && Number.isFinite(bid) && bid > 0) return bid;
+  } else {
+    const ask = quotes.bestAsk;
+    if (ask != null && Number.isFinite(ask) && ask > 0) return ask;
+  }
+
+  const mark = quotes.markPrice;
+  if (mark != null && Number.isFinite(mark) && mark > 0) return mark;
+  return null;
+}
+
 /**
- * Delta Web Terminal UPNL — mark × lots × contract_value (not raw REST `unrealized_pnl`).
- * BUY: `(mark - entry) * lots * contract_value`
- * SELL: `(entry - mark) * lots * contract_value`
+ * Delta Web Terminal UPNL — UPL@Bid (long) / UPL@Offer (short), mark fallback.
+ * BUY:  `(best_bid - entry) * lots * contract_value`
+ * SELL: `(entry - best_ask) * lots * contract_value`
  */
 export function computeDeltaTerminalUnrealizedPnl(args: {
   side: TradeSide;
   entryPrice: number | null;
-  markPrice: number | null;
   positionLots: number;
   contractValue: number;
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  markPrice?: number | null;
 }): number | null {
-  const { side, entryPrice, markPrice, positionLots, contractValue } = args;
+  const { side, entryPrice, positionLots, contractValue } = args;
+  const exitPrice = resolveDeltaTerminalExitPrice(side, {
+    bestBid: args.bestBid ?? null,
+    bestAsk: args.bestAsk ?? null,
+    markPrice: args.markPrice ?? null,
+  });
+
   if (
     entryPrice == null ||
     !Number.isFinite(entryPrice) ||
-    markPrice == null ||
-    !Number.isFinite(markPrice) ||
+    exitPrice == null ||
     !Number.isFinite(positionLots) ||
     Math.abs(positionLots) < 1e-12 ||
     !Number.isFinite(contractValue) ||
@@ -1361,29 +1394,39 @@ export function computeDeltaTerminalUnrealizedPnl(args: {
 
   const lots = Math.abs(positionLots);
   const priceDiff =
-    side === "BUY" ? markPrice - entryPrice : entryPrice - markPrice;
+    side === "BUY" ? exitPrice - entryPrice : entryPrice - exitPrice;
   const pnl = priceDiff * lots * contractValue;
   return Number.isFinite(pnl) ? pnl : null;
 }
 
-/** Resolve live UPNL for a parsed position — prefers fresh mark when provided. */
+export type DeltaTerminalQuoteOverrides = {
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  markPrice?: number | null;
+};
+
+/** Resolve live UPNL — WS/REST bid/ask preferred over mark (matches Delta Terminal). */
 export function resolveDeltaLiveUnrealizedPnl(
   pos: Pick<
     DeltaLivePosition,
-    "side" | "entryPrice" | "markPrice" | "contracts" | "contractValue"
+    | "side"
+    | "entryPrice"
+    | "markPrice"
+    | "bestBid"
+    | "bestAsk"
+    | "contracts"
+    | "contractValue"
   >,
-  markOverride?: number | null,
+  quoteOverrides?: DeltaTerminalQuoteOverrides | null,
 ): number | null {
-  const mark =
-    markOverride != null && Number.isFinite(markOverride) && markOverride > 0
-      ? markOverride
-      : pos.markPrice;
   return computeDeltaTerminalUnrealizedPnl({
     side: pos.side,
     entryPrice: pos.entryPrice,
-    markPrice: mark,
     positionLots: pos.contracts,
     contractValue: pos.contractValue,
+    bestBid: quoteOverrides?.bestBid ?? pos.bestBid,
+    bestAsk: quoteOverrides?.bestAsk ?? pos.bestAsk,
+    markPrice: quoteOverrides?.markPrice ?? pos.markPrice,
   });
 }
 
@@ -2427,9 +2470,14 @@ async function fetchDeltaL2BestQuotes(
 
 async function fetchDeltaTickerFromRestApi(
   productRef: string,
-): Promise<{ last: number | null; bid: number | null; ask: number | null }> {
+): Promise<{
+  last: number | null;
+  mark: number | null;
+  bid: number | null;
+  ask: number | null;
+}> {
   const ref = productRef.trim();
-  if (!ref) return { last: null, bid: null, ask: null };
+  if (!ref) return { last: null, mark: null, bid: null, ask: null };
 
   try {
     const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
@@ -2437,12 +2485,12 @@ async function fetchDeltaTickerFromRestApi(
       { timeout: 20_000 },
     );
     if (data?.success !== true || data.result == null) {
-      return { last: null, bid: null, ask: null };
+      return { last: null, mark: null, bid: null, ask: null };
     }
 
     const row = Array.isArray(data.result) ? data.result[0] : data.result;
     if (!row || typeof row !== "object") {
-      return { last: null, bid: null, ask: null };
+      return { last: null, mark: null, bid: null, ask: null };
     }
 
     const r = row as Record<string, unknown>;
@@ -2450,16 +2498,53 @@ async function fetchDeltaTickerFromRestApi(
       numberOrNull(r.close) ??
       numberOrNull(r.mark_price) ??
       numberOrNull(r.spot_price);
+    const mark = numberOrNull(r.mark_price) ?? last;
     const { bid, offer: ask } = extractDeltaQuotesBidOffer(r);
-    return { last, bid, ask };
+    return { last, mark, bid, ask };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
       `[exchangeService] fetchDeltaTickerFromRestApi failed ref=${ref}:`,
       msg,
     );
-    return { last: null, bid: null, ask: null };
+    return { last: null, mark: null, bid: null, ask: null };
   }
+}
+
+/**
+ * Public top-of-book + mark for terminal UPNL (UPL@Bid / UPL@Offer).
+ * Options: Delta REST ticker first; L2 orderbook when quotes are sparse.
+ */
+export async function fetchDeltaBestQuotes(
+  symbol: string,
+): Promise<{ bid: number | null; ask: number | null; mark: number | null }> {
+  const ref = symbol.trim();
+  if (!ref) return { bid: null, ask: null, mark: null };
+
+  const rest = await fetchDeltaTickerFromRestApi(ref);
+  let bid = rest.bid;
+  let ask = rest.ask;
+  let mark =
+    rest.mark ??
+    (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
+      ? rest.last
+      : null);
+
+  if (
+    (bid == null || ask == null) &&
+    (isDeltaOptionProductId(ref) || /^\d+$/.test(ref))
+  ) {
+    const l2 = await fetchDeltaL2BestQuotes(ref);
+    bid = bid ?? l2.bid;
+    ask = ask ?? l2.ask;
+  }
+
+  if (mark == null) {
+    const markRes = await fetchDeltaMarkPrice(ref);
+    mark = markRes.markPrice;
+  }
+
+  return { bid, ask, mark };
 }
 
 /**
@@ -2705,13 +2790,16 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         numberOrNull(position.average_price);
 
       const markPrice = extractDeltaMarkPrice(position);
+      const { bid: bestBid, offer: bestAsk } = extractDeltaBidOffer(position);
 
       const unrealizedPnl = computeDeltaTerminalUnrealizedPnl({
         side,
         entryPrice,
-        markPrice,
         positionLots: contractLotCount,
         contractValue,
+        bestBid,
+        bestAsk,
+        markPrice,
       });
       const realizedPnl = parseDeltaRealizedPnl(position);
 
@@ -2719,7 +2807,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         console.log(
           `[PNL_TRACKER] ${unified} option=${isOption} side=${side} ` +
             `lots=${contractLotCount} cv=${contractValue} entry=${entryPrice ?? "n/a"} ` +
-            `mark=${markPrice ?? "n/a"}`,
+            `bid=${bestBid ?? "n/a"} ask=${bestAsk ?? "n/a"} mark=${markPrice ?? "n/a"}`,
         );
       }
 
@@ -2755,6 +2843,8 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         realBaseSize,
         entryPrice,
         markPrice,
+        bestBid,
+        bestAsk,
         contractValue,
         unrealizedPnl:
           unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
