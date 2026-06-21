@@ -2,7 +2,7 @@ import axios from "axios";
 
 /** Hard cap on Delta India REST requests — shared across all services. */
 const MAX_REQUESTS_PER_SECOND = Number(
-  process.env.DELTA_REST_MAX_RPS ?? 10,
+  process.env.DELTA_REST_MAX_RPS ?? 3,
 );
 
 const CDN_PAUSE_SAFETY_BUFFER_MS = 5_000;

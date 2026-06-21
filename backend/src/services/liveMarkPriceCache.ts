@@ -206,6 +206,23 @@ export function resolveLiveQuotes(symbolKey: string): {
   };
 }
 
+/**
+ * Option UPL quotes — WS cache only (may be stale while subscription warms up).
+ * Never triggers REST; callers should subscribe via livePriceTracker separately.
+ */
+export function resolveOptionQuotesWsOnly(symbolKey: string): {
+  bestBid: number | null;
+  bestAsk: number | null;
+  markPrice: number | null;
+} {
+  const q = resolveLiveQuotes(symbolKey);
+  return {
+    bestBid: q.bestBid != null && q.bestBid > 0 ? q.bestBid : null,
+    bestAsk: q.bestAsk != null && q.bestAsk > 0 ? q.bestAsk : null,
+    markPrice: q.markPrice != null && q.markPrice > 0 ? q.markPrice : null,
+  };
+}
+
 function resolveQuoteUpdatedAt(symbolKey: string): number | null {
   let latest = 0;
   for (const k of symbolAliasKeys(symbolKey)) {

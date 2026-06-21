@@ -17,6 +17,7 @@ import {
   hasFreshTerminalQuotes,
   isLiveQuotesFresh,
   resolveLiveQuotes,
+  resolveOptionQuotesWsOnly,
 } from "./liveMarkPriceCache.js";
 import {
   cacheDeltaTerminalUpl,
@@ -2042,30 +2043,60 @@ function registerOptionMarketOnExchange(
  * Delta India public REST — CCXT loadMarkets() often omits live option contracts.
  * GET /v2/products/{symbol|numeric_id}
  */
+const PRODUCT_REST_CACHE_TTL_MS = 30 * 60 * 1000;
+const productRestCache = new Map<
+  string,
+  { at: number; row: Record<string, unknown> | null }
+>();
+
+function isOptionQuoteRef(ref: string): boolean {
+  const t = ref.trim();
+  return isDeltaOptionProductId(t) || /^\d+$/.test(t);
+}
+
+/** Subscribe option/perp on public WS — dynamic import avoids exchangeService ↔ livePriceTracker cycle. */
+function requestOptionWsSubscribe(ref: string): void {
+  const sym = ref.trim();
+  if (!sym) return;
+  void import("./livePriceTracker.js")
+    .then((m) => m.registerSymbolsForLivePrices([sym]))
+    .catch(() => {
+      /* WS tracker may not be started yet */
+    });
+}
+
 async function fetchDeltaProductFromRestApi(
   productRef: string,
 ): Promise<Record<string, unknown> | null> {
   const ref = productRef.trim();
   if (!ref) return null;
 
+  const cacheKey = ref.toUpperCase();
+  const hit = productRestCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < PRODUCT_REST_CACHE_TTL_MS) {
+    return hit.row;
+  }
+
   try {
     const data = await deltaPublicGet<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/products/${encodeURIComponent(ref)}`,
       { timeout: 20_000 },
     );
-    if (
+    const row =
       data?.success === true &&
       data.result != null &&
       typeof data.result === "object" &&
       !Array.isArray(data.result)
-    ) {
-      return data.result as Record<string, unknown>;
-    }
+        ? (data.result as Record<string, unknown>)
+        : null;
+    productRestCache.set(cacheKey, { at: Date.now(), row });
+    return row;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
       `[exchangeService] fetchDeltaProductFromRestApi failed ref=${ref}: ${msg}`,
     );
+    productRestCache.set(cacheKey, { at: Date.now(), row: null });
   }
 
   return null;
@@ -2736,7 +2767,7 @@ export async function fetchDeltaMarkPrice(
 
 /**
  * Delta India public REST ticker — CCXT omits most live option contracts.
- * Prefer bulk GET /v2/tickers (cached) over per-symbol GET /v2/tickers/{symbol}.
+ * Prefer bulk GET /v2/tickers (30s cache). Options never use per-symbol REST.
  */
 type DeltaTickerQuote = {
   last: number | null;
@@ -2745,7 +2776,7 @@ type DeltaTickerQuote = {
   ask: number | null;
 };
 
-const ALL_TICKERS_TTL_MS = 3_000;
+const ALL_TICKERS_TTL_MS = 30_000;
 let allTickersCache: {
   at: number;
   byRef: Map<string, DeltaTickerQuote>;
@@ -2816,15 +2847,14 @@ async function fetchAllDeltaTickersMap(): Promise<Map<string, DeltaTickerQuote>>
   return allTickersInflight;
 }
 
-async function lookupDeltaTickerFromBulk(
+function lookupDeltaTickerFromMap(
+  map: Map<string, DeltaTickerQuote>,
   productRef: string,
-): Promise<DeltaTickerQuote | null> {
+): DeltaTickerQuote | null {
   const ref = productRef.trim();
   if (!ref) return null;
 
-  const map = await fetchAllDeltaTickersMap();
   const tried = new Set<string>();
-
   const tryKey = (candidate: string): DeltaTickerQuote | null => {
     const c = candidate.trim();
     if (!c) return null;
@@ -2842,23 +2872,28 @@ async function lookupDeltaTickerFromBulk(
     if (hit) return hit;
   }
 
-  const resolved = await resolveDeltaProductNumericId(ref);
-  if (resolved) {
-    const bySymbol = tryKey(resolved.symbol);
-    if (bySymbol) return bySymbol;
-    const byId = tryKey(String(resolved.productId));
-    if (byId) return byId;
-  }
-
   return null;
 }
 
-/** Top-of-book from L2 orderbook — REST fallback when WS cache is stale. */
+async function lookupDeltaTickerFromBulk(
+  productRef: string,
+): Promise<DeltaTickerQuote | null> {
+  const map = await fetchAllDeltaTickersMap();
+  return lookupDeltaTickerFromMap(map, productRef);
+}
+
+/** WS-only for options — never hits per-symbol L2 REST. Perps may use REST when WS stale. */
 async function fetchDeltaL2BestQuotesForRef(
   ref: string,
 ): Promise<{ bid: number | null; ask: number | null }> {
   const trimmed = ref.trim();
   if (!trimmed) return { bid: null, ask: null };
+
+  if (isOptionQuoteRef(trimmed)) {
+    requestOptionWsSubscribe(trimmed);
+    const ws = resolveOptionQuotesWsOnly(trimmed);
+    return { bid: ws.bestBid, ask: ws.bestAsk };
+  }
 
   const ws = resolveLiveQuotes(trimmed);
   if (isLiveQuotesFresh(trimmed)) {
@@ -2891,6 +2926,9 @@ async function fetchDeltaL2BestQuotesForRef(
     }
     return { bid, ask };
   } catch (err) {
+    if (isDeltaRestPausedError(err)) {
+      return { bid: null, ask: null };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
       `[exchangeService] fetchDeltaL2BestQuotes failed ref=${trimmed}:`,
@@ -2905,6 +2943,11 @@ async function fetchDeltaL2BestQuotes(
 ): Promise<{ bid: number | null; ask: number | null }> {
   const ref = productRef.trim();
   if (!ref) return { bid: null, ask: null };
+
+  if (isOptionQuoteRef(ref)) {
+    requestOptionWsSubscribe(ref);
+    return fetchDeltaL2BestQuotesForRef(ref);
+  }
 
   const tried = new Set<string>();
   const tryRef = async (candidate: string): Promise<{ bid: number | null; ask: number | null } | null> => {
@@ -2929,60 +2972,47 @@ async function fetchDeltaL2BestQuotes(
     if (q) return q;
   }
 
-  const resolved = await resolveDeltaProductNumericId(ref);
-  if (resolved) {
-    const bySymbol = await tryRef(resolved.symbol);
-    if (bySymbol) return bySymbol;
-    const byId = await tryRef(String(resolved.productId));
-    if (byId) return byId;
-  }
-
   return { bid: null, ask: null };
 }
 
+/** Bulk `/v2/tickers` only — never per-symbol GET. Options use WS cache exclusively. */
 async function fetchDeltaTickerFromRestApi(
   productRef: string,
 ): Promise<DeltaTickerQuote> {
   const ref = productRef.trim();
-  if (!ref) return { last: null, mark: null, bid: null, ask: null };
+  const empty = { last: null, mark: null, bid: null, ask: null };
+  if (!ref) return empty;
+
+  if (isOptionQuoteRef(ref)) {
+    requestOptionWsSubscribe(ref);
+    const ws = resolveOptionQuotesWsOnly(ref);
+    return {
+      last: ws.markPrice,
+      mark: ws.markPrice,
+      bid: ws.bestBid,
+      ask: ws.bestAsk,
+    };
+  }
 
   const bulk = await lookupDeltaTickerFromBulk(ref);
-  if (bulk) return bulk;
-
-  try {
-    const data = await deltaPublicGet<{ success?: boolean; result?: unknown }>(
-      `${DELTA_INDIA_API_BASE}/v2/tickers/${encodeURIComponent(ref)}`,
-      { timeout: 20_000 },
-    );
-    if (data?.success !== true || data.result == null) {
-      return { last: null, mark: null, bid: null, ask: null };
-    }
-
-    const row = Array.isArray(data.result) ? data.result[0] : data.result;
-    if (!row || typeof row !== "object") {
-      return { last: null, mark: null, bid: null, ask: null };
-    }
-
-    return parseDeltaTickerRow(row as Record<string, unknown>);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[exchangeService] fetchDeltaTickerFromRestApi failed ref=${ref}:`,
-      msg,
-    );
-    return { last: null, mark: null, bid: null, ask: null };
-  }
+  return bulk ?? empty;
 }
 
 /**
  * Public top-of-book + mark for terminal UPNL (UPL@Bid / UPL@Offer).
- * Options: L2 orderbook first; ticker bid/ask only when L2 is empty (never mark as bid/ask).
+ * Options: WebSocket cache only — subscribe and wait; never per-symbol REST.
  */
 export async function fetchDeltaBestQuotes(
   symbol: string,
 ): Promise<{ bid: number | null; ask: number | null; mark: number | null }> {
   const ref = symbol.trim();
   if (!ref) return { bid: null, ask: null, mark: null };
+
+  if (isOptionQuoteRef(ref)) {
+    requestOptionWsSubscribe(ref);
+    const ws = resolveOptionQuotesWsOnly(ref);
+    return { bid: ws.bestBid, ask: ws.bestAsk, mark: ws.markPrice };
+  }
 
   const ws = resolveLiveQuotes(ref);
   if (isLiveQuotesFresh(ref)) {
@@ -2997,7 +3027,6 @@ export async function fetchDeltaBestQuotes(
     }
   }
 
-  const isOptionRef = isDeltaOptionProductId(ref) || /^\d+$/.test(ref);
   let bid: number | null = null;
   let ask: number | null = null;
   let mark: number | null = null;
@@ -3011,11 +3040,7 @@ export async function fetchDeltaBestQuotes(
       ? rest.last
       : null);
 
-  if (isOptionRef && (bid == null || ask == null)) {
-    const l2 = await fetchDeltaL2BestQuotes(ref);
-    bid = bid ?? l2.bid;
-    ask = ask ?? l2.ask;
-  } else if (!isOptionRef && (bid == null || ask == null)) {
+  if (bid == null || ask == null) {
     const l2 = await fetchDeltaL2BestQuotes(ref);
     bid = bid ?? l2.bid;
     ask = ask ?? l2.ask;
@@ -3030,23 +3055,10 @@ export async function fetchDeltaBestQuotes(
     cacheLiveQuotes(ref, { bid, ask, mark });
   }
 
-  const quoteData = { bid, ask, mark };
-
-  if (
-    isOptionRef &&
-    (bid == null || bid <= 0) &&
-    (ask == null || ask <= 0)
-  ) {
-    console.error(
-      `[CRITICAL] Option L2/ticker returned empty bid/ask — cannot compute UPL@Bid/Offer symbol=${ref}`,
-      quoteData,
-    );
-  }
-
-  return quoteData;
+  return { bid, ask, mark };
 }
 
-/** REST-seed WS quote cache for open legs missing fresh WS bid/ask (one bulk ticker fetch). */
+/** Boot seed: options → WS subscribe only; perps → one bulk `/v2/tickers` (30s TTL). */
 export async function seedTerminalQuotesForSymbols(
   symbols: Iterable<string>,
 ): Promise<void> {
@@ -3059,21 +3071,22 @@ export async function seedTerminalQuotesForSymbols(
   ];
   if (unique.length === 0) return;
 
-  const needsSeed = unique.filter((sym) => !hasFreshTerminalQuotes(sym));
-  if (needsSeed.length === 0) return;
+  const optionSymbols = unique.filter(isOptionQuoteRef);
+  const perpSymbols = unique.filter((s) => !isOptionQuoteRef(s));
 
-  try {
-    await fetchAllDeltaTickersMap();
-  } catch (err) {
-    console.warn(
-      `[exchangeService] bulk ticker seed failed:`,
-      err instanceof Error ? err.message : err,
-    );
+  for (const sym of optionSymbols) {
+    requestOptionWsSubscribe(sym);
   }
 
-  for (const sym of needsSeed) {
-    try {
-      const rest = await lookupDeltaTickerFromBulk(sym);
+  if (perpSymbols.length === 0) return;
+
+  const needsPerpSeed = perpSymbols.filter((sym) => !hasFreshTerminalQuotes(sym));
+  if (needsPerpSeed.length === 0) return;
+
+  try {
+    const map = await fetchAllDeltaTickersMap();
+    for (const sym of needsPerpSeed) {
+      const rest = lookupDeltaTickerFromMap(map, sym);
       if (rest) {
         cacheLiveQuotes(sym, {
           bid: rest.bid,
@@ -3081,18 +3094,11 @@ export async function seedTerminalQuotesForSymbols(
           mark: rest.mark,
         });
       }
-
-      const isOptionRef = isDeltaOptionProductId(sym) || /^\d+$/.test(sym);
-      if (isOptionRef && !hasFreshTerminalQuotes(sym)) {
-        const l2 = await fetchDeltaL2BestQuotes(sym);
-        cacheLiveQuotes(sym, {
-          bid: l2.bid,
-          ask: l2.ask,
-        });
-      }
-    } catch (err) {
+    }
+  } catch (err) {
+    if (!isDeltaRestPausedError(err)) {
       console.warn(
-        `[exchangeService] seedTerminalQuotes failed symbol=${sym}:`,
+        `[exchangeService] bulk ticker seed failed:`,
         err instanceof Error ? err.message : err,
       );
     }
@@ -3100,7 +3106,7 @@ export async function seedTerminalQuotesForSymbols(
 }
 
 /**
- * WS cache → always REST refresh for options (L2 bid/ask — never mark as exit price).
+ * WS cache for options (never REST). Perps may use bulk REST when WS stale.
  * Returns null when option side quote is missing (UI shows "—").
  */
 export async function resolveTerminalQuotesForPosition(
@@ -3115,27 +3121,12 @@ export async function resolveTerminalQuotesForPosition(
 
   const optionLeg = positionRequiresBidAskPnl(pos);
   if (optionLeg) {
-    if (
-      isLiveQuotesFresh(pos.symbolKey) &&
-      sideQuoteReady(pos.side, bestBid, bestAsk)
-    ) {
-      return { bestBid, bestAsk, markPrice: null };
-    }
-
-    const rest = await fetchDeltaBestQuotes(pos.symbolKey);
-    if (rest.bid != null && rest.bid > 0) bestBid = rest.bid;
-    if (rest.ask != null && rest.ask > 0) bestAsk = rest.ask;
-
-    cacheLiveQuotes(pos.symbolKey, {
-      bid: rest.bid,
-      ask: rest.ask,
-      mark: rest.mark,
-    });
+    requestOptionWsSubscribe(pos.symbolKey);
+    const ws = resolveOptionQuotesWsOnly(pos.symbolKey);
+    if (ws.bestBid != null && ws.bestBid > 0) bestBid = ws.bestBid;
+    if (ws.bestAsk != null && ws.bestAsk > 0) bestAsk = ws.bestAsk;
 
     if (!sideQuoteReady(pos.side, bestBid, bestAsk)) {
-      console.error(
-        `[CRITICAL] Option quotes unsynced — refusing mark fallback symbol=${pos.symbolKey} side=${pos.side} bid=${bestBid ?? "null"} ask=${bestAsk ?? "null"}`,
-      );
       return null;
     }
 
@@ -3167,8 +3158,7 @@ export async function resolveTerminalQuotesForPosition(
 
 /**
  * Public last traded price — for slippage checks only (not for unrealized PnL).
- * Options: Delta REST first (CCXT loadMarkets omits live contracts).
- * Returns `{ last: null }` on any failure.
+ * Options: WS cache only (subscribe + wait). Perps: bulk REST / CCXT.
  */
 export async function fetchDeltaTicker(
   symbol: string,
@@ -3176,18 +3166,21 @@ export async function fetchDeltaTicker(
   const ref = symbol.trim();
   if (!ref) return { last: null };
 
-  if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
-    const rest = await fetchDeltaTickerFromRestApi(ref);
-    if (rest.last != null && Number.isFinite(rest.last) && rest.last > 0) {
-      return { last: rest.last };
-    }
+  if (isOptionQuoteRef(ref)) {
+    requestOptionWsSubscribe(ref);
+    const ws = resolveOptionQuotesWsOnly(ref);
+    if (ws.markPrice != null) return { last: ws.markPrice };
     const mid =
-      rest.bid != null && rest.ask != null && rest.bid > 0 && rest.ask > 0
-        ? (rest.bid + rest.ask) / 2
-        : rest.bid ?? rest.ask;
+      ws.bestBid != null &&
+      ws.bestAsk != null &&
+      ws.bestBid > 0 &&
+      ws.bestAsk > 0
+        ? (ws.bestBid + ws.bestAsk) / 2
+        : ws.bestBid ?? ws.bestAsk;
     if (mid != null && Number.isFinite(mid) && mid > 0) {
       return { last: mid };
     }
+    return { last: null };
   }
 
   try {
