@@ -10,6 +10,7 @@ import {
   normalizeDeltaPerpProductRef,
   normalizeDeltaPerpSymbolForCcxt,
   resolveCanonicalDeltaProductId,
+  ingestDeltaPositionTerminalUplRow,
   tradeSideFromSignedSize,
   type DeltaLivePosition,
   type TradeSide,
@@ -1414,6 +1415,15 @@ function extractPositionSnapshot(raw: unknown): {
     avgEntry,
     productKey: productKey || symbol,
   };
+}
+
+/** Cache Delta Terminal UPL from `positions` WS when the server sends `upl`. */
+function ingestWsPositionTerminalUpl(
+  raw: unknown,
+  snap: { symbol: string; side: TradeSide },
+): void {
+  ingestDeltaPositionTerminalUplRow(raw, snap.symbol, snap.side);
+  registerSymbolsForLivePrices([snap.symbol]);
 }
 
 async function recordTrade(
@@ -3420,6 +3430,7 @@ class StrategyMasterSocket {
           const snap = extractPositionSnapshot(r);
           if (!snap) continue;
           if (snap.contracts <= 0) continue;
+          ingestWsPositionTerminalUpl(r, snap);
           this.tracker.writeTracked(snap, snap.contracts);
           n += 1;
         }
@@ -3490,6 +3501,7 @@ class StrategyMasterSocket {
 
         if (next > 0) {
           registerSymbolsForLivePrices([snap.symbol]);
+          ingestWsPositionTerminalUpl(r, snap);
           const decreased = prev > next;
           const increased = next > prev;
           this.tracker.writeTracked(snap, next);

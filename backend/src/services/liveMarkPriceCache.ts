@@ -1,16 +1,41 @@
 /** Delta product symbol → latest **mark** price (USD). */
 export const liveMarkPrices = new Map<string, number>();
-/** Top-of-book best bid — UPL@Bid for long options/perps. */
+/** Top-of-book best bid — UPL@Bid for long options/perps (L2 authoritative). */
 export const liveBestBids = new Map<string, number>();
-/** Top-of-book best ask (offer) — UPL@Offer for short options/perps. */
+/** Top-of-book best ask (offer) — UPL@Offer for short options/perps (L2 authoritative). */
 export const liveBestAsks = new Map<string, number>();
 
 type BtcMarkPriceListener = (price: number) => void;
+type BidAskTickListener = (
+  symbolKey: string,
+  update: { bid?: number; ask?: number },
+) => void;
+
 let btcMarkPriceListener: BtcMarkPriceListener | null = null;
+const bidAskTickListeners = new Set<BidAskTickListener>();
 
 /** Secondary BTC tick source from mark_price WS channel (feeds breakeven). */
 export function onBtcMarkPriceTick(listener: BtcMarkPriceListener): void {
   btcMarkPriceListener = listener;
+}
+
+/** Fired when L2 orderbook updates best bid and/or ask (not mark/ticker). */
+export function onLiveBidAskTick(listener: BidAskTickListener): () => void {
+  bidAskTickListeners.add(listener);
+  return () => bidAskTickListeners.delete(listener);
+}
+
+function notifyBidAskTick(
+  symbolKey: string,
+  update: { bid?: number; ask?: number },
+): void {
+  for (const fn of bidAskTickListeners) {
+    try {
+      fn(symbolKey, update);
+    } catch {
+      /* ignore listener errors */
+    }
+  }
 }
 
 function isBtcProductSymbol(raw: string): boolean {
@@ -77,11 +102,15 @@ function cacheNumericUnderAliases(
   map: Map<string, number>,
   productSymbol: string,
   price: number,
-): void {
-  if (!Number.isFinite(price) || price <= 0) return;
+): boolean {
+  if (!Number.isFinite(price) || price <= 0) return false;
+  let changed = false;
   for (const k of symbolAliasKeys(productSymbol)) {
+    const prev = map.get(k);
+    if (prev !== price) changed = true;
     map.set(k, price);
   }
+  return changed;
 }
 
 /** Store under product symbol and common perp aliases (ETHUSDT ↔ ETHUSD). */
@@ -97,13 +126,13 @@ export function cacheLiveMarkPrice(productSymbol: string, price: number): void {
   }
 }
 
-/** Cache L2 best bid / best ask from ticker or orderbook WS. */
-export function cacheLiveBestBid(productSymbol: string, bid: number): void {
-  cacheNumericUnderAliases(liveBestBids, productSymbol, bid);
+/** Cache L2 best bid / best ask from orderbook WS (authoritative for UPNL). */
+export function cacheLiveBestBid(productSymbol: string, bid: number): boolean {
+  return cacheNumericUnderAliases(liveBestBids, productSymbol, bid);
 }
 
-export function cacheLiveBestAsk(productSymbol: string, ask: number): void {
-  cacheNumericUnderAliases(liveBestAsks, productSymbol, ask);
+export function cacheLiveBestAsk(productSymbol: string, ask: number): boolean {
+  return cacheNumericUnderAliases(liveBestAsks, productSymbol, ask);
 }
 
 export function cacheLiveQuotes(
@@ -113,11 +142,19 @@ export function cacheLiveQuotes(
   if (quotes.mark != null && Number.isFinite(quotes.mark) && quotes.mark > 0) {
     cacheLiveMarkPrice(productSymbol, quotes.mark);
   }
-  if (quotes.bid != null && Number.isFinite(quotes.bid) && quotes.bid > 0) {
-    cacheLiveBestBid(productSymbol, quotes.bid);
-  }
-  if (quotes.ask != null && Number.isFinite(quotes.ask) && quotes.ask > 0) {
-    cacheLiveBestAsk(productSymbol, quotes.ask);
+  const bidChanged =
+    quotes.bid != null && Number.isFinite(quotes.bid) && quotes.bid > 0
+      ? cacheLiveBestBid(productSymbol, quotes.bid)
+      : false;
+  const askChanged =
+    quotes.ask != null && Number.isFinite(quotes.ask) && quotes.ask > 0
+      ? cacheLiveBestAsk(productSymbol, quotes.ask)
+      : false;
+  if (bidChanged || askChanged) {
+    const tick: { bid?: number; ask?: number } = {};
+    if (bidChanged && quotes.bid != null && quotes.bid > 0) tick.bid = quotes.bid;
+    if (askChanged && quotes.ask != null && quotes.ask > 0) tick.ask = quotes.ask;
+    notifyBidAskTick(productSymbol, tick);
   }
 }
 
@@ -163,35 +200,6 @@ export function deltaContractSizeFallback(symbol: string): number {
   return 1;
 }
 
-/** Delta v2/ticker nests top-of-book under `quotes.best_bid` / `quotes.best_ask`. */
-function extractTickerBestBidAsk(row: Record<string, unknown>): {
-  bid: number | null;
-  ask: number | null;
-} {
-  const quotes =
-    row.quotes != null && typeof row.quotes === "object"
-      ? (row.quotes as Record<string, unknown>)
-      : null;
-
-  const bid =
-    num(row.best_bid) ??
-    num(row.bid_price) ??
-    num(row.bid) ??
-    (quotes ? num(quotes.best_bid) ?? num(quotes.bid) : null);
-
-  const ask =
-    num(row.best_ask) ??
-    num(row.best_offer) ??
-    num(row.offer_price) ??
-    num(row.ask_price) ??
-    num(row.ask) ??
-    (quotes
-      ? num(quotes.best_ask) ?? num(quotes.ask) ?? num(quotes.offer)
-      : null);
-
-  return { bid, ask };
-}
-
 function ingestTickerRow(row: unknown): void {
   const r = asRecord(row);
   if (!r) return;
@@ -200,12 +208,11 @@ function ingestTickerRow(row: unknown): void {
   ).trim();
   if (!sym) return;
 
+  // Ticker/mark feeds display mark only — bid/ask come from L2 orderbook + REST seed.
   const mark = extractStrictMarkPrice(r);
-  const { bid, ask } = extractTickerBestBidAsk(r);
-  cacheLiveQuotes(sym, { mark, bid, ask });
+  if (mark != null && mark > 0) cacheLiveMarkPrice(sym, mark);
 }
 
-/** `ticker` / `v2/ticker` — mark_price field only (no LTP). */
 function ingestTickerMessage(msg: Record<string, unknown>): void {
   const layers: unknown[] = [msg.d, msg.data];
   const payload = asRecord(msg.payload);
@@ -254,17 +261,12 @@ function ingestL2OrderbookMessage(msg: Record<string, unknown>): void {
 }
 
 /**
- * Ingest Delta India public WS — mark + L2 best bid/ask (UPL@Bid / UPL@Offer).
+ * Ingest Delta India public WS — L2 bid/ask first-class; mark from mark/ticker only.
  */
 export function ingestLivePriceWsMessage(raw: unknown): void {
   if (!raw || typeof raw !== "object") return;
   const msg = raw as Record<string, unknown>;
   const type = String(msg.type ?? "");
-
-  if (type === "mark_price") {
-    ingestMarkPriceChannelMessage(msg);
-    return;
-  }
 
   if (type === "l2_orderbook" || type === "l2orderbook") {
     const layers: unknown[] = [msg.d, msg.data, msg];
@@ -281,6 +283,11 @@ export function ingestLivePriceWsMessage(raw: unknown): void {
         if (r) ingestL2OrderbookMessage(r);
       }
     }
+    return;
+  }
+
+  if (type === "mark_price") {
+    ingestMarkPriceChannelMessage(msg);
     return;
   }
 

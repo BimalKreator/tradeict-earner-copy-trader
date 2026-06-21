@@ -6,8 +6,7 @@ import {
 import {
   fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
-  resolveDeltaLiveUnrealizedPnl,
-  resolveTerminalQuotesForPosition,
+  hydratePositionForLivePnl,
   seedTerminalQuotesForSymbols,
   type DeltaLivePosition,
   type TradeSide,
@@ -505,25 +504,23 @@ export type AdminMasterPositionSnapshot = {
   };
 };
 
-/** Terminal UPNL (UPL@Bid / UPL@Offer) with live WS + REST quotes. */
+/** Terminal UPNL — atomic quote sync then bid/ask (or Delta `upl`) math; null if unsynced. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
   registerSymbolsForLivePrices([pos.symbolKey]);
-
-  const quotes = await resolveTerminalQuotesForPosition(pos);
-  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, quotes);
+  const { position, livePnl } = await hydratePositionForLivePnl(pos);
 
   return {
-    entryTime: pos.entryTime,
-    token: pos.symbolKey,
-    size: pos.contracts,
-    entryPrice: pos.entryPrice,
-    stopLoss: pos.stopLoss,
-    target: pos.takeProfit,
+    entryTime: position.entryTime,
+    token: position.symbolKey,
+    size: position.contracts,
+    entryPrice: position.entryPrice,
+    stopLoss: position.stopLoss,
+    target: position.takeProfit,
     livePnl,
-    markPrice: quotes.markPrice ?? pos.markPrice,
-    side: pos.side,
+    markPrice: position.markPrice,
+    side: position.side,
   };
 }
 
@@ -606,7 +603,7 @@ function deltaToRow(p: DeltaLivePosition): LiveTradeRow {
     entryPrice: p.entryPrice,
     stopLoss: p.stopLoss,
     target: p.takeProfit,
-    livePnl: p.unrealizedPnl,
+    livePnl: null,
     markPrice: p.markPrice,
     side: p.side,
   };

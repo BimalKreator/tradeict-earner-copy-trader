@@ -13,13 +13,13 @@ import {
   executeTrade,
   fetchDeltaOpenPositions,
   fetchDeltaTicker,
-  resolveDeltaLiveUnrealizedPnl,
-  resolveTerminalQuotesForPosition,
+  hydratePositionForLivePnl,
   seedTerminalQuotesForSymbols,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
+import { onLiveBidAskTick } from "./liveMarkPriceCache.js";
 import {
   latchBreakevenHedgeEntryBlock,
   markLegClosing,
@@ -85,6 +85,13 @@ const masterLegsCache = new Map<
 const breakevenExitInFlight = new Set<string>();
 let lastBtcTickPrice = 0;
 let lastBtcTickAt = 0;
+/** strategyId → open leg symbol keys (for WS bid/ask targeted auto-exit). */
+const legSymbolsByStrategy = new Map<string, Set<string>>();
+/** strategyId → last bid/ask tick ms (debounce duplicate L2 updates). */
+const lastBidAskTickByStrategy = new Map<string, number>();
+let stopBidAskTickListener: (() => void) | null = null;
+
+const AUTO_EXIT_BID_ASK_DEBOUNCE_MS = 40;
 
 /** Boot WS-driven breakeven watcher (call once from trade engine). */
 export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
@@ -94,15 +101,25 @@ export function initBreakevenExitWatcher(prisma: PrismaClient): () => void {
     void refreshBreakevenStrategyCache(prisma);
   }, BREAKEVEN_STRATEGY_CACHE_MS);
 
+  stopBidAskTickListener = onLiveBidAskTick((symbolKey, update) => {
+    void notifyLiveBidAskTickForAutoExit(prisma, symbolKey, update);
+  });
+
   return () => {
     breakevenWatchPrisma = null;
     if (breakevenCacheTimer != null) {
       clearInterval(breakevenCacheTimer);
       breakevenCacheTimer = null;
     }
+    if (stopBidAskTickListener != null) {
+      stopBidAskTickListener();
+      stopBidAskTickListener = null;
+    }
     breakevenStrategyCache = [];
     masterLegsCache.clear();
     breakevenExitInFlight.clear();
+    legSymbolsByStrategy.clear();
+    lastBidAskTickByStrategy.clear();
   };
 }
 
@@ -171,6 +188,7 @@ async function prefetchMasterLegsCache(
       totalPnlUsd: snap.totalPnlUsd,
       fetchedAt: Date.now(),
     });
+    rememberLegSymbolsForStrategy(strategyId, snap.legs);
   } catch {
     /* optional prefetch */
   }
@@ -219,10 +237,63 @@ export function notifyLiveBtcPriceTick(livePrice: number): void {
   }
 }
 
-/** Terminal UPNL (UPL@Bid / UPL@Offer) — REST-fetches option quotes when WS cache is empty. */
+/** Instant auto-exit re-check when L2 best bid/ask updates for a watched symbol. */
+async function notifyLiveBidAskTickForAutoExit(
+  prisma: PrismaClient,
+  symbolKey: string,
+  update: { bid?: number; ask?: number },
+): Promise<void> {
+  if (!update.bid && !update.ask) return;
+
+  const sym = symbolKey.trim();
+  if (!sym) return;
+
+  const symUpper = sym.toUpperCase();
+  const now = Date.now();
+
+  const strategies = await prisma.strategy.findMany({
+    where: {
+      isActive: true,
+      autoExitEnabled: true,
+      OR: [
+        { autoExitTarget: { not: null } },
+        { autoExitStopLoss: { not: null } },
+      ],
+    },
+    select: {
+      id: true,
+      title: true,
+      masterApiKey: true,
+      masterApiSecret: true,
+      autoExitEnabled: true,
+      autoExitTarget: true,
+      autoExitStopLoss: true,
+    },
+  });
+
+  for (const strat of strategies) {
+    const watched = legSymbolsByStrategy.get(strat.id);
+    if (!watched) continue;
+
+    const matches = [...watched].some((s) => {
+      const u = s.toUpperCase();
+      return u === symUpper || u.endsWith(symUpper) || symUpper.endsWith(u);
+    });
+    if (!matches) continue;
+
+    const lastTick = lastBidAskTickByStrategy.get(strat.id) ?? 0;
+    if (now - lastTick < AUTO_EXIT_BID_ASK_DEBOUNCE_MS) continue;
+    lastBidAskTickByStrategy.set(strat.id, now);
+
+    masterLegsCache.delete(strat.id);
+    void runStrategyAutoExitCheck(prisma, strat);
+  }
+}
+
+/** Terminal UPNL — atomic quote sync; null when bid/ask missing for options. */
 async function legPnlUsd(pos: DeltaLivePosition): Promise<number | null> {
-  const quotes = await resolveTerminalQuotesForPosition(pos);
-  return resolveDeltaLiveUnrealizedPnl(pos, quotes);
+  const { livePnl } = await hydratePositionForLivePnl(pos);
+  return livePnl;
 }
 
 export type MasterLegCloseTarget = {
@@ -270,6 +341,16 @@ export async function fetchMasterLegsWithTotalLivePnl(
   }
 
   return { totalPnlUsd, legs };
+}
+
+function rememberLegSymbolsForStrategy(
+  strategyId: string,
+  legs: MasterLegCloseTarget[],
+): void {
+  legSymbolsByStrategy.set(
+    strategyId,
+    new Set(legs.map((l) => l.symbolKey.trim()).filter(Boolean)),
+  );
 }
 
 export type AutoExitBreached = {
@@ -533,6 +614,8 @@ export async function runStrategyAutoExitCheck(
     );
     return;
   }
+
+  rememberLegSymbolsForStrategy(strategy.id, legs);
 
   const strategyId = strategy.id;
   const prevLegCount = lastLegCountByStrategy.get(strategyId) ?? 0;
