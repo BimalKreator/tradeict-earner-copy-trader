@@ -15,7 +15,11 @@ import {
   getDeltaTerminalUpl,
   parseDeltaPositionTerminalUpl,
 } from "./deltaTerminalUplCache.js";
-import { computeTerminalPnlUsd, roundPnlUsdHalfUp } from "./pnlMath.js";
+import {
+  BTC_OPTION_CONTRACT_VALUE,
+  computeTerminalPnlUsd,
+  roundPnlUsdHalfUp,
+} from "./pnlMath.js";
 
 export type TradeSide = "BUY" | "SELL";
 
@@ -1183,6 +1187,14 @@ function resolveOptionContractValue(
   position: Record<string, unknown>,
   productSymbol: string,
 ): number {
+  const ps = productSymbol.trim().toUpperCase();
+  if (
+    isDeltaOptionProductId(productSymbol) &&
+    (ps.startsWith("C-BTC-") || ps.startsWith("P-BTC-") || ps.includes("BTC"))
+  ) {
+    return BTC_OPTION_CONTRACT_VALUE;
+  }
+
   const cvDirect = numberOrNull(position.contract_value);
   if (cvDirect != null && cvDirect > 0) return cvDirect;
 
@@ -1193,6 +1205,23 @@ function resolveOptionContractValue(
   }
 
   return deltaContractSizeFallback(productSymbol);
+}
+
+/** Integer `size` = lots; fractional `size` = base BTC → convert to lots. */
+function optionContractLotCount(rawSize: number, contractValue: number): number {
+  const abs = Math.abs(rawSize);
+  if (abs < 1e-12) return 0;
+
+  if (Number.isInteger(abs) && abs >= 1) return abs;
+
+  if (contractValue > 0 && contractValue < 1 && abs < 1) {
+    const lots = abs / contractValue;
+    if (Number.isFinite(lots) && lots >= 1) {
+      return Math.round(lots);
+    }
+  }
+
+  return abs;
 }
 
 /**
@@ -1401,6 +1430,7 @@ export function computeDeltaTerminalUnrealizedPnl(args: {
   markPrice?: number | null;
   /** When false (options), never substitute mark if bid/ask for the side is missing. */
   allowMarkFallback?: boolean;
+  symbolKey?: string;
 }): number | null {
   const { side, entryPrice, positionLots, contractValue } = args;
   const optionLeg = args.allowMarkFallback === false;
@@ -1442,6 +1472,7 @@ export function computeDeltaTerminalUnrealizedPnl(args: {
     exitPrice,
     positionLots,
     contractValue,
+    ...(args.symbolKey ? { symbol: args.symbolKey } : {}),
   });
 }
 
@@ -1460,7 +1491,7 @@ export function positionRequiresBidAskPnl(
   return pos.contractValue > 0 && pos.contractValue < 1;
 }
 
-/** Resolve live UPNL — Delta `upl` first, else bid/ask math (null if quotes unsynced). */
+/** Resolve live UPNL — options: bid/ask math first; perps: Delta `upl` then quotes. */
 export function resolveDeltaLiveUnrealizedPnl(
   pos: Pick<
     DeltaLivePosition,
@@ -1477,26 +1508,43 @@ export function resolveDeltaLiveUnrealizedPnl(
   >,
   quoteOverrides?: DeltaTerminalQuoteOverrides | null,
 ): number | null {
+  const bestBid = quoteOverrides?.bestBid ?? pos.bestBid;
+  const bestAsk = quoteOverrides?.bestAsk ?? pos.bestAsk;
+  const optionLeg = positionRequiresBidAskPnl(pos);
+
+  const computed = computeDeltaTerminalUnrealizedPnl({
+    side: pos.side,
+    entryPrice: pos.entryPrice,
+    positionLots: pos.contracts,
+    contractValue: optionLeg
+      ? pos.symbolKey.toUpperCase().includes("BTC")
+        ? BTC_OPTION_CONTRACT_VALUE
+        : pos.contractValue
+      : pos.contractValue,
+    bestBid,
+    bestAsk,
+    markPrice: quoteOverrides?.markPrice ?? pos.markPrice,
+    allowMarkFallback: !optionLeg,
+    symbolKey: pos.symbolKey,
+  });
+
+  if (optionLeg) {
+    if (computed !== null) return computed;
+    const terminalUpl =
+      pos.terminalUpl ?? getDeltaTerminalUpl(pos.symbolKey, pos.side);
+    if (terminalUpl != null && Number.isFinite(terminalUpl)) {
+      return roundPnlUsdHalfUp(terminalUpl);
+    }
+    return null;
+  }
+
   const terminalUpl =
     pos.terminalUpl ?? getDeltaTerminalUpl(pos.symbolKey, pos.side);
   if (terminalUpl != null && Number.isFinite(terminalUpl)) {
     return roundPnlUsdHalfUp(terminalUpl);
   }
 
-  const bestBid = quoteOverrides?.bestBid ?? pos.bestBid;
-  const bestAsk = quoteOverrides?.bestAsk ?? pos.bestAsk;
-  const optionLeg = positionRequiresBidAskPnl(pos);
-
-  return computeDeltaTerminalUnrealizedPnl({
-    side: pos.side,
-    entryPrice: pos.entryPrice,
-    positionLots: pos.contracts,
-    contractValue: pos.contractValue,
-    bestBid,
-    bestAsk,
-    markPrice: quoteOverrides?.markPrice ?? pos.markPrice,
-    allowMarkFallback: !optionLeg,
-  });
+  return computed;
 }
 
 /** Atomic quote sync + PnL — bid/ask MUST be populated before calculation. */
@@ -1504,6 +1552,13 @@ export async function hydratePositionForLivePnl(
   pos: DeltaLivePosition,
 ): Promise<{ position: DeltaLivePosition; livePnl: number | null }> {
   const quotes = await resolveTerminalQuotesForPosition(pos);
+  if (quotes === null) {
+    return {
+      position: { ...pos, bestBid: null, bestAsk: null, markPrice: null },
+      livePnl: null,
+    };
+  }
+
   const bestBid =
     quotes.bestBid != null && quotes.bestBid > 0 ? quotes.bestBid : null;
   const bestAsk =
@@ -1511,11 +1566,18 @@ export async function hydratePositionForLivePnl(
   const terminalUpl =
     pos.terminalUpl ?? getDeltaTerminalUpl(pos.symbolKey, pos.side);
 
+  const contractValue = positionRequiresBidAskPnl(pos)
+    ? pos.symbolKey.toUpperCase().includes("BTC")
+      ? BTC_OPTION_CONTRACT_VALUE
+      : pos.contractValue
+    : pos.contractValue;
+
   const position: DeltaLivePosition = {
     ...pos,
     bestBid,
     bestAsk,
     markPrice: quotes.markPrice ?? pos.markPrice,
+    contractValue,
     terminalUpl,
   };
 
@@ -2534,16 +2596,16 @@ export async function fetchDeltaMarkPrice(
  * Delta India public REST ticker — CCXT omits most live option contracts.
  * GET /v2/tickers/{symbol}
  */
-/** Top-of-book from L2 orderbook — fallback when ticker omits nested `quotes`. */
-async function fetchDeltaL2BestQuotes(
-  productRef: string,
+/** Top-of-book from L2 orderbook — authoritative for option UPL@Bid/Offer. */
+async function fetchDeltaL2BestQuotesForRef(
+  ref: string,
 ): Promise<{ bid: number | null; ask: number | null }> {
-  const ref = productRef.trim();
-  if (!ref) return { bid: null, ask: null };
+  const trimmed = ref.trim();
+  if (!trimmed) return { bid: null, ask: null };
 
   try {
     const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
-      `${DELTA_INDIA_API_BASE}/v2/l2orderbook/${encodeURIComponent(ref)}`,
+      `${DELTA_INDIA_API_BASE}/v2/l2orderbook/${encodeURIComponent(trimmed)}`,
       { params: { depth: 1 }, timeout: 15_000 },
     );
     if (data?.success !== true || data.result == null || typeof data.result !== "object") {
@@ -2560,11 +2622,51 @@ async function fetchDeltaL2BestQuotes(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[exchangeService] fetchDeltaL2BestQuotes failed ref=${ref}:`,
+      `[exchangeService] fetchDeltaL2BestQuotes failed ref=${trimmed}:`,
       msg,
     );
     return { bid: null, ask: null };
   }
+}
+
+async function fetchDeltaL2BestQuotes(
+  productRef: string,
+): Promise<{ bid: number | null; ask: number | null }> {
+  const ref = productRef.trim();
+  if (!ref) return { bid: null, ask: null };
+
+  const tried = new Set<string>();
+  const tryRef = async (candidate: string): Promise<{ bid: number | null; ask: number | null } | null> => {
+    const c = candidate.trim();
+    if (!c || tried.has(c.toUpperCase())) return null;
+    tried.add(c.toUpperCase());
+    const q = await fetchDeltaL2BestQuotesForRef(c);
+    if (
+      (q.bid != null && q.bid > 0) ||
+      (q.ask != null && q.ask > 0)
+    ) {
+      return q;
+    }
+    return null;
+  };
+
+  const direct = await tryRef(ref);
+  if (direct) return direct;
+
+  for (const alias of deltaIndiaProductRefCandidates(ref)) {
+    const q = await tryRef(alias);
+    if (q) return q;
+  }
+
+  const resolved = await resolveDeltaProductNumericId(ref);
+  if (resolved) {
+    const bySymbol = await tryRef(resolved.symbol);
+    if (bySymbol) return bySymbol;
+    const byId = await tryRef(String(resolved.productId));
+    if (byId) return byId;
+  }
+
+  return { bid: null, ask: null };
 }
 
 async function fetchDeltaTickerFromRestApi(
@@ -2612,7 +2714,7 @@ async function fetchDeltaTickerFromRestApi(
 
 /**
  * Public top-of-book + mark for terminal UPNL (UPL@Bid / UPL@Offer).
- * Options: Delta REST ticker first; L2 orderbook when quotes are sparse.
+ * Options: L2 orderbook first; ticker bid/ask only when L2 is empty (never mark as bid/ask).
  */
 export async function fetchDeltaBestQuotes(
   symbol: string,
@@ -2625,26 +2727,32 @@ export async function fetchDeltaBestQuotes(
   let ask: number | null = null;
   let mark: number | null = null;
 
-  // Options: L2 orderbook is authoritative (ticker best_ask can track mark, not offer).
   if (isOptionRef) {
     const l2 = await fetchDeltaL2BestQuotes(ref);
     bid = l2.bid;
     ask = l2.ask;
-  }
 
-  const rest = await fetchDeltaTickerFromRestApi(ref);
-  bid = bid ?? rest.bid;
-  ask = ask ?? rest.ask;
-  mark =
-    rest.mark ??
-    (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
-      ? rest.last
-      : null);
+    const rest = await fetchDeltaTickerFromRestApi(ref);
+    mark =
+      rest.mark ??
+      (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
+        ? rest.last
+        : null);
+  } else {
+    const rest = await fetchDeltaTickerFromRestApi(ref);
+    bid = rest.bid;
+    ask = rest.ask;
+    mark =
+      rest.mark ??
+      (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
+        ? rest.last
+        : null);
 
-  if (!isOptionRef && (bid == null || ask == null)) {
-    const l2 = await fetchDeltaL2BestQuotes(ref);
-    bid = bid ?? l2.bid;
-    ask = ask ?? l2.ask;
+    if (bid == null || ask == null) {
+      const l2 = await fetchDeltaL2BestQuotes(ref);
+      bid = bid ?? l2.bid;
+      ask = ask ?? l2.ask;
+    }
   }
 
   if (mark == null) {
@@ -2652,7 +2760,21 @@ export async function fetchDeltaBestQuotes(
     mark = markRes.markPrice;
   }
 
-  return { bid, ask, mark };
+  const quoteData = { bid, ask, mark };
+  console.log("L2 Quote Fetch Attempt:", ref, quoteData);
+
+  if (
+    isOptionRef &&
+    (bid == null || bid <= 0) &&
+    (ask == null || ask <= 0)
+  ) {
+    console.error(
+      `[CRITICAL] Option L2/ticker returned empty bid/ask — cannot compute UPL@Bid/Offer symbol=${ref}`,
+      quoteData,
+    );
+  }
+
+  return quoteData;
 }
 
 /** REST-seed WS quote cache for every open leg (options: L2 bid/ask required for UPNL). */
@@ -2688,31 +2810,43 @@ export async function seedTerminalQuotesForSymbols(
 }
 
 /**
- * WS cache → always REST refresh for options (L2 bid/ask — never stale margined/ticker mark).
+ * WS cache → always REST refresh for options (L2 bid/ask — never mark as exit price).
+ * Returns null when option side quote is missing (UI shows "—").
  */
 export async function resolveTerminalQuotesForPosition(
   pos: Pick<
     DeltaLivePosition,
     "symbolKey" | "side" | "bestBid" | "bestAsk" | "markPrice" | "isOption" | "contractValue"
   >,
-): Promise<DeltaTerminalQuoteOverrides> {
+): Promise<DeltaTerminalQuoteOverrides | null> {
   const cached = resolveLiveQuotes(pos.symbolKey);
   let bestBid = cached.bestBid ?? pos.bestBid;
   let bestAsk = cached.bestAsk ?? pos.bestAsk;
-  let markPrice = cached.markPrice ?? pos.markPrice;
 
   const optionLeg = positionRequiresBidAskPnl(pos);
   if (optionLeg) {
     const rest = await fetchDeltaBestQuotes(pos.symbolKey);
     if (rest.bid != null && rest.bid > 0) bestBid = rest.bid;
     if (rest.ask != null && rest.ask > 0) bestAsk = rest.ask;
-    if (rest.mark != null && rest.mark > 0) markPrice = rest.mark;
+
     cacheLiveQuotes(pos.symbolKey, {
       bid: rest.bid,
       ask: rest.ask,
       mark: rest.mark,
     });
-  } else if (!sideQuoteReady(pos.side, bestBid, bestAsk)) {
+
+    if (!sideQuoteReady(pos.side, bestBid, bestAsk)) {
+      console.error(
+        `[CRITICAL] Option quotes unsynced — refusing mark fallback symbol=${pos.symbolKey} side=${pos.side} bid=${bestBid ?? "null"} ask=${bestAsk ?? "null"}`,
+      );
+      return null;
+    }
+
+    return { bestBid, bestAsk, markPrice: null };
+  }
+
+  let markPrice = cached.markPrice ?? pos.markPrice;
+  if (!sideQuoteReady(pos.side, bestBid, bestAsk)) {
     const rest = await fetchDeltaBestQuotes(pos.symbolKey);
     if (bestBid == null || bestBid <= 0) bestBid = rest.bid;
     if (bestAsk == null || bestAsk <= 0) bestAsk = rest.ask;
@@ -2944,6 +3078,10 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         ? resolveOptionContractValue(position, productSymbol)
         : deltaContractValueFromMarket(market ?? {}, position, productSymbol);
 
+      const pnlContractValue = isOption && symbolKey.toUpperCase().includes("BTC")
+        ? BTC_OPTION_CONTRACT_VALUE
+        : contractValue;
+
       const signedBtc = isOption
         ? optionSignedBaseSize(contractLots, contractValue)
         : market != null
@@ -2958,7 +3096,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
           ? Math.abs(signedBtc)
           : Math.abs(contractLots);
       let contractLotCount = isOption
-        ? Math.abs(contractLots)
+        ? optionContractLotCount(contractLots, contractValue)
         : deltaContractLotCount(contractLots, contractSize, signedBtc);
       if (contractLotCount < 1e-12) {
         contractLotCount = Math.abs(contractLots);
@@ -2976,11 +3114,12 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         side,
         entryPrice,
         positionLots: contractLotCount,
-        contractValue,
+        contractValue: pnlContractValue,
         bestBid,
         bestAsk,
         markPrice,
         allowMarkFallback: !isOption,
+        symbolKey,
       });
       const realizedPnl = parseDeltaRealizedPnl(position);
 

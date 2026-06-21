@@ -18,18 +18,13 @@ function num(v: unknown): number | null {
 
 /**
  * Parse Delta Terminal UPL from position payload.
- * Prefer `upl` (bid/ask-adjusted display) over raw `unrealized_pnl`.
+ * Only `upl` — `unrealized_pnl` is mark-scaled and must not override bid/ask math.
  */
 export function parseDeltaPositionTerminalUpl(
   row: Record<string, unknown>,
 ): number | null {
-  const candidates = [row.upl, row.unrealized_pnl, row.unrealizedPnl];
-  for (const raw of candidates) {
-    if (raw === undefined || raw === null) continue;
-    const n = num(raw);
-    if (n !== null) return n;
-  }
-  return null;
+  if (row.upl === undefined || row.upl === null) return null;
+  return num(row.upl);
 }
 
 export function cacheDeltaTerminalUpl(
