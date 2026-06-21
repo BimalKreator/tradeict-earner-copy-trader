@@ -16,7 +16,7 @@ export type FutureHedgeTrend = "UPTREND" | "DOWNTREND";
 
 const DELTA_INDIA_PUBLIC_WS = "wss://public-socket.india.delta.exchange";
 
-const TICKER_POLL_MS = Number(process.env.FUTURE_HEDGE_TICKER_POLL_MS) || 5_000;
+const TICKER_POLL_MS = Number(process.env.FUTURE_HEDGE_TICKER_POLL_MS) || 10_000;
 const OHLCV_REFRESH_MS = Number(process.env.FUTURE_HEDGE_OHLCV_REFRESH_MS) || 60_000;
 const CONFIG_REFRESH_MS = 30_000;
 const OHLCV_TIMEFRAME = process.env.FUTURE_HEDGE_OHLCV_TIMEFRAME?.trim() || "1m";

@@ -4,6 +4,11 @@ export const liveMarkPrices = new Map<string, number>();
 export const liveBestBids = new Map<string, number>();
 /** Top-of-book best ask (offer) — UPL@Offer for short options/perps (L2 authoritative). */
 export const liveBestAsks = new Map<string, number>();
+/** symbol alias → last WS/cache quote update (ms). */
+const liveQuotesUpdatedAt = new Map<string, number>();
+
+/** WS quotes younger than this skip REST L2/ticker polls. */
+export const WS_QUOTE_FRESH_MS = Number(process.env.DELTA_WS_QUOTE_FRESH_MS) || 5_000;
 
 type BtcMarkPriceListener = (price: number) => void;
 type BidAskTickListener = (
@@ -98,6 +103,13 @@ function symbolAliasKeys(productSymbol: string): string[] {
   return [...keys];
 }
 
+function touchQuoteFreshness(productSymbol: string): void {
+  const at = Date.now();
+  for (const k of symbolAliasKeys(productSymbol)) {
+    liveQuotesUpdatedAt.set(k, at);
+  }
+}
+
 function cacheNumericUnderAliases(
   map: Map<string, number>,
   productSymbol: string,
@@ -110,6 +122,7 @@ function cacheNumericUnderAliases(
     if (prev !== price) changed = true;
     map.set(k, price);
   }
+  if (changed) touchQuoteFreshness(productSymbol);
   return changed;
 }
 
@@ -191,6 +204,45 @@ export function resolveLiveQuotes(symbolKey: string): {
     bestAsk: resolveLiveBestAsk(symbolKey),
     markPrice: resolveLiveMarkPrice(symbolKey),
   };
+}
+
+function resolveQuoteUpdatedAt(symbolKey: string): number | null {
+  let latest = 0;
+  for (const k of symbolAliasKeys(symbolKey)) {
+    const at = liveQuotesUpdatedAt.get(k);
+    if (at != null && at > latest) latest = at;
+  }
+  return latest > 0 ? latest : null;
+}
+
+/** True when WS (or a recent REST seed) populated quotes within maxAgeMs. */
+export function isLiveQuotesFresh(
+  symbolKey: string,
+  maxAgeMs: number = WS_QUOTE_FRESH_MS,
+): boolean {
+  const at = resolveQuoteUpdatedAt(symbolKey);
+  if (at == null) return false;
+  return Date.now() - at < maxAgeMs;
+}
+
+/** True when bid/ask/mark are present and still within WS freshness window. */
+export function hasFreshTerminalQuotes(
+  symbolKey: string,
+  side?: "BUY" | "SELL",
+): boolean {
+  if (!isLiveQuotesFresh(symbolKey)) return false;
+  const q = resolveLiveQuotes(symbolKey);
+  if (side === "BUY") {
+    return q.bestBid != null && q.bestBid > 0;
+  }
+  if (side === "SELL") {
+    return q.bestAsk != null && q.bestAsk > 0;
+  }
+  return (
+    (q.bestBid != null && q.bestBid > 0) ||
+    (q.bestAsk != null && q.bestAsk > 0) ||
+    (q.markPrice != null && q.markPrice > 0)
+  );
 }
 
 export function deltaContractSizeFallback(symbol: string): number {

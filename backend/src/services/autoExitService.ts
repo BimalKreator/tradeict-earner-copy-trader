@@ -14,7 +14,6 @@ import {
   fetchDeltaOpenPositions,
   fetchDeltaTicker,
   hydratePositionForLivePnl,
-  seedTerminalQuotesForSymbols,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
@@ -44,7 +43,7 @@ const BREAKEVEN_SUSTAINED_TICKS = 1;
 /** In-memory breakeven strategy roster refresh interval. */
 const BREAKEVEN_STRATEGY_CACHE_MS = 10_000;
 /** Cached master legs TTL — avoids REST on every WS tick. */
-const MASTER_LEGS_CACHE_TTL_MS = 4_000;
+const MASTER_LEGS_CACHE_TTL_MS = 10_000;
 /** Pause after new master legs — margined UPNL can lag realtime overlay ~10s. */
 const POSITION_SETTLE_GRACE_MS = 12_000;
 
@@ -368,11 +367,8 @@ export async function fetchMasterLegsWithTotalLivePnl(
   apiKeyStored: string,
   apiSecretStored: string,
 ): Promise<{ totalPnlUsd: number; legs: MasterLegCloseTarget[] }> {
-  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored, {
-    skipCache: true,
-  });
+  const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
   registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
-  await seedTerminalQuotesForSymbols(positions.map((p) => p.symbolKey));
 
   const legs: MasterLegCloseTarget[] = [];
   let totalPnlUsd = 0;
@@ -709,7 +705,8 @@ export async function runStrategyAutoExitCheck(
   let totalPnlUsd: number;
   let legs: MasterLegCloseTarget[];
   try {
-    const snap = await fetchMasterLegsWithTotalLivePnl(
+    const snap = await resolveCachedMasterLegs(
+      strategy.id,
       strategy.masterApiKey,
       strategy.masterApiSecret,
     );
@@ -767,7 +764,6 @@ export async function runStrategyAutoExitCheck(
     const positions = await fetchDeltaOpenPositions(
       strategy.masterApiKey,
       strategy.masterApiSecret,
-      { skipCache: true },
     );
     const legSummary = positions
       .filter((p) => Math.abs(p.contracts) >= 1e-12)

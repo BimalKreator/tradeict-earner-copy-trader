@@ -156,7 +156,7 @@ const ROSTER_SYNC_MS = 8_000;
 /** How often to reconcile DB OPEN trades against master REST positions (safety net). */
 const SAFETY_RECONCILE_MS = 30_000;
 /** Poll master total unrealized PnL vs strategy auto-exit thresholds. */
-const AUTO_EXIT_CHECK_MS = 1_000;
+const AUTO_EXIT_CHECK_MS = 5_000;
 /** Align follower contract counts with master × multiplier (REST safety net). */
 const POSITION_QTY_RECONCILE_MS = COPY_QTY_RECONCILE_MS;
 /** REST reconciliation interval — WS hints trigger immediate poll; this is the backup. */

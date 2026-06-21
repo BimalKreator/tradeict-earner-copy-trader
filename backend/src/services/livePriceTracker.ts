@@ -2,7 +2,6 @@ import WebSocket from "ws";
 import { SubscriptionStatus, type PrismaClient } from "@prisma/client";
 import {
   fetchDeltaOpenPositions,
-  seedTerminalQuotesForSymbols,
 } from "./exchangeService.js";
 import { FUTURE_HEDGE_BTC_SYMBOL } from "./futureHedgeDataService.js";
 import {
@@ -14,7 +13,7 @@ import {
 const DELTA_INDIA_PUBLIC_WS = "wss://public-socket.india.delta.exchange";
 
 const HEARTBEAT_WATCHDOG_MS = 35_000;
-const SYMBOL_REFRESH_MS = 3_000;
+const SYMBOL_REFRESH_MS = 15_000;
 const MIN_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
 
@@ -189,8 +188,6 @@ async function refreshSymbolsFromMasterAccounts(
     select: { masterApiKey: true, masterApiSecret: true },
   });
 
-  const allSymbolKeys: string[] = [];
-
   for (const strat of strategies) {
     const key = strat.masterApiKey?.trim() ?? "";
     const secret = strat.masterApiSecret?.trim() ?? "";
@@ -198,7 +195,6 @@ async function refreshSymbolsFromMasterAccounts(
     try {
       const positions = await fetchDeltaOpenPositions(key, secret);
       for (const p of positions) {
-        allSymbolKeys.push(p.symbolKey);
         registerSymbolsForLivePrices([p.symbolKey]);
         cacheLiveQuotes(p.symbolKey, {
           mark: p.markPrice,
@@ -209,10 +205,6 @@ async function refreshSymbolsFromMasterAccounts(
     } catch {
       /* skip strategy */
     }
-  }
-
-  if (allSymbolKeys.length > 0) {
-    await seedTerminalQuotesForSymbols(allSymbolKeys);
   }
 }
 

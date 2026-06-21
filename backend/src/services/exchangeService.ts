@@ -6,8 +6,11 @@ import https from "node:https";
 import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
+import { scheduleDeltaRestRequest } from "../utils/deltaRateLimiter.js";
 import {
   cacheLiveQuotes,
+  hasFreshTerminalQuotes,
+  isLiveQuotesFresh,
   resolveLiveQuotes,
 } from "./liveMarkPriceCache.js";
 import {
@@ -52,6 +55,40 @@ const deltaAxios = axios.create({
   httpAgent: deltaHttpAgent,
   httpsAgent: deltaHttpsAgent,
 });
+
+/** All public Delta GETs — rate-limited + 429-aware. */
+async function deltaPublicGet<T>(
+  url: string,
+  config?: { params?: Record<string, unknown>; timeout?: number },
+): Promise<T> {
+  return scheduleDeltaRestRequest(async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= DELTA_429_MAX_RETRIES; attempt += 1) {
+      try {
+        const { data } = await deltaAxios.get<T>(url, config);
+        return data;
+      } catch (err) {
+        lastError = err;
+        if (isAxios429(err) && attempt < DELTA_429_MAX_RETRIES) {
+          const retryAfter = axios.isAxiosError(err)
+            ? parseRetryAfterMs(
+                (err.response?.headers ?? {}) as Record<string, unknown>,
+              )
+            : null;
+          const delay =
+            retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
+          console.warn(
+            `[delta] HTTP 429 on GET ${url} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
+          );
+          await sleepMs(delay);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError ?? new Error("Delta public GET failed after retries");
+  });
+}
 
 const DELTA_429_MAX_RETRIES = 3;
 const DELTA_429_BASE_DELAY_MS = 500;
@@ -124,20 +161,23 @@ async function deltaIndiaSignedRequest<T>(args: {
     );
 
     try {
-      const { data } = await deltaAxios.request<
-        T & { success?: boolean; error?: unknown }
-      >({
-        method: args.method,
-        url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "api-key": args.apiKey,
-          timestamp: timestampSec,
-          signature,
-        },
-        data: bodyStr.length > 0 ? bodyStr : undefined,
-        timeout: 25_000,
+      const data = await scheduleDeltaRestRequest(async () => {
+        const { data: responseData } = await deltaAxios.request<
+          T & { success?: boolean; error?: unknown }
+        >({
+          method: args.method,
+          url: `${DELTA_INDIA_API_BASE}${args.path}${queryString}`,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "api-key": args.apiKey,
+            timestamp: timestampSec,
+            signature,
+          },
+          data: bodyStr.length > 0 ? bodyStr : undefined,
+          timeout: 25_000,
+        });
+        return responseData;
       });
 
       const row = data as { success?: boolean; error?: unknown };
@@ -1431,8 +1471,8 @@ export type FetchMarginedSnapshotOptions = {
   skipCache?: boolean;
 };
 
-/** One margined snapshot per account at a time; 4s TTL avoids duplicate Delta REST under load. */
-const MARGINED_SNAPSHOT_TTL_MS = 4_000;
+/** One margined snapshot per account at a time; 10s TTL avoids duplicate Delta REST under load. */
+const MARGINED_SNAPSHOT_TTL_MS = 10_000;
 const marginedSnapshotCache = new Map<
   string,
   { at: number; snapshot: DeltaMarginedPositionSnapshot }
@@ -1985,7 +2025,7 @@ async function fetchDeltaProductFromRestApi(
   if (!ref) return null;
 
   try {
-    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
+    const data = await deltaPublicGet<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/products/${encodeURIComponent(ref)}`,
       { timeout: 20_000 },
     );
@@ -2672,17 +2712,143 @@ export async function fetchDeltaMarkPrice(
 
 /**
  * Delta India public REST ticker — CCXT omits most live option contracts.
- * GET /v2/tickers/{symbol}
+ * Prefer bulk GET /v2/tickers (cached) over per-symbol GET /v2/tickers/{symbol}.
  */
-/** Top-of-book from L2 orderbook — authoritative for option UPL@Bid/Offer. */
+type DeltaTickerQuote = {
+  last: number | null;
+  mark: number | null;
+  bid: number | null;
+  ask: number | null;
+};
+
+const ALL_TICKERS_TTL_MS = 3_000;
+let allTickersCache: {
+  at: number;
+  byRef: Map<string, DeltaTickerQuote>;
+} | null = null;
+let allTickersInflight: Promise<Map<string, DeltaTickerQuote>> | null = null;
+
+function parseDeltaTickerRow(row: Record<string, unknown>): DeltaTickerQuote {
+  const last =
+    numberOrNull(row.close) ??
+    numberOrNull(row.mark_price) ??
+    numberOrNull(row.spot_price);
+  const mark = numberOrNull(row.mark_price) ?? last;
+  const { bid, offer: ask } = extractDeltaQuotesBidOffer(row);
+  return { last, mark, bid, ask };
+}
+
+function indexTickerRow(
+  map: Map<string, DeltaTickerQuote>,
+  row: Record<string, unknown>,
+): void {
+  const sym = String(
+    row.symbol ?? row.product_symbol ?? row.s ?? "",
+  ).trim();
+  const id = String(row.product_id ?? row.id ?? "").trim();
+  const parsed = parseDeltaTickerRow(row);
+
+  if (sym) {
+    map.set(sym, parsed);
+    map.set(sym.toUpperCase(), parsed);
+  }
+  if (id) {
+    map.set(id, parsed);
+  }
+}
+
+async function fetchAllDeltaTickersMap(): Promise<Map<string, DeltaTickerQuote>> {
+  if (
+    allTickersCache &&
+    Date.now() - allTickersCache.at < ALL_TICKERS_TTL_MS
+  ) {
+    return allTickersCache.byRef;
+  }
+
+  if (allTickersInflight) return allTickersInflight;
+
+  allTickersInflight = (async () => {
+    try {
+      const data = await deltaPublicGet<{
+        success?: boolean;
+        result?: unknown;
+      }>(`${DELTA_INDIA_API_BASE}/v2/tickers`, { timeout: 25_000 });
+
+      const map = new Map<string, DeltaTickerQuote>();
+      if (data?.success === true && Array.isArray(data.result)) {
+        for (const row of data.result) {
+          if (row && typeof row === "object" && !Array.isArray(row)) {
+            indexTickerRow(map, row as Record<string, unknown>);
+          }
+        }
+      }
+      allTickersCache = { at: Date.now(), byRef: map };
+      return map;
+    } finally {
+      allTickersInflight = null;
+    }
+  })();
+
+  return allTickersInflight;
+}
+
+async function lookupDeltaTickerFromBulk(
+  productRef: string,
+): Promise<DeltaTickerQuote | null> {
+  const ref = productRef.trim();
+  if (!ref) return null;
+
+  const map = await fetchAllDeltaTickersMap();
+  const tried = new Set<string>();
+
+  const tryKey = (candidate: string): DeltaTickerQuote | null => {
+    const c = candidate.trim();
+    if (!c) return null;
+    const upper = c.toUpperCase();
+    if (tried.has(upper)) return null;
+    tried.add(upper);
+    return map.get(c) ?? map.get(upper) ?? null;
+  };
+
+  const direct = tryKey(ref);
+  if (direct) return direct;
+
+  for (const alias of deltaIndiaProductRefCandidates(ref)) {
+    const hit = tryKey(alias);
+    if (hit) return hit;
+  }
+
+  const resolved = await resolveDeltaProductNumericId(ref);
+  if (resolved) {
+    const bySymbol = tryKey(resolved.symbol);
+    if (bySymbol) return bySymbol;
+    const byId = tryKey(String(resolved.productId));
+    if (byId) return byId;
+  }
+
+  return null;
+}
+
+/** Top-of-book from L2 orderbook — REST fallback when WS cache is stale. */
 async function fetchDeltaL2BestQuotesForRef(
   ref: string,
 ): Promise<{ bid: number | null; ask: number | null }> {
   const trimmed = ref.trim();
   if (!trimmed) return { bid: null, ask: null };
 
+  const ws = resolveLiveQuotes(trimmed);
+  if (isLiveQuotesFresh(trimmed)) {
+    const bid =
+      ws.bestBid != null && ws.bestBid > 0 ? ws.bestBid : null;
+    const ask =
+      ws.bestAsk != null && ws.bestAsk > 0 ? ws.bestAsk : null;
+    if (bid != null || ask != null) {
+      return { bid, ask };
+    }
+  }
+
   try {
-    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
+    const data = await deltaPublicGet<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/l2orderbook/${encodeURIComponent(trimmed)}`,
       { params: { depth: 1 }, timeout: 15_000 },
     );
@@ -2696,6 +2862,9 @@ async function fetchDeltaL2BestQuotesForRef(
     };
     const bid = book.buy?.[0] ? numberOrNull(book.buy[0].price) : null;
     const ask = book.sell?.[0] ? numberOrNull(book.sell[0].price) : null;
+    if (bid != null || ask != null) {
+      cacheLiveQuotes(trimmed, { bid, ask });
+    }
     return { bid, ask };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2749,17 +2918,15 @@ async function fetchDeltaL2BestQuotes(
 
 async function fetchDeltaTickerFromRestApi(
   productRef: string,
-): Promise<{
-  last: number | null;
-  mark: number | null;
-  bid: number | null;
-  ask: number | null;
-}> {
+): Promise<DeltaTickerQuote> {
   const ref = productRef.trim();
   if (!ref) return { last: null, mark: null, bid: null, ask: null };
 
+  const bulk = await lookupDeltaTickerFromBulk(ref);
+  if (bulk) return bulk;
+
   try {
-    const { data } = await deltaAxios.get<{ success?: boolean; result?: unknown }>(
+    const data = await deltaPublicGet<{ success?: boolean; result?: unknown }>(
       `${DELTA_INDIA_API_BASE}/v2/tickers/${encodeURIComponent(ref)}`,
       { timeout: 20_000 },
     );
@@ -2772,14 +2939,7 @@ async function fetchDeltaTickerFromRestApi(
       return { last: null, mark: null, bid: null, ask: null };
     }
 
-    const r = row as Record<string, unknown>;
-    const last =
-      numberOrNull(r.close) ??
-      numberOrNull(r.mark_price) ??
-      numberOrNull(r.spot_price);
-    const mark = numberOrNull(r.mark_price) ?? last;
-    const { bid, offer: ask } = extractDeltaQuotesBidOffer(r);
-    return { last, mark, bid, ask };
+    return parseDeltaTickerRow(row as Record<string, unknown>);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
@@ -2800,37 +2960,41 @@ export async function fetchDeltaBestQuotes(
   const ref = symbol.trim();
   if (!ref) return { bid: null, ask: null, mark: null };
 
+  const ws = resolveLiveQuotes(ref);
+  if (isLiveQuotesFresh(ref)) {
+    const bid =
+      ws.bestBid != null && ws.bestBid > 0 ? ws.bestBid : null;
+    const ask =
+      ws.bestAsk != null && ws.bestAsk > 0 ? ws.bestAsk : null;
+    const mark =
+      ws.markPrice != null && ws.markPrice > 0 ? ws.markPrice : null;
+    if (bid != null || ask != null || mark != null) {
+      return { bid, ask, mark };
+    }
+  }
+
   const isOptionRef = isDeltaOptionProductId(ref) || /^\d+$/.test(ref);
   let bid: number | null = null;
   let ask: number | null = null;
   let mark: number | null = null;
 
-  if (isOptionRef) {
+  const rest = await fetchDeltaTickerFromRestApi(ref);
+  bid = rest.bid;
+  ask = rest.ask;
+  mark =
+    rest.mark ??
+    (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
+      ? rest.last
+      : null);
+
+  if (isOptionRef && (bid == null || ask == null)) {
     const l2 = await fetchDeltaL2BestQuotes(ref);
-    bid = l2.bid;
-    ask = l2.ask;
-
-    const rest = await fetchDeltaTickerFromRestApi(ref);
-    mark =
-      rest.mark ??
-      (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
-        ? rest.last
-        : null);
-  } else {
-    const rest = await fetchDeltaTickerFromRestApi(ref);
-    bid = rest.bid;
-    ask = rest.ask;
-    mark =
-      rest.mark ??
-      (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
-        ? rest.last
-        : null);
-
-    if (bid == null || ask == null) {
-      const l2 = await fetchDeltaL2BestQuotes(ref);
-      bid = bid ?? l2.bid;
-      ask = ask ?? l2.ask;
-    }
+    bid = bid ?? l2.bid;
+    ask = ask ?? l2.ask;
+  } else if (!isOptionRef && (bid == null || ask == null)) {
+    const l2 = await fetchDeltaL2BestQuotes(ref);
+    bid = bid ?? l2.bid;
+    ask = ask ?? l2.ask;
   }
 
   if (mark == null) {
@@ -2838,8 +3002,11 @@ export async function fetchDeltaBestQuotes(
     mark = markRes.markPrice;
   }
 
+  if (bid != null || ask != null || mark != null) {
+    cacheLiveQuotes(ref, { bid, ask, mark });
+  }
+
   const quoteData = { bid, ask, mark };
-  console.log("L2 Quote Fetch Attempt:", ref, quoteData);
 
   if (
     isOptionRef &&
@@ -2855,7 +3022,7 @@ export async function fetchDeltaBestQuotes(
   return quoteData;
 }
 
-/** REST-seed WS quote cache for every open leg (options: L2 bid/ask required for UPNL). */
+/** REST-seed WS quote cache for open legs missing fresh WS bid/ask (one bulk ticker fetch). */
 export async function seedTerminalQuotesForSymbols(
   symbols: Iterable<string>,
 ): Promise<void> {
@@ -2868,23 +3035,44 @@ export async function seedTerminalQuotesForSymbols(
   ];
   if (unique.length === 0) return;
 
-  await Promise.all(
-    unique.map(async (sym) => {
-      try {
-        const rest = await fetchDeltaBestQuotes(sym);
+  const needsSeed = unique.filter((sym) => !hasFreshTerminalQuotes(sym));
+  if (needsSeed.length === 0) return;
+
+  try {
+    await fetchAllDeltaTickersMap();
+  } catch (err) {
+    console.warn(
+      `[exchangeService] bulk ticker seed failed:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  for (const sym of needsSeed) {
+    try {
+      const rest = await lookupDeltaTickerFromBulk(sym);
+      if (rest) {
         cacheLiveQuotes(sym, {
           bid: rest.bid,
           ask: rest.ask,
           mark: rest.mark,
         });
-      } catch (err) {
-        console.warn(
-          `[exchangeService] seedTerminalQuotes failed symbol=${sym}:`,
-          err instanceof Error ? err.message : err,
-        );
       }
-    }),
-  );
+
+      const isOptionRef = isDeltaOptionProductId(sym) || /^\d+$/.test(sym);
+      if (isOptionRef && !hasFreshTerminalQuotes(sym)) {
+        const l2 = await fetchDeltaL2BestQuotes(sym);
+        cacheLiveQuotes(sym, {
+          bid: l2.bid,
+          ask: l2.ask,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `[exchangeService] seedTerminalQuotes failed symbol=${sym}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 }
 
 /**
@@ -2903,6 +3091,13 @@ export async function resolveTerminalQuotesForPosition(
 
   const optionLeg = positionRequiresBidAskPnl(pos);
   if (optionLeg) {
+    if (
+      isLiveQuotesFresh(pos.symbolKey) &&
+      sideQuoteReady(pos.side, bestBid, bestAsk)
+    ) {
+      return { bestBid, bestAsk, markPrice: null };
+    }
+
     const rest = await fetchDeltaBestQuotes(pos.symbolKey);
     if (rest.bid != null && rest.bid > 0) bestBid = rest.bid;
     if (rest.ask != null && rest.ask > 0) bestAsk = rest.ask;
@@ -2924,6 +3119,13 @@ export async function resolveTerminalQuotesForPosition(
   }
 
   let markPrice = cached.markPrice ?? pos.markPrice;
+  if (
+    isLiveQuotesFresh(pos.symbolKey) &&
+    sideQuoteReady(pos.side, bestBid, bestAsk)
+  ) {
+    return { bestBid, bestAsk, markPrice };
+  }
+
   if (!sideQuoteReady(pos.side, bestBid, bestAsk)) {
     const rest = await fetchDeltaBestQuotes(pos.symbolKey);
     if (bestBid == null || bestBid <= 0) bestBid = rest.bid;
@@ -3672,7 +3874,7 @@ export async function listBtcOptionProducts(
   const contractTypes =
     optionType === "call" ? "call_options" : "put_options";
   try {
-    const { data } = await deltaAxios.get<{ result?: DeltaProductRow[] }>(
+    const data = await deltaPublicGet<{ result?: DeltaProductRow[] }>(
       `${DELTA_INDIA_API_BASE}/v2/products`,
       {
         params: {
