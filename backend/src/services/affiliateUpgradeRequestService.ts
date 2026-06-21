@@ -10,6 +10,11 @@ import {
   upgradeUserToSalesMember,
   type SalesMemberRole,
 } from "./affiliateMemberService.js";
+import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+  teamMemberRoleLabel,
+} from "./emailService.js";
 
 export type NominationUplineOption = {
   id: string;
@@ -313,7 +318,7 @@ export async function createMemberUpgradeRequest(
 
     const target = await prisma.user.findFirst({
       where: { email: { equals: email, mode: "insensitive" } },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, name: true, role: true },
     });
     if (!target) {
       return { ok: false, status: 404, error: "User not found" };
@@ -364,6 +369,23 @@ export async function createMemberUpgradeRequest(
         status: MemberUpgradeRequestStatus.PENDING,
       },
       select: { id: true },
+    });
+
+    const requesterProfile = await prisma.user.findUnique({
+      where: { id: requesterId },
+      select: { name: true, email: true },
+    });
+    const nominatedRoleLabel =
+      roleRaw === NominatedSalesRole.MANAGER ? "Team Manager" : "Team Executive";
+    const nominatorName = requesterProfile
+      ? resolveEmailRecipientName(requesterProfile.name, requesterProfile.email)
+      : undefined;
+
+    sendTemplateEmailAsync(email, "nomination_request", {
+      userName: resolveEmailRecipientName(target.name, target.email),
+      phase: "received",
+      requestedRole: nominatedRoleLabel,
+      ...(nominatorName ? { nominatedBy: nominatorName } : {}),
     });
 
     return { ok: true, data: { id: row.id } };
@@ -483,7 +505,7 @@ export async function approveMemberUpgradeRequest(
 
   const target = await prisma.user.findFirst({
     where: { email: { equals: row.targetUserEmail, mode: "insensitive" } },
-    select: { id: true, role: true },
+    select: { id: true, role: true, email: true, name: true },
   });
   if (!target) {
     return {
@@ -519,6 +541,13 @@ export async function approveMemberUpgradeRequest(
   await prisma.memberUpgradeRequest.update({
     where: { id: requestId },
     data: { status: MemberUpgradeRequestStatus.APPROVED },
+  });
+
+  const nominatedRoleLabel = teamMemberRoleLabel(newRole as SalesMemberRole);
+  sendTemplateEmailAsync(target.email, "nomination_request", {
+    userName: resolveEmailRecipientName(target.name, target.email),
+    phase: "approved",
+    requestedRole: nominatedRoleLabel,
   });
 
   return {

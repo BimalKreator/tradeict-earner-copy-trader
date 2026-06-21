@@ -12,6 +12,10 @@ import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
 import { logUserActivity } from "../services/userActivityService.js";
 import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+} from "../services/emailService.js";
+import {
   distributeRevenueShareCommissions,
   triggerAffiliateCommissionDistribution,
   voidPendingEarnedCommissionsForSourceUser,
@@ -345,7 +349,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
 
       const strategy = await prisma.strategy.findUnique({
         where: { id: strategyId },
-        select: STRATEGY_SELECT_SUBSCRIBE_GATE,
+        select: { ...STRATEGY_SELECT_SUBSCRIBE_GATE, title: true },
       });
       if (!strategy) {
         res.status(404).json({ error: "Strategy not found" });
@@ -405,6 +409,17 @@ export function createSubscriptionController(prisma: PrismaClient) {
         kind: "SUBSCRIPTION_CREATED",
         message: `Added strategy to My Strategies (inactive)`,
       });
+
+      const subscriber = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, name: true },
+      });
+      if (subscriber?.email) {
+        sendTemplateEmailAsync(subscriber.email, "member_registration", {
+          userName: resolveEmailRecipientName(subscriber.name, subscriber.email),
+          strategyName: strategy.title,
+        });
+      }
 
       res.status(201).json(subscription);
     } catch (err) {
@@ -630,6 +645,18 @@ export function createSubscriptionController(prisma: PrismaClient) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[subscription] deploy late-join failed strategyId=${strategyId} userId=${userId}:`, msg);
           });
+      }
+
+      const subscriber = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, name: true },
+      });
+      if (subscriber?.email) {
+        sendTemplateEmailAsync(subscriber.email, "approval_notification", {
+          userName: resolveEmailRecipientName(subscriber.name, subscriber.email),
+          approvalType: "subscription",
+          strategyName: updated.strategy.title,
+        });
       }
 
       res.json({ subscription: updated });

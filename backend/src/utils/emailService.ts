@@ -36,7 +36,7 @@ export function createMailTransport(): nodemailer.Transporter {
   });
 }
 
-function getFromAddress(): string {
+export function getFromAddress(): string {
   const from = process.env.EMAIL_FROM?.trim();
   if (from) return from;
   const user = process.env.SMTP_USER?.trim();

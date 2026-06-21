@@ -23,6 +23,10 @@ import {
 } from "../services/paymentFeeService.js";
 import { getPgFeePercent, getUsdInrRate } from "../services/settingsService.js";
 import { sendPaymentReceiptEmails } from "../utils/emailService.js";
+import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+} from "../services/emailService.js";
 import { triggerMarkCommissionsAsPayable } from "../services/affiliateCommissionService.js";
 
 const DEFAULT_CURRENCY = "INR";
@@ -444,6 +448,12 @@ export function createPaymentController(prisma: PrismaClient) {
             userId,
             kind: "SUBSCRIPTION_CREATED",
             message: `Subscribed to strategy after payment (${notes.strategyTitle ?? sid})`,
+          });
+
+          const strategyTitle = notes.strategyTitle?.trim();
+          sendTemplateEmailAsync(user.email, "member_registration", {
+            userName: resolveEmailRecipientName(user.name, user.email),
+            ...(strategyTitle ? { strategyName: strategyTitle } : {}),
           });
         }
 

@@ -9,6 +9,10 @@ import {
 } from "../services/settingsService.js";
 import { sendOtpEmail } from "../utils/emailService.js";
 import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+} from "../services/emailService.js";
+import {
   clearAuthCookie,
   setAuthCookie,
   signAuthToken,
@@ -258,6 +262,10 @@ export function createAuthController(prisma: PrismaClient) {
       }
 
       const token = issueAuthSession(res, user, secret);
+
+      sendTemplateEmailAsync(user.email, "welcome", {
+        userName: resolveEmailRecipientName(user.name, user.email),
+      });
 
       res.status(200).json({ token });
     } catch (err) {

@@ -85,6 +85,10 @@ import {
   rejectMemberUpgradeRequest,
 } from "../services/affiliateUpgradeRequestService.js";
 import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+} from "../services/emailService.js";
+import {
   listReferralRequests,
   updateReferralRequestStatus,
 } from "../services/referralRequestService.js";
@@ -1032,6 +1036,17 @@ export function createAdminController(prisma: PrismaClient) {
           createdAt: true,
         },
       });
+
+      if (
+        data.status === UserStatus.ACTIVE &&
+        existing.status === UserStatus.SUSPENDED &&
+        user.email
+      ) {
+        sendTemplateEmailAsync(user.email, "approval_notification", {
+          userName: resolveEmailRecipientName(user.name, user.email),
+          approvalType: "account",
+        });
+      }
 
       const { firstName, lastName } = splitUserName(user.name);
       res.json({
@@ -3112,7 +3127,9 @@ export function createAdminController(prisma: PrismaClient) {
         where: { userId_strategyId: { userId, strategyId } },
         select: {
           id: true,
-          strategy: { select: { syncActiveTrades: true } },
+          isActive: true,
+          status: true,
+          strategy: { select: { syncActiveTrades: true, title: true } },
         },
       });
       if (!existing) {
@@ -3149,6 +3166,21 @@ export function createAdminController(prisma: PrismaClient) {
               msg,
             );
           });
+      }
+
+      if (
+        reEnableCopy &&
+        (!existing.isActive || existing.status !== SubscriptionStatus.ACTIVE) &&
+        updated.user.email
+      ) {
+        sendTemplateEmailAsync(updated.user.email, "approval_notification", {
+          userName: resolveEmailRecipientName(
+            updated.user.name,
+            updated.user.email,
+          ),
+          approvalType: "subscription",
+          strategyName: existing.strategy.title,
+        });
       }
 
       res.json({
