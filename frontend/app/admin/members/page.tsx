@@ -12,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AdminEmailOptions } from "@/components/admin/AdminEmailOptions";
+import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -199,6 +199,12 @@ export default function AdminMembersPage() {
   const [uplineParentId, setUplineParentId] = useState("");
   const [uplineSubmitting, setUplineSubmitting] = useState(false);
   const [uplineFormError, setUplineFormError] = useState<string | null>(null);
+
+  const { renderEmailOptions, emailModal } = useAdminEmailActions({
+    apiBase,
+    authHeaders,
+    onToast: setToast,
+  });
 
   const loadMembers = useCallback(async () => {
     setError(null);
@@ -619,17 +625,9 @@ export default function AdminMembersPage() {
                     <td className="px-4 py-3 font-mono text-xs text-primary/90">
                       {m.referralCode ?? "—"}
                     </td>
-                    <td className="px-4 py-3 min-w-[240px]">
-                      <AdminEmailOptions
-                        apiBase={apiBase}
-                        authHeaders={authHeaders}
-                        recipient={{
-                          id: m.id,
-                          email: m.email,
-                          name: m.name,
-                        }}
-                        onToast={setToast}
-                      >
+                    <td className="relative overflow-visible px-4 py-3 min-w-[240px]">
+                      {renderEmailOptions(
+                        { id: m.id, email: m.email, name: m.name },
                         <button
                           type="button"
                           onClick={() => openUplineModal(m)}
@@ -638,8 +636,8 @@ export default function AdminMembersPage() {
                         >
                           <Pencil className="h-3.5 w-3.5" aria-hidden />
                           Change upline
-                        </button>
-                      </AdminEmailOptions>
+                        </button>,
+                      )}
                     </td>
                   </tr>
                 ))
@@ -1030,6 +1028,8 @@ export default function AdminMembersPage() {
           </div>
         </div>
       ) : null}
+
+      {emailModal}
     </div>
   );
 }

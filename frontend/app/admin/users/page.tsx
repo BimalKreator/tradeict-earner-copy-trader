@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AdminEmailOptions } from "@/components/admin/AdminEmailOptions";
+import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -66,6 +66,12 @@ export default function AdminUsersPage() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("USER");
   const [status, setStatus] = useState("ACTIVE");
+
+  const { renderEmailOptions, emailModal } = useAdminEmailActions({
+    apiBase,
+    authHeaders,
+    onToast: setToast,
+  });
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -275,24 +281,16 @@ export default function AdminUsersPage() {
                     >
                       {fmtUsd(u.totalPnlToDate)}
                     </td>
-                    <td className="px-4 py-3 min-w-[280px]">
-                      <AdminEmailOptions
-                        apiBase={apiBase}
-                        authHeaders={authHeaders}
-                        recipient={{
-                          id: u.id,
-                          email: u.email,
-                          name: u.name,
-                        }}
-                        onToast={setToast}
-                      >
+                    <td className="relative overflow-visible px-4 py-3 min-w-[280px]">
+                      {renderEmailOptions(
+                        { id: u.id, email: u.email, name: u.name },
                         <Link
                           href={`/admin/users/${u.id}`}
                           className="inline-flex rounded-md border border-primary/40 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/25"
                         >
                           View Details
-                        </Link>
-                      </AdminEmailOptions>
+                        </Link>,
+                      )}
                     </td>
                   </tr>
                 ))
@@ -389,6 +387,8 @@ export default function AdminUsersPage() {
           </div>
         </div>
       )}
+
+      {emailModal}
     </div>
   );
 }
