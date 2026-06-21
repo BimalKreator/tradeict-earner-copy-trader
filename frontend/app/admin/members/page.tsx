@@ -4,9 +4,10 @@ import {
   Check,
   ClipboardList,
   Loader2,
-  Pencil,
+  Mail,
   RefreshCw,
   UserPlus,
+  Users,
   UsersRound,
   X,
   XCircle,
@@ -200,7 +201,7 @@ export default function AdminMembersPage() {
   const [uplineSubmitting, setUplineSubmitting] = useState(false);
   const [uplineFormError, setUplineFormError] = useState<string | null>(null);
 
-  const { renderEmailOptions, emailModal, openDropdownId } = useAdminEmailActions({
+  const { openEmailManager, emailManagerModal } = useAdminEmailActions({
     apiBase,
     authHeaders,
     onToast: setToast,
@@ -559,8 +560,8 @@ export default function AdminMembersPage() {
             {members.length} member{members.length === 1 ? "" : "s"}
           </span>
         </div>
-        <div className="scroll-table overflow-x-auto pb-32">
-          <table className="w-full min-w-[1100px] pb-32 text-left text-sm">
+        <div className="scroll-table overflow-x-auto">
+          <table className="w-full min-w-[1100px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.02]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Name</th>
@@ -591,9 +592,7 @@ export default function AdminMembersPage() {
                 members.map((m) => (
                   <tr
                     key={m.id}
-                    className={`border-b border-white/[0.06] hover:bg-white/[0.02] ${
-                      openDropdownId === m.id ? "relative z-[100]" : ""
-                    }`}
+                    className="border-b border-white/[0.06] hover:bg-white/[0.02]"
                   >
                     <td className="px-4 py-3 text-white/90">
                       {m.name?.trim() || "—"}
@@ -627,19 +626,33 @@ export default function AdminMembersPage() {
                     <td className="px-4 py-3 font-mono text-xs text-primary/90">
                       {m.referralCode ?? "—"}
                     </td>
-                    <td className="relative overflow-visible px-4 py-3 min-w-[240px]">
-                      {renderEmailOptions(
-                        { id: m.id, email: m.email, name: m.name },
+                    <td className="px-4 py-3">
+                      <div className="flex flex-row items-center justify-end gap-2">
                         <button
                           type="button"
                           onClick={() => openUplineModal(m)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-white/80 transition hover:bg-white/10"
-                          title="Change upline"
+                          title="Change Upline"
+                          aria-label="Change Upline"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-white/5 text-white/75 transition hover:bg-white/10 hover:text-white"
                         >
-                          <Pencil className="h-3.5 w-3.5" aria-hidden />
-                          Change upline
-                        </button>,
-                      )}
+                          <Users className="h-4 w-4" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openEmailManager({
+                              id: m.id,
+                              email: m.email,
+                              name: m.name,
+                            })
+                          }
+                          title="Email Options"
+                          aria-label="Email Options"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-100 transition hover:bg-sky-500/20"
+                        >
+                          <Mail className="h-4 w-4" aria-hidden />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1031,7 +1044,7 @@ export default function AdminMembersPage() {
         </div>
       ) : null}
 
-      {emailModal}
+      {emailManagerModal}
     </div>
   );
 }

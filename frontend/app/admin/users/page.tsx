@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Eye, Mail } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
 
@@ -67,7 +68,7 @@ export default function AdminUsersPage() {
   const [role, setRole] = useState("USER");
   const [status, setStatus] = useState("ACTIVE");
 
-  const { renderEmailOptions, emailModal, openDropdownId } = useAdminEmailActions({
+  const { openEmailManager, emailManagerModal } = useAdminEmailActions({
     apiBase,
     authHeaders,
     onToast: setToast,
@@ -207,8 +208,8 @@ export default function AdminUsersPage() {
       )}
 
       <div className="glass-card border border-glassBorder">
-        <div className="scroll-table overflow-x-auto pb-32">
-          <table className="w-full min-w-[1200px] pb-32 text-left text-sm">
+        <div className="scroll-table overflow-x-auto">
+          <table className="w-full min-w-[1200px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">User Name</th>
@@ -239,9 +240,7 @@ export default function AdminUsersPage() {
                 users.map((u) => (
                   <tr
                     key={u.id}
-                    className={`border-b border-white/[0.06] hover:bg-white/[0.02] ${
-                      openDropdownId === u.id ? "relative z-[100]" : ""
-                    }`}
+                    className="border-b border-white/[0.06] hover:bg-white/[0.02]"
                   >
                     <td className="px-4 py-3 text-white/90">
                       {u.name?.trim() || "—"}
@@ -283,16 +282,32 @@ export default function AdminUsersPage() {
                     >
                       {fmtUsd(u.totalPnlToDate)}
                     </td>
-                    <td className="relative overflow-visible px-4 py-3 min-w-[280px]">
-                      {renderEmailOptions(
-                        { id: u.id, email: u.email, name: u.name },
+                    <td className="px-4 py-3">
+                      <div className="flex flex-row items-center justify-end gap-2">
                         <Link
                           href={`/admin/users/${u.id}`}
-                          className="inline-flex rounded-md border border-primary/40 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/25"
+                          title="View Details"
+                          aria-label="View Details"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/40 bg-primary/15 text-primary transition hover:bg-primary/25"
                         >
-                          View Details
-                        </Link>,
-                      )}
+                          <Eye className="h-4 w-4" aria-hidden />
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openEmailManager({
+                              id: u.id,
+                              email: u.email,
+                              name: u.name,
+                            })
+                          }
+                          title="Email Options"
+                          aria-label="Email Options"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-100 transition hover:bg-sky-500/20"
+                        >
+                          <Mail className="h-4 w-4" aria-hidden />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -390,7 +405,7 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {emailModal}
+      {emailManagerModal}
     </div>
   );
 }
