@@ -200,7 +200,7 @@ export default function AdminMembersPage() {
   const [uplineSubmitting, setUplineSubmitting] = useState(false);
   const [uplineFormError, setUplineFormError] = useState<string | null>(null);
 
-  const { renderEmailOptions, emailModal } = useAdminEmailActions({
+  const { renderEmailOptions, emailModal, openDropdownId } = useAdminEmailActions({
     apiBase,
     authHeaders,
     onToast: setToast,
@@ -559,8 +559,8 @@ export default function AdminMembersPage() {
             {members.length} member{members.length === 1 ? "" : "s"}
           </span>
         </div>
-        <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1100px] text-left text-sm">
+        <div className="scroll-table overflow-x-auto pb-32">
+          <table className="w-full min-w-[1100px] pb-32 text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.02]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Name</th>
@@ -591,7 +591,9 @@ export default function AdminMembersPage() {
                 members.map((m) => (
                   <tr
                     key={m.id}
-                    className="border-b border-white/[0.06] hover:bg-white/[0.02]"
+                    className={`border-b border-white/[0.06] hover:bg-white/[0.02] ${
+                      openDropdownId === m.id ? "relative z-[100]" : ""
+                    }`}
                   >
                     <td className="px-4 py-3 text-white/90">
                       {m.name?.trim() || "—"}

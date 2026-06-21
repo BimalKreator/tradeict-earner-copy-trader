@@ -67,7 +67,7 @@ export default function AdminUsersPage() {
   const [role, setRole] = useState("USER");
   const [status, setStatus] = useState("ACTIVE");
 
-  const { renderEmailOptions, emailModal } = useAdminEmailActions({
+  const { renderEmailOptions, emailModal, openDropdownId } = useAdminEmailActions({
     apiBase,
     authHeaders,
     onToast: setToast,
@@ -207,8 +207,8 @@ export default function AdminUsersPage() {
       )}
 
       <div className="glass-card border border-glassBorder">
-        <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1200px] text-left text-sm">
+        <div className="scroll-table overflow-x-auto pb-32">
+          <table className="w-full min-w-[1200px] pb-32 text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">User Name</th>
@@ -239,7 +239,9 @@ export default function AdminUsersPage() {
                 users.map((u) => (
                   <tr
                     key={u.id}
-                    className="border-b border-white/[0.06] hover:bg-white/[0.02]"
+                    className={`border-b border-white/[0.06] hover:bg-white/[0.02] ${
+                      openDropdownId === u.id ? "relative z-[100]" : ""
+                    }`}
                   >
                     <td className="px-4 py-3 text-white/90">
                       {u.name?.trim() || "—"}
