@@ -8,6 +8,7 @@ import {
   fetchDeltaOpenPositions,
   resolveDeltaLiveUnrealizedPnl,
   resolveTerminalQuotesForPosition,
+  seedTerminalQuotesForSymbols,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
@@ -275,6 +276,7 @@ async function fetchAndMergeMasterLiveTrades(
     for (const pos of snapshot.open) {
       registerSymbolsForLivePrices([pos.symbolKey]);
     }
+    await seedTerminalQuotesForSymbols(snapshot.open.map((p) => p.symbolKey));
     const rows = await enrichPositionsList(snapshot.open);
     const positions = mergeMasterLiveTradesCache(
       strategyId,
@@ -511,18 +513,17 @@ async function enrichPositionLiveRow(
 
   const quotes = await resolveTerminalQuotesForPosition(pos);
   const livePnl = resolveDeltaLiveUnrealizedPnl(pos, quotes);
-  const base = deltaToRow({
-    ...pos,
-    unrealizedPnl: livePnl,
-    markPrice: quotes.markPrice ?? pos.markPrice,
-    bestBid: quotes.bestBid ?? pos.bestBid,
-    bestAsk: quotes.bestAsk ?? pos.bestAsk,
-  });
 
   return {
-    ...base,
-    markPrice: quotes.markPrice ?? pos.markPrice ?? base.markPrice,
-    livePnl: livePnl ?? base.livePnl,
+    entryTime: pos.entryTime,
+    token: pos.symbolKey,
+    size: pos.contracts,
+    entryPrice: pos.entryPrice,
+    stopLoss: pos.stopLoss,
+    target: pos.takeProfit,
+    livePnl,
+    markPrice: quotes.markPrice ?? pos.markPrice,
+    side: pos.side,
   };
 }
 
@@ -663,6 +664,8 @@ export async function getUserLiveTradesByStrategy(
           fetchDeltaOpenPositions(creds.apiKey, creds.apiSecret),
           `user positions userId=${userId} strategyId=${sub.strategyId}`,
         );
+        registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
+        await seedTerminalQuotesForSymbols(positions.map((p) => p.symbolKey));
         const enriched = await enrichPositionsList(positions);
         userPositions = applyUserLiveTradesSticky(
           userId,

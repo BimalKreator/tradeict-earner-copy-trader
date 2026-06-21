@@ -1,6 +1,9 @@
 import WebSocket from "ws";
 import { SubscriptionStatus, type PrismaClient } from "@prisma/client";
-import { fetchDeltaOpenPositions } from "./exchangeService.js";
+import {
+  fetchDeltaOpenPositions,
+  seedTerminalQuotesForSymbols,
+} from "./exchangeService.js";
 import { FUTURE_HEDGE_BTC_SYMBOL } from "./futureHedgeDataService.js";
 import {
   cacheLiveQuotes,
@@ -16,27 +19,17 @@ const MIN_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
 
 const wantedSymbols = new Set<string>();
+/** Symbols already sent on the current WS session (incremental subscribe). */
+const subscribedSymbols = new Set<string>();
 let ws: WebSocket | null = null;
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let symbolRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let destroyed = false;
-let subscribedKey = "";
-
-export function registerSymbolsForLivePrices(symbols: Iterable<string>): void {
-  for (const s of symbols) {
-    const t = String(s ?? "").trim();
-    if (t) wantedSymbols.add(t);
-  }
-}
 
 function markPriceSubscribeSymbols(symbols: string[]): string[] {
   return symbols.map((s) => (s.startsWith("MARK:") ? s : `MARK:${s}`));
-}
-
-function subscriptionKey(symbols: string[]): string {
-  return [...symbols].sort().join("|");
 }
 
 function sendSubscribe(socket: WebSocket, symbols: string[]): void {
@@ -57,17 +50,42 @@ function sendSubscribe(socket: WebSocket, symbols: string[]): void {
   );
 }
 
-function syncSubscriptions(): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const symbols = Array.from(wantedSymbols);
-  const key = subscriptionKey(symbols);
-  if (key === subscribedKey) return;
-  subscribedKey = key;
+/** Subscribe newly opened legs immediately — do not wait for the 3s refresh loop. */
+function subscribeNewSymbols(symbols: string[]): void {
   if (symbols.length === 0) return;
-  sendSubscribe(ws, symbols);
-  console.log(
-    `[livePriceTracker] subscribed mark + v2/ticker + l2_orderbook for ${symbols.length} symbol(s)`,
-  );
+  const fresh = symbols.filter((s) => !subscribedSymbols.has(s));
+  if (fresh.length === 0) return;
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    sendSubscribe(ws, fresh);
+    for (const s of fresh) subscribedSymbols.add(s);
+    console.log(
+      `[livePriceTracker] WS subscribe +${fresh.length} symbol(s): ${fresh.slice(0, 5).join(", ")}` +
+        (fresh.length > 5 ? ` …+${fresh.length - 5}` : ""),
+    );
+  }
+}
+
+function syncAllSubscriptions(): void {
+  subscribeNewSymbols(Array.from(wantedSymbols));
+}
+
+/**
+ * Register symbols for live v2/ticker + l2_orderbook WS feeds.
+ * Triggers an immediate incremental subscribe when the socket is open.
+ */
+export function registerSymbolsForLivePrices(symbols: Iterable<string>): void {
+  const added: string[] = [];
+  for (const s of symbols) {
+    const t = String(s ?? "").trim();
+    if (t && !wantedSymbols.has(t)) {
+      wantedSymbols.add(t);
+      added.push(t);
+    }
+  }
+  if (added.length > 0) {
+    subscribeNewSymbols(added);
+  }
 }
 
 function clearHeartbeat(): void {
@@ -101,7 +119,7 @@ function scheduleReconnect(): void {
 
 function tearDownSocket(): void {
   clearHeartbeat();
-  subscribedKey = "";
+  subscribedSymbols.clear();
   try {
     ws?.removeAllListeners();
     ws?.close();
@@ -123,7 +141,7 @@ function connect(): void {
     reconnectAttempt = 0;
     socket.send(JSON.stringify({ type: "enable_heartbeat" }));
     armHeartbeat();
-    syncSubscriptions();
+    syncAllSubscriptions();
   });
 
   socket.on("message", (data) => {
@@ -171,6 +189,8 @@ async function refreshSymbolsFromMasterAccounts(
     select: { masterApiKey: true, masterApiSecret: true },
   });
 
+  const allSymbolKeys: string[] = [];
+
   for (const strat of strategies) {
     const key = strat.masterApiKey?.trim() ?? "";
     const secret = strat.masterApiSecret?.trim() ?? "";
@@ -178,6 +198,7 @@ async function refreshSymbolsFromMasterAccounts(
     try {
       const positions = await fetchDeltaOpenPositions(key, secret);
       for (const p of positions) {
+        allSymbolKeys.push(p.symbolKey);
         registerSymbolsForLivePrices([p.symbolKey]);
         cacheLiveQuotes(p.symbolKey, {
           mark: p.markPrice,
@@ -189,12 +210,16 @@ async function refreshSymbolsFromMasterAccounts(
       /* skip strategy */
     }
   }
+
+  if (allSymbolKeys.length > 0) {
+    await seedTerminalQuotesForSymbols(allSymbolKeys);
+  }
 }
 
 function scheduleSymbolRefresh(prisma: PrismaClient): void {
   symbolRefreshTimer = setTimeout(() => {
     void refreshSymbolsFromMasterAccounts(prisma).finally(() => {
-      syncSubscriptions();
+      syncAllSubscriptions();
       if (!destroyed) scheduleSymbolRefresh(prisma);
     });
   }, SYMBOL_REFRESH_MS);
@@ -209,7 +234,7 @@ export function startLivePriceTracker(prisma: PrismaClient): () => void {
     "BTCUSDT",
   ]);
   connect();
-  void refreshSymbolsFromMasterAccounts(prisma).finally(() => syncSubscriptions());
+  void refreshSymbolsFromMasterAccounts(prisma).finally(() => syncAllSubscriptions());
   scheduleSymbolRefresh(prisma);
 
   return () => {
@@ -224,5 +249,6 @@ export function startLivePriceTracker(prisma: PrismaClient): () => void {
     }
     tearDownSocket();
     wantedSymbols.clear();
+    subscribedSymbols.clear();
   };
 }

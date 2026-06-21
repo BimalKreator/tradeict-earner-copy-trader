@@ -15,6 +15,7 @@ import {
   fetchDeltaTicker,
   resolveDeltaLiveUnrealizedPnl,
   resolveTerminalQuotesForPosition,
+  seedTerminalQuotesForSymbols,
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
@@ -239,6 +240,7 @@ export async function fetchMasterLegsWithTotalLivePnl(
     skipCache: true,
   });
   registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
+  await seedTerminalQuotesForSymbols(positions.map((p) => p.symbolKey));
 
   const legs: MasterLegCloseTarget[] = [];
   let totalPnlUsd = 0;

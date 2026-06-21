@@ -1292,6 +1292,8 @@ export interface DeltaLivePosition {
   bestAsk: number | null;
   /** Delta `contract_value` per lot — used to recalculate terminal UPNL. */
   contractValue: number;
+  /** Call/put leg — UPL@Bid/Offer only (no mark PnL). */
+  isOption: boolean;
   unrealizedPnl: number | null;
   /** Delta REST `realized_pnl` — cumulative since position opened. */
   realizedPnl: number | null;
@@ -1393,15 +1395,28 @@ export function computeDeltaTerminalUnrealizedPnl(args: {
     { allowMarkFallback: args.allowMarkFallback !== false },
   );
 
+  const optionLeg = args.allowMarkFallback === false;
+
   if (
     entryPrice == null ||
     !Number.isFinite(entryPrice) ||
-    exitPrice == null ||
     !Number.isFinite(positionLots) ||
     Math.abs(positionLots) < 1e-12 ||
     !Number.isFinite(contractValue) ||
     contractValue <= 0
   ) {
+    return null;
+  }
+
+  if (exitPrice == null || !Number.isFinite(exitPrice)) {
+    if (optionLeg) {
+      console.warn(
+        `[pnl] option missing ${side === "BUY" ? "best_bid" : "best_ask"} — ` +
+          `refusing mark fallback (bid=${args.bestBid ?? "n/a"} ask=${args.bestAsk ?? "n/a"} ` +
+          `mark=${args.markPrice ?? "n/a"})`,
+      );
+      return 0;
+    }
     return null;
   }
 
@@ -1418,11 +1433,21 @@ export type DeltaTerminalQuoteOverrides = {
   markPrice?: number | null;
 };
 
+/** True when PnL must use L2 bid/ask (never mark). */
+export function positionRequiresBidAskPnl(
+  pos: Pick<DeltaLivePosition, "symbolKey" | "isOption" | "contractValue">,
+): boolean {
+  if (pos.isOption) return true;
+  if (isDeltaOptionProductId(pos.symbolKey)) return true;
+  return pos.contractValue > 0 && pos.contractValue < 1;
+}
+
 /** Resolve live UPNL — bid/ask for options (UPL@Bid/Offer); mark fallback only for perps. */
 export function resolveDeltaLiveUnrealizedPnl(
   pos: Pick<
     DeltaLivePosition,
     | "symbolKey"
+    | "isOption"
     | "side"
     | "entryPrice"
     | "markPrice"
@@ -1433,7 +1458,7 @@ export function resolveDeltaLiveUnrealizedPnl(
   >,
   quoteOverrides?: DeltaTerminalQuoteOverrides | null,
 ): number | null {
-  const isOption = isDeltaOptionProductId(pos.symbolKey);
+  const optionLeg = positionRequiresBidAskPnl(pos);
   return computeDeltaTerminalUnrealizedPnl({
     side: pos.side,
     entryPrice: pos.entryPrice,
@@ -1442,7 +1467,7 @@ export function resolveDeltaLiveUnrealizedPnl(
     bestBid: quoteOverrides?.bestBid ?? pos.bestBid,
     bestAsk: quoteOverrides?.bestAsk ?? pos.bestAsk,
     markPrice: quoteOverrides?.markPrice ?? pos.markPrice,
-    allowMarkFallback: !isOption,
+    allowMarkFallback: !optionLeg,
   });
 }
 
@@ -2537,20 +2562,28 @@ export async function fetchDeltaBestQuotes(
   const ref = symbol.trim();
   if (!ref) return { bid: null, ask: null, mark: null };
 
+  const isOptionRef = isDeltaOptionProductId(ref) || /^\d+$/.test(ref);
+  let bid: number | null = null;
+  let ask: number | null = null;
+  let mark: number | null = null;
+
+  // Options: L2 orderbook is authoritative (ticker best_ask can track mark, not offer).
+  if (isOptionRef) {
+    const l2 = await fetchDeltaL2BestQuotes(ref);
+    bid = l2.bid;
+    ask = l2.ask;
+  }
+
   const rest = await fetchDeltaTickerFromRestApi(ref);
-  let bid = rest.bid;
-  let ask = rest.ask;
-  let mark =
+  bid = bid ?? rest.bid;
+  ask = ask ?? rest.ask;
+  mark =
     rest.mark ??
     (rest.last != null && Number.isFinite(rest.last) && rest.last > 0
       ? rest.last
       : null);
 
-  if (isDeltaOptionProductId(ref) || /^\d+$/.test(ref)) {
-    const l2 = await fetchDeltaL2BestQuotes(ref);
-    bid = bid ?? l2.bid;
-    ask = ask ?? l2.ask;
-  } else if (bid == null || ask == null) {
+  if (!isOptionRef && (bid == null || ask == null)) {
     const l2 = await fetchDeltaL2BestQuotes(ref);
     bid = bid ?? l2.bid;
     ask = ask ?? l2.ask;
@@ -2562,6 +2595,38 @@ export async function fetchDeltaBestQuotes(
   }
 
   return { bid, ask, mark };
+}
+
+/** REST-seed WS quote cache for every open leg (options: L2 bid/ask required for UPNL). */
+export async function seedTerminalQuotesForSymbols(
+  symbols: Iterable<string>,
+): Promise<void> {
+  const unique = [
+    ...new Set(
+      [...symbols]
+        .map((s) => String(s ?? "").trim())
+        .filter((s) => s.length > 0),
+    ),
+  ];
+  if (unique.length === 0) return;
+
+  await Promise.all(
+    unique.map(async (sym) => {
+      try {
+        const rest = await fetchDeltaBestQuotes(sym);
+        cacheLiveQuotes(sym, {
+          bid: rest.bid,
+          ask: rest.ask,
+          mark: rest.mark,
+        });
+      } catch (err) {
+        console.warn(
+          `[exchangeService] seedTerminalQuotes failed symbol=${sym}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }),
+  );
 }
 
 function optionSideQuoteReady(
@@ -2576,13 +2641,12 @@ function optionSideQuoteReady(
 }
 
 /**
- * WS cache → margined row → REST ticker/L2 for options UPL@Bid / UPL@Offer.
- * Options never rely on mark alone when the side-specific quote can be fetched.
+ * WS cache → always REST refresh for options (L2 bid/ask — never stale margined/ticker mark).
  */
 export async function resolveTerminalQuotesForPosition(
   pos: Pick<
     DeltaLivePosition,
-    "symbolKey" | "side" | "bestBid" | "bestAsk" | "markPrice"
+    "symbolKey" | "side" | "bestBid" | "bestAsk" | "markPrice" | "isOption" | "contractValue"
   >,
 ): Promise<DeltaTerminalQuoteOverrides> {
   const cached = resolveLiveQuotes(pos.symbolKey);
@@ -2590,8 +2654,18 @@ export async function resolveTerminalQuotesForPosition(
   let bestAsk = cached.bestAsk ?? pos.bestAsk;
   let markPrice = cached.markPrice ?? pos.markPrice;
 
-  const isOption = isDeltaOptionProductId(pos.symbolKey);
-  if (isOption && !optionSideQuoteReady(pos.side, bestBid, bestAsk)) {
+  const optionLeg = positionRequiresBidAskPnl(pos);
+  if (optionLeg) {
+    const rest = await fetchDeltaBestQuotes(pos.symbolKey);
+    if (rest.bid != null && rest.bid > 0) bestBid = rest.bid;
+    if (rest.ask != null && rest.ask > 0) bestAsk = rest.ask;
+    if (rest.mark != null && rest.mark > 0) markPrice = rest.mark;
+    cacheLiveQuotes(pos.symbolKey, {
+      bid: rest.bid,
+      ask: rest.ask,
+      mark: rest.mark,
+    });
+  } else if (!optionSideQuoteReady(pos.side, bestBid, bestAsk)) {
     const rest = await fetchDeltaBestQuotes(pos.symbolKey);
     if (bestBid == null || bestBid <= 0) bestBid = rest.bid;
     if (bestAsk == null || bestAsk <= 0) bestAsk = rest.ask;
@@ -2906,6 +2980,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         bestBid,
         bestAsk,
         contractValue,
+        isOption,
         unrealizedPnl:
           unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
             ? unrealizedPnl
