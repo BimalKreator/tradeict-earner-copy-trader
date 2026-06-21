@@ -129,7 +129,12 @@ let breakevenStrategyCache: BreakevenWatchStrategy[] = [];
 let breakevenCacheTimer: ReturnType<typeof setInterval> | null = null;
 const masterLegsCache = new Map<
   string,
-  { legs: MasterLegCloseTarget[]; totalPnlUsd: number; fetchedAt: number }
+  {
+    legs: MasterLegCloseTarget[];
+    totalPnlUsd: number;
+    livePnlComplete: boolean;
+    fetchedAt: number;
+  }
 >();
 const breakevenExitInFlight = new Set<string>();
 let lastBtcTickPrice = 0;
@@ -240,6 +245,7 @@ async function prefetchMasterLegsCache(
     masterLegsCache.set(strategyId, {
       legs: snap.legs,
       totalPnlUsd: snap.totalPnlUsd,
+      livePnlComplete: snap.livePnlComplete,
       fetchedAt: Date.now(),
     });
     rememberLegSymbolsForStrategy(strategyId, snap.legs);
@@ -252,16 +258,28 @@ async function resolveCachedMasterLegs(
   strategyId: string,
   masterApiKey: string,
   masterApiSecret: string,
-): Promise<{ legs: MasterLegCloseTarget[]; totalPnlUsd: number }> {
+): Promise<{
+  legs: MasterLegCloseTarget[];
+  totalPnlUsd: number;
+  livePnlComplete: boolean;
+}> {
   const cached = masterLegsCache.get(strategyId);
   if (cached && Date.now() - cached.fetchedAt < MASTER_LEGS_CACHE_TTL_MS) {
-    return { legs: cached.legs, totalPnlUsd: cached.totalPnlUsd };
+    return {
+      legs: cached.legs,
+      totalPnlUsd: cached.totalPnlUsd,
+      livePnlComplete: cached.livePnlComplete,
+    };
   }
   if (isDeltaRestApiPaused()) {
     if (cached) {
-      return { legs: cached.legs, totalPnlUsd: cached.totalPnlUsd };
+      return {
+        legs: cached.legs,
+        totalPnlUsd: cached.totalPnlUsd,
+        livePnlComplete: cached.livePnlComplete,
+      };
     }
-    return { legs: [], totalPnlUsd: 0 };
+    return { legs: [], totalPnlUsd: 0, livePnlComplete: false };
   }
   const snap = await fetchMasterLegsWithTotalLivePnl(
     masterApiKey,
@@ -270,6 +288,7 @@ async function resolveCachedMasterLegs(
   masterLegsCache.set(strategyId, {
     legs: snap.legs,
     totalPnlUsd: snap.totalPnlUsd,
+    livePnlComplete: snap.livePnlComplete,
     fetchedAt: Date.now(),
   });
   return snap;
@@ -373,20 +392,29 @@ export type MasterLegCloseTarget = {
 export async function fetchMasterLegsWithTotalLivePnl(
   apiKeyStored: string,
   apiSecretStored: string,
-): Promise<{ totalPnlUsd: number; legs: MasterLegCloseTarget[] }> {
+): Promise<{
+  totalPnlUsd: number;
+  legs: MasterLegCloseTarget[];
+  /** False when any open leg lacks a computable live UPNL (do not auto-exit on partial/zero totals). */
+  livePnlComplete: boolean;
+}> {
   const positions = await fetchDeltaOpenPositions(apiKeyStored, apiSecretStored);
   registerSymbolsForLivePrices(positions.map((p) => p.symbolKey));
 
   const legs: MasterLegCloseTarget[] = [];
   let totalPnlUsd = 0;
+  let legsWithPnl = 0;
+  let openLegCount = 0;
 
   for (const pos of positions) {
     const contracts = Math.abs(pos.contracts);
     if (!Number.isFinite(contracts) || contracts < 1e-12) continue;
 
+    openLegCount += 1;
     const legUpnl = await legPnlUsd(pos);
     if (legUpnl != null) {
       totalPnlUsd += legUpnl;
+      legsWithPnl += 1;
     }
 
     const entryPrice =
@@ -404,7 +432,11 @@ export async function fetchMasterLegsWithTotalLivePnl(
     });
   }
 
-  return { totalPnlUsd, legs };
+  return {
+    totalPnlUsd,
+    legs,
+    livePnlComplete: openLegCount === 0 || legsWithPnl === openLegCount,
+  };
 }
 
 function rememberLegSymbolsForStrategy(
@@ -714,6 +746,7 @@ export async function runStrategyAutoExitCheck(
 
   let totalPnlUsd: number;
   let legs: MasterLegCloseTarget[];
+  let livePnlComplete: boolean;
   try {
     const snap = await resolveCachedMasterLegs(
       strategy.id,
@@ -722,11 +755,16 @@ export async function runStrategyAutoExitCheck(
     );
     totalPnlUsd = snap.totalPnlUsd;
     legs = snap.legs;
+    livePnlComplete = snap.livePnlComplete;
   } catch (err) {
     console.warn(
       `[auto-exit] master snapshot failed strategyId=${strategy.id}:`,
       err instanceof Error ? err.message : err,
     );
+    return;
+  }
+
+  if (legs.length > 0 && !livePnlComplete) {
     return;
   }
 

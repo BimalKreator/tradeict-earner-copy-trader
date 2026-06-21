@@ -1712,15 +1712,21 @@ export function resolveDeltaLiveUnrealizedPnl(
   return computed;
 }
 
-/** Atomic quote sync + PnL — bid/ask MUST be populated before calculation. */
+/** Atomic quote sync + PnL — bid/ask preferred; margined `terminalUpl` when WS still warming. */
 export async function hydratePositionForLivePnl(
   pos: DeltaLivePosition,
 ): Promise<{ position: DeltaLivePosition; livePnl: number | null }> {
   const quotes = await resolveTerminalQuotesForPosition(pos);
   if (quotes === null) {
+    const fallbackPnl = resolveDeltaLiveUnrealizedPnl(pos);
     return {
-      position: { ...pos, bestBid: null, bestAsk: null, markPrice: null },
-      livePnl: null,
+      position: {
+        ...pos,
+        bestBid: pos.bestBid ?? null,
+        bestAsk: pos.bestAsk ?? null,
+        markPrice: pos.markPrice ?? null,
+      },
+      livePnl: fallbackPnl,
     };
   }
 
