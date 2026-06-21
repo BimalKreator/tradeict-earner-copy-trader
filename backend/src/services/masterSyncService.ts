@@ -173,19 +173,9 @@ export async function executeMasterLegCloseAfterRestCheck(
   if (!restOpen || restContracts <= 0) {
     if (isLegClosingBlocked(strategyId, args.symbol, args.openSide)) {
       console.log(
-        `[MASTER-REST-SYNC] reconcile-only flat confirmed ${args.symbol} ${args.openSide} (${args.source}) — instant exit already in flight`,
+        `[MASTER-REST-SYNC] defer priority flat ${args.symbol} ${args.openSide} (${args.source}) — close in flight, keep tracker`,
       );
-      tracker.clearPendingFlat(legKey);
-      tracker.clearWsFlatHint(args.symbol, args.openSide);
-      tracker.clearLegKeys(
-        tracker.aliasesForSnap({
-          symbol: args.symbol,
-          side: args.openSide,
-          productKey: args.symbol,
-        }),
-      );
-      tracker.lastRestContractsByLeg.delete(legKey);
-      return true;
+      return false;
     }
 
     console.log(

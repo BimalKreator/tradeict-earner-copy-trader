@@ -109,6 +109,7 @@ import {
   shouldSuppressMasterRestCopy,
 } from "./masterNoCopyOrders.js";
 import { MasterFillDedup } from "./masterFillDedup.js";
+import { upsertMasterLivePositionFromWs } from "./liveTradesService.js";
 import {
   buildClientOrderId,
   buildStableCopyClientOrderId,
@@ -381,6 +382,156 @@ function masterWsSubscribePayload(): {
   };
 }
 
+async function triggerLiveMasterOpenCopyImmediate(
+  prisma: PrismaClient,
+  strategyId: string,
+  args: {
+    symbol: string;
+    side: TradeSide;
+    masterContracts: number;
+    masterTotalLots?: number;
+    avgPrice: number | null;
+    masterFillKey: string;
+    masterOpenedAt?: Date | null;
+    locallyFirstSeenAt?: Date | null;
+    skipFollowerCopy?: boolean;
+    skipTrackerUpdate?: boolean;
+  },
+  tracker?: MasterPositionTracker,
+): Promise<void> {
+  if (syncMonitorOpensBlocked(strategyId)) {
+    console.log(
+      `[MASTER-WS] skip open copy — master flatting/post-exit lock strategyId=${strategyId} symbol=${args.symbol}`,
+    );
+    return;
+  }
+  if (isLegClosingBlocked(strategyId, args.symbol, args.side)) {
+    console.log(
+      `[MASTER-WS] skip open copy — leg closing lock strategyId=${strategyId} symbol=${args.symbol} ${args.side}`,
+    );
+    return;
+  }
+  if (tracker?.wsFlatHintAgeMs(args.symbol, args.side) != null) {
+    console.log(
+      `[MASTER-WS] skip open copy — WS flat hint active ${args.symbol} ${args.side}`,
+    );
+    return;
+  }
+
+  let working = args;
+  const canonicalSymbol = await canonicalizeCopySymbol(args.symbol, {
+    liveFast: true,
+  });
+  if (!canonicalSymbol) return;
+  if (canonicalSymbol !== args.symbol.trim()) {
+    working = { ...args, symbol: canonicalSymbol };
+  }
+
+  const skipCopy = working.skipFollowerCopy === true;
+  const prevTracked =
+    tracker?.maxContractsForSymbolSide(working.symbol, working.side) ?? 0;
+  const masterTotalLots = Math.max(
+    working.masterTotalLots ?? working.masterContracts,
+    prevTracked + working.masterContracts,
+  );
+
+  if (
+    !skipCopy &&
+    tracker?.copyDedup?.shouldSkipLegCopy({
+      symbol: working.symbol,
+      side: working.side,
+      masterTotalLots,
+    })
+  ) {
+    console.log(
+      `[MASTER-WS] skip duplicate leg copy ${working.symbol} ${working.side} total=${masterTotalLots} — already forwarded`,
+    );
+    return;
+  }
+
+  const entryPrice =
+    working.avgPrice != null &&
+    Number.isFinite(working.avgPrice) &&
+    working.avgPrice > 0
+      ? working.avgPrice
+      : await resolveMasterCopyEntryPrice(working.symbol, working.avgPrice);
+
+  if (entryPrice == null && !skipCopy) {
+    console.warn(
+      `[MASTER-WS] skip copy ${working.symbol} — could not resolve entry/mark price`,
+    );
+    return;
+  }
+
+  upsertMasterLivePositionFromWs(strategyId, {
+    symbol: working.symbol,
+    side: working.side,
+    size: masterTotalLots,
+    entryPrice: entryPrice ?? working.avgPrice,
+  });
+
+  if (!skipCopy && entryPrice != null) {
+    tracker?.copyDedup?.recordLegCopy({
+      symbol: working.symbol,
+      side: working.side,
+      masterTotalLots,
+    });
+
+    console.log(
+      `[MASTER-WS] instant follower open ${working.symbol} ${working.side} ` +
+        `qty=${working.masterContracts} total=${masterTotalLots}`,
+    );
+    void copyMasterFillToSubscribers(prisma, strategyId, {
+      symbol: working.symbol,
+      side: working.side,
+      masterContracts: working.masterContracts,
+      masterTotalLots,
+      avgPrice: entryPrice,
+      masterFillKey: working.masterFillKey,
+      liveMasterFill: true,
+      ...(working.masterOpenedAt !== undefined
+        ? { masterOpenedAt: working.masterOpenedAt }
+        : {}),
+      ...(working.locallyFirstSeenAt !== undefined
+        ? { locallyFirstSeenAt: working.locallyFirstSeenAt }
+        : {}),
+    }).catch((err) => {
+      console.error(
+        `[MASTER-WS] instant open fan-out failed ${working.symbol} ${working.side}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+    requestImmediateMasterRestPoll(
+      `ws-reconcile:${working.symbol}:${working.side}`,
+    );
+  }
+
+  if (
+    tracker &&
+    entryPrice != null &&
+    working.skipTrackerUpdate !== true
+  ) {
+    const isNewLeg = tracker.isNewLegThisSession(working.symbol, working.side);
+    tracker.noteLegObserved(working.symbol, working.side, null, isNewLeg);
+    const prev = tracker.maxContractsForSymbolSide(working.symbol, working.side);
+    if (prev <= 0) {
+      tracker.applyMasterLeg({
+        symbol: working.symbol,
+        side: working.side,
+        contracts: masterTotalLots,
+        avgEntry: entryPrice,
+      });
+    } else if (masterTotalLots > prev) {
+      tracker.applyMasterLeg({
+        symbol: working.symbol,
+        side: working.side,
+        contracts: masterTotalLots,
+        avgEntry: entryPrice,
+      });
+    }
+  }
+}
+
 async function triggerMasterOpenCopy(
   prisma: PrismaClient,
   strategyId: string,
@@ -405,6 +556,39 @@ async function triggerMasterOpenCopy(
   tracker?: MasterPositionTracker,
 ): Promise<void> {
   if (args.masterContracts <= 0) return;
+
+  const isLiveMasterFill = args.source !== "rest";
+
+  if (isLiveMasterFill && args.adminForceSync !== true) {
+    void triggerLiveMasterOpenCopyImmediate(
+      prisma,
+      strategyId,
+      {
+        symbol: args.symbol,
+        side: args.side,
+        masterContracts: args.masterContracts,
+        ...(args.masterTotalLots != null
+          ? { masterTotalLots: args.masterTotalLots }
+          : {}),
+        avgPrice: args.avgPrice,
+        masterFillKey: args.masterFillKey,
+        ...(args.masterOpenedAt !== undefined
+          ? { masterOpenedAt: args.masterOpenedAt }
+          : {}),
+        ...(args.locallyFirstSeenAt !== undefined
+          ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
+          : {}),
+        ...(args.skipFollowerCopy !== undefined
+          ? { skipFollowerCopy: args.skipFollowerCopy }
+          : {}),
+        ...(args.skipTrackerUpdate !== undefined
+          ? { skipTrackerUpdate: args.skipTrackerUpdate }
+          : {}),
+      },
+      tracker,
+    );
+    return;
+  }
 
   if (args.adminForceSync !== true) {
     const subs = await findActiveFutureHedgeCopySubscribers(prisma);
@@ -442,10 +626,8 @@ async function triggerMasterOpenCopy(
     }
   }
 
-  const isLiveMasterFill = args.source !== "rest";
-
   const canonicalSymbol = await canonicalizeCopySymbol(args.symbol, {
-    liveFast: isLiveMasterFill,
+    liveFast: false,
   });
   if (!canonicalSymbol) {
     return;
@@ -453,8 +635,9 @@ async function triggerMasterOpenCopy(
   if (canonicalSymbol !== args.symbol.trim()) {
     args = { ...args, symbol: canonicalSymbol };
   }
-  const logTag = args.source === "rest" ? "[MASTER-REST-SYNC]" : "[MASTER-WS]";
   const skipCopy = args.skipFollowerCopy === true;
+
+  const logTag = "[MASTER-REST-SYNC]";
 
   if (skipCopy) {
     console.log(
@@ -467,13 +650,7 @@ async function triggerMasterOpenCopy(
     );
   }
 
-  const entryPrice =
-    isLiveMasterFill &&
-    args.avgPrice != null &&
-    Number.isFinite(args.avgPrice) &&
-    args.avgPrice > 0
-      ? args.avgPrice
-      : await resolveMasterCopyEntryPrice(args.symbol, args.avgPrice);
+  const entryPrice = await resolveMasterCopyEntryPrice(args.symbol, args.avgPrice);
   if (entryPrice == null) {
     console.warn(
       `${logTag} skip ${skipCopy ? "tracker" : "copy"} ${args.symbol} — could not resolve entry/mark price`,
@@ -499,32 +676,7 @@ async function triggerMasterOpenCopy(
   }
 
   if (!skipCopy && entryPrice != null) {
-    if (isLiveMasterFill && args.adminForceSync !== true) {
-      void copyMasterFillToSubscribers(prisma, strategyId, {
-        symbol: args.symbol,
-        side: args.side,
-        masterContracts: args.masterContracts,
-        masterTotalLots: args.masterTotalLots ?? args.masterContracts,
-        avgPrice: entryPrice,
-        masterFillKey: args.masterFillKey,
-        liveMasterFill: true,
-        ...(args.masterOpenedAt !== undefined
-          ? { masterOpenedAt: args.masterOpenedAt }
-          : {}),
-        ...(args.locallyFirstSeenAt !== undefined
-          ? { locallyFirstSeenAt: args.locallyFirstSeenAt }
-          : {}),
-      }).catch((err) => {
-        console.error(
-          `${logTag} live WS fan-out failed ${args.symbol} ${args.side}:`,
-          err instanceof Error ? err.message : err,
-        );
-      });
-      requestImmediateMasterRestPoll(
-        `ws-reconcile:${args.symbol}:${args.side}`,
-      );
-    } else {
-      await copyMasterFillToSubscribers(prisma, strategyId, {
+    await copyMasterFillToSubscribers(prisma, strategyId, {
       symbol: args.symbol,
       side: args.side,
       masterContracts: args.masterContracts,
@@ -546,8 +698,7 @@ async function triggerMasterOpenCopy(
       ...(args.restPreExistingUnknown
         ? { restPreExistingUnknown: true }
         : {}),
-      });
-    }
+    });
   }
 
   if (
@@ -555,26 +706,12 @@ async function triggerMasterOpenCopy(
     entryPrice != null &&
     args.skipTrackerUpdate !== true
   ) {
-    if (isLiveMasterFill) {
-      const isNewLeg = tracker.isNewLegThisSession(args.symbol, args.side);
-      tracker.noteLegObserved(args.symbol, args.side, null, isNewLeg);
-      const prev = tracker.maxContractsForSymbolSide(args.symbol, args.side);
-      if (prev <= 0) {
-        tracker.applyMasterLeg({
-          symbol: args.symbol,
-          side: args.side,
-          contracts: args.masterContracts,
-          avgEntry: entryPrice,
-        });
-      }
-    } else {
-      tracker.applyMasterLeg({
-        symbol: args.symbol,
-        side: args.side,
-        contracts: args.masterContracts,
-        avgEntry: entryPrice,
-      });
-    }
+    tracker.applyMasterLeg({
+      symbol: args.symbol,
+      side: args.side,
+      contracts: args.masterContracts,
+      avgEntry: entryPrice,
+    });
   }
 }
 
@@ -1088,18 +1225,13 @@ async function handleMasterWsInstantLegClose(
   if (!meta) return;
 
   tracker.markWsFlatHint(args.symbol, args.openSide);
-  markLegClosing(strategyId, args.symbol, args.openSide);
-  markMasterFlatting(strategyId);
-
-  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
-  evictMasterLivePositionLeg(strategyId, args.symbol, args.openSide);
 
   const fillNote = args.fillDetail ? ` (${args.fillDetail})` : "";
   console.log(
     `[MASTER-WS] instant follower close ${args.symbol} ${args.openSide}${fillNote} source=${args.source}`,
   );
 
-  void notifyMasterFlat(
+  const closed = await notifyMasterFlat(
     prisma,
     strategyId,
     {
@@ -1109,29 +1241,26 @@ async function handleMasterWsInstantLegClose(
       masterContracts: trackedContracts,
     },
     { instantClose: true },
-  )
-    .then((closed) => {
-      if (closed) {
-        tracker.clearPendingFlat(masterLegKey(args.symbol, args.openSide));
-        tracker.clearWsFlatHint(args.symbol, args.openSide);
-        tracker.clearLegKeys(
-          tracker.aliasesForSnap({
-            symbol: args.symbol,
-            side: args.openSide,
-            productKey: args.symbol,
-          }),
-        );
-        tracker.lastRestContractsByLeg.delete(
-          masterLegKey(args.symbol, args.openSide),
-        );
-      }
-    })
-    .catch((err) => {
-      console.error(
-        `[MASTER-WS] instant close fan-out failed ${args.symbol} ${args.openSide}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
+  );
+
+  if (closed) {
+    tracker.clearPendingFlat(masterLegKey(args.symbol, args.openSide));
+    tracker.clearWsFlatHint(args.symbol, args.openSide);
+    tracker.clearLegKeys(
+      tracker.aliasesForSnap({
+        symbol: args.symbol,
+        side: args.openSide,
+        productKey: args.symbol,
+      }),
+    );
+    tracker.lastRestContractsByLeg.delete(
+      masterLegKey(args.symbol, args.openSide),
+    );
+  } else {
+    console.warn(
+      `[MASTER-WS] instant close did not complete ${args.symbol} ${args.openSide} — tracker retained for REST retry`,
+    );
+  }
 
   requestPriorityMasterRestPoll(
     strategyId,
@@ -1293,35 +1422,17 @@ async function processMasterUserTradeFillRecords(
       if (masterFillClosesExistingLeg(tracker, sig.symbol, sig.side)) {
         if (!tracker) return;
         const openSide: TradeSide = sig.side === "BUY" ? "SELL" : "BUY";
-        const meta = resolveTrackedOpenLegMeta(tracker, sig.symbol, openSide);
-        if (!meta) return;
-        tracker.markWsFlatHint(sig.symbol, openSide);
-        markLegClosing(strategyId, sig.symbol, openSide);
-        markMasterFlatting(strategyId);
-        const { evictMasterLivePositionLeg } = await import(
-          "./liveTradesService.js"
-        );
-        evictMasterLivePositionLeg(strategyId, sig.symbol, openSide);
-        console.log(
-          `[MASTER-WS] opposing fill → instant close ${sig.symbol} ${openSide} ` +
-            `(fill ${sig.side} qty=${sig.contracts})`,
-        );
-        void notifyMasterFlat(
+        await handleMasterWsInstantLegClose(
           prisma,
           strategyId,
           {
             symbol: sig.symbol,
-            side: openSide,
-            masterEntryPrice: meta.avgEntry,
-            masterContracts: meta.contracts,
+            openSide,
+            source: "opposing-fill",
+            fillDetail: `opposing fill ${sig.side} qty=${sig.contracts}`,
           },
-          { instantClose: true },
-        ).catch((err) => {
-          console.error(
-            `[MASTER-WS] opposing-fill close failed ${sig.symbol}:`,
-            err instanceof Error ? err.message : err,
-          );
-        });
+          tracker,
+        );
         return;
       }
       registerSymbolsForLivePrices([sig.symbol]);
@@ -2285,9 +2396,6 @@ async function notifyMasterFlat(
     markLegClosing(strategyId, snap.symbol, snap.side);
     markMasterFlatting(strategyId);
 
-    const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
-    evictMasterLivePositionLeg(strategyId, snap.symbol, snap.side);
-
     try {
       const result = await syncMasterCloseToFutureHedgeFollowers(
         prisma,
@@ -2319,6 +2427,10 @@ async function notifyMasterFlat(
         );
         return false;
       }
+      const { evictMasterLivePositionLeg } = await import(
+        "./liveTradesService.js"
+      );
+      evictMasterLivePositionLeg(strategyId, snap.symbol, snap.side);
       return true;
     } finally {
       consumeBotInitiatedCloseReason(strategyId, snap.symbol);
@@ -3597,33 +3709,24 @@ class StrategyMasterSocket {
           const increased = next > prev;
           this.tracker.writeTracked(snap, next);
 
+          const wsEntryPrice =
+            snap.avgEntry != null && Number.isFinite(snap.avgEntry)
+              ? snap.avgEntry
+              : meta?.avgEntry ?? null;
+          upsertMasterLivePositionFromWs(this.strategyId, {
+            symbol: snap.symbol,
+            side: snap.side,
+            size: next,
+            ...(wsEntryPrice != null ? { entryPrice: wsEntryPrice } : {}),
+          });
+
           if (copyEnabled && increased) {
-            const delta = next - prev;
             console.log(
-              `[MASTER-WS] positions +${delta} ${snap.symbol} ${snap.side} — instant follower open (REST reconcile background)`,
+              `[MASTER-WS] positions +${next - prev} ${snap.symbol} ${snap.side} — tracker/cache only (fills channel copies)`,
             );
-            void triggerMasterOpenCopy(
-              this.prisma,
-              this.strategyId,
-              {
-                symbol: snap.symbol,
-                side: snap.side,
-                masterContracts: delta,
-                masterTotalLots: next,
-                avgPrice:
-                  snap.avgEntry != null && Number.isFinite(snap.avgEntry)
-                    ? snap.avgEntry
-                    : meta?.avgEntry ?? null,
-                masterFillKey: `ws-pos:${snap.symbol}:${snap.side}:${next}:${prev}`,
-                source: "positions",
-              },
-              this.tracker,
-            ).catch((err) => {
-              console.error(
-                `[MASTER-WS] position increase fan-out failed ${snap.symbol} ${snap.side}:`,
-                err instanceof Error ? err.message : err,
-              );
-            });
+            requestImmediateMasterRestPoll(
+              `ws-reconcile:position-increase:${snap.symbol}:${snap.side}`,
+            );
           }
 
           if (copyEnabled && decreased) {

@@ -1069,7 +1069,23 @@ export async function syncMasterOpenFillToFutureHedgeFollowers(
 
       if (isLiveIncrement) {
         expectedLots = followerLotsFromMaster(masterTargetLots, sub);
-        lotsToOrder = incrementLots;
+        const deficitLots = await followerBotOpenDeficitLots(prisma, {
+          strategyId,
+          userId: sub.userId,
+          symbol: fill.symbol,
+          side: fill.side,
+          targetLots: expectedLots,
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+        });
+        lotsToOrder = Math.min(incrementLots, deficitLots);
+        if (lotsToOrder <= 0) {
+          console.log(
+            `[copy] Skip live duplicate user=${sub.userId} ${fill.symbol} ${fill.side} ` +
+              `(target=${expectedLots}, deficit=0)`,
+          );
+          return;
+        }
       } else {
         expectedLots = followerLotsFromMaster(masterTargetLots, sub);
         lotsToOrder = await followerBotOpenDeficitLots(prisma, {
@@ -1854,24 +1870,32 @@ export async function syncMasterCloseToFutureHedgeFollowers(
       }
 
       if (instantClose) {
-        const closeLots = Math.floor(
-          followerLotsFromMaster(snap.masterLots, sub),
-        );
-        if (closeLots <= 0) {
-          console.log(
-            `[copy] instant close skip user=${sub.userId} ${snap.symbol} ${snap.side} — scaled qty 0`,
-          );
-          return;
-        }
-
         const closeClientOrderId = buildStableCopyClientOrderId({
           strategyId,
           userId: sub.userId,
-          masterFillKey: `close:${snap.symbol}:${snap.side}:ws-instant`,
+          masterFillKey: `close:${snap.symbol}:${snap.side}`,
           symbol: snap.symbol,
           side: oppositeSide,
           leg: "close",
         });
+
+        const scaledLots = Math.floor(
+          followerLotsFromMaster(snap.masterLots, sub),
+        );
+        const { lots: closeLots } = await resolveFollowerReduceOnlyCloseLots({
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+          symbol: snap.symbol,
+          openSide: snap.side,
+          requestedLots: scaledLots,
+        });
+
+        if (closeLots <= 0) {
+          console.log(
+            `[copy] instant close skip user=${sub.userId} ${snap.symbol} ${snap.side} — exchange flat`,
+          );
+          return;
+        }
 
         console.log(
           `[copy] instant WS close user=${sub.userId} ${snap.symbol} ${oppositeSide} lots=${closeLots}`,
@@ -2816,11 +2840,10 @@ export async function executeFollowerTradeWithVerification(
       `[copy-exec] blocked duplicate open user=${userId} ${symbol} ${side} — entry in-flight (REST lag grace)`,
     );
     return {
-      success: true,
-      verified: true,
+      success: false,
+      error: "entry in-flight — defer duplicate open",
       attempts: 0,
-      verifiedQty: targetContracts,
-      persistedOpen: true,
+      verified: false,
     };
   }
 

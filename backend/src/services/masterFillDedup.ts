@@ -6,7 +6,7 @@
  * - user_trades (fills) is the primary live copy path when it arrives first.
  * - orders is the fallback when fills never arrive (UI/API-only order updates).
  * - Whichever channel copies first for an orderId blocks the other from copying.
- * - positions channel does NOT copy (tracker only) — REST deficit sync covers gaps.
+ * - positions channel does NOT copy (tracker + UI cache only) — fills/orders copy; REST deficit sync covers gaps.
  */
 export class MasterFillDedup {
   /** trade_id values already forwarded to follower copy pipeline. */
@@ -17,6 +17,38 @@ export class MasterFillDedup {
   private readonly ordersCopiedOrderIds = new Set<string>();
   /** order_id → cumulative qty already sent to copy pipeline (orders-channel delta tracking). */
   private readonly orderPipelineCopied = new Map<string, number>();
+  /** symbol:side → cumulative master lots already forwarded (all WS channels). */
+  private readonly legPipelineCopied = new Map<string, number>();
+
+  private legCopyKey(symbol: string, side: string): string {
+    return `${symbol.trim().toUpperCase()}:${side.toUpperCase()}`;
+  }
+
+  /**
+   * True when this master leg increment was already forwarded (orders/fills/positions).
+   * Prevents double fan-out when Delta emits multiple channels for one fill.
+   */
+  shouldSkipLegCopy(args: {
+    symbol: string;
+    side: string;
+    masterTotalLots: number;
+  }): boolean {
+    if (args.masterTotalLots <= 0) return true;
+    const piped = this.legPipelineCopied.get(this.legCopyKey(args.symbol, args.side)) ?? 0;
+    return piped >= args.masterTotalLots - 1e-9;
+  }
+
+  /** Record cumulative master lots forwarded to followers for this leg. */
+  recordLegCopy(args: {
+    symbol: string;
+    side: string;
+    masterTotalLots: number;
+  }): void {
+    if (args.masterTotalLots <= 0) return;
+    const key = this.legCopyKey(args.symbol, args.side);
+    const prev = this.legPipelineCopied.get(key) ?? 0;
+    this.legPipelineCopied.set(key, Math.max(prev, args.masterTotalLots));
+  }
 
   shouldSkipFillsChannelCopy(args: {
     tradeId: string;

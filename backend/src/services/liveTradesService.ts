@@ -25,10 +25,14 @@ const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
 /** Master poll budget — lite snapshot avoids per-option tickers; keep headroom for many legs. */
 const MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS = 45_000;
 
-/** One successful REST miss → evict (manual close must not wait 75s). */
+/** One successful REST miss with explicit flat → evict (manual close). */
 const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 1;
+/** Leg absent from snapshot (REST lag) — require multiple misses before evict. */
+const MASTER_MISSING_SNAPSHOT_POLLS_REQUIRED = 4;
 /** Same for a fully empty margined book on a successful REST read. */
-const MASTER_EMPTY_BOOK_EVICT_POLLS = 1;
+const MASTER_EMPTY_BOOK_EVICT_POLLS = 3;
+/** WS-eviction deny-list TTL — stale REST may re-open the leg after this. */
+const MASTER_WS_EVICTION_TTL_MS = 300_000;
 
 function legSideFromKey(key: string): string {
   const idx = key.lastIndexOf(":");
@@ -78,7 +82,7 @@ type MasterStrategyLegCache = Map<string, MasterLegCacheEntry>;
 export const lastKnownMasterPositions = new Map<string, MasterStrategyLegCache>();
 
 /** WS-confirmed closed legs — block stale margined REST from re-adding until flat/absent. */
-const masterWsEvictedLegs = new Map<string, Set<string>>();
+const masterWsEvictedLegs = new Map<string, Map<string, number>>();
 
 function findMasterCacheKeysForSymbolSide(
   cache: MasterStrategyLegCache,
@@ -89,10 +93,20 @@ function findMasterCacheKeysForSymbolSide(
   return [...cache.keys()].filter((key) => liveLegKeysAlign(key, probe));
 }
 
+function pruneExpiredWsEvictions(strategyId: string, refMs = Date.now()): void {
+  const denied = masterWsEvictedLegs.get(strategyId);
+  if (!denied) return;
+  for (const [key, untilMs] of [...denied.entries()]) {
+    if (refMs >= untilMs) denied.delete(key);
+  }
+  if (denied.size === 0) masterWsEvictedLegs.delete(strategyId);
+}
+
 function isLegWsEvicted(strategyId: string, cacheKey: string): boolean {
+  pruneExpiredWsEvictions(strategyId);
   const denied = masterWsEvictedLegs.get(strategyId);
   if (!denied || denied.size === 0) return false;
-  for (const d of denied) {
+  for (const d of denied.keys()) {
     if (liveLegKeysAlign(cacheKey, d)) return true;
   }
   return false;
@@ -102,16 +116,17 @@ function markLegWsEvicted(strategyId: string, keys: string[]): void {
   if (keys.length === 0) return;
   let denied = masterWsEvictedLegs.get(strategyId);
   if (!denied) {
-    denied = new Set();
+    denied = new Map();
     masterWsEvictedLegs.set(strategyId, denied);
   }
-  for (const key of keys) denied.add(key);
+  const untilMs = Date.now() + MASTER_WS_EVICTION_TTL_MS;
+  for (const key of keys) denied.set(key, untilMs);
 }
 
 function clearLegWsEviction(strategyId: string, cacheKey: string): void {
   const denied = masterWsEvictedLegs.get(strategyId);
   if (!denied) return;
-  for (const d of [...denied]) {
+  for (const d of [...denied.keys()]) {
     if (liveLegKeysAlign(cacheKey, d)) denied.delete(d);
   }
   if (denied.size === 0) masterWsEvictedLegs.delete(strategyId);
@@ -151,8 +166,59 @@ export function clearMasterLivePositionsCache(strategyId: string): void {
 }
 
 /**
- * Drop one master leg immediately (e.g. WS `user_trades` reduce-only fill).
- * Blocks stale margined REST from re-adding the leg until the exchange confirms flat.
+ * Upsert a master leg from the private WebSocket — primary source for admin UI
+ * while REST reconciliation is debounced.
+ */
+export function upsertMasterLivePositionFromWs(
+  strategyId: string,
+  args: {
+    symbol: string;
+    side: TradeSide | string;
+    size: number;
+    entryPrice?: number | null;
+    entryTime?: string | null;
+    livePnl?: number | null;
+    markPrice?: number | null;
+  },
+): void {
+  if (args.size <= 0) return;
+
+  let cache = lastKnownMasterPositions.get(strategyId);
+  if (!cache) {
+    cache = new Map();
+    lastKnownMasterPositions.set(strategyId, cache);
+  }
+
+  const side = String(args.side).toUpperCase();
+  const key = `${args.symbol}:${side}`;
+  clearLegWsEviction(strategyId, key);
+
+  const existing = cache.get(key)?.row;
+  cache.set(key, {
+    row: {
+      entryTime:
+        args.entryTime ??
+        existing?.entryTime ??
+        new Date().toISOString(),
+      token: args.symbol,
+      size: args.size,
+      entryPrice:
+        args.entryPrice != null && Number.isFinite(args.entryPrice)
+          ? args.entryPrice
+          : (existing?.entryPrice ?? null),
+      stopLoss: existing?.stopLoss ?? null,
+      target: existing?.target ?? null,
+      livePnl: args.livePnl ?? existing?.livePnl ?? null,
+      markPrice: args.markPrice ?? existing?.markPrice ?? null,
+      side,
+    },
+    explicitFlatStreak: 0,
+  });
+}
+
+/**
+ * Drop one master leg immediately after a confirmed flat close.
+ * Blocks stale margined REST from re-adding the leg until TTL or explicit flat.
  */
 export function evictMasterLivePositionLeg(
   strategyId: string,
@@ -191,7 +257,8 @@ type MasterLiveFetchOpts = {
  * - Empty open array → keep cache unchanged (missing ≠ flat).
  * - Open legs → upsert and reset flat streak.
  * - explicitFlatLegKeys → evict on first successful flat read.
- * - Leg missing from snapshot → evict on first successful miss (no multi-poll streak).
+ * - Leg missing from snapshot → evict only after {@link MASTER_MISSING_SNAPSHOT_POLLS_REQUIRED} misses.
+ * - Open legs from REST always override WS-eviction (REST lag must not hide live positions).
  */
 function mergeMasterLiveTradesCache(
   strategyId: string,
@@ -214,9 +281,19 @@ function mergeMasterLiveTradesCache(
   const fetchedKeys = new Set<string>();
   for (const row of fetched) {
     const key = masterLegKeyFromRow(row);
+    const openSize = row.size != null && Number.isFinite(row.size) ? row.size : 0;
+
+    // REST confirms an open leg — always trust over WS-eviction (stale REST lag).
+    if (openSize > 0) {
+      fetchedKeys.add(key);
+      cache.set(key, { row, explicitFlatStreak: 0 });
+      clearLegWsEviction(strategyId, key);
+      continue;
+    }
+
     if (isLegWsEvicted(strategyId, key)) {
       console.log(
-        `[live-trades] master leg hold WS-evicted (stale REST) strategyId=${strategyId} key=${key}`,
+        `[live-trades] master leg hold WS-evicted (explicit flat pending REST) strategyId=${strategyId} key=${key}`,
       );
       continue;
     }
@@ -226,16 +303,17 @@ function mergeMasterLiveTradesCache(
   }
 
   const flatSet = new Set(explicitFlatLegKeys);
-  const pollsRequired =
-    fetched.length === 0
-      ? MASTER_EMPTY_BOOK_EVICT_POLLS
-      : MASTER_EXPLICIT_FLAT_POLLS_REQUIRED;
-
   for (const [key, entry] of [...cache.entries()]) {
     if (fetchedKeys.has(key)) continue;
 
-    const isFlat =
+    const isExplicitFlat =
       flatSet.has(key) || cacheKeyMatchesExplicitFlat(key, explicitFlatLegKeys);
+
+    const pollsRequired = isExplicitFlat
+      ? MASTER_EXPLICIT_FLAT_POLLS_REQUIRED
+      : fetched.length === 0
+        ? MASTER_EMPTY_BOOK_EVICT_POLLS
+        : MASTER_MISSING_SNAPSHOT_POLLS_REQUIRED;
 
     const streak = entry.explicitFlatStreak + 1;
     if (streak >= pollsRequired) {
@@ -243,7 +321,7 @@ function mergeMasterLiveTradesCache(
       clearLegWsEviction(strategyId, key);
       console.log(
         `[live-trades] master leg removed after ${streak} flat/missing REST poll(s): ${key}` +
-          (isFlat ? " (explicit flat)" : " (absent from snapshot)"),
+          (isExplicitFlat ? " (explicit flat)" : " (absent from snapshot)"),
       );
     } else {
       cache.set(key, { row: entry.row, explicitFlatStreak: streak });
