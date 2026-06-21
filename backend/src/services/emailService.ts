@@ -93,3 +93,48 @@ export function sendTemplateEmailAsync<T extends EmailTemplateName>(
 ): void {
   void sendTemplateEmail(to, templateName, data);
 }
+
+/** Admin-composed HTML email (subject + body HTML). Returns true on success. */
+export async function sendCustomEmail(args: {
+  to: string;
+  subject: string;
+  htmlContent: string;
+  textContent?: string;
+}): Promise<boolean> {
+  const recipient = args.to.trim();
+  const subject = args.subject.trim();
+  const html = args.htmlContent.trim();
+
+  if (!recipient || !subject || !html) {
+    console.error("[emailService] sendCustomEmail skipped — missing to/subject/html");
+    return false;
+  }
+
+  try {
+    const transport = createMailTransport();
+    const info = await transport.sendMail({
+      from: getFromAddress(),
+      to: recipient,
+      subject,
+      html,
+      text: args.textContent?.trim() || subject,
+    });
+
+    const messageId =
+      info && typeof info === "object" && "messageId" in info
+        ? String((info as { messageId?: string }).messageId ?? "")
+        : "";
+
+    console.log(
+      `[emailService] Sent custom email to=${recipient} subject="${subject}"` +
+        (messageId ? ` messageId=${messageId}` : ""),
+    );
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[emailService] Failed custom email to=${recipient}: ${message}`,
+    );
+    return false;
+  }
+}

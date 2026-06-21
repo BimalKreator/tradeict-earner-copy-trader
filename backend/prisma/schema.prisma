@@ -794,3 +794,22 @@ model TicketMessage {
 
   @@index([ticketId, createdAt])
 }
+
+/** Audit trail for admin-initiated manual emails (template resend or custom). */
+model EmailLog {
+  id              String   @id @default(uuid())
+  recipientUserId String
+  recipientEmail  String
+  adminUserId     String
+  adminEmail      String?
+  kind            String
+  templateName    String?
+  subject         String
+  success         Boolean  @default(true)
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+
+  @@index([recipientUserId])
+  @@index([adminUserId])
+  @@index([createdAt])
+}

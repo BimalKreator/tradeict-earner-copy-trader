@@ -35,6 +35,7 @@ import {
 import { createSettingsController } from "../controllers/settingsController.js";
 import { createCouponController } from "../controllers/couponController.js";
 import { createAdminNotificationController } from "../controllers/adminNotificationController.js";
+import { createAdminEmailController } from "../controllers/adminEmailController.js";
 import { createFutureHedgeController } from "../controllers/futureHedgeController.js";
 import {
   decryptDeltaSecretOrPlain,
@@ -70,9 +71,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const settings = createSettingsController(prisma);
   const coupons = createCouponController(prisma);
   const adminNotifications = createAdminNotificationController(prisma);
+  const adminEmail = createAdminEmailController(prisma);
   const futureHedge = createFutureHedgeController(prisma);
 
   router.use(authenticateToken(), isAdmin(prisma));
+
+  router.post("/resend-registration-email", adminEmail.resendRegistrationEmail);
+  router.post("/send-custom-email", adminEmail.sendCustomEmailToUser);
 
   router.get("/strategies/future-hedge", futureHedge.getConfig);
   router.get("/strategies/future-hedge/market", futureHedge.getMarket);
