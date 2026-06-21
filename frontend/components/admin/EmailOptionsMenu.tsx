@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, Loader2, Mail, MessageSquare, Pencil } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 export type EmailOptionsRecipient = {
@@ -19,6 +19,26 @@ type EmailOptionsMenuProps = {
   resending?: boolean;
 };
 
+const MENU_WIDTH = 224;
+const MENU_GAP = 6;
+
+function computeMenuPosition(button: HTMLButtonElement): { top: number; left: number } {
+  const rect = button.getBoundingClientRect();
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+
+  // Right-align menu to trigger; clamp within viewport (document coords).
+  let left = rect.right + scrollX - MENU_WIDTH;
+  const minLeft = scrollX + 8;
+  const maxLeft = scrollX + window.innerWidth - MENU_WIDTH - 8;
+  left = Math.max(minLeft, Math.min(left, maxLeft));
+
+  return {
+    top: rect.bottom + scrollY + MENU_GAP,
+    left,
+  };
+}
+
 /**
  * Controlled email-options dropdown for admin user/member tables.
  * Menu renders in a portal so table overflow cannot clip it.
@@ -35,35 +55,44 @@ export function EmailOptionsMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(false);
-  const [coords, setCoords] = useState({ top: 0, left: 0 });
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(
+    null,
+  );
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  const updatePosition = useCallback(() => {
+  const syncMenuPosition = useCallback(() => {
     const el = triggerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const menuWidth = 224;
-    let left = rect.right - menuWidth;
-    left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
-    setCoords({
-      top: rect.bottom + 6,
-      left,
-    });
+    if (!el) return null;
+    const next = computeMenuPosition(el);
+    setCoords(next);
+    return next;
   }, []);
 
+  /** Position before paint so the portal never flashes at (0, 0). */
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setCoords(null);
+      return;
+    }
+    syncMenuPosition();
+  }, [isOpen, syncMenuPosition]);
+
+  /** Close on scroll/resize so the menu does not drift from the trigger. */
   useEffect(() => {
     if (!isOpen) return;
-    updatePosition();
-    window.addEventListener("scroll", updatePosition, true);
-    window.addEventListener("resize", updatePosition);
+    function closeMenu() {
+      onOpenDropdown(null);
+    }
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("resize", closeMenu);
     return () => {
-      window.removeEventListener("scroll", updatePosition, true);
-      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu);
     };
-  }, [isOpen, updatePosition]);
+  }, [isOpen, onOpenDropdown]);
 
   /** Defer outside-click so the opening click does not instantly close the menu. */
   useEffect(() => {
@@ -93,19 +122,24 @@ export function EmailOptionsMenu({
       onOpenDropdown(null);
       return;
     }
-    updatePosition();
+    syncMenuPosition();
     onOpenDropdown(rowId);
   }
 
   const menu =
-    isOpen && mounted
+    isOpen && mounted && coords
       ? createPortal(
           <div
             ref={menuRef}
             role="menu"
             aria-label="Email options"
-            className="fixed z-[9999] min-w-[224px] overflow-hidden rounded-lg border border-white/15 bg-[#0f172a] py-1 shadow-2xl ring-1 ring-sky-500/20"
-            style={{ top: coords.top, left: coords.left }}
+            className="absolute z-[9999] min-w-[224px] overflow-hidden rounded-lg border border-white/15 bg-[#0f172a] py-1 shadow-2xl ring-1 ring-sky-500/20"
+            style={{
+              position: "absolute",
+              top: coords.top,
+              left: coords.left,
+              zIndex: 9999,
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <button
