@@ -6,7 +6,12 @@ import https from "node:https";
 import {
   decryptDeltaSecretOrPlain,
 } from "../utils/encryption.js";
-import { scheduleDeltaRestRequest } from "../utils/deltaRateLimiter.js";
+import {
+  DeltaRestPausedError,
+  handleDeltaCdn429,
+  isDeltaRestPausedError,
+  scheduleDeltaRestRequest,
+} from "../utils/deltaRateLimiter.js";
 import {
   cacheLiveQuotes,
   hasFreshTerminalQuotes,
@@ -69,19 +74,27 @@ async function deltaPublicGet<T>(
         return data;
       } catch (err) {
         lastError = err;
-        if (isAxios429(err) && attempt < DELTA_429_MAX_RETRIES) {
-          const retryAfter = axios.isAxiosError(err)
-            ? parseRetryAfterMs(
-                (err.response?.headers ?? {}) as Record<string, unknown>,
-              )
-            : null;
-          const delay =
-            retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
-          console.warn(
-            `[delta] HTTP 429 on GET ${url} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
-          );
-          await sleepMs(delay);
-          continue;
+        if (isAxios429(err)) {
+          if (handleDeltaCdn429(err)) {
+            throw new DeltaRestPausedError(
+              "API Paused globally due to CDN limit",
+              "cdn",
+            );
+          }
+          if (attempt < DELTA_429_MAX_RETRIES) {
+            const retryAfter = axios.isAxiosError(err)
+              ? parseRetryAfterMs(
+                  (err.response?.headers ?? {}) as Record<string, unknown>,
+                )
+              : null;
+            const delay =
+              retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
+            console.warn(
+              `[delta] HTTP 429 on GET ${url} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
+            );
+            await sleepMs(delay);
+            continue;
+          }
         }
         throw err;
       }
@@ -192,19 +205,30 @@ async function deltaIndiaSignedRequest<T>(args: {
       return data;
     } catch (err) {
       lastError = err;
-      if (isAxios429(err) && attempt < DELTA_429_MAX_RETRIES) {
-        const retryAfter = axios.isAxiosError(err)
-          ? parseRetryAfterMs(
-              (err.response?.headers ?? {}) as Record<string, unknown>,
-            )
-          : null;
-        const delay =
-          retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
-        console.warn(
-          `[delta] HTTP 429 on ${args.method} ${args.path} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
-        );
-        await sleepMs(delay);
-        continue;
+      if (isDeltaRestPausedError(err)) {
+        throw err;
+      }
+      if (isAxios429(err)) {
+        if (handleDeltaCdn429(err)) {
+          throw new DeltaRestPausedError(
+            "API Paused globally due to CDN limit",
+            "cdn",
+          );
+        }
+        if (attempt < DELTA_429_MAX_RETRIES) {
+          const retryAfter = axios.isAxiosError(err)
+            ? parseRetryAfterMs(
+                (err.response?.headers ?? {}) as Record<string, unknown>,
+              )
+            : null;
+          const delay =
+            retryAfter ?? DELTA_429_BASE_DELAY_MS * 2 ** attempt;
+          console.warn(
+            `[delta] HTTP 429 on ${args.method} ${args.path} — retry ${attempt + 1}/${DELTA_429_MAX_RETRIES} after ${delay}ms`,
+          );
+          await sleepMs(delay);
+          continue;
+        }
       }
       throw err;
     }

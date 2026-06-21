@@ -8,6 +8,7 @@ import {
   cacheLiveQuotes,
   ingestLivePriceWsMessage,
 } from "./liveMarkPriceCache.js";
+import { isDeltaRestApiPaused } from "../utils/deltaRateLimiter.js";
 
 /** Delta Exchange India public WebSocket — mark, v2/ticker quotes, L2 top-of-book. */
 const DELTA_INDIA_PUBLIC_WS = "wss://public-socket.india.delta.exchange";
@@ -172,6 +173,8 @@ function connect(): void {
 async function refreshSymbolsFromMasterAccounts(
   prisma: PrismaClient,
 ): Promise<void> {
+  if (isDeltaRestApiPaused()) return;
+
   const strategies = await prisma.strategy.findMany({
     where: {
       OR: [

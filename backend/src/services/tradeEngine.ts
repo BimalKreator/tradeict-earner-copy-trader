@@ -16,6 +16,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
+import { isDeltaRestApiPaused, isDeltaRestPausedError } from "../utils/deltaRateLimiter.js";
 import { recordTradePnl } from "../controllers/subscriptionController.js";
 import {
   EXIT_REASON,
@@ -270,13 +271,14 @@ function requestImmediateMasterRestPoll(reason: string): void {
   masterRestPollDebounce = setTimeout(() => {
     masterRestPollDebounce = null;
     const active = masterRestPollContext;
-    if (!active || active.cancelled.value) return;
+    if (!active || active.cancelled.value || isDeltaRestApiPaused()) return;
     console.log(`[MASTER-REST-SYNC] immediate poll (${reason})`);
     void pollAllMasterPositionsFallback(
       active.prisma,
       active.trackers,
       active.cancelled,
     ).catch((err) => {
+      if (isDeltaRestPausedError(err)) return;
       console.error(
         "[MASTER-REST-SYNC] immediate poll failed:",
         err instanceof Error ? err.message : err,
@@ -805,6 +807,7 @@ function scheduleMasterRestPoll(
 ): void {
   void pollAllMasterPositionsFallback(prisma, trackers, cancelled).catch(
     (err) => {
+      if (isDeltaRestPausedError(err)) return;
       console.error(
         "[MASTER-REST-SYNC] initial poll unhandled rejection:",
         err instanceof Error ? err.message : err,
@@ -818,6 +821,8 @@ async function pollAllMasterPositionsFallback(
   trackers: Map<string, MasterPositionTracker>,
   cancelled: { value: boolean },
 ): Promise<void> {
+  if (isDeltaRestApiPaused()) return;
+
   const strategies = await findActiveCopyTradingStrategies(prisma);
   for (const strat of strategies) {
     if (cancelled.value) return;
@@ -4640,6 +4645,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
 
   async function runAutoExitPass(): Promise<void> {
     if (cancelled.value) return;
+    if (isDeltaRestApiPaused()) return;
     try {
       await runAllStrategyAutoExitChecks(prisma);
       await runAllBreakevenExitChecks(prisma);
@@ -4679,6 +4685,7 @@ export function startTradeEngine(prisma: PrismaClient): () => void {
     try {
       void pollAllMasterPositionsFallback(prisma, trackers, cancelled).catch(
         (err) => {
+          if (isDeltaRestPausedError(err)) return;
           console.error(
             "[MASTER-REST-SYNC] interval poll unhandled rejection:",
             err instanceof Error ? err.message : err,

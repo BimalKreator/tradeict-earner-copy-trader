@@ -18,6 +18,7 @@ import {
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
+import { isDeltaRestApiPaused } from "../utils/deltaRateLimiter.js";
 import { onLiveBidAskTick } from "./liveMarkPriceCache.js";
 import {
   isLegClosingBlocked,
@@ -256,6 +257,12 @@ async function resolveCachedMasterLegs(
   if (cached && Date.now() - cached.fetchedAt < MASTER_LEGS_CACHE_TTL_MS) {
     return { legs: cached.legs, totalPnlUsd: cached.totalPnlUsd };
   }
+  if (isDeltaRestApiPaused()) {
+    if (cached) {
+      return { legs: cached.legs, totalPnlUsd: cached.totalPnlUsd };
+    }
+    return { legs: [], totalPnlUsd: 0 };
+  }
   const snap = await fetchMasterLegsWithTotalLivePnl(
     masterApiKey,
     masterApiSecret,
@@ -448,6 +455,9 @@ export async function resolveLiveBtcUsdPrice(): Promise<number | null> {
   const cached = getLiveFuturePrice();
   if (cached != null && Number.isFinite(cached) && cached > 0) {
     return cached;
+  }
+  if (isDeltaRestApiPaused()) {
+    return null;
   }
   try {
     const tick = await fetchDeltaTicker(FUTURE_HEDGE_BTC_SYMBOL);
@@ -837,6 +847,9 @@ async function runBreakevenExitCheckOnPrice(
   livePrice: number,
   source: "ws" | "poll",
 ): Promise<void> {
+  if (source === "poll" && isDeltaRestApiPaused()) {
+    return;
+  }
   const config = strategy.futureHedgeConfig;
   if (!config?.isBreakevenExitEnabled) return;
 
@@ -977,6 +990,9 @@ export async function runBreakevenExitCheck(
 export async function runAllBreakevenExitChecks(
   prisma: PrismaClient,
 ): Promise<void> {
+  if (isDeltaRestApiPaused()) {
+    return;
+  }
   const strategies =
     breakevenStrategyCache.length > 0
       ? breakevenStrategyCache
@@ -990,6 +1006,9 @@ export async function runAllBreakevenExitChecks(
 export async function runAllStrategyAutoExitChecks(
   prisma: PrismaClient,
 ): Promise<void> {
+  if (isDeltaRestApiPaused()) {
+    return;
+  }
   const strategies = await prisma.strategy.findMany({
     where: {
       isActive: true,

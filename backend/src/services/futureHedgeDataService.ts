@@ -6,6 +6,7 @@ import {
   resolveCcxtSymbol,
 } from "./exchangeService.js";
 import { extractStrictMarkPrice } from "./liveMarkPriceCache.js";
+import { isDeltaRestApiPaused, isDeltaRestPausedError } from "../utils/deltaRateLimiter.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "./futureHedgeService.js";
 
 /** Compact Delta India perp key (BTC linear perp). */
@@ -158,6 +159,7 @@ async function resolveCcxtBtcSymbol(): Promise<string> {
 }
 
 async function refreshEmaFromExchange(period: number): Promise<void> {
+  if (isDeltaRestApiPaused()) return;
   if (ohlcvInFlight) return;
   ohlcvInFlight = true;
   try {
@@ -189,6 +191,7 @@ async function refreshEmaFromExchange(period: number): Promise<void> {
       );
     }
   } catch (err) {
+    if (isDeltaRestPausedError(err)) return;
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[future-hedge-data] OHLCV/EMA refresh failed: ${msg}`);
   } finally {
@@ -197,12 +200,14 @@ async function refreshEmaFromExchange(period: number): Promise<void> {
 }
 
 async function pollTickerRest(): Promise<void> {
+  if (isDeltaRestApiPaused()) return;
   try {
     const { last } = await fetchDeltaTicker(FUTURE_HEDGE_BTC_SYMBOL);
     if (last != null && last > 0) {
       setLivePrice(last, "rest");
     }
   } catch (err) {
+    if (isDeltaRestPausedError(err)) return;
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[future-hedge-data] REST ticker poll failed: ${msg}`);
   }

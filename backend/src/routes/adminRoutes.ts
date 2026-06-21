@@ -51,6 +51,10 @@ import {
   handleInjectTradeRequest,
   isInjectTradeClientError,
 } from "../services/dummyTradeInjectorService.js";
+import {
+  getDeltaRestPauseStatus,
+  setDeltaRestApiManualPause,
+} from "../utils/deltaRateLimiter.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -75,6 +79,22 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const futureHedge = createFutureHedgeController(prisma);
 
   router.use(authenticateToken(prisma), isAdmin(prisma));
+
+  /** GET /api/admin/system/api-pause — Delta REST pause status (CDN auto + manual kill switch). */
+  router.get("/system/api-pause", (_req, res) => {
+    res.json(getDeltaRestPauseStatus());
+  });
+
+  /** PUT /api/admin/system/api-pause — toggle manual REST kill switch `{ "paused": true|false }`. */
+  router.put("/system/api-pause", (req, res) => {
+    const paused = (req.body as { paused?: unknown })?.paused;
+    if (typeof paused !== "boolean") {
+      res.status(400).json({ error: "paused must be a boolean" });
+      return;
+    }
+    setDeltaRestApiManualPause(paused);
+    res.json(getDeltaRestPauseStatus());
+  });
 
   router.post("/resend-registration-email", adminEmail.resendRegistrationEmail);
   router.post("/send-custom-email", adminEmail.sendCustomEmailToUser);
