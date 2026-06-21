@@ -7,6 +7,7 @@ import {
   fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
   hydratePositionForLivePnl,
+  prefetchBulkTickersForSymbols,
   seedTerminalQuotesForSymbols,
   type DeltaLivePosition,
   type TradeSide,
@@ -628,6 +629,9 @@ async function safeEnrichPositionLiveRow(
 async function enrichPositionsList(
   list: DeltaLivePosition[],
 ): Promise<LiveTradeRow[]> {
+  if (list.length > 0) {
+    await prefetchBulkTickersForSymbols(list.map((p) => p.symbolKey));
+  }
   return Promise.all(list.map((pos) => safeEnrichPositionLiveRow(pos)));
 }
 
