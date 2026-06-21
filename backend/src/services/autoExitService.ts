@@ -16,6 +16,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import type { DeltaLivePosition } from "./exchangeService.js";
+import { resolveDeltaLiveUnrealizedPnl } from "./exchangeService.js";
 import { resolveLiveMarkPrice } from "./liveMarkPriceCache.js";
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
@@ -230,8 +231,11 @@ function resolveMarkForPosition(pos: DeltaLivePosition): number | null {
   return null;
 }
 
-/** Delta-native unrealized PnL only — null when the API did not provide a value. */
+/** Terminal UPNL with WS mark when fresher than REST snapshot. */
 function legPnlUsd(pos: DeltaLivePosition): number | null {
+  const mark = resolveMarkForPosition(pos);
+  const computed = resolveDeltaLiveUnrealizedPnl(pos, mark);
+  if (computed != null && Number.isFinite(computed)) return computed;
   if (pos.unrealizedPnl != null && Number.isFinite(pos.unrealizedPnl)) {
     return pos.unrealizedPnl;
   }

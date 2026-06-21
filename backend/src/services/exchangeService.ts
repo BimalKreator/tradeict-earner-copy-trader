@@ -1282,6 +1282,8 @@ export interface DeltaLivePosition {
   realBaseSize: number;
   entryPrice: number | null;
   markPrice: number | null;
+  /** Delta `contract_value` per lot — used to recalculate terminal UPNL with live mark. */
+  contractValue: number;
   unrealizedPnl: number | null;
   /** Delta REST `realized_pnl` — cumulative since position opened. */
   realizedPnl: number | null;
@@ -1332,9 +1334,60 @@ function fastFlatLegSymbolKey(productSymbol: string): string {
 }
 
 /**
- * Delta exchange terminal UPNL — strict pass-through of `unrealized_pnl` only (total USD for the leg).
- * Do not read `upl`, CCXT `unrealizedPnl`, or apply qty / contract_size math.
+ * Delta Web Terminal UPNL — mark × lots × contract_value (not raw REST `unrealized_pnl`).
+ * BUY: `(mark - entry) * lots * contract_value`
+ * SELL: `(entry - mark) * lots * contract_value`
  */
+export function computeDeltaTerminalUnrealizedPnl(args: {
+  side: TradeSide;
+  entryPrice: number | null;
+  markPrice: number | null;
+  positionLots: number;
+  contractValue: number;
+}): number | null {
+  const { side, entryPrice, markPrice, positionLots, contractValue } = args;
+  if (
+    entryPrice == null ||
+    !Number.isFinite(entryPrice) ||
+    markPrice == null ||
+    !Number.isFinite(markPrice) ||
+    !Number.isFinite(positionLots) ||
+    Math.abs(positionLots) < 1e-12 ||
+    !Number.isFinite(contractValue) ||
+    contractValue <= 0
+  ) {
+    return null;
+  }
+
+  const lots = Math.abs(positionLots);
+  const priceDiff =
+    side === "BUY" ? markPrice - entryPrice : entryPrice - markPrice;
+  const pnl = priceDiff * lots * contractValue;
+  return Number.isFinite(pnl) ? pnl : null;
+}
+
+/** Resolve live UPNL for a parsed position — prefers fresh mark when provided. */
+export function resolveDeltaLiveUnrealizedPnl(
+  pos: Pick<
+    DeltaLivePosition,
+    "side" | "entryPrice" | "markPrice" | "contracts" | "contractValue"
+  >,
+  markOverride?: number | null,
+): number | null {
+  const mark =
+    markOverride != null && Number.isFinite(markOverride) && markOverride > 0
+      ? markOverride
+      : pos.markPrice;
+  return computeDeltaTerminalUnrealizedPnl({
+    side: pos.side,
+    entryPrice: pos.entryPrice,
+    markPrice: mark,
+    positionLots: pos.contracts,
+    contractValue: pos.contractValue,
+  });
+}
+
+/** Raw REST `unrealized_pnl` — settlement snapshots only; live UI uses {@link computeDeltaTerminalUnrealizedPnl}. */
 export function parseDeltaPositionUnrealizedPnl(
   position: Record<string, unknown>,
 ): number | null {
@@ -2653,19 +2706,21 @@ async function fetchDeltaMarginedPositionSnapshotInner(
 
       const markPrice = extractDeltaMarkPrice(position);
 
-      const unrealizedPnl = parseDeltaPositionUnrealizedPnl(position);
+      const unrealizedPnl = computeDeltaTerminalUnrealizedPnl({
+        side,
+        entryPrice,
+        markPrice,
+        positionLots: contractLotCount,
+        contractValue,
+      });
       const realizedPnl = parseDeltaRealizedPnl(position);
 
       if (!lite && unrealizedPnl === null) {
         console.log(
           `[PNL_TRACKER] ${unified} option=${isOption} side=${side} ` +
-            `lots=${contractLotCount} api_unrealized_pnl=${position.unrealized_pnl ?? "n/a"} ` +
+            `lots=${contractLotCount} cv=${contractValue} entry=${entryPrice ?? "n/a"} ` +
             `mark=${markPrice ?? "n/a"}`,
         );
-      }
-
-      if (Number.isNaN(unrealizedPnl as number)) {
-        /* keep null */
       }
 
       let stopLoss: number | null = null;
@@ -2700,6 +2755,7 @@ async function fetchDeltaMarginedPositionSnapshotInner(
         realBaseSize,
         entryPrice,
         markPrice,
+        contractValue,
         unrealizedPnl:
           unrealizedPnl !== null && Number.isFinite(unrealizedPnl)
             ? unrealizedPnl

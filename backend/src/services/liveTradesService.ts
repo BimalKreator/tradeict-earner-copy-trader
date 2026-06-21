@@ -8,6 +8,7 @@ import {
   fetchDeltaMarginedPositionSnapshot,
   fetchDeltaOpenPositions,
   isDeltaOptionProductId,
+  resolveDeltaLiveUnrealizedPnl,
   type DeltaLivePosition,
   type TradeSide,
 } from "./exchangeService.js";
@@ -26,10 +27,10 @@ const DELTA_LIVE_TRADES_FETCH_TIMEOUT_MS = 25_000;
 /** Master poll budget — lite snapshot avoids per-option tickers; keep headroom for many legs. */
 const MASTER_LIVE_TRADES_FETCH_TIMEOUT_MS = 45_000;
 
-/** Successful REST polls before evicting a master leg (explicit flat or missing from snapshot). */
-const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 3;
-/** Faster eviction when the master book is completely empty on a successful REST read. */
-const MASTER_EMPTY_BOOK_EVICT_POLLS = 5;
+/** One successful REST miss → evict (manual close must not wait 75s). */
+const MASTER_EXPLICIT_FLAT_POLLS_REQUIRED = 1;
+/** Same for a fully empty margined book on a successful REST read. */
+const MASTER_EMPTY_BOOK_EVICT_POLLS = 1;
 
 function legSideFromKey(key: string): string {
   const idx = key.lastIndexOf(":");
@@ -78,6 +79,46 @@ type MasterStrategyLegCache = Map<string, MasterLegCacheEntry>;
  */
 export const lastKnownMasterPositions = new Map<string, MasterStrategyLegCache>();
 
+/** WS-confirmed closed legs — block stale margined REST from re-adding until flat/absent. */
+const masterWsEvictedLegs = new Map<string, Set<string>>();
+
+function findMasterCacheKeysForSymbolSide(
+  cache: MasterStrategyLegCache,
+  symbol: string,
+  side: TradeSide,
+): string[] {
+  const probe = `${symbol}:${side.toUpperCase()}`;
+  return [...cache.keys()].filter((key) => liveLegKeysAlign(key, probe));
+}
+
+function isLegWsEvicted(strategyId: string, cacheKey: string): boolean {
+  const denied = masterWsEvictedLegs.get(strategyId);
+  if (!denied || denied.size === 0) return false;
+  for (const d of denied) {
+    if (liveLegKeysAlign(cacheKey, d)) return true;
+  }
+  return false;
+}
+
+function markLegWsEvicted(strategyId: string, keys: string[]): void {
+  if (keys.length === 0) return;
+  let denied = masterWsEvictedLegs.get(strategyId);
+  if (!denied) {
+    denied = new Set();
+    masterWsEvictedLegs.set(strategyId, denied);
+  }
+  for (const key of keys) denied.add(key);
+}
+
+function clearLegWsEviction(strategyId: string, cacheKey: string): void {
+  const denied = masterWsEvictedLegs.get(strategyId);
+  if (!denied) return;
+  for (const d of [...denied]) {
+    if (liveLegKeysAlign(cacheKey, d)) denied.delete(d);
+  }
+  if (denied.size === 0) masterWsEvictedLegs.delete(strategyId);
+}
+
 function masterLegKeyFromRow(row: LiveTradeRow): string {
   return `${row.token}:${row.side}`;
 }
@@ -105,8 +146,39 @@ export function clearMasterLivePositionsCache(strategyId: string): void {
   } else {
     lastKnownMasterPositions.set(strategyId, new Map());
   }
+  masterWsEvictedLegs.delete(strategyId);
   console.log(
     `[live-trades] master cache force-cleared strategyId=${strategyId}`,
+  );
+}
+
+/**
+ * Drop one master leg immediately (e.g. WS `user_trades` reduce-only fill).
+ * Blocks stale margined REST from re-adding the leg until the exchange confirms flat.
+ */
+export function evictMasterLivePositionLeg(
+  strategyId: string,
+  symbol: string,
+  side: TradeSide,
+): void {
+  let cache = lastKnownMasterPositions.get(strategyId);
+  if (!cache) {
+    cache = new Map();
+    lastKnownMasterPositions.set(strategyId, cache);
+  }
+
+  const keys = findMasterCacheKeysForSymbolSide(cache, symbol, side);
+  const denyKeys =
+    keys.length > 0 ? keys : [`${symbol}:${side.toUpperCase()}`];
+
+  for (const key of keys) {
+    cache.delete(key);
+  }
+  markLegWsEvicted(strategyId, denyKeys);
+
+  console.log(
+    `[live-trades] master leg WS-evicted strategyId=${strategyId} ` +
+      `symbol=${symbol} side=${side} keys=${denyKeys.join(",")}`,
   );
 }
 
@@ -120,7 +192,8 @@ type MasterLiveFetchOpts = {
  * - Fetch error/timeout → keep cache unchanged.
  * - Empty open array → keep cache unchanged (missing ≠ flat).
  * - Open legs → upsert and reset flat streak.
- * - explicitFlatLegKeys → increment streak; remove only after 3 consecutive successful flat reads.
+ * - explicitFlatLegKeys → evict on first successful flat read.
+ * - Leg missing from snapshot → evict on first successful miss (no multi-poll streak).
  */
 function mergeMasterLiveTradesCache(
   strategyId: string,
@@ -143,8 +216,15 @@ function mergeMasterLiveTradesCache(
   const fetchedKeys = new Set<string>();
   for (const row of fetched) {
     const key = masterLegKeyFromRow(row);
+    if (isLegWsEvicted(strategyId, key)) {
+      console.log(
+        `[live-trades] master leg hold WS-evicted (stale REST) strategyId=${strategyId} key=${key}`,
+      );
+      continue;
+    }
     fetchedKeys.add(key);
     cache.set(key, { row, explicitFlatStreak: 0 });
+    clearLegWsEviction(strategyId, key);
   }
 
   const flatSet = new Set(explicitFlatLegKeys);
@@ -162,6 +242,7 @@ function mergeMasterLiveTradesCache(
     const streak = entry.explicitFlatStreak + 1;
     if (streak >= pollsRequired) {
       cache.delete(key);
+      clearLegWsEviction(strategyId, key);
       console.log(
         `[live-trades] master leg removed after ${streak} flat/missing REST poll(s): ${key}` +
           (isFlat ? " (explicit flat)" : " (absent from snapshot)"),
@@ -193,7 +274,16 @@ async function fetchAndMergeMasterLiveTrades(
       timeoutMs != null
         ? await withDeltaFetchTimeout(promise, label, timeoutMs)
         : await promise;
-    const rows = snapshot.open.map((pos) => deltaToRow(pos));
+    const rows = snapshot.open.map((pos) => {
+      const cachedMark = resolveLiveMarkPrice(pos.symbolKey);
+      const livePnl =
+        resolveDeltaLiveUnrealizedPnl(pos, cachedMark) ?? pos.unrealizedPnl;
+      return deltaToRow({
+        ...pos,
+        unrealizedPnl: livePnl,
+        markPrice: cachedMark ?? pos.markPrice,
+      });
+    });
     const positions = mergeMasterLiveTradesCache(
       strategyId,
       rows,
@@ -445,19 +535,22 @@ async function resolveMarkForLiveRow(
   return rest.markPrice;
 }
 
-/** Mark for display only — live PnL is Delta REST `unrealized_pnl` (no local math). */
+/** Terminal UPNL with live mark — matches Delta Web UI formula. */
 async function enrichPositionLiveRow(
   pos: DeltaLivePosition,
 ): Promise<LiveTradeRow> {
   if (!isDeltaOptionProductId(pos.symbolKey)) {
     registerSymbolsForLivePrices([pos.symbolKey]);
   }
-  const base = deltaToRow(pos);
+
+  const liveMark = await resolveMarkForLiveRow(pos);
+  const livePnl = resolveDeltaLiveUnrealizedPnl(pos, liveMark) ?? pos.unrealizedPnl;
+  const base = deltaToRow({ ...pos, unrealizedPnl: livePnl });
 
   return {
     ...base,
-    markPrice: pos.markPrice ?? base.markPrice,
-    livePnl: base.livePnl,
+    markPrice: liveMark ?? pos.markPrice ?? base.markPrice,
+    livePnl,
   };
 }
 

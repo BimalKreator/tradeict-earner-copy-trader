@@ -1084,6 +1084,9 @@ async function handleMasterWsClosingFill(
   markLegClosing(strategyId, sig.symbol, openSide);
   markMasterFlatting(strategyId);
 
+  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
+  evictMasterLivePositionLeg(strategyId, sig.symbol, openSide);
+
   console.log(
     `[MASTER-WS] instant follower close ${sig.symbol} ${openSide} ` +
       `(fill ${sig.side} qty=${sig.contracts} source=${sig.source})`,
@@ -1258,6 +1261,10 @@ async function processMasterUserTradeFillRecords(
         tracker.markWsFlatHint(sig.symbol, openSide);
         markLegClosing(strategyId, sig.symbol, openSide);
         markMasterFlatting(strategyId);
+        const { evictMasterLivePositionLeg } = await import(
+          "./liveTradesService.js"
+        );
+        evictMasterLivePositionLeg(strategyId, sig.symbol, openSide);
         console.log(
           `[MASTER-WS] opposing fill → instant close ${sig.symbol} ${openSide} ` +
             `(fill ${sig.side} qty=${sig.contracts})`,
@@ -2197,8 +2204,8 @@ async function notifyMasterFlat(
   markLegClosing(strategyId, snap.symbol, snap.side);
   markMasterFlatting(strategyId);
 
-  const { clearMasterLivePositionsCache } = await import("./liveTradesService.js");
-  clearMasterLivePositionsCache(strategyId);
+  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
+  evictMasterLivePositionLeg(strategyId, snap.symbol, snap.side);
 
   try {
     const result = await syncMasterCloseToFutureHedgeFollowers(
