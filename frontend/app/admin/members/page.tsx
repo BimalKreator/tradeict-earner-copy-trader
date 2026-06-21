@@ -2,10 +2,8 @@
 
 import {
   Check,
-  ChevronDown,
   ClipboardList,
   Loader2,
-  Mail,
   Pencil,
   RefreshCw,
   UserPlus,
@@ -13,7 +11,8 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AdminEmailOptions } from "@/components/admin/AdminEmailOptions";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -201,15 +200,6 @@ export default function AdminMembersPage() {
   const [uplineSubmitting, setUplineSubmitting] = useState(false);
   const [uplineFormError, setUplineFormError] = useState<string | null>(null);
 
-  const [emailMenuMemberId, setEmailMenuMemberId] = useState<string | null>(null);
-  const emailMenuRef = useRef<HTMLDivElement | null>(null);
-  const [emailActionKey, setEmailActionKey] = useState<string | null>(null);
-  const [customEmailMember, setCustomEmailMember] = useState<TeamMember | null>(null);
-  const [customEmailSubject, setCustomEmailSubject] = useState("");
-  const [customEmailBody, setCustomEmailBody] = useState("");
-  const [customEmailSubmitting, setCustomEmailSubmitting] = useState(false);
-  const [customEmailError, setCustomEmailError] = useState<string | null>(null);
-
   const loadMembers = useCallback(async () => {
     setError(null);
     setLoading(true);
@@ -267,20 +257,6 @@ export default function AdminMembersPage() {
     const t = window.setTimeout(() => setToast(null), 5000);
     return () => window.clearTimeout(t);
   }, [toast]);
-
-  useEffect(() => {
-    if (!emailMenuMemberId) return;
-    function onDocClick(e: MouseEvent) {
-      if (
-        emailMenuRef.current &&
-        !emailMenuRef.current.contains(e.target as Node)
-      ) {
-        setEmailMenuMemberId(null);
-      }
-    }
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [emailMenuMemberId]);
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -486,89 +462,6 @@ export default function AdminMembersPage() {
     }
   }
 
-  function openCustomEmailModal(member: TeamMember) {
-    setEmailMenuMemberId(null);
-    setCustomEmailMember(member);
-    setCustomEmailSubject("");
-    setCustomEmailBody("");
-    setCustomEmailError(null);
-  }
-
-  function closeCustomEmailModal() {
-    setCustomEmailMember(null);
-    setCustomEmailSubject("");
-    setCustomEmailBody("");
-    setCustomEmailError(null);
-  }
-
-  async function handleResendWelcome(member: TeamMember) {
-    const actionKey = `${member.id}:welcome`;
-    setEmailActionKey(actionKey);
-    setEmailMenuMemberId(null);
-    try {
-      const res = await fetch(`${apiBase}/admin/resend-registration-email`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ userId: member.id, templateName: "welcome" }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        throw new Error(body.error ?? "Failed to send welcome email");
-      }
-      setToast({
-        type: "ok",
-        text: `Welcome email sent to ${member.email}.`,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Email send failed";
-      setToast({ type: "err", text: msg });
-    } finally {
-      setEmailActionKey(null);
-    }
-  }
-
-  async function handleSendCustomEmail(e: React.FormEvent) {
-    e.preventDefault();
-    if (!customEmailMember) return;
-    if (!customEmailSubject.trim()) {
-      setCustomEmailError("Subject is required.");
-      return;
-    }
-    if (!customEmailBody.trim()) {
-      setCustomEmailError("Message body is required.");
-      return;
-    }
-
-    setCustomEmailSubmitting(true);
-    setCustomEmailError(null);
-    try {
-      const res = await fetch(`${apiBase}/admin/send-custom-email`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({
-          userId: customEmailMember.id,
-          subject: customEmailSubject.trim(),
-          body: customEmailBody.trim(),
-        }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        throw new Error(body.error ?? "Failed to send email");
-      }
-      closeCustomEmailModal();
-      setToast({
-        type: "ok",
-        text: `Custom email sent to ${customEmailMember.email}.`,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Email send failed";
-      setCustomEmailError(msg);
-      setToast({ type: "err", text: msg });
-    } finally {
-      setCustomEmailSubmitting(false);
-    }
-  }
-
   return (
     <div className="mx-auto w-full min-w-0 max-w-6xl space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -652,7 +545,7 @@ export default function AdminMembersPage() {
       </div>
 
       {activeTab === "members" ? (
-      <div className="glass-card border border-glassBorder overflow-hidden">
+      <div className="glass-card border border-glassBorder">
         <div className="flex items-center gap-2 border-b border-glassBorder bg-white/[0.03] px-4 py-3">
           <UsersRound className="h-4 w-4 text-primary" aria-hidden />
           <span className="text-sm font-medium text-white/80">Team members</span>
@@ -661,7 +554,7 @@ export default function AdminMembersPage() {
           </span>
         </div>
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-sm">
+          <table className="w-full min-w-[1100px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.02]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Name</th>
@@ -726,8 +619,17 @@ export default function AdminMembersPage() {
                     <td className="px-4 py-3 font-mono text-xs text-primary/90">
                       {m.referralCode ?? "—"}
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap items-center gap-2">
+                    <td className="px-4 py-3 min-w-[240px]">
+                      <AdminEmailOptions
+                        apiBase={apiBase}
+                        authHeaders={authHeaders}
+                        recipient={{
+                          id: m.id,
+                          email: m.email,
+                          name: m.name,
+                        }}
+                        onToast={setToast}
+                      >
                         <button
                           type="button"
                           onClick={() => openUplineModal(m)}
@@ -737,53 +639,7 @@ export default function AdminMembersPage() {
                           <Pencil className="h-3.5 w-3.5" aria-hidden />
                           Change upline
                         </button>
-                        <div className="relative" ref={emailMenuMemberId === m.id ? emailMenuRef : undefined}>
-                          <button
-                            type="button"
-                            disabled={emailActionKey?.startsWith(`${m.id}:`) ?? false}
-                            onClick={() =>
-                              setEmailMenuMemberId((prev) =>
-                                prev === m.id ? null : m.id,
-                              )
-                            }
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-white/80 transition hover:bg-white/10 disabled:opacity-50"
-                            title="Email options"
-                          >
-                            {emailActionKey?.startsWith(`${m.id}:`) ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                            ) : (
-                              <Mail className="h-3.5 w-3.5" aria-hidden />
-                            )}
-                            Email options
-                            <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
-                          </button>
-                          {emailMenuMemberId === m.id ? (
-                            <div className="absolute right-0 top-full z-20 mt-1 min-w-[200px] overflow-hidden rounded-lg border border-glassBorder bg-[#0f172a] py-1 shadow-xl">
-                              <button
-                                type="button"
-                                disabled={emailActionKey === `${m.id}:welcome`}
-                                onClick={() => void handleResendWelcome(m)}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-white/85 hover:bg-white/10 disabled:opacity-50"
-                              >
-                                {emailActionKey === `${m.id}:welcome` ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" aria-hidden />
-                                ) : (
-                                  <Mail className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
-                                )}
-                                Resend Welcome Email
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openCustomEmailModal(m)}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-white/85 hover:bg-white/10"
-                              >
-                                <Pencil className="h-3.5 w-3.5 shrink-0 text-sky-300" aria-hidden />
-                                Send Custom Message
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
+                      </AdminEmailOptions>
                     </td>
                   </tr>
                 ))
@@ -1167,105 +1023,6 @@ export default function AdminMembersPage() {
                     </>
                   ) : (
                     "Save upline"
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      ) : null}
-
-      {customEmailMember ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="custom-email-title"
-        >
-          <div className="glass-card max-h-[90vh] w-full max-w-lg overflow-y-auto border border-glassBorder p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2
-                  id="custom-email-title"
-                  className="text-lg font-semibold text-white"
-                >
-                  Send custom message
-                </h2>
-                <p className="mt-1 text-sm text-white/50">
-                  To{" "}
-                  <strong className="text-white/80">
-                    {customEmailMember.name?.trim() || customEmailMember.email}
-                  </strong>{" "}
-                  ({customEmailMember.email})
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeCustomEmailModal}
-                className="rounded-lg border border-white/10 p-2 text-white/60 hover:bg-white/10 hover:text-white"
-                aria-label="Close"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <form
-              onSubmit={(e) => void handleSendCustomEmail(e)}
-              className="mt-6 space-y-4"
-            >
-              {customEmailError ? (
-                <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-                  {customEmailError}
-                </p>
-              ) : null}
-
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Subject</span>
-                <input
-                  type="text"
-                  value={customEmailSubject}
-                  onChange={(e) => setCustomEmailSubject(e.target.value)}
-                  maxLength={200}
-                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none ring-primary/30 placeholder:text-white/30 focus:ring-2"
-                  placeholder="Email subject"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">Message</span>
-                <textarea
-                  value={customEmailBody}
-                  onChange={(e) => setCustomEmailBody(e.target.value)}
-                  rows={8}
-                  maxLength={5000}
-                  className="mt-1 w-full resize-y rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none ring-primary/30 placeholder:text-white/30 focus:ring-2"
-                  placeholder="Write your message to the member…"
-                />
-              </label>
-
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeCustomEmailModal}
-                  className="rounded-lg px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/10"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={customEmailSubmitting}
-                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-lg shadow-primary/20 disabled:opacity-50"
-                >
-                  {customEmailSubmitting ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                      Sending…
-                    </>
-                  ) : (
-                    <>
-                      <Mail className="h-4 w-4" aria-hidden />
-                      Send email
-                    </>
                   )}
                 </button>
               </div>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AdminEmailOptions } from "@/components/admin/AdminEmailOptions";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -55,6 +56,9 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
+    null,
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -108,6 +112,12 @@ export default function AdminUsersPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
     void loadUsers();
   }, [loadUsers]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [toast]);
 
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
@@ -171,15 +181,28 @@ export default function AdminUsersPage() {
         </button>
       </header>
 
+      {toast ? (
+        <div
+          className={`mb-6 rounded-lg border px-4 py-3 text-sm ${
+            toast.type === "ok"
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+              : "border-red-500/40 bg-red-500/10 text-red-200"
+          }`}
+          role="status"
+        >
+          {toast.text}
+        </div>
+      ) : null}
+
       {error && (
         <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
         </div>
       )}
 
-      <div className="glass-card border border-glassBorder overflow-hidden">
+      <div className="glass-card border border-glassBorder">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-left text-sm">
+          <table className="w-full min-w-[1200px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">User Name</th>
@@ -188,7 +211,9 @@ export default function AdminUsersPage() {
                 <th className="px-4 py-3 font-medium text-white/70">Wallet Balance</th>
                 <th className="px-4 py-3 font-medium text-white/70">Delta Balance</th>
                 <th className="px-4 py-3 font-medium text-white/70">Total PnL</th>
-                <th className="px-4 py-3 font-medium text-white/70">Actions</th>
+                <th className="px-4 py-3 font-medium text-white/70 min-w-[280px]">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -250,13 +275,24 @@ export default function AdminUsersPage() {
                     >
                       {fmtUsd(u.totalPnlToDate)}
                     </td>
-                    <td className="px-4 py-3">
-                      <Link
-                        href={`/admin/users/${u.id}`}
-                        className="inline-flex rounded-md border border-primary/40 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/25"
+                    <td className="px-4 py-3 min-w-[280px]">
+                      <AdminEmailOptions
+                        apiBase={apiBase}
+                        authHeaders={authHeaders}
+                        recipient={{
+                          id: u.id,
+                          email: u.email,
+                          name: u.name,
+                        }}
+                        onToast={setToast}
                       >
-                        View Details
-                      </Link>
+                        <Link
+                          href={`/admin/users/${u.id}`}
+                          className="inline-flex rounded-md border border-primary/40 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/25"
+                        >
+                          View Details
+                        </Link>
+                      </AdminEmailOptions>
                     </td>
                   </tr>
                 ))
