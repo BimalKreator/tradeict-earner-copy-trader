@@ -413,9 +413,8 @@ async function finalizeOptimisticFollowerOpen(
   },
 ): Promise<FollowerExecuteResult> {
   const optimisticQty = args.targetContracts;
-  let persistedOpen = false;
   if (args.strategyId) {
-    await recordTradePositionOpen(prisma, {
+    void recordTradePositionOpen(prisma, {
       strategyId: args.strategyId,
       userId: args.userId,
       symbol: args.symbol,
@@ -427,22 +426,29 @@ async function finalizeOptimisticFollowerOpen(
           : 0,
       ...(args.openClientOrderId ? { clientOrderId: args.openClientOrderId } : {}),
       ...(args.lastResult.orderId ? { exchangeOrderId: args.lastResult.orderId } : {}),
-    });
-    persistedOpen = true;
+    })
+      .then(() =>
+        markSubscriptionSynced(prisma, {
+          userId: args.userId,
+          strategyId: args.strategyId!,
+        }),
+      )
+      .catch((err) => {
+        console.warn(
+          `[copy-exec] deferred optimistic open persist user=${args.userId} ${args.symbol}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
     extendFollowerCopyInflight({
       userId: args.userId,
       strategyId: args.strategyId,
       symbol: args.symbol,
       side: args.side,
     });
-    await markSubscriptionSynced(prisma, {
-      userId: args.userId,
-      strategyId: args.strategyId,
-    });
   }
   console.log(
     `[copy-exec] optimistic open user=${args.userId} ${args.symbol} ${args.side} ` +
-      `qty=${optimisticQty} orderId=${args.lastResult.orderId ?? "pending"} — SYNC-MONITOR will verify`,
+      `qty=${optimisticQty} orderId=${args.lastResult.orderId ?? "pending"} — DB persist async`,
   );
   return {
     ...buildOpenExecuteSuccess({
@@ -452,7 +458,7 @@ async function finalizeOptimisticFollowerOpen(
       attempts: Math.max(args.attempts, 1),
       verifiedQty: optimisticQty,
     }),
-    persistedOpen,
+    persistedOpen: false,
   };
 }
 
@@ -1822,13 +1828,6 @@ export async function syncMasterCloseToFutureHedgeFollowers(
     return null;
   }
 
-  await closeTradePositionsForLeg(prisma, {
-    isMaster: true,
-    strategyId,
-    symbol: snap.symbol,
-    side: snap.side,
-  });
-
   const subscribers = await findActiveFutureHedgeCopySubscribers(prisma);
   const oppositeSide: TradeSide = snap.side === "BUY" ? "SELL" : "BUY";
   const instantClose = options?.instantClose === true;
@@ -1854,24 +1853,17 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         return;
       }
 
-      const dbLots = await sumOpenFollowerBotQuantity(prisma, {
-        strategyId,
-        userId: sub.userId,
-        symbol: snap.symbol,
-        side: snap.side,
-      });
-
-      const dbLotsFloor = Math.floor(dbLots);
-
       if (instantClose) {
-        if (dbLotsFloor <= 0) {
+        const closeLots = Math.floor(
+          followerLotsFromMaster(snap.masterLots, sub),
+        );
+        if (closeLots <= 0) {
           console.log(
-            `[copy] instant close skip user=${sub.userId} ${snap.symbol} ${snap.side} — no DB qty`,
+            `[copy] instant close skip user=${sub.userId} ${snap.symbol} ${snap.side} — scaled qty 0`,
           );
           return;
         }
 
-        const closeLots = dbLotsFloor;
         const closeClientOrderId = buildStableCopyClientOrderId({
           strategyId,
           userId: sub.userId,
@@ -1907,12 +1899,17 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           return;
         }
 
-        await closeTradePositionsForLeg(prisma, {
+        void closeTradePositionsForLeg(prisma, {
           strategyId,
           userId: sub.userId,
           symbol: snap.symbol,
           side: snap.side,
           clientOrderId: closeClientOrderId,
+        }).catch((err) => {
+          console.warn(
+            `[copy] deferred instant close DB persist user=${sub.userId} ${snap.symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
         });
 
         const settlement = requireCloseSettlement(
@@ -1921,7 +1918,7 @@ export async function syncMasterCloseToFutureHedgeFollowers(
         );
         if (!settlement) return;
 
-        await onFollowerClosed({
+        void onFollowerClosed({
           userId: sub.userId,
           strategyId,
           symbol: snap.symbol,
@@ -1930,10 +1927,24 @@ export async function syncMasterCloseToFutureHedgeFollowers(
           sizedPosition: closeLots,
           settlement,
           ...(options?.exitReason ? { exitReason: options.exitReason } : {}),
+        }).catch((err) => {
+          console.warn(
+            `[copy] deferred instant close PnL user=${sub.userId} ${snap.symbol}:`,
+            err instanceof Error ? err.message : err,
+          );
         });
         closedCount += 1;
         return;
       }
+
+      const dbLots = await sumOpenFollowerBotQuantity(prisma, {
+        strategyId,
+        userId: sub.userId,
+        symbol: snap.symbol,
+        side: snap.side,
+      });
+
+      const dbLotsFloor = Math.floor(dbLots);
 
       const exchangeOpenLots = await followerExchangeOpenLotsLive(
         creds.apiKey,
@@ -2069,6 +2080,18 @@ export async function syncMasterCloseToFutureHedgeFollowers(
     );
     remainingExchangeLots += Math.floor(openLots);
   }
+
+  void closeTradePositionsForLeg(prisma, {
+    isMaster: true,
+    strategyId,
+    symbol: snap.symbol,
+    side: snap.side,
+  }).catch((err) => {
+    console.warn(
+      `[copy] deferred master leg DB close ${snap.symbol} ${snap.side}:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
 
   return {
     strategyId,

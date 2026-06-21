@@ -33,11 +33,11 @@ export const COPY_ROLL_SUPPRESS_MS = 90_000;
 /** Background master REST poll interval (WS hints trigger immediate poll). */
 export const COPY_MASTER_REST_POLL_MS = 15_000;
 
-/** Follower qty align pass interval. */
+/** Follower qty align pass interval (SYNC-MONITOR fallback — WS is primary). */
 export const COPY_QTY_RECONCILE_MS = 30_000;
 
-/** Debounce burst WS hints into one REST poll. */
-export const COPY_REST_IMMEDIATE_DEBOUNCE_MS = 350;
+/** Debounce burst WS hints into one REST poll (avoid event-loop choke). */
+export const COPY_REST_IMMEDIATE_DEBOUNCE_MS = 2_500;
 
 /** Per-leg REST force-copy cooldown. */
 export const COPY_FORCE_SYNC_COOLDOWN_MS = 45_000;

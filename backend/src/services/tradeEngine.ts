@@ -467,10 +467,13 @@ async function triggerMasterOpenCopy(
     );
   }
 
-  const entryPrice = await resolveMasterCopyEntryPrice(
-    args.symbol,
-    args.avgPrice,
-  );
+  const entryPrice =
+    isLiveMasterFill &&
+    args.avgPrice != null &&
+    Number.isFinite(args.avgPrice) &&
+    args.avgPrice > 0
+      ? args.avgPrice
+      : await resolveMasterCopyEntryPrice(args.symbol, args.avgPrice);
   if (entryPrice == null) {
     console.warn(
       `${logTag} skip ${skipCopy ? "tracker" : "copy"} ${args.symbol} — could not resolve entry/mark price`,
@@ -1060,6 +1063,83 @@ async function tryExecuteMasterLegCloseAfterRestCheck(
   );
 }
 
+async function handleMasterWsInstantLegClose(
+  prisma: PrismaClient,
+  strategyId: string,
+  args: {
+    symbol: string;
+    openSide: TradeSide;
+    source: string;
+    fillDetail?: string;
+  },
+  tracker: MasterPositionTracker,
+): Promise<void> {
+  if (isLegClosingBlocked(strategyId, args.symbol, args.openSide)) {
+    return;
+  }
+
+  const trackedContracts = tracker.maxContractsForSymbolSide(
+    args.symbol,
+    args.openSide,
+  );
+  if (trackedContracts <= 0) return;
+
+  const meta = resolveTrackedOpenLegMeta(tracker, args.symbol, args.openSide);
+  if (!meta) return;
+
+  tracker.markWsFlatHint(args.symbol, args.openSide);
+  markLegClosing(strategyId, args.symbol, args.openSide);
+  markMasterFlatting(strategyId);
+
+  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
+  evictMasterLivePositionLeg(strategyId, args.symbol, args.openSide);
+
+  const fillNote = args.fillDetail ? ` (${args.fillDetail})` : "";
+  console.log(
+    `[MASTER-WS] instant follower close ${args.symbol} ${args.openSide}${fillNote} source=${args.source}`,
+  );
+
+  void notifyMasterFlat(
+    prisma,
+    strategyId,
+    {
+      symbol: args.symbol,
+      side: args.openSide,
+      masterEntryPrice: meta.avgEntry,
+      masterContracts: trackedContracts,
+    },
+    { instantClose: true },
+  )
+    .then((closed) => {
+      if (closed) {
+        tracker.clearPendingFlat(masterLegKey(args.symbol, args.openSide));
+        tracker.clearWsFlatHint(args.symbol, args.openSide);
+        tracker.clearLegKeys(
+          tracker.aliasesForSnap({
+            symbol: args.symbol,
+            side: args.openSide,
+            productKey: args.symbol,
+          }),
+        );
+        tracker.lastRestContractsByLeg.delete(
+          masterLegKey(args.symbol, args.openSide),
+        );
+      }
+    })
+    .catch((err) => {
+      console.error(
+        `[MASTER-WS] instant close fan-out failed ${args.symbol} ${args.openSide}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+
+  requestPriorityMasterRestPoll(
+    strategyId,
+    `ws-${args.source}:${args.symbol}:${args.openSide}`,
+    [{ symbol: args.symbol, side: args.openSide }],
+  );
+}
+
 async function handleMasterWsClosingFill(
   prisma: PrismaClient,
   strategyId: string,
@@ -1075,60 +1155,16 @@ async function handleMasterWsClosingFill(
   if (!sig.reduceOnly) return;
 
   const openSide = closingFillOpenSide(sig.side);
-  const trackedContracts = tracker.maxContractsForSymbolSide(sig.symbol, openSide);
-  if (trackedContracts <= 0) return;
-
-  const meta = resolveTrackedOpenLegMeta(tracker, sig.symbol, openSide);
-  if (!meta) return;
-
-  tracker.markWsFlatHint(sig.symbol, openSide);
-  markLegClosing(strategyId, sig.symbol, openSide);
-  markMasterFlatting(strategyId);
-
-  const { evictMasterLivePositionLeg } = await import("./liveTradesService.js");
-  evictMasterLivePositionLeg(strategyId, sig.symbol, openSide);
-
-  console.log(
-    `[MASTER-WS] instant follower close ${sig.symbol} ${openSide} ` +
-      `(fill ${sig.side} qty=${sig.contracts} source=${sig.source})`,
-  );
-
-  void notifyMasterFlat(
+  await handleMasterWsInstantLegClose(
     prisma,
     strategyId,
     {
       symbol: sig.symbol,
-      side: openSide,
-      masterEntryPrice: meta.avgEntry,
-      masterContracts: trackedContracts,
+      openSide,
+      source: sig.source,
+      fillDetail: `fill ${sig.side} qty=${sig.contracts}`,
     },
-    { instantClose: true },
-  )
-    .then((closed) => {
-      if (closed) {
-        tracker.clearPendingFlat(masterLegKey(sig.symbol, openSide));
-        tracker.clearWsFlatHint(sig.symbol, openSide);
-        tracker.clearLegKeys(
-          tracker.aliasesForSnap({
-            symbol: sig.symbol,
-            side: openSide,
-            productKey: sig.symbol,
-          }),
-        );
-        tracker.lastRestContractsByLeg.delete(masterLegKey(sig.symbol, openSide));
-      }
-    })
-    .catch((err) => {
-      console.error(
-        `[MASTER-WS] instant close fan-out failed ${sig.symbol} ${openSide}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
-
-  requestPriorityMasterRestPoll(
-    strategyId,
-    `ws-close-fill:${sig.symbol}:${openSide}`,
-    [{ symbol: sig.symbol, side: openSide }],
+    tracker,
   );
 }
 
@@ -2307,26 +2343,28 @@ export async function fanOutMasterFlatCloses(
   }>,
   exitReason: ExitReasonValue,
 ): Promise<void> {
-  for (const leg of legs) {
-    try {
-      await notifyMasterFlat(
-        prisma,
-        strategyId,
-        {
-          symbol: leg.symbolKey,
-          side: leg.side,
-          masterEntryPrice: leg.entryPrice,
-          masterContracts: leg.contracts,
-        },
-        { exitReason },
-      );
-    } catch (err) {
-      console.error(
-        `[tradeEngine] fanOutMasterFlatCloses failed ${leg.symbolKey} ${leg.side}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+  await Promise.allSettled(
+    legs.map(async (leg) => {
+      try {
+        await notifyMasterFlat(
+          prisma,
+          strategyId,
+          {
+            symbol: leg.symbolKey,
+            side: leg.side,
+            masterEntryPrice: leg.entryPrice,
+            masterContracts: leg.contracts,
+          },
+          { exitReason },
+        );
+      } catch (err) {
+        console.error(
+          `[tradeEngine] fanOutMasterFlatCloses failed ${leg.symbolKey} ${leg.side}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }),
+  );
 }
 
 type LastOpenMeta = {
@@ -3483,10 +3521,9 @@ class StrategyMasterSocket {
         return;
       }
 
-      // WS delete/close — mark flat hint + priority REST (fast-path streak=1 on confirm).
+      // WS delete/close — instant follower close from WS hint; REST reconcile only.
       if (action === "delete" || action === "closed") {
         const rows = collectRows();
-        const hintedLegs: Array<{ symbol: string; side: TradeSide }> = [];
         for (const r of rows) {
           const snap = extractPositionSnapshot(r);
           if (!snap) continue;
@@ -3495,18 +3532,24 @@ class StrategyMasterSocket {
             snap.side,
           );
           if (prevContracts > 0 || snap.contracts > 0) {
-            this.tracker.markWsFlatHint(snap.symbol, snap.side);
-            hintedLegs.push({ symbol: snap.symbol, side: snap.side });
+            void handleMasterWsInstantLegClose(
+              this.prisma,
+              this.strategyId,
+              {
+                symbol: snap.symbol,
+                openSide: snap.side,
+                source: `position-${action}`,
+                fillDetail: `${action} prev=${prevContracts}`,
+              },
+              this.tracker,
+            ).catch((err) => {
+              console.error(
+                `[MASTER-WS] position ${action} instant close failed ${snap.symbol} ${snap.side}:`,
+                err instanceof Error ? err.message : err,
+              );
+            });
           }
         }
-        console.warn(
-          `[MASTER-WS] positions ${action} strategyId=${this.strategyId} — priority REST flat verification`,
-        );
-        requestPriorityMasterRestPoll(
-          this.strategyId,
-          `ws-position-${action}`,
-          hintedLegs.length > 0 ? hintedLegs : undefined,
-        );
         return;
       }
 
@@ -3528,15 +3571,22 @@ class StrategyMasterSocket {
         const next = snap.contracts;
 
         if (next <= 0 && prev > 0) {
-          this.tracker.markWsFlatHint(snap.symbol, snap.side);
-          console.warn(
-            `[MASTER-WS] positions update size→0 ${snap.symbol} ${snap.side} (${prev} contracts) strategyId=${this.strategyId} — priority REST flat verification`,
-          );
-          requestPriorityMasterRestPoll(
+          void handleMasterWsInstantLegClose(
+            this.prisma,
             this.strategyId,
-            "ws-position-flat-hint",
-            [{ symbol: snap.symbol, side: snap.side }],
-          );
+            {
+              symbol: snap.symbol,
+              openSide: snap.side,
+              source: "position-flat-hint",
+              fillDetail: `size→0 (${prev} contracts)`,
+            },
+            this.tracker,
+          ).catch((err) => {
+            console.error(
+              `[MASTER-WS] position size→0 instant close failed ${snap.symbol} ${snap.side}:`,
+              err instanceof Error ? err.message : err,
+            );
+          });
           continue;
         }
 
@@ -3548,10 +3598,32 @@ class StrategyMasterSocket {
           this.tracker.writeTracked(snap, next);
 
           if (copyEnabled && increased) {
+            const delta = next - prev;
             console.log(
-              `[MASTER-WS] positions +${next - prev} ${snap.symbol} ${snap.side} — scheduling immediate REST copy sync`,
+              `[MASTER-WS] positions +${delta} ${snap.symbol} ${snap.side} — instant follower open (REST reconcile background)`,
             );
-            requestImmediateMasterRestPoll("ws-position-increase");
+            void triggerMasterOpenCopy(
+              this.prisma,
+              this.strategyId,
+              {
+                symbol: snap.symbol,
+                side: snap.side,
+                masterContracts: delta,
+                masterTotalLots: next,
+                avgPrice:
+                  snap.avgEntry != null && Number.isFinite(snap.avgEntry)
+                    ? snap.avgEntry
+                    : meta?.avgEntry ?? null,
+                masterFillKey: `ws-pos:${snap.symbol}:${snap.side}:${next}:${prev}`,
+                source: "positions",
+              },
+              this.tracker,
+            ).catch((err) => {
+              console.error(
+                `[MASTER-WS] position increase fan-out failed ${snap.symbol} ${snap.side}:`,
+                err instanceof Error ? err.message : err,
+              );
+            });
           }
 
           if (copyEnabled && decreased) {

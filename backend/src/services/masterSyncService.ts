@@ -9,6 +9,7 @@ import {
   type TradeSide,
 } from "./exchangeService.js";
 import { syncMasterPartialTrimToFollowers } from "./followerTradeExecution.js";
+import { isLegClosingBlocked } from "./subscriptionSyncService.js";
 import { tradePositionSymbolsAlign } from "./tradePositionService.js";
 
 export type MasterRestLeg = {
@@ -170,6 +171,23 @@ export async function executeMasterLegCloseAfterRestCheck(
   tracker.markPriorityFlatVerified(legKey);
 
   if (!restOpen || restContracts <= 0) {
+    if (isLegClosingBlocked(strategyId, args.symbol, args.openSide)) {
+      console.log(
+        `[MASTER-REST-SYNC] reconcile-only flat confirmed ${args.symbol} ${args.openSide} (${args.source}) — instant exit already in flight`,
+      );
+      tracker.clearPendingFlat(legKey);
+      tracker.clearWsFlatHint(args.symbol, args.openSide);
+      tracker.clearLegKeys(
+        tracker.aliasesForSnap({
+          symbol: args.symbol,
+          side: args.openSide,
+          productKey: args.symbol,
+        }),
+      );
+      tracker.lastRestContractsByLeg.delete(legKey);
+      return true;
+    }
+
     console.log(
       `[MASTER-REST-SYNC] priority verify confirmed flat ${args.symbol} ${args.openSide} (${args.source}) — closing followers`,
     );
@@ -286,27 +304,31 @@ export async function runPriorityFlatVerificationRestFetch(
     }
   }
 
-  let closed = 0;
-  for (const leg of legs) {
-    const tracked = tracker.maxContractsForSymbolSide(leg.symbol, leg.side);
-    const meta = deps.resolveLegMeta(tracker, leg.symbol, leg.side);
-    if (!meta || tracked <= 0) continue;
+  const outcomes = await Promise.allSettled(
+    legs.map(async (leg) => {
+      const tracked = tracker.maxContractsForSymbolSide(leg.symbol, leg.side);
+      const meta = deps.resolveLegMeta(tracker, leg.symbol, leg.side);
+      if (!meta || tracked <= 0) return false;
 
-    tracker.markWsFlatHint(leg.symbol, leg.side);
-    const ok = await executeMasterLegCloseAfterRestCheck(
-      prisma,
-      strategyId,
-      tracker,
-      {
-        symbol: leg.symbol,
-        openSide: leg.side,
-        trackedContracts: tracked,
-        avgEntry: meta.avgEntry,
-        source: `priority:${args.reason}`,
-      },
-      deps,
-    );
-    if (ok) closed += 1;
+      tracker.markWsFlatHint(leg.symbol, leg.side);
+      return executeMasterLegCloseAfterRestCheck(
+        prisma,
+        strategyId,
+        tracker,
+        {
+          symbol: leg.symbol,
+          openSide: leg.side,
+          trackedContracts: tracked,
+          avgEntry: meta.avgEntry,
+          source: `priority:${args.reason}`,
+        },
+        deps,
+      );
+    }),
+  );
+  let closed = 0;
+  for (const outcome of outcomes) {
+    if (outcome.status === "fulfilled" && outcome.value) closed += 1;
   }
 
   if (closed > 0) {
