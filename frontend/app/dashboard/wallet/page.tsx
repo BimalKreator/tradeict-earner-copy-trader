@@ -17,8 +17,10 @@ import {
   fmtDateTime,
   fmtInr,
   fmtUsd,
-  getUsdInrRate,
+  formatINR,
+  formatINRApprox,
   mapPaymentStatus,
+  USD_TO_INR_RATE,
   usdToInr,
 } from "@/lib/currency";
 import { openRazorpayCheckout } from "@/lib/razorpay";
@@ -195,7 +197,6 @@ async function authFetch(
 export default function DashboardWalletPage() {
   const [liveCycle, setLiveCycle] = useState<LiveCycleResponse | null>(null);
   const [wallet, setWallet] = useState<WalletResponse | null>(null);
-  const [usdInrRate, setUsdInrRate] = useState<number | null>(null);
   const [paymentHistory, setPaymentHistory] = useState<PaymentHistoryRow[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
 
@@ -252,8 +253,6 @@ export default function DashboardWalletPage() {
         usdInrRate?: number;
       };
 
-      const rate = getUsdInrRate(w.usdInrRate ?? hist.usdInrRate);
-      setUsdInrRate(rate);
       setLiveCycle(cycle);
       setWallet(w);
       setPaymentHistory(
@@ -431,10 +430,7 @@ export default function DashboardWalletPage() {
     [loadAll],
   );
 
-  const rate = getUsdInrRate(usdInrRate ?? undefined);
   const balanceUsd = wallet?.balanceUsd ?? wallet?.balance ?? 0;
-  const balanceInr =
-    wallet?.balanceInr ?? (Number.isFinite(balanceUsd) ? usdToInr(balanceUsd, rate) : 0);
 
   const pendingCount = useMemo(
     () => invoices.filter((i) => i.status === "PENDING" || i.status === "OVERDUE").length,
@@ -485,7 +481,7 @@ export default function DashboardWalletPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center rounded-full border border-cyan-500/35 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-200">
-            1 USD = {rate.toLocaleString("en-IN", { maximumFractionDigits: 2 })} INR
+            1 USD = {USD_TO_INR_RATE.toLocaleString("en-IN")} INR
           </span>
         <button
           type="button"
@@ -541,13 +537,13 @@ export default function DashboardWalletPage() {
               <p className="mt-4 text-4xl font-bold tabular-nums text-white">
                 {fmtUsd(balanceUsd)}
               </p>
-              <p className="mt-1 text-lg tabular-nums text-cyan-300/90">
-                {fmtInr(balanceInr)}
+              <p className="mt-1 text-sm tabular-nums text-white/50">
+                {formatINRApprox(Math.max(0, balanceUsd))}
               </p>
               {wallet && wallet.pendingFees > 0 ? (
                 <p className="mt-3 text-xs text-amber-200">
                   Pending fees: {fmtUsd(wallet.pendingFees)} (
-                  {fmtInr(usdToInr(wallet.pendingFees, rate))})
+                  {formatINR(wallet.pendingFees)})
                 </p>
               ) : null}
               <Link
@@ -563,11 +559,11 @@ export default function DashboardWalletPage() {
                 Exchange rate
               </p>
               <p className="mt-4 text-2xl font-semibold text-white tabular-nums">
-                1 USD = {rate.toLocaleString("en-IN", { maximumFractionDigits: 2 })} INR
+                1 USD = {USD_TO_INR_RATE.toLocaleString("en-IN")} INR
               </p>
               <p className="mt-3 text-sm text-white/55">
-                INR amounts on this page use the active platform rate from the server
-                (aligned with Razorpay settlements).
+                INR equivalents on this page use the fixed platform rate of{" "}
+                {USD_TO_INR_RATE} INR per USD.
               </p>
             </article>
           </section>
@@ -604,9 +600,7 @@ export default function DashboardWalletPage() {
                     paymentHistory.map((tx) => {
                       const usd = tx.netCredit;
                       const inr =
-                        tx.amount > 0
-                          ? tx.amount
-                          : usdToInr(usd, rate);
+                        tx.amount > 0 ? tx.amount : usdToInr(usd);
                       const label = `${tx.method} · ${tx.referenceId ? `Ref ${tx.referenceId}` : "Wallet top-up"}`;
                       const displayStatus = mapPaymentStatus(tx.status);
                       return (
@@ -792,9 +786,7 @@ export default function DashboardWalletPage() {
                         wallet.balance + 1e-9 < inv.amountDue;
                       const isPaying = payingId === inv.id;
                       const isRazorpayPaying = razorpayPayingId === inv.id;
-                      const estInr = Math.ceil(
-                        inv.amountDue * getUsdInrRate(usdInrRate ?? undefined),
-                      );
+                      const estInr = Math.ceil(usdToInr(inv.amountDue));
                       return (
                         <tr
                           key={inv.id}

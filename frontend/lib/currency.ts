@@ -1,19 +1,19 @@
-/** Last-resort fallback when API rate is unavailable (admin-configured rate preferred). */
-export const FALLBACK_USD_INR_RATE = 83;
+/** Fixed USD → INR rate for all user-facing balance displays. */
+export const USD_TO_INR_RATE = 85;
 
-export function getUsdInrRate(apiRate?: number | null): number {
-  if (typeof apiRate === "number" && Number.isFinite(apiRate) && apiRate > 0) {
-    return apiRate;
-  }
-  return FALLBACK_USD_INR_RATE;
+/** @deprecated Use {@link USD_TO_INR_RATE}. */
+export const FALLBACK_USD_INR_RATE = USD_TO_INR_RATE;
+
+export function getUsdInrRate(_apiRate?: number | null): number {
+  return USD_TO_INR_RATE;
 }
 
-export function usdToInr(usd: number, rate: number): number {
-  return usd * getUsdInrRate(rate);
+export function usdToInr(usd: number): number {
+  return usd * USD_TO_INR_RATE;
 }
 
-export function inrToUsdDisplay(inr: number, rate: number): number {
-  return inr / getUsdInrRate(rate);
+export function inrToUsdDisplay(inr: number): number {
+  return inr / USD_TO_INR_RATE;
 }
 
 const usdFmt = new Intl.NumberFormat("en-US", {
@@ -41,6 +41,24 @@ const dateTimeFmt = new Intl.DateTimeFormat("en-IN", {
 export function fmtUsd(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return usdFmt.format(n);
+}
+
+/** Balance display — never show negative wallet/margin amounts. */
+export function fmtUsdBalance(n: number | null | undefined): string {
+  const safe = typeof n === "number" && Number.isFinite(n) ? Math.max(0, n) : 0;
+  return fmtUsd(safe);
+}
+
+/** Converts a USD amount to INR at {@link USD_TO_INR_RATE} and formats it. */
+export function formatINR(usdValue: number): string {
+  if (!Number.isFinite(usdValue)) return "—";
+  return inrFmt.format(usdValue * USD_TO_INR_RATE);
+}
+
+/** INR equivalent with approximate prefix for secondary balance lines. */
+export function formatINRApprox(usdValue: number): string {
+  const formatted = formatINR(usdValue);
+  return formatted === "—" ? formatted : `≈ ${formatted}`;
 }
 
 export function fmtInr(n: number | null | undefined): string {

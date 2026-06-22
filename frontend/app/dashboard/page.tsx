@@ -17,6 +17,12 @@ import {
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import {
+  fmtUsd,
+  fmtUsdBalance,
+  formatINR,
+  formatINRApprox,
+} from "@/lib/currency";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -52,17 +58,6 @@ type DashboardOverview = {
   arbitrageMonthlyPnlPercent: number;
   cryptoArbitrageEnabled: boolean;
 };
-
-function fmtUsd(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  return `${sign}$${Math.abs(n).toFixed(2)}`;
-}
-
-/** Balance display — never show negative wallet/margin amounts. */
-function fmtUsdBalance(n: number | null | undefined): string {
-  const safe = typeof n === "number" && Number.isFinite(n) ? Math.max(0, n) : 0;
-  return fmtUsd(safe);
-}
 
 function fmtPct(n: number): string {
   const sign = n > 0 ? "+" : "";
@@ -216,20 +211,21 @@ export default function DashboardPage() {
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
               label="Total Delta Balance"
               value={fmtUsdBalance(data.totalBalance)}
+              secondaryValue={
+                <span className="text-sm tabular-nums text-slate-500">
+                  {formatINRApprox(Math.max(0, data.totalBalance))}
+                </span>
+              }
               sub={
-                <div className="space-y-1.5 border-t border-slate-800/80 pt-2">
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-slate-500">Available</span>
-                    <span className="tabular-nums text-slate-200">
-                      {fmtUsdBalance(data.availableBalance ?? data.availableCapital)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-slate-500">In active trades</span>
-                    <span className="tabular-nums text-slate-200">
-                      {fmtUsdBalance(data.usedBalance)}
-                    </span>
-                  </div>
+                <div className="space-y-2 border-t border-slate-800/80 pt-2">
+                  <BalanceSubRow
+                    label="Available"
+                    usd={Math.max(0, data.availableBalance ?? data.availableCapital)}
+                  />
+                  <BalanceSubRow
+                    label="In active trades"
+                    usd={Math.max(0, data.usedBalance)}
+                  />
                 </div>
               }
               valueClass="text-white text-3xl"
@@ -447,12 +443,14 @@ function MetricCard({
   icon,
   label,
   value,
+  secondaryValue,
   sub,
   valueClass = "text-white",
 }: {
   icon: ReactNode;
   label: string;
   value: string;
+  secondaryValue?: ReactNode;
   sub: ReactNode;
   valueClass?: string;
 }) {
@@ -463,7 +461,22 @@ function MetricCard({
         <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
       </div>
       <p className={`mt-3 text-2xl font-semibold tabular-nums ${valueClass}`}>{value}</p>
+      {secondaryValue ? <div className="mt-1">{secondaryValue}</div> : null}
       <div className="mt-2 text-sm">{sub}</div>
+    </div>
+  );
+}
+
+function BalanceSubRow({ label, usd }: { label: string; usd: number }) {
+  return (
+    <div className="text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-slate-500">{label}</span>
+        <span className="tabular-nums text-slate-200">{fmtUsdBalance(usd)}</span>
+      </div>
+      <p className="mt-0.5 text-right text-[11px] tabular-nums text-slate-500">
+        {formatINRApprox(usd)}
+      </p>
     </div>
   );
 }
