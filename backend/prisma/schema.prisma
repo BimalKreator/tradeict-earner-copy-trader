@@ -110,6 +110,12 @@ enum InvoiceStatus {
   OVERDUE
 }
 
+/** Revenue-share (PnL) vs monthly strategy subscription fee. */
+enum InvoiceKind {
+  REVENUE_SHARE
+  STRATEGY_FEE
+}
+
 enum TicketStatus {
   OPEN
   CLOSED
@@ -327,6 +333,10 @@ model UserStrategySubscription {
   syncStatus         String              @default("SYNCED")
   /** Last copy failure reason (e.g. Insufficient Funds). */
   syncError          String?
+  /** False when user chose pay-later for the monthly strategy fee. */
+  isStrategyFeePaid  Boolean             @default(false)
+  /** Pay-later grace window end (UTC); copy pauses when unpaid after this. */
+  strategyFeeCycleEndsAt DateTime?
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])
@@ -565,6 +575,7 @@ model Invoice {
   amountDue   Float
   dueDate     DateTime
   status      InvoiceStatus @default(PENDING)
+  kind        InvoiceKind   @default(REVENUE_SHARE)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
@@ -572,8 +583,9 @@ model Invoice {
   strategy          Strategy           @relation(fields: [strategyId], references: [id])
   commissionLedgers CommissionLedger[]
 
-  @@unique([userId, strategyId, month, year])
+  @@unique([userId, strategyId, month, year, kind])
   @@index([status])
+  @@index([kind])
 }
 
 model PnLRecord {

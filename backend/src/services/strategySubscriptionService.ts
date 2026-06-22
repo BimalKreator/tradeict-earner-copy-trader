@@ -1,9 +1,17 @@
 import {
   type Prisma,
   type PrismaClient,
+  InvoiceKind,
+  InvoiceStatus,
   SubscriptionStatus,
   UserStatus,
 } from "@prisma/client";
+import {
+  STRATEGY_FEE_CYCLE_DAYS,
+  STRATEGY_PAYMENT_MODE,
+  type StrategyPaymentMode,
+} from "../constants/subscription.js";
+import { getUsdInrRate } from "./settingsService.js";
 import { resolveCanonicalFutureHedgeStrategyId } from "./futureHedgeService.js";
 
 /** Copy engine: only subscribers with an active row for the given strategy. */
@@ -296,4 +304,164 @@ export async function resolveUserExchangeCreds(
   }
 
   return null;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+export function parseStrategyPaymentMode(
+  value: unknown,
+): StrategyPaymentMode | null {
+  if (value === STRATEGY_PAYMENT_MODE.PAY_NOW) return STRATEGY_PAYMENT_MODE.PAY_NOW;
+  if (value === STRATEGY_PAYMENT_MODE.PAY_LATER) {
+    return STRATEGY_PAYMENT_MODE.PAY_LATER;
+  }
+  return null;
+}
+
+/** INR strategy fee → USD wallet invoice amount. */
+export async function strategyFeeInrToUsd(
+  prisma: PrismaClient,
+  feeInr: number,
+): Promise<number> {
+  const rate = await getUsdInrRate(prisma);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("USD/INR rate is not configured");
+  }
+  return Math.max(0, feeInr) / rate;
+}
+
+export function strategyFeeCycleEndFrom(joinedAt: Date): Date {
+  return new Date(joinedAt.getTime() + STRATEGY_FEE_CYCLE_DAYS * MS_PER_DAY);
+}
+
+export type CreateStrategySubscriptionResult = {
+  subscription: Prisma.UserStrategySubscriptionGetPayload<{
+    include: Record<string, never>;
+  }>;
+  strategyFeeInvoiceId: string | null;
+};
+
+/**
+ * Creates a subscription row after pay-later checkout (no gateway debit).
+ * Active subscription status; deploy still binds exchange account + isActive.
+ */
+export async function createStrategySubscriptionWithPaymentMode(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    strategyId: string;
+    paymentMode: StrategyPaymentMode;
+    finalFeeInr: number;
+    couponId?: string | null;
+  },
+): Promise<CreateStrategySubscriptionResult> {
+  const joinedDate = new Date();
+  const feePaid = args.finalFeeInr <= 0;
+  const payLater =
+    !feePaid && args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER;
+
+  if (!feePaid && args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_NOW) {
+    throw new Error(
+      "PAY_NOW subscriptions must complete Razorpay checkout before creation",
+    );
+  }
+
+  const cycleEndsAt = payLater ? strategyFeeCycleEndFrom(joinedDate) : null;
+  const amountDueUsd = payLater
+    ? await strategyFeeInrToUsd(prisma, args.finalFeeInr)
+    : 0;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const subscription = await tx.userStrategySubscription.create({
+      data: {
+        userId: args.userId,
+        strategyId: args.strategyId,
+        multiplier: 1,
+        isActive: false,
+        status: SubscriptionStatus.ACTIVE,
+        isStrategyFeePaid: feePaid,
+        strategyFeeCycleEndsAt: cycleEndsAt,
+        joinedDate,
+      },
+    });
+
+    let strategyFeeInvoiceId: string | null = null;
+
+    if (payLater) {
+      const invoice = await tx.invoice.create({
+        data: {
+          userId: args.userId,
+          strategyId: args.strategyId,
+          month: joinedDate.getUTCMonth() + 1,
+          year: joinedDate.getUTCFullYear(),
+          totalPnl: 0,
+          amountDue: amountDueUsd,
+          dueDate: cycleEndsAt!,
+          status: InvoiceStatus.PENDING,
+          kind: InvoiceKind.STRATEGY_FEE,
+        },
+      });
+      strategyFeeInvoiceId = invoice.id;
+    }
+
+    if (args.couponId) {
+      const { consumeCouponUse } = await import("./couponService.js");
+      await consumeCouponUse(tx, args.couponId);
+    }
+
+    return { subscription, strategyFeeInvoiceId };
+  });
+
+  invalidateCopySubscriberCache();
+  return result;
+}
+
+/** Outstanding invoices that should block deploy / resume. */
+export function blockingUnpaidInvoiceWhere(
+  userId: string,
+  strategyId: string,
+): Prisma.InvoiceWhereInput {
+  return {
+    userId,
+    strategyId,
+    OR: [
+      {
+        kind: InvoiceKind.REVENUE_SHARE,
+        status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+      },
+      {
+        kind: InvoiceKind.STRATEGY_FEE,
+        status: InvoiceStatus.OVERDUE,
+      },
+    ],
+  };
+}
+
+export async function hasBlockingUnpaidInvoicesForStrategy(
+  prisma: PrismaClient,
+  userId: string,
+  strategyId: string,
+): Promise<boolean> {
+  const row = await prisma.invoice.findFirst({
+    where: blockingUnpaidInvoiceWhere(userId, strategyId),
+    select: { id: true },
+  });
+  return row != null;
+}
+
+export async function markStrategyFeePaidForSubscription(
+  prisma: PrismaClient,
+  args: { userId: string; strategyId: string },
+): Promise<void> {
+  await prisma.userStrategySubscription.updateMany({
+    where: {
+      userId: args.userId,
+      strategyId: args.strategyId,
+    },
+    data: {
+      isStrategyFeePaid: true,
+      strategyFeeCycleEndsAt: null,
+    },
+  });
+  invalidateCopySubscriberCache();
 }

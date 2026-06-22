@@ -1,7 +1,8 @@
 "use client";
 
 import { openRazorpayCheckout } from "@/lib/razorpay";
-import { Loader2, Tag } from "lucide-react";
+import { CheckCircle2, Loader2, Tag } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const ENV_API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -28,6 +29,7 @@ export function StrategySubscriptionCheckout({
   onSubscribed,
   className = "",
 }: Props) {
+  const router = useRouter();
   const apiBase = useMemo(resolveApiBase, []);
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
@@ -38,8 +40,10 @@ export function StrategySubscriptionCheckout({
     discountPercentage: number | null;
   } | null>(null);
   const [couponError, setCouponError] = useState<string | null>(null);
+  const [successToast, setSuccessToast] = useState<string | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
-  const [payBusy, setPayBusy] = useState(false);
+  const [payNowBusy, setPayNowBusy] = useState(false);
+  const [payLaterBusy, setPayLaterBusy] = useState(false);
   const [pgFeePercent, setPgFeePercent] = useState(2.36);
 
   const token =
@@ -48,6 +52,7 @@ export function StrategySubscriptionCheckout({
   const displayOriginal = quote?.originalFeeInr ?? monthlyFeeInr;
   const displayFinal = quote?.finalFeeInr ?? monthlyFeeInr;
   const requiresPayment = displayFinal > 0;
+  const checkoutBusy = payNowBusy || payLaterBusy;
 
   const totalWithPg = useMemo(() => {
     if (!requiresPayment) return 0;
@@ -74,6 +79,12 @@ export function StrategySubscriptionCheckout({
   useEffect(() => {
     void loadPgFee();
   }, [loadPgFee]);
+
+  useEffect(() => {
+    if (!successToast) return;
+    const t = window.setTimeout(() => setSuccessToast(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [successToast]);
 
   async function applyCoupon() {
     setApplyBusy(true);
@@ -116,7 +127,8 @@ export function StrategySubscriptionCheckout({
   }
 
   async function subscribeFree() {
-    setPayBusy(true);
+    setPayNowBusy(true);
+    setCouponError(null);
     try {
       const res = await fetch(`${apiBase}/subscriptions/subscribe`, {
         method: "POST",
@@ -135,12 +147,44 @@ export function StrategySubscriptionCheckout({
     } catch (e) {
       setCouponError(e instanceof Error ? e.message : "Subscribe failed");
     } finally {
-      setPayBusy(false);
+      setPayNowBusy(false);
+    }
+  }
+
+  async function subscribePayLater() {
+    setPayLaterBusy(true);
+    setCouponError(null);
+    try {
+      const res = await fetch(`${apiBase}/subscriptions/subscribe`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          strategyId,
+          paymentMode: "PAY_LATER",
+          ...(appliedCoupon ? { couponCode: appliedCoupon } : {}),
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(body.error ?? "Subscribe failed");
+
+      setSuccessToast(
+        "Subscribed successfully! You can pay the fee later from the Billing section.",
+      );
+      window.setTimeout(() => {
+        router.push("/dashboard");
+      }, 1200);
+    } catch (e) {
+      setCouponError(e instanceof Error ? e.message : "Subscribe failed");
+    } finally {
+      setPayLaterBusy(false);
     }
   }
 
   async function payAndSubscribe() {
-    setPayBusy(true);
+    setPayNowBusy(true);
     setCouponError(null);
     try {
       const orderRes = await fetch(`${apiBase}/payments/create-order`, {
@@ -203,7 +247,7 @@ export function StrategySubscriptionCheckout({
     } catch (e) {
       setCouponError(e instanceof Error ? e.message : "Payment failed");
     } finally {
-      setPayBusy(false);
+      setPayNowBusy(false);
     }
   }
 
@@ -211,6 +255,16 @@ export function StrategySubscriptionCheckout({
     <div
       className={`rounded-xl border border-gray-800 bg-gray-950 p-5 text-gray-100 ${className}`}
     >
+      {successToast ? (
+        <div
+          className="mb-4 flex items-start gap-2 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-100"
+          role="status"
+        >
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>{successToast}</span>
+        </div>
+      ) : null}
+
       <h3 className="text-sm font-semibold text-gray-200">Subscription checkout</h3>
       <p className="mt-1 text-xs text-gray-500">
         Monthly fee for {strategyTitle}
@@ -237,7 +291,7 @@ export function StrategySubscriptionCheckout({
           <div className="flex justify-between text-xs text-gray-500">
             <span>+ Razorpay fee ({pgFeePercent}%)</span>
             <span className="tabular-nums">
-              ≈ ₹{totalWithPg.toLocaleString("en-IN")} total
+              ≈ ₹{totalWithPg.toLocaleString("en-IN")} total at checkout
             </span>
           </div>
         ) : null}
@@ -251,12 +305,13 @@ export function StrategySubscriptionCheckout({
             value={couponInput}
             onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
             placeholder="Discount coupon"
-            className="w-full rounded-lg border border-gray-700 bg-gray-900 py-2.5 pl-9 pr-3 text-sm uppercase text-gray-100 placeholder:text-gray-600"
+            disabled={checkoutBusy}
+            className="w-full rounded-lg border border-gray-700 bg-gray-900 py-2.5 pl-9 pr-3 text-sm uppercase text-gray-100 placeholder:text-gray-600 disabled:opacity-60"
           />
         </div>
         <button
           type="button"
-          disabled={applyBusy || !couponInput.trim()}
+          disabled={applyBusy || checkoutBusy || !couponInput.trim()}
           onClick={() => void applyCoupon()}
           className="rounded-lg border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-100 hover:bg-gray-700 disabled:opacity-50"
         >
@@ -270,22 +325,51 @@ export function StrategySubscriptionCheckout({
         <p className="mt-2 text-xs text-red-400">{couponError}</p>
       ) : null}
 
-      <button
-        type="button"
-        disabled={payBusy}
-        onClick={() =>
-          void (requiresPayment ? payAndSubscribe() : subscribeFree())
-        }
-        className="mt-5 w-full rounded-lg bg-primary py-3 text-sm font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
-      >
-        {payBusy ? (
-          <Loader2 className="mx-auto h-5 w-5 animate-spin" />
-        ) : requiresPayment ? (
-          `Pay ₹${totalWithPg.toLocaleString("en-IN")} & Subscribe`
-        ) : (
-          "Subscribe (Free)"
-        )}
-      </button>
+      {requiresPayment ? (
+        <div className="mt-5 space-y-3">
+          <button
+            type="button"
+            disabled={checkoutBusy}
+            onClick={() => void payAndSubscribe()}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+          >
+            {payNowBusy ? (
+              <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+            ) : (
+              `Pay Now (₹${displayFinal.toLocaleString("en-IN")})`
+            )}
+          </button>
+          <button
+            type="button"
+            disabled={checkoutBusy}
+            onClick={() => void subscribePayLater()}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-600 bg-transparent py-3 text-sm font-semibold text-gray-100 hover:bg-gray-800/80 disabled:opacity-60"
+          >
+            {payLaterBusy ? (
+              <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+            ) : (
+              "Subscribe & Pay Later"
+            )}
+          </button>
+          <p className="text-center text-xs leading-relaxed text-gray-500">
+            Pay Later: Subscribe instantly and pay your strategy fee anytime within
+            the 30-day billing cycle.
+          </p>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={checkoutBusy}
+          onClick={() => void subscribeFree()}
+          className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+        >
+          {payNowBusy ? (
+            <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+          ) : (
+            "Subscribe (Free)"
+          )}
+        </button>
+      )}
     </div>
   );
 }

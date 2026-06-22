@@ -435,6 +435,7 @@ export function createPaymentController(prisma: PrismaClient) {
                 multiplier: 1,
                 isActive: false,
                 status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+                isStrategyFeePaid: true,
               },
             });
 

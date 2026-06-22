@@ -4,6 +4,8 @@ import { tradePositionSymbolsAlign } from "./tradePositionService.js";
 export const SUBSCRIPTION_SYNC_STATUS = {
   SYNCED: "SYNCED",
   PENDING: "PENDING",
+  /** Pay-later strategy fee unpaid after billing cycle — copy paused. */
+  HOLD: "HOLD",
   /** Legacy — treat like FAILED for reconcile skip. */
   ERROR: "ERROR",
   FAILED: "FAILED",
@@ -44,7 +46,8 @@ export function formatSubscriptionSyncError(error?: string | null): string {
 export function subscriptionSyncBlocksReconcile(syncStatus: string): boolean {
   return (
     syncStatus === SUBSCRIPTION_SYNC_STATUS.FAILED ||
-    syncStatus === SUBSCRIPTION_SYNC_STATUS.ERROR
+    syncStatus === SUBSCRIPTION_SYNC_STATUS.ERROR ||
+    syncStatus === SUBSCRIPTION_SYNC_STATUS.HOLD
   );
 }
 

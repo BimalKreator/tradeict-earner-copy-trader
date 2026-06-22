@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import {
+  InvoiceKind,
   InvoiceStatus,
   Prisma,
   SubscriptionStatus,
@@ -7,6 +8,7 @@ import {
 } from "@prisma/client";
 import cron from "node-cron";
 import { triggerMarkCommissionsAsPayable } from "./affiliateCommissionService.js";
+import { SUBSCRIPTION_SYNC_STATUS } from "./subscriptionSyncService.js";
 
 /** Days a generated invoice has before it goes OVERDUE and pauses the subscription. */
 const INVOICE_DUE_DAYS = 5;
@@ -384,6 +386,7 @@ export async function generateMonthlyInvoices(
             amountDue,
             dueDate,
             status: InvoiceStatus.PENDING,
+            kind: InvoiceKind.REVENUE_SHARE,
           },
         });
 
@@ -511,14 +514,31 @@ export async function settleInvoiceAfterGateway(
       data: { status: InvoiceStatus.PAID },
     });
 
-    await tx.userStrategySubscription.updateMany({
-      where: {
-        userId: args.userId,
-        strategyId: invoice.strategyId,
-        status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
-      },
-      data: { status: SubscriptionStatus.ACTIVE, isActive: true },
-    });
+    if (invoice.kind === InvoiceKind.STRATEGY_FEE) {
+      await tx.userStrategySubscription.updateMany({
+        where: {
+          userId: args.userId,
+          strategyId: invoice.strategyId,
+        },
+        data: {
+          isStrategyFeePaid: true,
+          strategyFeeCycleEndsAt: null,
+          status: SubscriptionStatus.ACTIVE,
+          isActive: true,
+          syncStatus: SUBSCRIPTION_SYNC_STATUS.PENDING,
+          syncError: null,
+        },
+      });
+    } else {
+      await tx.userStrategySubscription.updateMany({
+        where: {
+          userId: args.userId,
+          strategyId: invoice.strategyId,
+          status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+        },
+        data: { status: SubscriptionStatus.ACTIVE, isActive: true },
+      });
+    }
 
     const wallet = await tx.wallet.findUnique({
       where: { userId: args.userId },
@@ -663,16 +683,31 @@ export async function payInvoiceFromWallet(
       data: { status: InvoiceStatus.PAID },
     });
 
-    // Re-activate the subscription if it was paused for funds — paying the
-    // outstanding invoice clears the dunning state.
-    await tx.userStrategySubscription.updateMany({
-      where: {
-        userId: args.userId,
-        strategyId: invoice.strategyId,
-        status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
-      },
-      data: { status: SubscriptionStatus.ACTIVE, isActive: true },
-    });
+    if (invoice.kind === InvoiceKind.STRATEGY_FEE) {
+      await tx.userStrategySubscription.updateMany({
+        where: {
+          userId: args.userId,
+          strategyId: invoice.strategyId,
+        },
+        data: {
+          isStrategyFeePaid: true,
+          strategyFeeCycleEndsAt: null,
+          status: SubscriptionStatus.ACTIVE,
+          isActive: true,
+          syncStatus: SUBSCRIPTION_SYNC_STATUS.PENDING,
+          syncError: null,
+        },
+      });
+    } else {
+      await tx.userStrategySubscription.updateMany({
+        where: {
+          userId: args.userId,
+          strategyId: invoice.strategyId,
+          status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+        },
+        data: { status: SubscriptionStatus.ACTIVE, isActive: true },
+      });
+    }
 
     return {
       ok: true,
@@ -681,6 +716,81 @@ export async function payInvoiceFromWallet(
       walletBalance: updatedWallet.balance,
     } as const;
   });
+}
+
+async function pauseSubscriptionForOverdueInvoice(
+  prisma: PrismaClient,
+  inv: { userId: string; strategyId: string; kind: InvoiceKind },
+): Promise<number> {
+  const data: Prisma.UserStrategySubscriptionUpdateManyMutationInput = {
+    status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+    isActive: false,
+  };
+  if (inv.kind === InvoiceKind.STRATEGY_FEE) {
+    data.syncStatus = SUBSCRIPTION_SYNC_STATUS.HOLD;
+  }
+
+  const result = await prisma.userStrategySubscription.updateMany({
+    where: {
+      userId: inv.userId,
+      strategyId: inv.strategyId,
+      status: SubscriptionStatus.ACTIVE,
+    },
+    data,
+  });
+  return result.count;
+}
+
+export interface StrategyFeeCycleCheckResult {
+  subscriptionsHeld: number;
+  invoicesMarkedOverdue: number;
+}
+
+/**
+ * Pay-later safety net: pause copy when the 30-day strategy-fee window ends
+ * and `isStrategyFeePaid` is still false (even if invoice dueDate drifted).
+ */
+export async function runUnpaidStrategyFeeCycleEndCheck(
+  prisma: PrismaClient,
+): Promise<StrategyFeeCycleCheckResult> {
+  const now = new Date();
+
+  const expiredSubs = await prisma.userStrategySubscription.findMany({
+    where: {
+      isStrategyFeePaid: false,
+      strategyFeeCycleEndsAt: { lt: now },
+      status: SubscriptionStatus.ACTIVE,
+    },
+    select: { id: true, userId: true, strategyId: true },
+  });
+
+  let subscriptionsHeld = 0;
+  for (const sub of expiredSubs) {
+    const held = await prisma.userStrategySubscription.updateMany({
+      where: { id: sub.id, status: SubscriptionStatus.ACTIVE },
+      data: {
+        status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+        isActive: false,
+        syncStatus: SUBSCRIPTION_SYNC_STATUS.HOLD,
+      },
+    });
+    subscriptionsHeld += held.count;
+  }
+
+  const overdueFlip = await prisma.invoice.updateMany({
+    where: {
+      kind: InvoiceKind.STRATEGY_FEE,
+      status: InvoiceStatus.PENDING,
+      dueDate: { lt: now },
+      userId: { in: expiredSubs.map((s) => s.userId) },
+    },
+    data: { status: InvoiceStatus.OVERDUE },
+  });
+
+  return {
+    subscriptionsHeld,
+    invoicesMarkedOverdue: overdueFlip.count,
+  };
 }
 
 export interface OverdueCheckResult {
@@ -705,7 +815,7 @@ export async function runOverdueCheck(
       status: InvoiceStatus.PENDING,
       dueDate: { lt: now },
     },
-    select: { id: true, userId: true, strategyId: true },
+    select: { id: true, userId: true, strategyId: true, kind: true },
   });
 
   if (overdueInvoices.length === 0) {
@@ -718,8 +828,6 @@ export async function runOverdueCheck(
     data: { status: InvoiceStatus.OVERDUE },
   });
 
-  // Dedupe (userId, strategyId) — multiple overdue invoices for the same
-  // pair only need one subscription update.
   const seen = new Set<string>();
   let subscriptionsPaused = 0;
   for (const inv of overdueInvoices) {
@@ -727,15 +835,7 @@ export async function runOverdueCheck(
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const result = await prisma.userStrategySubscription.updateMany({
-      where: {
-        userId: inv.userId,
-        strategyId: inv.strategyId,
-        status: SubscriptionStatus.ACTIVE,
-      },
-      data: { status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS, isActive: false },
-    });
-    subscriptionsPaused += result.count;
+    subscriptionsPaused += await pauseSubscriptionForOverdueInvoice(prisma, inv);
   }
 
   return {
@@ -751,6 +851,7 @@ export async function runOverdueCheck(
  */
 export async function runBillingCycle(prisma: PrismaClient): Promise<void> {
   await runOverdueCheck(prisma);
+  await runUnpaidStrategyFeeCycleEndCheck(prisma);
 }
 
 /**
@@ -792,6 +893,18 @@ export function initBillingCronJobs(prisma: PrismaClient): void {
         })
         .catch((err) => {
           console.error("[billing] Daily overdue run failed:", err);
+        });
+
+      void runUnpaidStrategyFeeCycleEndCheck(prisma)
+        .then((res) => {
+          if (res.subscriptionsHeld > 0 || res.invoicesMarkedOverdue > 0) {
+            console.log(
+              `[billing] Strategy fee cycle: subs→HOLD=${res.subscriptionsHeld}, strategyFeeInvoices→OVERDUE=${res.invoicesMarkedOverdue}`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.error("[billing] Strategy fee cycle check failed:", err);
         });
     },
     { timezone: "Etc/UTC" },

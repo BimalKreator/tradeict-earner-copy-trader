@@ -1,12 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
 import {
   type PrismaClient,
-  InvoiceStatus,
   SubscriptionStatus,
 } from "@prisma/client";
 import {
   MAX_SUBSCRIPTION_MULTIPLIER,
   MIN_SUBSCRIPTION_MULTIPLIER,
+  STRATEGY_PAYMENT_MODE,
 } from "../constants/subscription.js";
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
@@ -22,7 +22,11 @@ import {
 } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
 import {
+  createStrategySubscriptionWithPaymentMode,
+  hasBlockingUnpaidInvoicesForStrategy,
+  invalidateCopySubscriberCache,
   normalizeFutureHedgeStrategyId,
+  parseStrategyPaymentMode,
 } from "../services/strategySubscriptionService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import { resolveCanonicalFutureHedgeStrategyId } from "../services/futureHedgeService.js";
@@ -134,15 +138,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     userId: string,
     strategyId: string,
   ): Promise<boolean> {
-    const row = await prisma.invoice.findFirst({
-      where: {
-        userId,
-        strategyId,
-        status: { in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
-      },
-      select: { id: true },
-    });
-    return row != null;
+    return hasBlockingUnpaidInvoicesForStrategy(prisma, userId, strategyId);
   }
 
   async function validateExchangeAccountOwnership(
@@ -330,12 +326,16 @@ export function createSubscriptionController(prisma: PrismaClient) {
       const body = req.body as {
         strategyId?: unknown;
         couponCode?: unknown;
+        paymentMode?: unknown;
       };
 
       const rawStrategyId =
         typeof body.strategyId === "string" ? body.strategyId.trim() : "";
       const couponCode =
         typeof body.couponCode === "string" ? body.couponCode : undefined;
+      const paymentMode =
+        parseStrategyPaymentMode(body.paymentMode) ??
+        STRATEGY_PAYMENT_MODE.PAY_NOW;
 
       if (!rawStrategyId) {
         res.status(400).json({ error: "strategyId is required" });
@@ -362,11 +362,12 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      if (feeQuote.finalFeeInr > 0) {
+      if (feeQuote.finalFeeInr > 0 && paymentMode === STRATEGY_PAYMENT_MODE.PAY_NOW) {
         res.status(402).json({
           error:
-            "This strategy requires payment. Use checkout (Razorpay) before subscribing.",
+            "This strategy requires payment. Use checkout (Razorpay) or choose pay-later.",
           requiresPayment: true,
+          paymentMode: STRATEGY_PAYMENT_MODE.PAY_NOW,
           originalFeeInr: feeQuote.originalFeeInr,
           finalFeeInr: feeQuote.finalFeeInr,
         });
@@ -390,24 +391,44 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const subscription = await prisma.userStrategySubscription.create({
-        data: {
+      let subscription;
+      let strategyFeeInvoiceId: string | null = null;
+
+      if (feeQuote.finalFeeInr > 0 && paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER) {
+        const created = await createStrategySubscriptionWithPaymentMode(prisma, {
           userId,
           strategyId,
-          multiplier: 1,
-          isActive: false,
-          status: USER_PAUSED_STATUS,
-        },
-      });
+          paymentMode: STRATEGY_PAYMENT_MODE.PAY_LATER,
+          finalFeeInr: feeQuote.finalFeeInr,
+          couponId: feeQuote.couponId,
+        });
+        subscription = created.subscription;
+        strategyFeeInvoiceId = created.strategyFeeInvoiceId;
+      } else {
+        subscription = await prisma.userStrategySubscription.create({
+          data: {
+            userId,
+            strategyId,
+            multiplier: 1,
+            isActive: false,
+            status: SubscriptionStatus.ACTIVE,
+            isStrategyFeePaid: true,
+          },
+        });
+        invalidateCopySubscriberCache();
+      }
 
       console.log(
-        `[subscription] Strategy added (paused) id=${subscription.id} userId=${userId} strategyId=${strategyId}`,
+        `[subscription] Strategy added id=${subscription.id} userId=${userId} strategyId=${strategyId} paymentMode=${paymentMode}`,
       );
 
       void logUserActivity(prisma, {
         userId,
         kind: "SUBSCRIPTION_CREATED",
-        message: `Added strategy to My Strategies (inactive)`,
+        message:
+          paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER
+            ? `Subscribed with pay-later (${strategy.title})`
+            : `Added strategy to My Strategies (inactive)`,
       });
 
       const subscriber = await prisma.user.findUnique({
@@ -421,7 +442,11 @@ export function createSubscriptionController(prisma: PrismaClient) {
         });
       }
 
-      res.status(201).json(subscription);
+      res.status(201).json({
+        ...subscription,
+        paymentMode,
+        strategyFeeInvoiceId,
+      });
     } catch (err) {
       next(err);
     }

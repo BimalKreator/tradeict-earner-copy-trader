@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import { BillingDashboard } from "@/components/billing/BillingDashboard";
 
-export default function BillingRedirectPage() {
-  redirect("/dashboard/wallet");
+export default function BillingPage() {
+  return <BillingDashboard />;
 }

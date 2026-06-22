@@ -749,9 +749,10 @@ export function createUserController(prisma: PrismaClient) {
           amountDue: true,
           dueDate: true,
           status: true,
+          kind: true,
           createdAt: true,
           updatedAt: true,
-          strategy: { select: { title: true } },
+          strategy: { select: { title: true, monthlyFee: true } },
         },
       });
 
@@ -759,12 +760,14 @@ export function createUserController(prisma: PrismaClient) {
         id: r.id,
         strategyId: r.strategyId,
         strategyTitle: r.strategy.title,
+        strategyMonthlyFeeInr: r.strategy.monthlyFee,
         month: r.month,
         year: r.year,
         totalPnl: r.totalPnl,
         amountDue: r.amountDue,
         dueDate: r.dueDate.toISOString(),
         status: r.status,
+        kind: r.kind,
         createdAt: r.createdAt.toISOString(),
         updatedAt: r.updatedAt.toISOString(),
       }));
