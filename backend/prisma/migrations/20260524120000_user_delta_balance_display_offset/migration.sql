@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "deltaBalanceDisplayOffset" DOUBLE PRECISION NOT NULL DEFAULT 0;

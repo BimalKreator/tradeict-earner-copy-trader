@@ -2579,6 +2579,59 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function patchUserDeltaBalanceDisplayOffset(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const body = req.body as { balanceOffset?: unknown };
+      if (
+        typeof body.balanceOffset !== "number" ||
+        !Number.isFinite(body.balanceOffset)
+      ) {
+        res.status(400).json({
+          error: "balanceOffset (finite number) is required",
+        });
+        return;
+      }
+
+      const existing = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, deltaBalanceDisplayOffset: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const nextOffset = Math.max(0, body.balanceOffset);
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { deltaBalanceDisplayOffset: nextOffset },
+        select: {
+          id: true,
+          email: true,
+          deltaBalanceDisplayOffset: true,
+        },
+      });
+
+      res.json({
+        userId: user.id,
+        email: user.email,
+        balanceDisplayOffset: user.deltaBalanceDisplayOffset,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function patchUserCryptoArbitrageBalance(
     req: Request,
     res: Response,
@@ -3855,6 +3908,7 @@ export function createAdminController(prisma: PrismaClient) {
     sendResetPasswordLink,
     getDashboardStats,
     getUserBalance,
+    patchUserDeltaBalanceDisplayOffset,
     listTransactions,
     listAllDeposits,
     updateDepositStatus,

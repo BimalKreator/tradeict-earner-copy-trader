@@ -254,6 +254,34 @@ const ZERO_BREAKDOWN: DeltaBalanceBreakdown = {
   usedBalance: 0,
 };
 
+/** UI-only Delta balance inflation — must not be used for trading or margin. */
+export async function getUserDeltaBalanceDisplayOffset(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<number> {
+  const row = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { deltaBalanceDisplayOffset: true },
+  });
+  const offset = row?.deltaBalanceDisplayOffset ?? 0;
+  return offset > 0 && Number.isFinite(offset) ? offset : 0;
+}
+
+/** Adds display offset to total/available only; used margin stays exchange-truth. */
+export function applyDeltaBalanceDisplayOffset(
+  breakdown: DeltaBalanceBreakdown,
+  offset: number,
+): DeltaBalanceBreakdown {
+  if (!(offset > 0 && Number.isFinite(offset))) {
+    return breakdown;
+  }
+  return {
+    totalBalance: breakdown.totalBalance + offset,
+    availableBalance: breakdown.availableBalance + offset,
+    usedBalance: breakdown.usedBalance,
+  };
+}
+
 export async function fetchUserCapitalBreakdown(
   prisma: PrismaClient,
   userId: string,
@@ -265,6 +293,18 @@ export async function fetchUserCapitalBreakdown(
   } catch {
     return { ...ZERO_BREAKDOWN };
   }
+}
+
+/** User dashboard capital — live Delta balance plus optional display offset. */
+export async function fetchUserCapitalBreakdownForDisplay(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<DeltaBalanceBreakdown> {
+  const [breakdown, offset] = await Promise.all([
+    fetchUserCapitalBreakdown(prisma, userId),
+    getUserDeltaBalanceDisplayOffset(prisma, userId),
+  ]);
+  return applyDeltaBalanceDisplayOffset(breakdown, offset);
 }
 
 export async function fetchUserAvailableCapital(

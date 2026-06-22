@@ -160,6 +160,11 @@ model User {
   cryptoCapitalPerTradePercent Float   @default(10.0)
   /** When set, this user's arbitrage trades UI reads from the source user's trade history. */
   arbitrageSourceUserId        String?
+  /**
+   * USDT amount added to Delta balance shown on the user dashboard only.
+   * Never applied to margin checks, copy-trading, or exchange execution.
+   */
+  deltaBalanceDisplayOffset    Float   @default(0)
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique

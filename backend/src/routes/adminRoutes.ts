@@ -538,6 +538,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
   router.get("/users/:id/balance", adminController.getUserBalance);
+  router.patch(
+    "/users/:id/balance-display-offset",
+    adminController.patchUserDeltaBalanceDisplayOffset,
+  );
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
   router.post("/users/flush-trades", adminController.flushUserTrades);
   router.post("/trades/flush-all", adminController.flushAllPlatformTrades);
