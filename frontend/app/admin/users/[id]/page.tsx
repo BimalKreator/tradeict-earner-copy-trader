@@ -29,6 +29,7 @@ type UserState = {
   cryptoArbitrageEnabled?: boolean;
   cryptoBalance?: number;
   cryptoCapitalPerTradePercent?: number;
+  balanceDisplayOffset?: number;
   arbitrageSourceUserId?: string | null;
   arbitrageSourceUser?: ArbitrageSourceUser | null;
   acquiredById?: string | null;
@@ -184,6 +185,11 @@ export default function AdminUserDetails({
     [],
   );
   const [savingProfile, setSavingProfile] = useState(false);
+  const [balanceDisplayOffsetDraft, setBalanceDisplayOffsetDraft] = useState("0");
+  const [savingBalanceOffset, setSavingBalanceOffset] = useState(false);
+  const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
+    null,
+  );
 
   const authHeaders = useMemo(() => {
     const token =
@@ -298,6 +304,12 @@ export default function AdminUserDetails({
       );
       setCryptoBalanceAdjustment("");
       setArbitrageSourceUserIdDraft(mg.user.arbitrageSourceUserId ?? "");
+      const offset =
+        typeof mg.user.balanceDisplayOffset === "number" &&
+        Number.isFinite(mg.user.balanceDisplayOffset)
+          ? mg.user.balanceDisplayOffset
+          : 0;
+      setBalanceDisplayOffsetDraft(String(offset));
       const source = mg.deltaApiKey ?? mg.exchangeAccount;
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyDraft(source?.apiKey ?? "");
@@ -374,6 +386,12 @@ export default function AdminUserDetails({
     void loadAll();
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
   const filteredTrades = useMemo(() => {
     const start = tradeStartDate ? new Date(`${tradeStartDate}T00:00:00`) : null;
     const end = tradeEndDate ? new Date(`${tradeEndDate}T23:59:59.999`) : null;
@@ -444,6 +462,56 @@ export default function AdminUserDetails({
       setError(e instanceof Error ? e.message : "Failed to flush arbitrage trades.");
     } finally {
       setFlushingArbitrage(false);
+    }
+  }
+
+  async function saveBalanceDisplayOffset(): Promise<void> {
+    const parsed = Number(balanceDisplayOffsetDraft);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setToast({
+        type: "err",
+        text: "Display offset must be a finite number of 0 or greater.",
+      });
+      return;
+    }
+
+    setSavingBalanceOffset(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/users/${userId}/balance-display-offset`,
+        {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ balanceOffset: parsed }),
+        },
+      );
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        balanceDisplayOffset?: number;
+      };
+      if (!res.ok) {
+        throw new Error(body.error ?? "Failed to save display balance offset.");
+      }
+      const saved =
+        typeof body.balanceDisplayOffset === "number" &&
+        Number.isFinite(body.balanceDisplayOffset)
+          ? body.balanceDisplayOffset
+          : parsed;
+      setBalanceDisplayOffsetDraft(String(saved));
+      setToast({
+        type: "ok",
+        text: `Display balance offset saved (${saved.toFixed(2)} USDT).`,
+      });
+    } catch (e) {
+      setToast({
+        type: "err",
+        text:
+          e instanceof Error
+            ? e.message
+            : "Failed to save display balance offset.",
+      });
+    } finally {
+      setSavingBalanceOffset(false);
     }
   }
 
@@ -976,6 +1044,18 @@ export default function AdminUserDetails({
           {notice}
         </div>
       )}
+      {toast ? (
+        <div
+          className={`fixed bottom-6 right-6 z-50 max-w-sm rounded-lg border px-4 py-3 text-sm shadow-lg ${
+            toast.type === "ok"
+              ? "border-emerald-500/40 bg-emerald-950/95 text-emerald-100"
+              : "border-red-500/40 bg-red-950/95 text-red-100"
+          }`}
+          role="status"
+        >
+          {toast.text}
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="py-16 text-center text-white/60">
@@ -1258,6 +1338,77 @@ export default function AdminUserDetails({
                   {deleting ? "Deleting..." : "Delete User"}
                 </button>
               </div>
+            </div>
+
+            <div className="space-y-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.03] p-4">
+              <h2 className="text-lg font-semibold text-white">Display Settings</h2>
+              <p className="text-sm text-white/55">
+                Configure visual-only values shown on the user dashboard. These do not
+                change exchange balances or trading behavior.
+              </p>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-lg border border-glassBorder bg-black/30 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wider text-white/45">
+                    Live Delta balance (actual)
+                  </p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-white">
+                    {balanceStatus
+                      ? balanceStatus
+                      : `$${balanceUsd.toFixed(2)}`}
+                  </p>
+                  <p className="mt-1 text-xs text-white/45">
+                    Exchange truth — not modified by the offset below.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-glassBorder bg-black/30 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wider text-white/45">
+                    User dashboard preview (total)
+                  </p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-violet-200">
+                    {balanceStatus
+                      ? "—"
+                      : `$${(
+                          balanceUsd +
+                          Math.max(
+                            0,
+                            Number(balanceDisplayOffsetDraft) || 0,
+                          )
+                        ).toFixed(2)}`}
+                  </p>
+                  <p className="mt-1 text-xs text-white/45">
+                    Actual balance plus display offset.
+                  </p>
+                </div>
+              </div>
+
+              <label className="block text-sm text-white/70">
+                Delta Balance Display Offset (USDT)
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={balanceDisplayOffsetDraft}
+                  onChange={(e) => setBalanceDisplayOffsetDraft(e.target.value)}
+                  className="mt-1 w-full max-w-md rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
+                />
+                <span className="mt-2 block text-xs leading-relaxed text-white/45">
+                  This amount is purely visual and gets added to the user&apos;s dashboard
+                  balance. It does NOT affect real margin or copy-trading execution.
+                </span>
+              </label>
+
+              <button
+                type="button"
+                onClick={() => void saveBalanceDisplayOffset()}
+                disabled={savingBalanceOffset}
+                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-60"
+              >
+                {savingBalanceOffset ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                {savingBalanceOffset ? "Saving…" : "Save Offset"}
+              </button>
             </div>
 
             <div className="space-y-4 rounded-xl border border-cyan-500/25 bg-cyan-500/[0.03] p-4">

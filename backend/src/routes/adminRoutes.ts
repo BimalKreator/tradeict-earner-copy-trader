@@ -213,6 +213,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           cryptoArbitrageEnabled: true,
           cryptoBalance: true,
           cryptoCapitalPerTradePercent: true,
+          deltaBalanceDisplayOffset: true,
           arbitrageSourceUserId: true,
           acquiredById: true,
           acquiredBy: {
@@ -262,6 +263,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
           cryptoBalance: user.cryptoBalance,
           cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
+          balanceDisplayOffset: user.deltaBalanceDisplayOffset,
           arbitrageSourceUserId: user.arbitrageSourceUserId,
           arbitrageSourceUser: user.arbitrageSourceUser,
           acquiredById: user.acquiredById,
