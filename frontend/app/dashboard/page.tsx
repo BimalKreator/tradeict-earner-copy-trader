@@ -85,11 +85,26 @@ function usdSecondaryLabel(usd: number, balance = false): string {
   return `≈ ${balance ? fmtUsdBalance(usd) : fmtUsd(usd)}`;
 }
 
-function usdSecondaryNode(usd: number, balance = false): ReactNode {
+/** INR primary (large) + USD secondary (small) — single source of truth for metric cards. */
+function DualCurrencyValue({
+  usd,
+  balance = false,
+  valueClass = "text-white",
+}: {
+  usd: number;
+  balance?: boolean;
+  valueClass?: string;
+}) {
+  const displayUsd = balance ? Math.max(0, usd) : usd;
   return (
-    <span className="text-sm tabular-nums text-slate-500">
-      {usdSecondaryLabel(usd, balance)}
-    </span>
+    <div className="mt-3">
+      <p className={`text-2xl font-bold tabular-nums ${valueClass}`}>
+        {formatINR(displayUsd)}
+      </p>
+      <p className="mt-1 text-sm text-slate-500 tabular-nums">
+        {usdSecondaryLabel(displayUsd, balance)}
+      </p>
+    </div>
   );
 }
 
@@ -293,8 +308,7 @@ export default function DashboardPage() {
             <MetricCard
               icon={<TrendingUp className="h-5 w-5 text-emerald-400" />}
               label="Earned PnL"
-              value={formatINR(data.earnedPnl)}
-              secondaryValue={usdSecondaryNode(data.earnedPnl)}
+              currencyUsd={data.earnedPnl}
               sub={
                 <span className="text-slate-500">
                   Net take-home after revenue sharing
@@ -306,8 +320,7 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Activity className="h-5 w-5 text-cyan-400" />}
               label="Today's PnL"
-              value={formatINR(data.todayPnl)}
-              secondaryValue={usdSecondaryNode(data.todayPnl)}
+              currencyUsd={data.todayPnl}
               sub={
                 <span className={pnlTone(data.todayPnlPercent)}>
                   {fmtPct(data.todayPnlPercent)} of capital
@@ -319,8 +332,7 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Calendar className="h-5 w-5 text-violet-400" />}
               label="Monthly PnL"
-              value={formatINR(data.monthlyPnl)}
-              secondaryValue={usdSecondaryNode(data.monthlyPnl)}
+              currencyUsd={data.monthlyPnl}
               sub={
                 <div className="space-y-0.5">
                   <span className={pnlTone(data.monthlyPnlPercent)}>
@@ -345,8 +357,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
               label="Total Delta Balance"
-              value={formatINR(Math.max(0, data.totalBalance))}
-              secondaryValue={usdSecondaryNode(data.totalBalance, true)}
+              currencyUsd={data.totalBalance}
+              currencyAsBalance
               sub={
                 <div className="space-y-2 border-t border-slate-800/80 pt-2">
                   <BalanceSubRow
@@ -359,14 +371,13 @@ export default function DashboardPage() {
                   />
                 </div>
               }
-              valueClass="text-white text-3xl"
+              valueClass="text-white"
             />
 
             <MetricCard
               icon={<CreditCard className="h-5 w-5 text-amber-400" />}
               label="Revenue Sharing Due"
-              value={formatINR(data.revenueSharingDue)}
-              secondaryValue={usdSecondaryNode(data.revenueSharingDue)}
+              currencyUsd={data.revenueSharingDue}
               sub={
                 data.revenueSharingDue > 0 ? (
                   <div className="flex flex-col gap-2">
@@ -575,25 +586,43 @@ function MetricCard({
   icon,
   label,
   value,
+  currencyUsd,
+  currencyAsBalance = false,
   secondaryValue,
   sub,
   valueClass = "text-white",
 }: {
   icon: ReactNode;
   label: string;
-  value: string;
+  value?: string;
+  currencyUsd?: number;
+  currencyAsBalance?: boolean;
   secondaryValue?: ReactNode;
   sub: ReactNode;
   valueClass?: string;
 }) {
+  const hasCurrency = typeof currencyUsd === "number" && Number.isFinite(currencyUsd);
+
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
       <div className="flex items-center gap-2 text-slate-400">
         {icon}
         <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
       </div>
-      <p className={`mt-3 text-2xl font-semibold tabular-nums ${valueClass}`}>{value}</p>
-      {secondaryValue ? <div className="mt-1">{secondaryValue}</div> : null}
+      {hasCurrency ? (
+        <DualCurrencyValue
+          usd={currencyUsd}
+          balance={currencyAsBalance}
+          valueClass={valueClass}
+        />
+      ) : (
+        <>
+          <p className={`mt-3 text-2xl font-semibold tabular-nums ${valueClass}`}>
+            {value ?? "—"}
+          </p>
+          {secondaryValue ? <div className="mt-1">{secondaryValue}</div> : null}
+        </>
+      )}
       <div className="mt-2 text-sm">{sub}</div>
     </div>
   );
@@ -605,7 +634,9 @@ function BalanceSubRow({ label, usd }: { label: string; usd: number }) {
     <div className="text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="text-slate-500">{label}</span>
-        <span className="tabular-nums text-slate-200">{formatINR(safeUsd)}</span>
+        <span className="font-bold tabular-nums text-slate-200">
+          {formatINR(safeUsd)}
+        </span>
       </div>
       <p className="mt-0.5 text-right text-[11px] tabular-nums text-slate-500">
         {usdSecondaryLabel(safeUsd, true)}
