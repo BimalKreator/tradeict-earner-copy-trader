@@ -4,7 +4,8 @@ export type EmailTemplateName =
   | "welcome"
   | "member_registration"
   | "approval_notification"
-  | "nomination_request";
+  | "nomination_request"
+  | "withdrawal_request_submitted";
 
 export type WelcomeTemplateData = {
   userName: string;
@@ -33,11 +34,19 @@ export type NominationRequestTemplateData = {
   dashboardUrl?: string;
 };
 
+export type WithdrawalRequestSubmittedTemplateData = {
+  userName: string;
+  amount: number;
+  message: string;
+  dashboardUrl?: string;
+};
+
 export type EmailTemplateDataMap = {
   welcome: WelcomeTemplateData;
   member_registration: MemberRegistrationTemplateData;
   approval_notification: ApprovalNotificationTemplateData;
   nomination_request: NominationRequestTemplateData;
+  withdrawal_request_submitted: WithdrawalRequestSubmittedTemplateData;
 };
 
 export type RenderedEmail = {
@@ -367,6 +376,51 @@ function renderNominationRequest(data: NominationRequestTemplateData): RenderedE
   };
 }
 
+function renderWithdrawalRequestSubmitted(
+  data: WithdrawalRequestSubmittedTemplateData,
+): RenderedEmail {
+  const name = escapeHtml(data.userName.trim() || "Member");
+  const dashboardUrl = data.dashboardUrl ?? defaultDashboardUrl();
+  const amountLabel = `$${data.amount.toFixed(2)} USDT`;
+  const message = escapeHtml(data.message);
+
+  const bodyHtml = [
+    paragraph(`Hi <strong style="color:#f1f5f9;">${name}</strong>,`),
+    paragraph(
+      `We received your wallet withdrawal request for <strong style="color:#38bdf8;">${escapeHtml(amountLabel)}</strong>.`,
+    ),
+    paragraph(message),
+    paragraph(
+      "You can track the status from your wallet dashboard. We will notify you once the transfer is processed.",
+    ),
+  ].join("");
+
+  const text = [
+    `Hi ${data.userName.trim() || "Member"},`,
+    "",
+    `Withdrawal amount: ${amountLabel}`,
+    "",
+    data.message,
+    "",
+    `Dashboard: ${dashboardUrl}`,
+    "",
+    "— TradeICT Earner Team",
+  ].join("\n");
+
+  return {
+    subject: "Withdrawal request received — TradeICT Earner",
+    html: emailShell({
+      preheader: data.message,
+      headline: "Withdrawal request submitted",
+      subheadline: amountLabel,
+      bodyHtml,
+      ctaLabel: "View wallet",
+      ctaUrl: dashboardUrl,
+    }),
+    text,
+  };
+}
+
 export function renderEmailTemplate<T extends EmailTemplateName>(
   templateName: T,
   data: EmailTemplateDataMap[T],
@@ -380,6 +434,10 @@ export function renderEmailTemplate<T extends EmailTemplateName>(
       return renderApprovalNotification(data as ApprovalNotificationTemplateData);
     case "nomination_request":
       return renderNominationRequest(data as NominationRequestTemplateData);
+    case "withdrawal_request_submitted":
+      return renderWithdrawalRequestSubmitted(
+        data as WithdrawalRequestSubmittedTemplateData,
+      );
     default: {
       const _exhaustive: never = templateName;
       throw new Error(`Unknown email template: ${String(_exhaustive)}`);

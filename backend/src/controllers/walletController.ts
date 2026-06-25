@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { Prisma, type PrismaClient, TransactionStatus } from "@prisma/client";
 import { getUsdInrRate } from "../services/settingsService.js";
+import { requestWalletWithdrawal } from "../services/walletWithdrawalService.js";
 
 export function createWalletController(prisma: PrismaClient) {
   async function topUp(
@@ -200,18 +201,60 @@ export function createWalletController(prisma: PrismaClient) {
       }
       const wallet = await prisma.wallet.findUnique({
         where: { userId },
-        select: { balance: true, pendingFees: true, overdueDays: true },
+        select: {
+          balance: true,
+          lockedBalance: true,
+          pendingFees: true,
+          overdueDays: true,
+        },
       });
       const rate = await getUsdInrRate(prisma);
       const balanceUsd = wallet?.balance ?? 0;
+      const lockedBalanceUsd = wallet?.lockedBalance ?? 0;
       res.json({
         exists: wallet !== null,
         balance: balanceUsd,
         balanceUsd,
         balanceInr: balanceUsd * rate,
+        lockedBalance: lockedBalanceUsd,
+        lockedBalanceUsd,
+        lockedBalanceInr: lockedBalanceUsd * rate,
+        availableBalance: balanceUsd,
         pendingFees: wallet?.pendingFees ?? 0,
         overdueDays: wallet?.overdueDays ?? 0,
         usdInrRate: rate,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function withdraw(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const body = req.body as { amount?: unknown };
+      const outcome = await requestWalletWithdrawal(prisma, userId, body.amount);
+
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.status(201).json({
+        ok: true,
+        withdrawalId: outcome.withdrawalId,
+        amount: outcome.amount,
+        message:
+          "Your withdrawal request has been submitted successfully and will be credited to your saved bank account within 24 to 48 hours.",
       });
     } catch (err) {
       next(err);
@@ -223,5 +266,6 @@ export function createWalletController(prisma: PrismaClient) {
     listTransactions,
     approve,
     getMyWallet,
+    withdraw,
   };
 }

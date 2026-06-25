@@ -103,6 +103,13 @@ import {
   updateTierConfigs,
   type TierConfigUpdateInput,
 } from "../services/tierConfigService.js";
+import {
+  adjustUserWalletBalance,
+  getAdminWalletSummary,
+  listAdminWalletUsers,
+  listWalletWithdrawalRequests,
+  processWalletWithdrawalRequest,
+} from "../services/walletWithdrawalService.js";
 import { ReferralRequestStatus, SalesTier } from "@prisma/client";
 
 /** Prevent CDN/proxy/browser caching of live admin dashboards (PnL must be fresh). */
@@ -3649,6 +3656,112 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function listWalletWithdrawals(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const status =
+        typeof req.query.status === "string" ? req.query.status : undefined;
+      const result = await listWalletWithdrawalRequests(prisma, status);
+      applyNoStoreCacheHeaders(res);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getWalletAdminSummary(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const summary = await getAdminWalletSummary(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json(summary);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listWalletUsers(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const result = await listAdminWalletUsers(prisma);
+      applyNoStoreCacheHeaders(res);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function processWalletWithdrawal(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const withdrawalId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof withdrawalId !== "string" || !withdrawalId.trim()) {
+        res.status(400).json({ error: "Withdrawal id is required" });
+        return;
+      }
+
+      const outcome = await processWalletWithdrawalRequest(
+        prisma,
+        withdrawalId.trim(),
+        (req.body ?? {}) as Record<string, unknown>,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.json({ ok: true, withdrawal: outcome.withdrawal });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function adjustUserWallet(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawUserId = req.params.userId;
+      const userId = Array.isArray(rawUserId) ? rawUserId[0] : rawUserId;
+      if (typeof userId !== "string" || !userId.trim()) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+
+      const outcome = await adjustUserWalletBalance(
+        prisma,
+        userId.trim(),
+        (req.body ?? {}) as Record<string, unknown>,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        wallet: outcome.wallet,
+        transactionId: outcome.transactionId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function listMemberUpgradeRequests(
     _req: Request,
     res: Response,
@@ -3893,6 +4006,11 @@ export function createAdminController(prisma: PrismaClient) {
     deleteUserSafely,
     listPartnerPayouts,
     completePartnerPayout: completePartnerPayoutHandler,
+    listWalletWithdrawals,
+    getWalletAdminSummary,
+    listWalletUsers,
+    processWalletWithdrawal,
+    adjustUserWallet,
     updateUserProfile,
     getUserProfileDetails,
     updateUserProfileDetails,

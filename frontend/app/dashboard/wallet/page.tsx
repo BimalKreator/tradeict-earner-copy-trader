@@ -45,6 +45,8 @@ type WalletResponse = {
   balance: number;
   balanceUsd?: number;
   balanceInr?: number;
+  availableBalance?: number;
+  lockedBalance?: number;
   usdInrRate?: number;
   pendingFees: number;
   overdueDays: number;
@@ -60,6 +62,26 @@ type PaymentHistoryRow = {
   totalInr: number;
   status: string;
   referenceId: string | null;
+};
+
+type LedgerTransactionRow = {
+  id: string;
+  date: string;
+  amount: number;
+  type: string;
+  status: string;
+  utrNumber: string | null;
+  note: string | null;
+};
+
+type HistoryRow = {
+  id: string;
+  date: string;
+  description: string;
+  amountUsd: number;
+  inr: number;
+  status: string;
+  ledgerType?: string;
 };
 
 type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
@@ -178,6 +200,101 @@ function dueDateLabel(
   };
 }
 
+function ledgerDescription(tx: LedgerTransactionRow): string {
+  switch (tx.type) {
+    case "WITHDRAWAL_REQUEST":
+      return "Wallet withdrawal request";
+    case "ADMIN_ADJUSTMENT":
+      return tx.note?.trim() || "Admin wallet adjustment";
+    case "PAYMENT":
+      return tx.utrNumber?.trim()
+        ? `Deposit request · UTR ${tx.utrNumber.trim()}`
+        : "Deposit request";
+    case "FEE":
+      return "Platform fee";
+    default:
+      return tx.type.replace(/_/g, " ").toLowerCase();
+  }
+}
+
+function ledgerAmountUsd(tx: LedgerTransactionRow): number {
+  if (tx.type === "WITHDRAWAL_REQUEST") return -tx.amount;
+  if (tx.type === "ADMIN_ADJUSTMENT") {
+    if (tx.note?.trim().toUpperCase().startsWith("REMOVE:")) return -tx.amount;
+    return tx.amount;
+  }
+  return tx.amount;
+}
+
+function paymentStatusBadge(status: string): string {
+  const mapped = mapPaymentStatus(status);
+  switch (mapped) {
+    case "PAID":
+      return "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30";
+    case "FAILED":
+      return "bg-red-500/15 text-red-300 ring-1 ring-red-500/30";
+    default:
+      return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30";
+  }
+}
+
+function historyStatusLabel(status: string, ledgerType?: string): string {
+  if (ledgerType === "WITHDRAWAL_REQUEST") {
+    const s = status.toUpperCase();
+    if (s === "COMPLETED" || s === "REJECTED" || s === "PENDING") return s;
+    return status;
+  }
+  return mapPaymentStatus(status);
+}
+
+function historyStatusBadge(status: string, ledgerType?: string): string {
+  if (ledgerType === "WITHDRAWAL_REQUEST") {
+    switch (status.toUpperCase()) {
+      case "COMPLETED":
+        return "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30";
+      case "REJECTED":
+        return "bg-red-500/15 text-red-300 ring-1 ring-red-500/30";
+      case "PENDING":
+      default:
+        return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30";
+    }
+  }
+  return paymentStatusBadge(status);
+}
+
+function mergeTransactionHistory(
+  payments: PaymentHistoryRow[],
+  ledger: LedgerTransactionRow[],
+): HistoryRow[] {
+  const paymentRows: HistoryRow[] = payments.map((tx) => {
+    const usd = tx.netCredit;
+    const inr = tx.amount > 0 ? tx.amount : usdToInr(usd);
+    const label = `${tx.method} · ${tx.referenceId ? `Ref ${tx.referenceId}` : "Wallet top-up"}`;
+    return {
+      id: `payment-${tx.id}`,
+      date: tx.date,
+      description: label,
+      amountUsd: usd,
+      inr,
+      status: tx.status,
+    };
+  });
+
+  const ledgerRows: HistoryRow[] = ledger.map((tx) => ({
+    id: `ledger-${tx.id}`,
+    date: tx.date,
+    description: ledgerDescription(tx),
+    amountUsd: ledgerAmountUsd(tx),
+    inr: usdToInr(Math.abs(tx.amount)),
+    status: tx.status,
+    ledgerType: tx.type,
+  }));
+
+  return [...paymentRows, ...ledgerRows].sort(
+    (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+  );
+}
+
 async function authFetch(
   path: string,
   init?: RequestInit,
@@ -198,6 +315,7 @@ export default function DashboardWalletPage() {
   const [liveCycle, setLiveCycle] = useState<LiveCycleResponse | null>(null);
   const [wallet, setWallet] = useState<WalletResponse | null>(null);
   const [paymentHistory, setPaymentHistory] = useState<PaymentHistoryRow[]>([]);
+  const [ledgerTransactions, setLedgerTransactions] = useState<LedgerTransactionRow[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -210,35 +328,45 @@ export default function DashboardWalletPage() {
 
   const loadAll = useCallback(async (silent: boolean) => {
     try {
-      const [cycleRes, walletRes, invoiceRes, historyRes] = await Promise.all([
+      const [cycleRes, walletRes, invoiceRes, historyRes, ledgerRes] = await Promise.all([
         authFetch("/billing/live-cycle/all"),
         authFetch("/wallet/me"),
         authFetch("/user/invoices"),
         authFetch("/payments/history"),
+        authFetch("/user/transactions"),
       ]);
 
       if (
         cycleRes.status === 401 ||
         walletRes.status === 401 ||
         invoiceRes.status === 401 ||
-        historyRes.status === 401
+        historyRes.status === 401 ||
+        ledgerRes.status === 401
       ) {
         if (!silent) {
           setUnauthorized(true);
           setLiveCycle(null);
           setWallet(null);
           setPaymentHistory([]);
+          setLedgerTransactions([]);
           setInvoices([]);
         }
         return;
       }
 
-      if (!cycleRes.ok || !walletRes.ok || !invoiceRes.ok || !historyRes.ok) {
+      if (
+        !cycleRes.ok ||
+        !walletRes.ok ||
+        !invoiceRes.ok ||
+        !historyRes.ok ||
+        !ledgerRes.ok
+      ) {
         const codes = [
           cycleRes.status,
           walletRes.status,
           invoiceRes.status,
           historyRes.status,
+          ledgerRes.status,
         ]
           .filter((c) => c >= 400)
           .join("/");
@@ -252,11 +380,17 @@ export default function DashboardWalletPage() {
         transactions?: PaymentHistoryRow[];
         usdInrRate?: number;
       };
+      const ledger = (await ledgerRes.json()) as {
+        transactions?: LedgerTransactionRow[];
+      };
 
       setLiveCycle(cycle);
       setWallet(w);
       setPaymentHistory(
         Array.isArray(hist.transactions) ? hist.transactions : [],
+      );
+      setLedgerTransactions(
+        Array.isArray(ledger.transactions) ? ledger.transactions : [],
       );
       setInvoices(Array.isArray(inv.invoices) ? inv.invoices : []);
       if (!silent) {
@@ -430,24 +564,18 @@ export default function DashboardWalletPage() {
     [loadAll],
   );
 
-  const balanceUsd = wallet?.balanceUsd ?? wallet?.balance ?? 0;
+  const balanceUsd =
+    wallet?.availableBalance ?? wallet?.balanceUsd ?? wallet?.balance ?? 0;
+
+  const transactionHistory = useMemo(
+    () => mergeTransactionHistory(paymentHistory, ledgerTransactions),
+    [ledgerTransactions, paymentHistory],
+  );
 
   const pendingCount = useMemo(
     () => invoices.filter((i) => i.status === "PENDING" || i.status === "OVERDUE").length,
     [invoices],
   );
-
-  function txStatusBadge(status: string): string {
-    const mapped = mapPaymentStatus(status);
-    switch (mapped) {
-      case "PAID":
-        return "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30";
-      case "FAILED":
-        return "bg-red-500/15 text-red-300 ring-1 ring-red-500/30";
-      default:
-        return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30";
-    }
-  }
 
   if (unauthorized) {
     return (
@@ -572,7 +700,7 @@ export default function DashboardWalletPage() {
             <div className="border-b border-glassBorder bg-white/[0.03] px-5 py-3">
               <h2 className="text-sm font-semibold text-white">Transactions</h2>
               <p className="text-xs text-white/45">
-                Deposits and payments — USD wallet credit with INR equivalent
+                Deposits, withdrawals, and payments — USD with INR equivalent
               </p>
             </div>
             <div className="scroll-table overflow-x-auto">
@@ -587,7 +715,7 @@ export default function DashboardWalletPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {paymentHistory.length === 0 ? (
+                  {transactionHistory.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-4 py-14 text-center text-white/55">
                         No transactions yet.{" "}
@@ -597,12 +725,12 @@ export default function DashboardWalletPage() {
                       </td>
                     </tr>
                   ) : (
-                    paymentHistory.map((tx) => {
-                      const usd = tx.netCredit;
-                      const inr =
-                        tx.amount > 0 ? tx.amount : usdToInr(usd);
-                      const label = `${tx.method} · ${tx.referenceId ? `Ref ${tx.referenceId}` : "Wallet top-up"}`;
-                      const displayStatus = mapPaymentStatus(tx.status);
+                    transactionHistory.map((tx) => {
+                      const isDebit = tx.amountUsd < 0;
+                      const displayStatus = historyStatusLabel(
+                        tx.status,
+                        tx.ledgerType,
+                      );
                       return (
                         <tr
                           key={tx.id}
@@ -611,18 +739,26 @@ export default function DashboardWalletPage() {
                           <td className="whitespace-nowrap px-4 py-3 text-white/70 tabular-nums">
                             {fmtDateTime(tx.date)}
                           </td>
-                          <td className="max-w-[240px] truncate px-4 py-3 text-white/85" title={label}>
-                            {label}
+                          <td
+                            className="max-w-[240px] truncate px-4 py-3 text-white/85"
+                            title={tx.description}
+                          >
+                            {tx.description}
                           </td>
-                          <td className="px-4 py-3 text-right tabular-nums text-emerald-300">
-                            {fmtUsd(usd)}
+                          <td
+                            className={`px-4 py-3 text-right tabular-nums ${
+                              isDebit ? "text-red-300" : "text-emerald-300"
+                            }`}
+                          >
+                            {isDebit ? "−" : "+"}
+                            {fmtUsd(Math.abs(tx.amountUsd))}
                           </td>
                           <td className="px-4 py-3 text-right tabular-nums text-white/80">
-                            {fmtInr(inr)}
+                            {fmtInr(tx.inr)}
                           </td>
                           <td className="px-4 py-3">
                             <span
-                              className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${txStatusBadge(tx.status)}`}
+                              className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${historyStatusBadge(tx.status, tx.ledgerType)}`}
                             >
                               {displayStatus}
                             </span>

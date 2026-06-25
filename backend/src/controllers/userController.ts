@@ -921,6 +921,57 @@ export function createUserController(prisma: PrismaClient) {
     }
   }
 
+  async function listTransactions(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const { startDate, endDate } = parseDateRange(req);
+      const rows = await prisma.transaction.findMany({
+        where: {
+          userId,
+          ...(startDate || endDate
+            ? {
+                createdAt: {
+                  ...(startDate ? { gte: startDate } : {}),
+                  ...(endDate ? { lte: endDate } : {}),
+                },
+              }
+            : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+          amount: true,
+          type: true,
+          status: true,
+          utrNumber: true,
+          note: true,
+        },
+      });
+      res.json({
+        transactions: rows.map((r) => ({
+          id: r.id,
+          date: r.createdAt.toISOString(),
+          amount: r.amount,
+          type: r.type,
+          status: r.status,
+          utrNumber: r.utrNumber,
+          note: r.note,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getPartnerMetricsHandler(
     req: Request,
     res: Response,
@@ -1309,6 +1360,7 @@ export function createUserController(prisma: PrismaClient) {
     listDeposits,
     exportTrades,
     exportTransactions,
+    listTransactions,
     getLiveTradesByStrategy,
     getPartnerMetrics: getPartnerMetricsHandler,
     listPartnerDirectUsers: listPartnerDirectUsersHandler,

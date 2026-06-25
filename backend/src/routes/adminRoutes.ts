@@ -193,6 +193,18 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/payouts", adminController.listPartnerPayouts);
   router.post("/payouts/:id/complete", adminController.completePartnerPayout);
 
+  router.get("/wallet/withdrawals", adminController.listWalletWithdrawals);
+  router.get("/wallet/summary", adminController.getWalletAdminSummary);
+  router.get("/wallet/users", adminController.listWalletUsers);
+  router.post(
+    "/wallet/withdrawals/:id/process",
+    adminController.processWalletWithdrawal,
+  );
+  router.post(
+    "/wallet/users/:userId/adjust",
+    adminController.adjustUserWallet,
+  );
+
   router.get("/users", adminController.listUsersForAdmin);
 
   router.get("/users/:id/management", async (req, res, next) => {

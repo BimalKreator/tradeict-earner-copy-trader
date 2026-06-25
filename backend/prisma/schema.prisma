@@ -91,11 +91,20 @@ enum TransactionStatus {
   PENDING
   APPROVED
   REJECTED
+  COMPLETED
 }
 
 enum TransactionType {
   PAYMENT
   FEE
+  WITHDRAWAL_REQUEST
+  ADMIN_ADJUSTMENT
+}
+
+enum WalletWithdrawalStatus {
+  PENDING
+  COMPLETED
+  REJECTED
 }
 
 enum ProfileUpdateStatus {
@@ -185,6 +194,7 @@ model User {
   tradePositions   TradePosition[]
   wallet        Wallet?
   transactions  Transaction[]
+  walletWithdrawalRequests WalletWithdrawalRequest[]
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
   activities    UserActivity[]
@@ -414,14 +424,40 @@ model TradePosition {
 }
 
 model Wallet {
-  id          String        @id @default(uuid())
-  userId      String        @unique
-  balance     Float         @default(0.0)
-  pendingFees Float         @default(0.0)
-  overdueDays Int           @default(0)
+  id            String        @id @default(uuid())
+  userId        String        @unique
+  balance       Float         @default(0.0)
+  lockedBalance Float         @default(0.0)
+  pendingFees   Float         @default(0.0)
+  overdueDays   Int           @default(0)
 
-  user         User              @relation(fields: [userId], references: [id])
-  transactions WalletTransaction[]
+  user                User                      @relation(fields: [userId], references: [id])
+  transactions        WalletTransaction[]
+  withdrawalRequests  WalletWithdrawalRequest[]
+}
+
+model WalletWithdrawalRequest {
+  id                  String                 @id @default(uuid())
+  walletId            String
+  userId              String
+  amount              Float
+  status              WalletWithdrawalStatus @default(PENDING)
+  bankName            String?
+  bankAccountNumber   String?
+  bankIfsc            String?
+  /** Bank transfer reference filled by admin on completion. */
+  transactionId       String?
+  adminRemarks        String?
+  ledgerTransactionId String?                @unique
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  wallet            Wallet       @relation(fields: [walletId], references: [id])
+  user              User         @relation(fields: [userId], references: [id])
+  ledgerTransaction Transaction? @relation(fields: [ledgerTransactionId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([userId, status])
 }
 
 model WalletTransaction {
@@ -441,10 +477,12 @@ model Transaction {
   amount    Float
   type      TransactionType   @default(PAYMENT)
   utrNumber String?           @unique
+  note      String?
   status    TransactionStatus @default(PENDING)
   createdAt DateTime          @default(now())
 
-  user User @relation(fields: [userId], references: [id])
+  user                    User                     @relation(fields: [userId], references: [id])
+  walletWithdrawalRequest WalletWithdrawalRequest?
 }
 
 model ProfileUpdateRequest {

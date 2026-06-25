@@ -9,6 +9,7 @@ import {
   BarChart3,
   Bell,
   ChevronDown,
+  CircleDollarSign,
   Download,
   FolderOpen,
   GitBranch,
@@ -75,6 +76,7 @@ const navGroups: NavGroup[] = [
     items: [
       { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
       { href: "/admin/payouts", label: "Payouts", icon: Banknote },
+      { href: "/admin/wallet", label: "Wallet Management", icon: CircleDollarSign },
       { href: "/admin/funds", label: "Funds", icon: Wallet },
       { href: "/admin/coupons", label: "Coupons", icon: Tag },
     ],

@@ -14,9 +14,12 @@ import {
   PlayCircle,
   TrendingUp,
   Wallet,
+  ArrowDownToLine,
+  Plus,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { WithdrawFundsModal } from "@/components/wallet/WithdrawFundsModal";
 import {
   fmtUsd,
   fmtUsdBalance,
@@ -59,6 +62,15 @@ type DashboardOverview = {
   cryptoArbitrageEnabled: boolean;
 };
 
+type WalletSummary = {
+  exists: boolean;
+  balance: number;
+  availableBalance?: number;
+  lockedBalance?: number;
+};
+
+type Toast = { kind: "success" | "error"; text: string } | null;
+
 function fmtPct(n: number): string {
   const sign = n > 0 ? "+" : "";
   return `${sign}${n.toFixed(2)}%`;
@@ -72,10 +84,23 @@ function pnlTone(n: number): string {
 
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardOverview | null>(null);
+  const [wallet, setWallet] = useState<WalletSummary | null>(null);
+  const [walletLoading, setWalletLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast>(null);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [toggleBusy, setToggleBusy] = useState(false);
   const { token } = useAuth();
+
+  const loadWallet = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/wallet/me`, {
+      headers: { Authorization: `Bearer ${token ?? ""}` },
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`Failed to load wallet (${res.status})`);
+    setWallet((await res.json()) as WalletSummary);
+  }, [token]);
 
   const loadOverview = useCallback(async () => {
     const res = await fetch(`${API_BASE}/user/dashboard-overview`, {
@@ -88,14 +113,26 @@ export default function DashboardPage() {
   useEffect(() => {
     void (async () => {
       try {
-        await loadOverview();
+        await Promise.all([loadOverview(), loadWallet()]);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load dashboard");
       } finally {
         setLoading(false);
+        setWalletLoading(false);
       }
     })();
-  }, [loadOverview]);
+  }, [loadOverview, loadWallet]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const availableWalletUsd = Math.max(
+    0,
+    wallet?.availableBalance ?? wallet?.balance ?? 0,
+  );
 
   async function toggleCopyTrading() {
     if (!data || toggleBusy) return;
@@ -149,6 +186,88 @@ export default function DashboardPage() {
           {error}
         </div>
       )}
+
+      {toast ? (
+        <div
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            toast.kind === "success"
+              ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
+              : "border-red-500/40 bg-red-500/10 text-red-100"
+          }`}
+          role="status"
+        >
+          {toast.text}
+        </div>
+      ) : null}
+
+      <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-2.5">
+              <CircleDollarSign className="h-5 w-5 text-sky-400" aria-hidden />
+            </div>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+                Available wallet balance
+              </p>
+              {walletLoading ? (
+                <div className="mt-2 flex items-center gap-2 text-sm text-slate-400">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  Loading…
+                </div>
+              ) : (
+                <>
+                  <p className="mt-1 text-3xl font-semibold tabular-nums text-white">
+                    {fmtUsdBalance(availableWalletUsd)}
+                  </p>
+                  <p className="mt-1 text-sm tabular-nums text-slate-500">
+                    {formatINR(availableWalletUsd)}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/dashboard/payments"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-primary/90"
+            >
+              <Plus className="h-4 w-4" aria-hidden />
+              Add Funds
+            </Link>
+            <button
+              type="button"
+              onClick={() => setWithdrawOpen(true)}
+              disabled={walletLoading}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+            >
+              <ArrowDownToLine className="h-4 w-4" aria-hidden />
+              Withdraw Funds
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <WithdrawFundsModal
+        open={withdrawOpen}
+        apiBase={API_BASE ?? ""}
+        token={token}
+        availableBalance={availableWalletUsd}
+        onClose={() => setWithdrawOpen(false)}
+        onSuccess={(message) => {
+          setToast({ kind: "success", text: message });
+          setWalletLoading(true);
+          void loadWallet()
+            .catch(() => {
+              setToast({
+                kind: "error",
+                text: "Withdrawal submitted but wallet balance could not be refreshed.",
+              });
+            })
+            .finally(() => setWalletLoading(false));
+        }}
+        onError={(message) => setToast({ kind: "error", text: message })}
+      />
 
       <DashboardSection
         title="Delta Exchange Trading"

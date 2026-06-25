@@ -5,11 +5,13 @@ import type { PrismaClient } from "@prisma/client";
 import multer from "multer";
 import { authenticateJwt } from "../middleware/authMiddleware.js";
 import { createUserController } from "../controllers/userController.js";
+import { createWalletController } from "../controllers/walletController.js";
 
 export function createUserRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const jwtAuth = authenticateJwt(prisma);
   const user = createUserController(prisma);
+  const wallet = createWalletController(prisma);
   const uploadDir = path.resolve(process.cwd(), "public", "uploads");
   fs.mkdirSync(uploadDir, { recursive: true });
   const storage = multer.diskStorage({
@@ -51,6 +53,7 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.get("/trades", jwtAuth, user.listTrades);
   router.get("/trades/export", jwtAuth, user.exportTrades);
   router.get("/transactions/export", jwtAuth, user.exportTransactions);
+  router.get("/transactions", jwtAuth, user.listTransactions);
   router.get("/invoices", jwtAuth, user.listInvoices);
   router.get("/partner/metrics", jwtAuth, user.getPartnerMetrics);
   router.get("/partner/direct-users", jwtAuth, user.listPartnerDirectUsers);
@@ -62,6 +65,8 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.get("/partner/tier-info", jwtAuth, user.getPartnerTierInfo);
   router.get("/partner/referral-requests", jwtAuth, user.listPartnerReferralRequests);
   router.post("/partner/request-payout", jwtAuth, user.requestPartnerPayout);
+
+  router.post("/wallet/withdraw", jwtAuth, wallet.withdraw);
 
   return router;
 }
