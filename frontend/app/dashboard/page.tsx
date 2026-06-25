@@ -218,10 +218,10 @@ export default function DashboardPage() {
               ) : (
                 <>
                   <p className="mt-1 text-3xl font-semibold tabular-nums text-white">
-                    {fmtUsdBalance(availableWalletUsd)}
+                    {formatINR(availableWalletUsd)}
                   </p>
                   <p className="mt-1 text-sm tabular-nums text-slate-500">
-                    {formatINR(availableWalletUsd)}
+                    ≈ {fmtUsdBalance(availableWalletUsd)}
                   </p>
                 </>
               )}
