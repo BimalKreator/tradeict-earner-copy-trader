@@ -24,7 +24,6 @@ import {
   fmtUsd,
   fmtUsdBalance,
   formatINR,
-  formatINRApprox,
 } from "@/lib/currency";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
@@ -80,6 +79,18 @@ function pnlTone(n: number): string {
   if (n > 0) return "text-emerald-400";
   if (n < 0) return "text-red-400";
   return "text-slate-300";
+}
+
+function usdSecondaryLabel(usd: number, balance = false): string {
+  return `≈ ${balance ? fmtUsdBalance(usd) : fmtUsd(usd)}`;
+}
+
+function usdSecondaryNode(usd: number, balance = false): ReactNode {
+  return (
+    <span className="text-sm tabular-nums text-slate-500">
+      {usdSecondaryLabel(usd, balance)}
+    </span>
+  );
 }
 
 export default function DashboardPage() {
@@ -282,7 +293,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<TrendingUp className="h-5 w-5 text-emerald-400" />}
               label="Earned PnL"
-              value={fmtUsd(data.earnedPnl)}
+              value={formatINR(data.earnedPnl)}
+              secondaryValue={usdSecondaryNode(data.earnedPnl)}
               sub={
                 <span className="text-slate-500">
                   Net take-home after revenue sharing
@@ -294,7 +306,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Activity className="h-5 w-5 text-cyan-400" />}
               label="Today's PnL"
-              value={fmtUsd(data.todayPnl)}
+              value={formatINR(data.todayPnl)}
+              secondaryValue={usdSecondaryNode(data.todayPnl)}
               sub={
                 <span className={pnlTone(data.todayPnlPercent)}>
                   {fmtPct(data.todayPnlPercent)} of capital
@@ -306,7 +319,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Calendar className="h-5 w-5 text-violet-400" />}
               label="Monthly PnL"
-              value={fmtUsd(data.monthlyPnl)}
+              value={formatINR(data.monthlyPnl)}
+              secondaryValue={usdSecondaryNode(data.monthlyPnl)}
               sub={
                 <div className="space-y-0.5">
                   <span className={pnlTone(data.monthlyPnlPercent)}>
@@ -317,8 +331,10 @@ export default function DashboardPage() {
                   (data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0) !==
                     data.monthlyPnl ? (
                     <p className="text-xs text-slate-500">
-                      Gross {fmtUsd(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}{" "}
-                      − app revenue {fmtUsd(data.revenueSharingDue)}
+                      Gross {formatINR(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}{" "}
+                      ({usdSecondaryLabel(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}) −
+                      app revenue {formatINR(data.revenueSharingDue)} (
+                      {usdSecondaryLabel(data.revenueSharingDue)})
                     </p>
                   ) : null}
                 </div>
@@ -329,12 +345,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
               label="Total Delta Balance"
-              value={fmtUsdBalance(data.totalBalance)}
-              secondaryValue={
-                <span className="text-sm tabular-nums text-slate-500">
-                  {formatINRApprox(Math.max(0, data.totalBalance))}
-                </span>
-              }
+              value={formatINR(Math.max(0, data.totalBalance))}
+              secondaryValue={usdSecondaryNode(data.totalBalance, true)}
               sub={
                 <div className="space-y-2 border-t border-slate-800/80 pt-2">
                   <BalanceSubRow
@@ -353,7 +365,8 @@ export default function DashboardPage() {
             <MetricCard
               icon={<CreditCard className="h-5 w-5 text-amber-400" />}
               label="Revenue Sharing Due"
-              value={fmtUsd(data.revenueSharingDue)}
+              value={formatINR(data.revenueSharingDue)}
+              secondaryValue={usdSecondaryNode(data.revenueSharingDue)}
               sub={
                 data.revenueSharingDue > 0 ? (
                   <div className="flex flex-col gap-2">
@@ -587,14 +600,15 @@ function MetricCard({
 }
 
 function BalanceSubRow({ label, usd }: { label: string; usd: number }) {
+  const safeUsd = Math.max(0, usd);
   return (
     <div className="text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="text-slate-500">{label}</span>
-        <span className="tabular-nums text-slate-200">{fmtUsdBalance(usd)}</span>
+        <span className="tabular-nums text-slate-200">{formatINR(safeUsd)}</span>
       </div>
       <p className="mt-0.5 text-right text-[11px] tabular-nums text-slate-500">
-        {formatINRApprox(usd)}
+        {usdSecondaryLabel(safeUsd, true)}
       </p>
     </div>
   );
