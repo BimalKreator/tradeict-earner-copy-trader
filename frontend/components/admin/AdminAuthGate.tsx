@@ -5,6 +5,10 @@ import { useEffect, useState } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth } from "@/context/AuthContext";
 
+function isPlatformAdminUser(user: { role: string; adminRole?: string } | null): boolean {
+  return user?.role === "ADMIN" || Boolean(user?.adminRole);
+}
+
 export function AdminAuthGate({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
@@ -21,7 +25,7 @@ export function AdminAuthGate({
       return;
     }
 
-    if (user?.role !== "ADMIN") {
+    if (!isPlatformAdminUser(user)) {
       router.replace("/dashboard");
       setReady(false);
       return;

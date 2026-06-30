@@ -14,7 +14,8 @@
     "db:remove-legacy-strategies": "npm run build && node dist/scripts/removeLegacyCryptoOptionsStrategy.js",
     "db:import-arbitrage": "npm run build && node dist/scripts/import-arbitrage.js",
     "db:migrate-encryption": "npm run build && node dist/scripts/migrate-encryption.js",
-    "setup-admins": "ts-node src/scripts/setupInitialAdmins.ts"
+    "setup-admins": "ts-node src/scripts/setupInitialAdmins.ts",
+    "sync-admins-to-members": "ts-node src/scripts/syncAdminsToMembers.ts"
   },
   "keywords": [],
   "author": "",

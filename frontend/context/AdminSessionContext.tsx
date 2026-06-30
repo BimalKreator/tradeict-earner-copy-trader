@@ -57,7 +57,7 @@ function parseAdminSession(data: unknown): AdminSession | null {
 }
 
 function sessionFromAuthUser(user: AuthUser | null): AdminSession | null {
-  if (!user || user.role !== "ADMIN") return null;
+  if (!user || (user.role !== "ADMIN" && !user.adminRole)) return null;
   return {
     id: user.id,
     email: user.email,
@@ -83,7 +83,7 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (user?.role !== "ADMIN") {
+    if (user?.role !== "ADMIN" && !user?.adminRole) {
       setAdmin(null);
       setError("Not a platform admin");
       setLoading(false);

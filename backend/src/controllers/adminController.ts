@@ -70,6 +70,7 @@ import {
   assertUserSafeToDelete,
   changeMemberUpline,
   changeUserAcquiredBy,
+  ensurePlatformAdminAsSeniorManagerMember,
   listSalesMembers,
   normalizeUpgradeParentId,
   syncAffiliateProfileOnRoleChange,
@@ -3893,6 +3894,20 @@ export function createAdminController(prisma: PrismaClient) {
         email: user.email,
         adminRole: user.adminRole,
       });
+
+      const memberSync = await ensurePlatformAdminAsSeniorManagerMember(
+        prisma,
+        user.id,
+        {
+          upgradedById: req.admin?.id ?? user.id,
+          sendWelcomeEmail: false,
+        },
+      );
+      if (!memberSync.ok) {
+        console.warn(
+          `[createManager] Senior Manager affiliate sync failed for ${user.email}: ${memberSync.error}`,
+        );
+      }
 
       res.status(201).json({
         admin: {

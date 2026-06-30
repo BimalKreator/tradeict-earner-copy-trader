@@ -436,6 +436,104 @@ export type UpgradeMemberResult =
   | { ok: true; member: AdminMemberRow }
   | { ok: false; status: number; error: string };
 
+export type EnsurePlatformAdminMemberResult =
+  | {
+      ok: true;
+      userId: string;
+      email: string;
+      profileCreated: boolean;
+      roleUpdated: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Platform admins (`adminRole` set) participate in the affiliate tree as Senior Managers.
+ * Member tier is stored on `User.role`; partner stats live in `AffiliateProfile`.
+ */
+export async function ensurePlatformAdminAsSeniorManagerMember(
+  prisma: PrismaClient,
+  userId: string,
+  options?: {
+    upgradedById?: string | null;
+    sendWelcomeEmail?: boolean;
+  },
+): Promise<EnsurePlatformAdminMemberResult> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      adminRole: true,
+    },
+  });
+  if (!user) {
+    return { ok: false, error: "User not found" };
+  }
+  if (user.adminRole == null) {
+    return { ok: false, error: "User has no platform adminRole" };
+  }
+
+  const existingProfile = await prisma.affiliateProfile.findUnique({
+    where: { userId },
+    select: { id: true, referralCode: true },
+  });
+
+  const referralCode =
+    existingProfile?.referralCode ??
+    (await generateUniqueReferralCode(prisma, userId, user.email));
+
+  const upgradedById = options?.upgradedById ?? userId;
+  const roleUpdated = user.role !== Role.SENIOR_MANAGER;
+  const profileCreated = existingProfile == null;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: userId },
+      data: { role: Role.SENIOR_MANAGER },
+    });
+
+    await tx.affiliateProfile.upsert({
+      where: { userId },
+      create: {
+        userId,
+        referralCode,
+        status: AffiliateProfileStatus.ACTIVE,
+        upgradedById,
+        upgradedAt: new Date(),
+      },
+      update: {
+        status: AffiliateProfileStatus.ACTIVE,
+        upgradedById,
+        upgradedAt: new Date(),
+      },
+    });
+  });
+
+  if (options?.sendWelcomeEmail) {
+    void sendWelcomeToTeamMemberEmail(
+      user.email,
+      user.name?.trim() || user.email,
+      Role.SENIOR_MANAGER,
+      referralCode,
+    ).catch((err) => {
+      console.error(
+        `[affiliate] welcome email failed platform admin userId=${userId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+  }
+
+  return {
+    ok: true,
+    userId: user.id,
+    email: user.email,
+    profileCreated,
+    roleUpdated,
+  };
+}
+
 export async function upgradeUserToSalesMember(
   prisma: PrismaClient,
   args: UpgradeMemberArgs,
@@ -445,13 +543,17 @@ export async function upgradeUserToSalesMember(
 
   const target = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, name: true, role: true },
+    select: { id: true, email: true, name: true, role: true, adminRole: true },
   });
   if (!target) {
     return { ok: false, status: 404, error: "User not found" };
   }
-  if (target.role === Role.ADMIN) {
-    return { ok: false, status: 400, error: "Admin accounts cannot become team members" };
+  if (target.adminRole) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Platform admin accounts cannot be re-nominated as team members",
+    };
   }
 
   let parent: { id: string; role: Role } | null = null;

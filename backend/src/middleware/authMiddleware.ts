@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import type { PrismaClient } from "@prisma/client";
 import { AdminRole, Role, UserStatus } from "@prisma/client";
 import { AUTH_COOKIE_NAME } from "../utils/authToken.js";
+import { isPlatformAdminUser } from "../utils/platformAdmin.js";
 
 function extractBearerToken(req: Request): string | null {
   const authHeader = req.headers.authorization;
@@ -105,7 +106,7 @@ export function requireAdmin(prisma: PrismaClient): (
         },
       });
 
-      if (!user || user.role !== Role.ADMIN) {
+      if (!user || !isPlatformAdminUser(user)) {
         res.status(403).json({ error: "Admin access required" });
         return;
       }

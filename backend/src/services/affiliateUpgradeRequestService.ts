@@ -318,13 +318,17 @@ export async function createMemberUpgradeRequest(
 
     const target = await prisma.user.findFirst({
       where: { email: { equals: email, mode: "insensitive" } },
-      select: { id: true, email: true, name: true, role: true },
+      select: { id: true, email: true, name: true, role: true, adminRole: true },
     });
     if (!target) {
       return { ok: false, status: 404, error: "User not found" };
     }
-    if (target.role === Role.ADMIN) {
-      return { ok: false, status: 400, error: "Admin accounts cannot be nominated" };
+    if (target.adminRole) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Platform admin accounts cannot be nominated",
+      };
     }
     if (isSalesMemberRole(target.role)) {
       return {

@@ -227,8 +227,8 @@ export function createUserController(prisma: PrismaClient) {
       res.json({
         ...rest,
         role,
-        ...(user.role === "ADMIN"
-          ? { adminRole: adminRole ?? "SUPER_ADMIN" }
+        ...(user.adminRole != null
+          ? { adminRole: user.adminRole ?? "SUPER_ADMIN" }
           : {}),
         referrer,
         pendingApprovalFields: pendingFields,
