@@ -23,6 +23,8 @@ export type AuthUser = {
   name: string | null;
   /** USER | ADMIN | EXECUTIVE | MANAGER | SENIOR_MANAGER */
   role: string;
+  /** Platform RBAC tier when role is ADMIN. */
+  adminRole?: "SUPER_ADMIN" | "MANAGER" | "SUPPORT";
   mobile?: string | null;
   address?: string | null;
   panNumber?: string | null;
@@ -63,15 +65,30 @@ function isJwtExpired(token: string): boolean {
   }
 }
 
+function parsePlatformAdminRole(
+  value: unknown,
+): AuthUser["adminRole"] | undefined {
+  if (typeof value !== "string") return undefined;
+  const role = value.trim().toUpperCase();
+  if (role === "SUPER_ADMIN" || role === "MANAGER" || role === "SUPPORT") {
+    return role;
+  }
+  return undefined;
+}
+
 function parseAuthUser(data: unknown): AuthUser | null {
   if (typeof data !== "object" || data === null) return null;
   const row = data as Record<string, unknown>;
   if (typeof row.id !== "string" || typeof row.email !== "string") return null;
+  const role =
+    typeof row.role === "string" ? row.role.trim().toUpperCase() : "USER";
+  const adminRole = parsePlatformAdminRole(row.adminRole);
   return {
     id: row.id,
     email: row.email,
     name: typeof row.name === "string" ? row.name : null,
-    role: typeof row.role === "string" ? row.role.trim().toUpperCase() : "USER",
+    role,
+    ...(adminRole ? { adminRole } : {}),
     mobile: typeof row.mobile === "string" ? row.mobile : null,
     address: typeof row.address === "string" ? row.address : null,
     panNumber: typeof row.panNumber === "string" ? row.panNumber : null,

@@ -187,6 +187,7 @@ export function createUserController(prisma: PrismaClient) {
           panNumber: true,
           aadharNumber: true,
           role: true,
+          adminRole: true,
           status: true,
           acquiredById: true,
           acquiredBy: {
@@ -221,9 +222,17 @@ export function createUserController(prisma: PrismaClient) {
             }
           : null;
 
-      const { acquiredBy: _acquiredBy, ...rest } = user;
+      const { acquiredBy: _acquiredBy, adminRole, ...rest } = user;
       const role = normalizeAffiliateRoleEnum(user.role) ?? user.role;
-      res.json({ ...rest, role, referrer, pendingApprovalFields: pendingFields });
+      res.json({
+        ...rest,
+        role,
+        ...(user.role === "ADMIN"
+          ? { adminRole: adminRole ?? "SUPER_ADMIN" }
+          : {}),
+        referrer,
+        pendingApprovalFields: pendingFields,
+      });
     } catch (err) {
       next(err);
     }
