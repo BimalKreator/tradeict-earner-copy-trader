@@ -809,7 +809,7 @@ export default function PartnerDashboardPage() {
                     Grow your downline
                   </p>
                   <p className="mt-1 text-xs leading-relaxed text-white/50">
-                    Nominate a user who already has an active strategy subscription.
+                    Nominate any registered user for admin approval.
                     An admin will review and approve the upgrade.
                   </p>
                 </div>

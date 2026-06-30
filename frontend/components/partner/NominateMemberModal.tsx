@@ -183,8 +183,8 @@ export function NominateMemberModal({
               Nominate team member
             </h2>
             <p className="mt-1 text-sm text-white/50">
-              Submit a user for admin approval. They must have an active strategy
-              subscription before upgrade.
+              Submit a user for admin approval. They do not need an active strategy
+              subscription to be nominated.
             </p>
           </div>
           <button

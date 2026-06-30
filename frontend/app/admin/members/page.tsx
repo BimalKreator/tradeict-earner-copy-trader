@@ -419,10 +419,7 @@ export default function AdminMembersPage() {
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
-        throw new Error(
-          body.error ??
-            "Upgrade failed. Ensure the user has an active paid subscription.",
-        );
+        throw new Error(body.error ?? "Upgrade failed.");
       }
       setModalOpen(false);
       setToast({
@@ -831,7 +828,7 @@ export default function AdminMembersPage() {
                   Upgrade user to team member
                 </h2>
                 <p className="mt-1 text-sm text-white/50">
-                  User must have an active, paid strategy subscription.
+                  Assign a sales role and upline. Strategy subscription is not required.
                 </p>
               </div>
               <button

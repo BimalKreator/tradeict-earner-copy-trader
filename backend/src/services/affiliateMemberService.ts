@@ -3,7 +3,6 @@ import {
   AffiliateProfileStatus,
   PayoutRequestStatus,
   Role,
-  SubscriptionStatus,
   UserStatus,
   type Prisma,
   type PrismaClient,
@@ -17,9 +16,6 @@ export const SALES_MEMBER_ROLES = [
 ] as const;
 
 export type SalesMemberRole = (typeof SALES_MEMBER_ROLES)[number];
-
-const ACTIVE_SUBSCRIPTION_ERROR =
-  "User must have an active subscription to become a Team Member";
 
 export function isSalesMemberRole(role: Role): role is SalesMemberRole {
   return (
@@ -300,22 +296,6 @@ export async function changeUserAcquiredBy(
   };
 }
 
-/** At least one active deployed copy subscription (includes 100% coupon activations). */
-export async function userHasActivePaidStrategySubscription(
-  prisma: PrismaClient,
-  userId: string,
-): Promise<boolean> {
-  const activeSub = await prisma.userStrategySubscription.findFirst({
-    where: {
-      userId,
-      isActive: true,
-      status: SubscriptionStatus.ACTIVE,
-    },
-    select: { id: true },
-  });
-  return activeSub != null;
-}
-
 /** Normalize upline id from admin upgrade payloads — never query junk sentinels. */
 export function normalizeUpgradeParentId(
   raw: string | null | undefined,
@@ -472,14 +452,6 @@ export async function upgradeUserToSalesMember(
   }
   if (target.role === Role.ADMIN) {
     return { ok: false, status: 400, error: "Admin accounts cannot become team members" };
-  }
-
-  const hasActivePaid = await userHasActivePaidStrategySubscription(
-    prisma,
-    userId,
-  );
-  if (!hasActivePaid) {
-    return { ok: false, status: 400, error: ACTIVE_SUBSCRIPTION_ERROR };
   }
 
   let parent: { id: string; role: Role } | null = null;
