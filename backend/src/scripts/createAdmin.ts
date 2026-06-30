@@ -2,7 +2,7 @@ import "dotenv/config";
 import bcrypt from "bcrypt";
 import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, Role } from "@prisma/client";
+import { PrismaClient, Role, AdminRole } from "@prisma/client";
 
 const SALT_ROUNDS = 12;
 
@@ -64,6 +64,7 @@ async function main(): Promise<void> {
         password: passwordHash,
         name,
         role: Role.ADMIN,
+        adminRole: AdminRole.SUPER_ADMIN,
       },
     });
 

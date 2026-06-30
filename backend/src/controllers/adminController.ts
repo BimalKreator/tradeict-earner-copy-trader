@@ -1,6 +1,8 @@
 import type { NextFunction, Request, Response } from "express";
 import {
+  AdminRole,
   InvoiceStatus,
+  Prisma,
   Role,
   SubscriptionStatus,
   TradeStatus,
@@ -43,6 +45,7 @@ import { settlementFromExecuteResult } from "../services/tradeSettlementService.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import bcrypt from "bcrypt";
 import {
   executeTrade,
   fetchDeltaTotalBalanceUsd,
@@ -110,7 +113,10 @@ import {
   listWalletWithdrawalRequests,
   processWalletWithdrawalRequest,
 } from "../services/walletWithdrawalService.js";
+import { auditFromRequest } from "../utils/auditLogger.js";
 import { ReferralRequestStatus, SalesTier } from "@prisma/client";
+
+const BCRYPT_ROUNDS = 12;
 
 /** Prevent CDN/proxy/browser caching of live admin dashboards (PnL must be fresh). */
 export function applyNoStoreCacheHeaders(res: Response): void {
@@ -927,6 +933,7 @@ export function createAdminController(prisma: PrismaClient) {
         mobile?: string | null;
         status?: UserStatus;
         role?: Role;
+        adminRole?: AdminRole | null;
         arbitrageSourceUserId?: string | null;
       } = {};
 
@@ -984,7 +991,40 @@ export function createAdminController(prisma: PrismaClient) {
           res.status(400).json({ error: "role must be ADMIN or USER" });
           return;
         }
+        if (role === Role.ADMIN && existing.role !== Role.ADMIN) {
+          if (req.admin?.role !== AdminRole.SUPER_ADMIN) {
+            res.status(403).json({
+              error: "Only SUPER_ADMIN can promote users to platform admin",
+            });
+            return;
+          }
+        }
         data.role = role as Role;
+      }
+
+      const bodyAdminRole = (body as { adminRole?: unknown }).adminRole;
+      if (bodyAdminRole !== undefined) {
+        if (req.admin?.role !== AdminRole.SUPER_ADMIN) {
+          res.status(403).json({
+            error: "Only SUPER_ADMIN can change admin roles",
+          });
+          return;
+        }
+        if (bodyAdminRole === null || bodyAdminRole === "") {
+          data.adminRole = null;
+        } else {
+          const adminRole = String(bodyAdminRole).toUpperCase();
+          if (!Object.values(AdminRole).includes(adminRole as AdminRole)) {
+            res.status(400).json({
+              error: "adminRole must be SUPER_ADMIN, MANAGER, or SUPPORT",
+            });
+            return;
+          }
+          data.adminRole = adminRole as AdminRole;
+          if (existing.role !== Role.ADMIN) {
+            data.role = Role.ADMIN;
+          }
+        }
       }
 
       if (body.arbitrageSourceUserId !== undefined) {
@@ -1045,10 +1085,23 @@ export function createAdminController(prisma: PrismaClient) {
           mobile: true,
           status: true,
           role: true,
+          adminRole: true,
           arbitrageSourceUserId: true,
           createdAt: true,
         },
       });
+
+      auditFromRequest(prisma, req, "UPDATE_USER", "User", id, {
+        previous: existing,
+        next: user,
+        body: {
+          status:
+            body.status !== undefined ? String(body.status) : undefined,
+          role: body.role !== undefined ? String(body.role) : undefined,
+          adminRole:
+            bodyAdminRole !== undefined ? String(bodyAdminRole) : undefined,
+        },
+      } satisfies Prisma.InputJsonObject);
 
       if (
         data.status === UserStatus.ACTIVE &&
@@ -1138,6 +1191,9 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(409).json({ error: result.error });
         return;
       }
+      auditFromRequest(prisma, req, "UPDATE_USER_PROFILE", "User", id, {
+        fields: Object.keys(parsed.data),
+      });
       res.json({
         profile: formatProfileResponse(result.user),
         message: "User profile updated successfully.",
@@ -2251,6 +2307,13 @@ export function createAdminController(prisma: PrismaClient) {
       });
 
       res.json({ ok: true, deposit: updated });
+
+      auditFromRequest(prisma, req, "UPDATE_DEPOSIT", "DepositRequest", id, {
+        previousStatus: deposit.status,
+        nextStatus: status,
+        adminReason,
+        userId: deposit.userId,
+      });
     } catch (err) {
       next(err);
     }
@@ -2634,6 +2697,18 @@ export function createAdminController(prisma: PrismaClient) {
         email: user.email,
         balanceDisplayOffset: user.deltaBalanceDisplayOffset,
       });
+
+      auditFromRequest(
+        prisma,
+        req,
+        "UPDATE_BALANCE_DISPLAY_OFFSET",
+        "User",
+        userId,
+        {
+          previous: existing.deltaBalanceDisplayOffset,
+          next: user.deltaBalanceDisplayOffset,
+        },
+      );
     } catch (err) {
       next(err);
     }
@@ -3601,6 +3676,9 @@ export function createAdminController(prisma: PrismaClient) {
       }
 
       await prisma.user.delete({ where: { id } });
+      auditFromRequest(prisma, req, "DELETE_USER", "User", id, {
+        deletedUserId: id,
+      });
       res.status(204).send();
     } catch (err) {
       next(err);
@@ -3700,6 +3778,235 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function getAdminMe(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      if (!req.admin) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      applyNoStoreCacheHeaders(res);
+      res.json({ admin: req.admin });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function listManagers(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const admins = await prisma.user.findMany({
+        where: { role: Role.ADMIN },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          adminRole: true,
+          status: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      applyNoStoreCacheHeaders(res);
+      res.json({
+        admins: admins.map((a) => ({
+          id: a.id,
+          email: a.email,
+          name: a.name,
+          adminRole: a.adminRole ?? AdminRole.SUPER_ADMIN,
+          status: a.status,
+          createdAt: a.createdAt.toISOString(),
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function createManager(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        email?: unknown;
+        password?: unknown;
+        name?: unknown;
+        adminRole?: unknown;
+      };
+
+      const email =
+        typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password =
+        typeof body.password === "string" ? body.password : "";
+      const name =
+        typeof body.name === "string" ? body.name.trim() : undefined;
+      const roleRaw =
+        typeof body.adminRole === "string"
+          ? body.adminRole.trim().toUpperCase()
+          : "";
+
+      if (!email || !email.includes("@")) {
+        res.status(400).json({ error: "Valid email is required" });
+        return;
+      }
+      if (password.length < 8) {
+        res.status(400).json({ error: "Password must be at least 8 characters" });
+        return;
+      }
+      if (!Object.values(AdminRole).includes(roleRaw as AdminRole)) {
+        res.status(400).json({
+          error: "adminRole must be SUPER_ADMIN, MANAGER, or SUPPORT",
+        });
+        return;
+      }
+
+      const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      const adminRole = roleRaw as AdminRole;
+
+      const user = await prisma.user.create({
+        data: {
+          email,
+          password: passwordHash,
+          name: name || null,
+          role: Role.ADMIN,
+          adminRole,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          adminRole: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      auditFromRequest(prisma, req, "CREATE_ADMIN", "Admin", user.id, {
+        email: user.email,
+        adminRole: user.adminRole,
+      });
+
+      res.status(201).json({
+        admin: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          adminRole: user.adminRole ?? AdminRole.SUPER_ADMIN,
+          status: user.status,
+          createdAt: user.createdAt.toISOString(),
+        },
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        res.status(409).json({ error: "An account with this email already exists" });
+        return;
+      }
+      next(err);
+    }
+  }
+
+  async function listAuditLogs(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const page = Math.max(
+        1,
+        Number.parseInt(String(req.query.page ?? "1"), 10) || 1,
+      );
+      const pageSize = Math.min(
+        100,
+        Math.max(
+          1,
+          Number.parseInt(String(req.query.pageSize ?? "25"), 10) || 25,
+        ),
+      );
+      const adminId =
+        typeof req.query.adminId === "string" ? req.query.adminId.trim() : "";
+      const adminEmail =
+        typeof req.query.adminEmail === "string"
+          ? req.query.adminEmail.trim()
+          : "";
+      const action =
+        typeof req.query.action === "string" ? req.query.action.trim() : "";
+
+      const where = {
+        ...(adminId ? { adminId } : {}),
+        ...(action ? { action } : {}),
+        ...(adminEmail
+          ? {
+              admin: {
+                OR: [
+                  { email: { contains: adminEmail, mode: "insensitive" as const } },
+                  { name: { contains: adminEmail, mode: "insensitive" as const } },
+                ],
+              },
+            }
+          : {}),
+      };
+
+      const [total, items] = await Promise.all([
+        prisma.adminAuditLog.count({ where }),
+        prisma.adminAuditLog.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          include: {
+            admin: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                adminRole: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      applyNoStoreCacheHeaders(res);
+      res.json({
+        items: items.map((row) => ({
+          id: row.id,
+          adminId: row.adminId,
+          action: row.action,
+          resource: row.resource,
+          resourceId: row.resourceId,
+          details: row.details,
+          ipAddress: row.ipAddress,
+          createdAt: row.createdAt.toISOString(),
+          admin: {
+            id: row.admin.id,
+            name: row.admin.name,
+            email: row.admin.email,
+            adminRole: row.admin.adminRole,
+          },
+        })),
+        pagination: {
+          page,
+          pageSize,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / pageSize)),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function processWalletWithdrawal(
     req: Request,
     res: Response,
@@ -3722,6 +4029,18 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(outcome.status).json({ error: outcome.message });
         return;
       }
+
+      auditFromRequest(
+        prisma,
+        req,
+        "PROCESS_WITHDRAWAL",
+        "WalletWithdrawalRequest",
+        withdrawalId.trim(),
+        {
+          body: req.body,
+          result: outcome.withdrawal,
+        },
+      );
 
       res.json({ ok: true, withdrawal: outcome.withdrawal });
     } catch (err) {
@@ -3751,6 +4070,12 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(outcome.status).json({ error: outcome.message });
         return;
       }
+
+      auditFromRequest(prisma, req, "UPDATE_WALLET", "UserWallet", userId.trim(), {
+        body: req.body,
+        wallet: outcome.wallet,
+        transactionId: outcome.transactionId,
+      });
 
       res.json({
         ok: true,
@@ -4009,6 +4334,10 @@ export function createAdminController(prisma: PrismaClient) {
     listWalletWithdrawals,
     getWalletAdminSummary,
     listWalletUsers,
+    listAuditLogs,
+    getAdminMe,
+    listManagers,
+    createManager,
     processWalletWithdrawal,
     adjustUserWallet,
     updateUserProfile,

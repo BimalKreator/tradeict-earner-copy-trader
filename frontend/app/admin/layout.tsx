@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { AdminAuthGate } from "@/components/admin/AdminAuthGate";
 import { AdminShell } from "@/components/admin/AdminShell";
+import { AdminSessionProvider } from "@/context/AdminSessionContext";
 
 export const metadata: Metadata = {
   title: "Admin · TradeICT",
@@ -14,7 +15,9 @@ export default function AdminLayout({
 }>) {
   return (
     <AdminAuthGate>
-      <AdminShell>{children}</AdminShell>
+      <AdminSessionProvider>
+        <AdminShell>{children}</AdminShell>
+      </AdminSessionProvider>
     </AdminAuthGate>
   );
 }

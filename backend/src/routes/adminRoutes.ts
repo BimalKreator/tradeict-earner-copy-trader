@@ -2,13 +2,14 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import {
   Prisma,
   type PrismaClient,
+  AdminRole,
   InvoiceStatus,
   Role,
   TradeStatus,
   UserStatus,
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
-import { authenticateToken, isAdmin } from "../middleware/authMiddleware.js";
+import { authenticateToken, isAdmin, authorizeRoles } from "../middleware/authMiddleware.js";
 import { getAdminMasterPositionSnapshots } from "../services/liveTradesService.js";
 import {
   generateMonthlyInvoices,
@@ -80,13 +81,24 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.use(authenticateToken(prisma), isAdmin(prisma));
 
+  const superAdminOnly = authorizeRoles(AdminRole.SUPER_ADMIN);
+  const walletManagers = authorizeRoles(
+    AdminRole.SUPER_ADMIN,
+    AdminRole.MANAGER,
+  );
+
+  router.get("/audit-logs", walletManagers, adminController.listAuditLogs);
+  router.get("/me", adminController.getAdminMe);
+  router.get("/managers", superAdminOnly, adminController.listManagers);
+  router.post("/managers", superAdminOnly, adminController.createManager);
+
   /** GET /api/admin/system/api-pause — Delta REST pause status (CDN auto + manual kill switch). */
   router.get("/system/api-pause", (_req, res) => {
     res.json(getDeltaRestPauseStatus());
   });
 
   /** PUT /api/admin/system/api-pause — toggle manual REST kill switch `{ "paused": true|false }`. */
-  router.put("/system/api-pause", (req, res) => {
+  router.put("/system/api-pause", superAdminOnly, (req, res) => {
     const paused = (req.body as { paused?: unknown })?.paused;
     if (typeof paused !== "boolean") {
       res.status(400).json({ error: "paused must be a boolean" });
@@ -106,18 +118,19 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.post("/notifications/broadcast", adminNotifications.broadcast);
 
   router.get("/coupons", coupons.list);
-  router.post("/coupons", coupons.create);
-  router.post("/coupons/bulk", coupons.createBulk);
+  router.post("/coupons", superAdminOnly, coupons.create);
+  router.post("/coupons/bulk", superAdminOnly, coupons.createBulk);
   router.patch("/coupons/:id/toggle", coupons.toggleActive);
 
   router.get("/settings/payment", settings.getPaymentSettings);
-  router.put("/settings/payment", settings.updatePaymentSettings);
+  router.put("/settings/payment", superAdminOnly, settings.updatePaymentSettings);
   router.get(
     "/settings/partner-commission",
     settings.getPartnerCommissionSettings,
   );
   router.put(
     "/settings/partner-commission",
+    superAdminOnly,
     settings.updatePartnerCommissionSettings,
   );
 
@@ -187,7 +200,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     adminController.patchReferralRequestStatus,
   );
   router.get("/tier-config", adminController.getTierConfig);
-  router.put("/tier-config", adminController.putTierConfig);
+  router.put("/tier-config", superAdminOnly, adminController.putTierConfig);
   router.get("/network-tree", adminController.getNetworkTree);
 
   router.get("/payouts", adminController.listPartnerPayouts);
@@ -198,10 +211,12 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/wallet/users", adminController.listWalletUsers);
   router.post(
     "/wallet/withdrawals/:id/process",
+    walletManagers,
     adminController.processWalletWithdrawal,
   );
   router.post(
     "/wallet/users/:userId/adjust",
+    walletManagers,
     adminController.adjustUserWallet,
   );
 
@@ -717,7 +732,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     adminController.changeUserReferrer,
   );
 
-  router.delete("/users/:id", adminController.deleteUserSafely);
+  router.delete("/users/:id", superAdminOnly, adminController.deleteUserSafely);
 
   router.get("/strategies", async (_req, res, next) => {
     try {

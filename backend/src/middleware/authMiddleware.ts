@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import type { PrismaClient } from "@prisma/client";
-import { Role, UserStatus } from "@prisma/client";
+import { AdminRole, Role, UserStatus } from "@prisma/client";
 import { AUTH_COOKIE_NAME } from "../utils/authToken.js";
 
 function extractBearerToken(req: Request): string | null {
@@ -79,6 +79,7 @@ export const authenticateToken = authenticateJwt;
 
 /**
  * Must run after `authenticateJwt`. Loads user and requires `role === ADMIN`.
+ * Sets `req.admin` with id, RBAC role, email, and name.
  */
 export function requireAdmin(prisma: PrismaClient): (
   req: Request,
@@ -95,7 +96,13 @@ export function requireAdmin(prisma: PrismaClient): (
     try {
       const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { role: true },
+        select: {
+          id: true,
+          role: true,
+          adminRole: true,
+          email: true,
+          name: true,
+        },
       });
 
       if (!user || user.role !== Role.ADMIN) {
@@ -103,6 +110,12 @@ export function requireAdmin(prisma: PrismaClient): (
         return;
       }
 
+      req.admin = {
+        id: user.id,
+        role: user.adminRole ?? AdminRole.SUPER_ADMIN,
+        email: user.email,
+        name: user.name,
+      };
       next();
     } catch (err) {
       next(err);
@@ -113,4 +126,22 @@ export function requireAdmin(prisma: PrismaClient): (
 /** Alias — same as {@link requireAdmin}. */
 export function isAdmin(prisma: PrismaClient) {
   return requireAdmin(prisma);
+}
+
+/**
+ * Restrict route to specific {@link AdminRole} values. Must run after `requireAdmin`.
+ */
+export function authorizeRoles(...allowedRoles: AdminRole[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const admin = req.admin;
+    if (!admin) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (!allowedRoles.includes(admin.role)) {
+      res.status(403).json({ error: "Insufficient admin permissions" });
+      return;
+    }
+    next();
+  };
 }

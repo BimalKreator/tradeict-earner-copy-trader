@@ -17,6 +17,13 @@ enum Role {
   SENIOR_MANAGER
 }
 
+/** Platform admin RBAC tier — only applies when {@link Role.ADMIN}. */
+enum AdminRole {
+  SUPER_ADMIN
+  MANAGER
+  SUPPORT
+}
+
 /** Partner commission wallet state machine (Earned → Payable → Withdrawable). */
 enum CommissionLedgerStatus {
   EARNED
@@ -160,6 +167,8 @@ model User {
   nomineeRelationship String?
   nomineeMobile String?
   role          Role                @default(USER)
+  /** RBAC tier for platform admins (`role === ADMIN`). */
+  adminRole     AdminRole?
   /** Immediate upline in the sales hierarchy (Executive→Manager, Manager→Senior Manager). */
   parentId      String?
   /** Team member who referred/acquired this user (set at signup — Phase 4). */
@@ -221,6 +230,7 @@ model User {
   upgradeRequestsSubmitted MemberUpgradeRequest[] @relation("UpgradeRequestRequester")
   upgradeRequestsAsParent  MemberUpgradeRequest[] @relation("UpgradeRequestAssignedParent")
   referralRequestsSubmitted ReferralRequest[]     @relation("ReferralRequestSponsor")
+  adminAuditLogs            AdminAuditLog[]
 
   @@index([parentId])
   @@index([acquiredById])
@@ -881,5 +891,22 @@ model EmailLog {
 
   @@index([recipientUserId])
   @@index([adminUserId])
+  @@index([createdAt])
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  action     String
+  resource   String
+  resourceId String?
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
   @@index([createdAt])
 }

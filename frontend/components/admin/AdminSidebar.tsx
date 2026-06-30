@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
+import { useAdminSession } from "@/context/AdminSessionContext";
 import { useAuth } from "@/context/AuthContext";
 import {
   Banknote,
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   CircleDollarSign,
   Download,
+  FileSearch,
   FolderOpen,
   GitBranch,
   GitCompare,
@@ -20,6 +22,7 @@ import {
   MessageSquare,
   Radio,
   Settings,
+  Shield,
   Tag,
   TestTube2,
   Users,
@@ -29,12 +32,16 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type NavItem = {
   href: string;
   label: string;
   icon: LucideIcon;
+  /** Only visible to SUPER_ADMIN */
+  superAdminOnly?: boolean;
+  /** Visible to SUPER_ADMIN and MANAGER */
+  managerOrAbove?: boolean;
 };
 
 type NavGroup = {
@@ -85,6 +92,18 @@ const navGroups: NavGroup[] = [
     id: "system",
     label: "System",
     items: [
+      {
+        href: "/admin/managers",
+        label: "Managers",
+        icon: Shield,
+        superAdminOnly: true,
+      },
+      {
+        href: "/admin/audit-logs",
+        label: "Audit Logs",
+        icon: FileSearch,
+        managerOrAbove: true,
+      },
       { href: "/admin/support", label: "Support", icon: MessageSquare },
       { href: "/admin/notifications", label: "Notifications", icon: Bell },
       { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
@@ -128,10 +147,35 @@ type AdminSidebarProps = {
   onClose: () => void;
 };
 
+function filterNavItems(
+  items: NavItem[],
+  isSuperAdmin: boolean,
+  canViewAuditLogs: boolean,
+): NavItem[] {
+  return items.filter((item) => {
+    if (item.superAdminOnly) return isSuperAdmin;
+    if (item.managerOrAbove) return canViewAuditLogs;
+    return true;
+  });
+}
+
 export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { logout } = useAuth();
+  const { isSuperAdmin, canViewAuditLogs } = useAdminSession();
+
+  const visibleNavGroups = useMemo(
+    () =>
+      navGroups
+        .map((group) => ({
+          ...group,
+          items: filterNavItems(group.items, isSuperAdmin, canViewAuditLogs),
+        }))
+        .filter((group) => group.items.length > 0),
+    [canViewAuditLogs, isSuperAdmin],
+  );
+
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
     buildInitialExpanded(pathname),
   );
@@ -139,14 +183,14 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
   useEffect(() => {
     setExpanded((prev) => {
       const next = { ...prev };
-      for (const group of navGroups) {
+      for (const group of visibleNavGroups) {
         if (groupHasActive(pathname, group.items)) {
           next[group.id] = true;
         }
       }
       return next;
     });
-  }, [pathname]);
+  }, [pathname, visibleNavGroups]);
 
   async function handleLogout() {
     onClose();
@@ -180,7 +224,7 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
       </div>
 
       <nav className="flex flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pr-0.5">
-        {navGroups.map((group) => {
+        {visibleNavGroups.map((group) => {
           const isOpen = expanded[group.id] ?? false;
           const activeInGroup = groupHasActive(pathname, group.items);
 
