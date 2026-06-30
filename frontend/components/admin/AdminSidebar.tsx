@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
-import { useAdminSession } from "@/context/AdminSessionContext";
+import { useAdminSession, type PlatformAdminRole } from "@/context/AdminSessionContext";
 import { useAuth } from "@/context/AuthContext";
 import {
   Banknote,
@@ -38,9 +38,9 @@ type NavItem = {
   href: string;
   label: string;
   icon: LucideIcon;
-  /** Only visible to SUPER_ADMIN */
+  /** Visible to platform SUPER_ADMIN and platform MANAGER (not SUPPORT). */
   superAdminOnly?: boolean;
-  /** Visible to SUPER_ADMIN and MANAGER */
+  /** Visible to platform SUPER_ADMIN and platform MANAGER (not SUPPORT). */
   managerOrAbove?: boolean;
 };
 
@@ -149,12 +149,17 @@ type AdminSidebarProps = {
 
 function filterNavItems(
   items: NavItem[],
-  isSuperAdmin: boolean,
-  canViewAuditLogs: boolean,
+  platformRole: PlatformAdminRole | null,
 ): NavItem[] {
+  if (!platformRole) return [];
+
+  const fullNavAccess =
+    platformRole === "SUPER_ADMIN" || platformRole === "MANAGER";
+
   return items.filter((item) => {
-    if (item.superAdminOnly) return isSuperAdmin;
-    if (item.managerOrAbove) return canViewAuditLogs;
+    if (item.superAdminOnly || item.managerOrAbove) {
+      return fullNavAccess;
+    }
     return true;
   });
 }
@@ -163,17 +168,17 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { logout } = useAuth();
-  const { isSuperAdmin, canViewAuditLogs } = useAdminSession();
+  const { platformAdminRole } = useAdminSession();
 
   const visibleNavGroups = useMemo(
     () =>
       navGroups
         .map((group) => ({
           ...group,
-          items: filterNavItems(group.items, isSuperAdmin, canViewAuditLogs),
+          items: filterNavItems(group.items, platformAdminRole),
         }))
         .filter((group) => group.items.length > 0),
-    [canViewAuditLogs, isSuperAdmin],
+    [platformAdminRole],
   );
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>

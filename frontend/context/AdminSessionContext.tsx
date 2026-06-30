@@ -26,7 +26,12 @@ type AdminSessionContextValue = {
   admin: AdminSession | null;
   error: string | null;
   refresh: () => Promise<void>;
+  /** Resolved platform RBAC tier (SUPER_ADMIN | MANAGER | SUPPORT). */
+  platformAdminRole: PlatformAdminRole | null;
+  isPlatformAdmin: boolean;
   isSuperAdmin: boolean;
+  /** SUPER_ADMIN and platform MANAGER — full admin sidebar. */
+  canSeeFullAdminNav: boolean;
   canViewAuditLogs: boolean;
 };
 
@@ -41,13 +46,27 @@ function parsePlatformAdminRole(value: unknown): PlatformAdminRole | null {
   return null;
 }
 
+function isPlatformAdminUser(user: AuthUser | null | undefined): boolean {
+  return user?.role === "ADMIN" || Boolean(user?.adminRole);
+}
+
+function platformRoleFromAuthUser(user: AuthUser | null | undefined): PlatformAdminRole | null {
+  if (!isPlatformAdminUser(user)) return null;
+  return user?.adminRole ?? "SUPER_ADMIN";
+}
+
 function parseAdminSession(data: unknown): AdminSession | null {
   if (typeof data !== "object" || data === null) return null;
   const row = data as { admin?: unknown };
   if (typeof row.admin !== "object" || row.admin === null) return null;
   const admin = row.admin as Record<string, unknown>;
   if (typeof admin.id !== "string" || typeof admin.email !== "string") return null;
-  const role = parsePlatformAdminRole(admin.role) ?? "SUPER_ADMIN";
+
+  const role =
+    parsePlatformAdminRole(admin.adminRole) ??
+    parsePlatformAdminRole(admin.role) ??
+    "SUPER_ADMIN";
+
   return {
     id: admin.id,
     email: admin.email,
@@ -57,12 +76,13 @@ function parseAdminSession(data: unknown): AdminSession | null {
 }
 
 function sessionFromAuthUser(user: AuthUser | null): AdminSession | null {
-  if (!user || (user.role !== "ADMIN" && !user.adminRole)) return null;
+  const role = platformRoleFromAuthUser(user);
+  if (!user || !role) return null;
   return {
     id: user.id,
     email: user.email,
     name: user.name,
-    role: user.adminRole ?? "SUPER_ADMIN",
+    role,
   };
 }
 
@@ -83,7 +103,7 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (user?.role !== "ADMIN" && !user?.adminRole) {
+    if (!isPlatformAdminUser(user)) {
       setAdmin(null);
       setError("Not a platform admin");
       setLoading(false);
@@ -151,28 +171,33 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
   }, [authLoading, token, user]);
 
   useEffect(() => {
-    if (authLoading || user?.role !== "ADMIN") return;
+    if (authLoading || !isPlatformAdminUser(user)) return;
     void refreshUser();
-  }, [authLoading, refreshUser, user?.role]);
+  }, [authLoading, refreshUser, user?.adminRole, user?.id, user?.role]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const effectiveRole = admin?.role ?? sessionFromAuthUser(user ?? null)?.role ?? null;
+  const platformAdminRole =
+    admin?.role ?? platformRoleFromAuthUser(user ?? null);
 
-  const value = useMemo<AdminSessionContextValue>(
-    () => ({
+  const value = useMemo<AdminSessionContextValue>(() => {
+    const canSeeFullAdminNav =
+      platformAdminRole === "SUPER_ADMIN" || platformAdminRole === "MANAGER";
+
+    return {
       loading: authLoading || loading,
       admin,
       error,
       refresh,
-      isSuperAdmin: effectiveRole === "SUPER_ADMIN",
-      canViewAuditLogs:
-        effectiveRole === "SUPER_ADMIN" || effectiveRole === "MANAGER",
-    }),
-    [admin, authLoading, effectiveRole, error, loading, refresh],
-  );
+      platformAdminRole,
+      isPlatformAdmin: platformAdminRole != null,
+      isSuperAdmin: platformAdminRole === "SUPER_ADMIN",
+      canSeeFullAdminNav,
+      canViewAuditLogs: canSeeFullAdminNav,
+    };
+  }, [admin, authLoading, error, loading, platformAdminRole, refresh]);
 
   return (
     <AdminSessionContext.Provider value={value}>

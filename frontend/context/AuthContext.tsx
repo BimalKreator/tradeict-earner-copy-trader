@@ -23,7 +23,7 @@ export type AuthUser = {
   name: string | null;
   /** USER | ADMIN | EXECUTIVE | MANAGER | SENIOR_MANAGER */
   role: string;
-  /** Platform RBAC tier when role is ADMIN. */
+  /** Platform RBAC tier (`SUPER_ADMIN` | `MANAGER` | `SUPPORT`) when user is a platform admin. */
   adminRole?: "SUPER_ADMIN" | "MANAGER" | "SUPPORT";
   mobile?: string | null;
   address?: string | null;
