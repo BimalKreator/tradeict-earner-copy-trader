@@ -226,6 +226,21 @@ export default function DashboardPage() {
         </div>
       ) : null}
 
+      {!loading && data && data.activeStrategies.count === 0 ? (
+        <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-4 sm:px-5">
+          <p className="text-sm text-primary-100">
+            You don&apos;t have an active strategy.{" "}
+            <Link
+              href="/dashboard/strategies"
+              className="font-semibold text-white underline-offset-2 hover:underline"
+            >
+              Click here to explore and subscribe
+            </Link>
+            .
+          </p>
+        </div>
+      ) : null}
+
       <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-3">

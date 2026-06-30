@@ -265,13 +265,21 @@ export default function StrategyPerformancePage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 text-gray-100">
-      <Link
-        href="/dashboard/strategies"
-        className="inline-flex items-center gap-2 text-sm text-gray-400 transition hover:text-gray-200"
-      >
-        <ArrowLeft className="h-4 w-4" aria-hidden />
-        Back to marketplace
-      </Link>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link
+          href="/dashboard/strategies"
+          className="inline-flex items-center gap-2 text-sm text-gray-400 transition hover:text-gray-200"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden />
+          Back to marketplace
+        </Link>
+        <Link
+          href="/dashboard"
+          className="inline-flex items-center justify-center rounded-lg border border-gray-700 bg-gray-900 px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-gray-800"
+        >
+          Continue to Dashboard
+        </Link>
+      </div>
 
       {/* Hero */}
       <section className="rounded-2xl border border-gray-800 bg-gray-950 p-6 md:p-8">

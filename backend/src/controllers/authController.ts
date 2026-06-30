@@ -267,7 +267,10 @@ export function createAuthController(prisma: PrismaClient) {
         userName: resolveEmailRecipientName(user.name, user.email),
       });
 
-      res.status(200).json({ token });
+      res.status(200).json({
+        token,
+        user: sanitizeUser(user),
+      });
     } catch (err) {
       next(err);
     }

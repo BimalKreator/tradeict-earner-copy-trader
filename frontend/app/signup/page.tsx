@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
+import { useAuth } from "@/context/AuthContext";
+
 const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "details" | "otp";
@@ -22,6 +24,7 @@ async function parseApiError(res: Response): Promise<string> {
 
 export default function SignupPage() {
   const router = useRouter();
+  const { setSession } = useAuth();
   const [step, setStep] = useState<Step>("details");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -91,7 +94,28 @@ export default function SignupPage() {
       if (!res.ok) {
         throw new Error(await parseApiError(res));
       }
-      router.push("/login?registered=1");
+
+      const body = (await res.json()) as {
+        token?: string;
+        user?: { id: string; email: string; name: string | null; role: string };
+      };
+      const token = typeof body.token === "string" ? body.token.trim() : "";
+      if (!token) {
+        throw new Error("Registration succeeded but no session token was returned.");
+      }
+
+      setSession(
+        token,
+        body.user
+          ? {
+              id: body.user.id,
+              email: body.user.email,
+              name: body.user.name,
+              role: body.user.role,
+            }
+          : null,
+      );
+      router.push("/dashboard");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Registration failed",

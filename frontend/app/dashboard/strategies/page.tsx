@@ -253,30 +253,39 @@ export default function StrategySubscriptionLifecyclePage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold text-white md:text-3xl">Subscription Lifecycle</h1>
-        <p className="mt-2 text-sm text-white/55">
-          Professional workflow: Add strategy (inactive), then Deploy with multiplier and account.
-        </p>
-        <div className="mt-5 flex gap-2">
-          <button
-            type="button"
-            onClick={() => setTab("marketplace")}
-            className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "marketplace" ? "bg-primary text-white" : "bg-white/10 text-white/70"}`}
-          >
-            <Sparkles className="mr-2 inline h-4 w-4" />
-            Marketplace
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("my")}
-            className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "my" ? "bg-primary text-white" : "bg-white/10 text-white/70"}`}
-          >
-            <Layers className="mr-2 inline h-4 w-4" />
-            My Strategies
-          </button>
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white md:text-3xl">Subscription Lifecycle</h1>
+          <p className="mt-2 text-sm text-white/55">
+            Professional workflow: Add strategy (inactive), then Deploy with multiplier and account.
+            Strategy subscription is optional — explore the platform first if you prefer.
+          </p>
         </div>
+        <Link
+          href="/dashboard"
+          className="inline-flex shrink-0 items-center justify-center rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-white/85 transition hover:bg-white/10"
+        >
+          Continue to Dashboard
+        </Link>
       </header>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setTab("marketplace")}
+          className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "marketplace" ? "bg-primary text-white" : "bg-white/10 text-white/70"}`}
+        >
+          <Sparkles className="mr-2 inline h-4 w-4" />
+          Marketplace
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("my")}
+          className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "my" ? "bg-primary text-white" : "bg-white/10 text-white/70"}`}
+        >
+          <Layers className="mr-2 inline h-4 w-4" />
+          My Strategies
+        </button>
+      </div>
 
       {error && <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
       {loading ? (

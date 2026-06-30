@@ -19,6 +19,7 @@ type Props = {
   strategyTitle: string;
   monthlyFeeInr: number;
   onSubscribed?: () => void;
+  showSkipToDashboard?: boolean;
   className?: string;
 };
 
@@ -27,6 +28,7 @@ export function StrategySubscriptionCheckout({
   strategyTitle,
   monthlyFeeInr,
   onSubscribed,
+  showSkipToDashboard = true,
   className = "",
 }: Props) {
   const router = useRouter();
@@ -370,6 +372,17 @@ export function StrategySubscriptionCheckout({
           )}
         </button>
       )}
+
+      {showSkipToDashboard ? (
+        <button
+          type="button"
+          disabled={checkoutBusy}
+          onClick={() => router.push("/dashboard")}
+          className="mt-3 w-full rounded-lg border border-gray-700 bg-transparent py-2.5 text-sm font-medium text-gray-400 transition hover:bg-gray-800/60 hover:text-gray-200 disabled:opacity-50"
+        >
+          Skip for now — continue to Dashboard
+        </button>
+      ) : null}
     </div>
   );
 }
