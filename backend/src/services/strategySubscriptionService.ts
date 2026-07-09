@@ -63,7 +63,7 @@ let subscriberCache: {
 } | null = null;
 let strategyIdCache: { id: string | null; fetchedAt: number } | null = null;
 
-/** Bust in-memory copy roster after subscription deploy/undeploy/sync changes. */
+/** Bust in-memory copy roster after subscription deploy/undeploy/sync or admin capital changes. */
 export function invalidateCopySubscriberCache(): void {
   subscriberCache = null;
   strategyIdCache = null;

@@ -15,6 +15,7 @@ import {
 import { registerSymbolsForLivePrices } from "./livePriceTracker.js";
 import {
   COPY_SUBSCRIPTION_INCLUDE,
+  findActiveCopySubscribersForStrategy,
   resolveCopySubscriptionCreds,
   type CopySubscriptionRow,
 } from "./strategySubscriptionService.js";
@@ -841,7 +842,8 @@ export async function getUserLiveTradeRows(
 }
 
 /**
- * Admin live trades: every strategy with master legs and per-subscriber open positions.
+ * Admin live trades: every active copy strategy with master legs and per-subscriber open positions.
+ * Subscriber multipliers are always read fresh from the database (no in-memory roster cache).
  */
 export async function getAdminLiveTradesByStrategy(
   prisma: PrismaClient,
@@ -849,8 +851,15 @@ export async function getAdminLiveTradesByStrategy(
   const canonicalId = await resolveCanonicalFutureHedgeStrategyId(prisma);
   const strategies = await prisma.strategy.findMany({
     where: {
-      title: FUTURE_HEDGE_STRATEGY_TITLE,
-      ...(canonicalId ? { id: canonicalId } : {}),
+      isActive: true,
+      masterApiKey: { not: "" },
+      masterApiSecret: { not: "" },
+      subscriptions: {
+        some: {
+          isActive: true,
+          status: SubscriptionStatus.ACTIVE,
+        },
+      },
     },
     orderBy: { createdAt: "desc" },
     select: {
@@ -872,7 +881,14 @@ export async function getAdminLiveTradesByStrategy(
     },
   });
 
-  if (strategies.length === 0) return [];
+  const deduped = strategies.filter(
+    (s) =>
+      s.title !== FUTURE_HEDGE_STRATEGY_TITLE ||
+      !canonicalId ||
+      s.id === canonicalId,
+  );
+
+  if (deduped.length === 0) return [];
 
   const out: AdminLiveTradesGroup[] = [];
   const followerPositionsCache = new Map<string, DeltaLivePosition[]>();
@@ -901,7 +917,7 @@ export async function getAdminLiveTradesByStrategy(
     }
   }
 
-  for (const strat of strategies) {
+  for (const strat of deduped) {
     try {
       const hedge = strat.futureHedgeConfig;
       const strategy: LiveStrategySummary = {
@@ -920,29 +936,7 @@ export async function getAdminLiveTradesByStrategy(
         strat.masterApiKey?.trim() && strat.masterApiSecret?.trim(),
       );
 
-      const subsPromise = prisma.userStrategySubscription.findMany({
-        where: {
-          strategyId: strat.id,
-          isActive: true,
-          status: SubscriptionStatus.ACTIVE,
-          user: { status: UserStatus.ACTIVE, copyTradingPaused: false },
-        },
-        include: {
-          exchangeAccount: true,
-          user: {
-            select: {
-              id: true,
-              email: true,
-              name: true,
-              deltaApiKeys: true,
-              exchangeAccounts: {
-                orderBy: { createdAt: "desc" },
-                take: 1,
-              },
-            },
-          },
-        },
-      });
+      const subsPromise = findActiveCopySubscribersForStrategy(prisma, strat.id);
 
       const masterMergedPromise = credentialsPresent
         ? fetchAndMergeMasterLiveTrades(

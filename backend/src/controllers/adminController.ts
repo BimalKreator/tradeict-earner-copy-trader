@@ -34,7 +34,10 @@ import {
   purgeAnalyticsForDeletedTrades,
 } from "../services/tradeFlushService.js";
 import { reconcileStaleOpenTradesForUser } from "../services/tradeSettlementService.js";
-import { resolveUserExchangeCreds } from "../services/strategySubscriptionService.js";
+import {
+  invalidateCopySubscriberCache,
+  resolveUserExchangeCreds,
+} from "../services/strategySubscriptionService.js";
 import {
   EXIT_REASON,
   markBotInitiatedClose,
@@ -60,6 +63,7 @@ import {
 import {
   deployedCapitalFromMultiplier,
   deployedCapitalRangeError,
+  parseDeployedCapital,
   parseMultiplierFromBody,
   resolveStrategyBaseCapital,
 } from "../utils/subscriptionCapital.js";
@@ -3368,6 +3372,10 @@ export function createAdminController(prisma: PrismaClient) {
         },
       });
 
+      if (data.multiplier !== undefined) {
+        invalidateCopySubscriberCache();
+      }
+
       if (reEnableCopy && existing.strategy.syncActiveTrades) {
         void import("../services/tradeEngine.js")
           .then(({ lateJoinMirrorOpenPositionsForSubscriber }) =>
@@ -3397,6 +3405,10 @@ export function createAdminController(prisma: PrismaClient) {
         });
       }
 
+      const savedDeployedCapital =
+        parseDeployedCapital(body.deployedCapital) ??
+        deployedCapitalFromMultiplier(updated.multiplier, baseCapital);
+
       res.json({
         subscriptionId: updated.id,
         userId: updated.userId,
@@ -3404,7 +3416,8 @@ export function createAdminController(prisma: PrismaClient) {
         name: updated.user.name,
         email: updated.user.email,
         multiplier: updated.multiplier,
-        deployedCapital: deployedCapitalFromMultiplier(updated.multiplier, baseCapital),
+        baseCapital,
+        deployedCapital: savedDeployedCapital,
         isActive: updated.isActive,
         status: updated.status,
         syncStatus: updated.syncStatus,

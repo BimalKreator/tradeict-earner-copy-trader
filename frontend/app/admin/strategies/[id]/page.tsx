@@ -90,6 +90,26 @@ export default function AdminEditStrategyPage() {
   const [savingSubscriberId, setSavingSubscriberId] = useState<string | null>(
     null,
   );
+  const [subscriberSaveFlash, setSubscriberSaveFlash] = useState<
+    Record<string, boolean>
+  >({});
+
+  function subscriberCapitalDisplay(sub: StrategySubscriber): string {
+    const draft = capitalDrafts[sub.userId];
+    if (draft !== undefined && draft !== "") return draft;
+    return String(
+      sub.deployedCapital ??
+        deployedCapitalFromMultiplier(sub.multiplier, subscriberBaseCapital),
+    );
+  }
+
+  function subscriberMultiplierPreview(sub: StrategySubscriber): number {
+    const capital = parseDeployedCapital(subscriberCapitalDisplay(sub));
+    if (capital != null) {
+      return multiplierFromDeployedCapital(capital, subscriberBaseCapital);
+    }
+    return sub.multiplier;
+  }
 
   const hydrateFormFromStrategy = useCallback((s: Strategy) => {
     const applied = applyStrategyToFormState(s);
@@ -104,6 +124,9 @@ export default function AdminEditStrategyPage() {
     setMonthlyFee(applied.monthlyFee);
     setProfitShare(applied.profitShare);
     setMinCapital(applied.minCapital);
+    if (typeof s.baseCapital === "number" && s.baseCapital > 0) {
+      setSubscriberBaseCapital(s.baseCapital);
+    }
     setPerformanceJsonOverride(applied.performance.jsonOverride);
     setPnlLabels(applied.performance.pnlLabels);
     setPnlValues(applied.performance.pnlValues);
@@ -219,8 +242,12 @@ export default function AdminEditStrategyPage() {
   }, [strategyId, pageTab, loadSubscribers]);
 
   async function saveSubscriberCapital(userId: string): Promise<void> {
-    const raw = capitalDrafts[userId] ?? "";
-    const deployedCapital = parseDeployedCapital(raw);
+    const sub = subscribers.find((r) => r.userId === userId);
+    if (!sub) {
+      setSubscribersError("Subscriber row not found.");
+      return;
+    }
+    const deployedCapital = parseDeployedCapital(subscriberCapitalDisplay(sub));
     if (deployedCapital == null) {
       setSubscribersError("Allocated capital must be a positive number.");
       return;
@@ -248,19 +275,30 @@ export default function AdminEditStrategyPage() {
             : `Update failed (${res.status})`;
         throw new Error(msg);
       }
-      const updated = body as StrategySubscriber;
+      const updated = body as StrategySubscriber & { baseCapital?: number };
+      const nextBaseCapital =
+        typeof updated.baseCapital === "number" && updated.baseCapital > 0
+          ? updated.baseCapital
+          : subscriberBaseCapital;
+      if (nextBaseCapital !== subscriberBaseCapital) {
+        setSubscriberBaseCapital(nextBaseCapital);
+      }
+      const savedCapital =
+        typeof updated.deployedCapital === "number" && Number.isFinite(updated.deployedCapital)
+          ? updated.deployedCapital
+          : deployedCapitalFromMultiplier(updated.multiplier, nextBaseCapital);
+      const savedMultiplier =
+        typeof updated.multiplier === "number" && Number.isFinite(updated.multiplier)
+          ? updated.multiplier
+          : multiplierFromDeployedCapital(savedCapital, nextBaseCapital);
+
       setSubscribers((prev) =>
         prev.map((r) =>
           r.userId === userId
             ? {
                 ...r,
-                multiplier: updated.multiplier,
-                deployedCapital:
-                  updated.deployedCapital ??
-                  deployedCapitalFromMultiplier(
-                    updated.multiplier,
-                    subscriberBaseCapital,
-                  ),
+                multiplier: savedMultiplier,
+                deployedCapital: savedCapital,
                 isActive: updated.isActive,
                 status: updated.status,
               }
@@ -269,11 +307,16 @@ export default function AdminEditStrategyPage() {
       );
       setCapitalDrafts((prev) => ({
         ...prev,
-        [userId]: String(
-          updated.deployedCapital ??
-            deployedCapitalFromMultiplier(updated.multiplier, subscriberBaseCapital),
-        ),
+        [userId]: String(savedCapital),
       }));
+      setSubscriberSaveFlash((prev) => ({ ...prev, [userId]: true }));
+      window.setTimeout(() => {
+        setSubscriberSaveFlash((prev) => {
+          const next = { ...prev };
+          delete next[userId];
+          return next;
+        });
+      }, 2000);
     } catch (e) {
       setSubscribersError(e instanceof Error ? e.message : "Update failed");
     } finally {
@@ -637,16 +680,7 @@ export default function AdminEditStrategyPage() {
                                 min={0.01}
                                 step="0.01"
                                 disabled={busy}
-                                value={
-                                  capitalDrafts[sub.userId] ??
-                                  String(
-                                    sub.deployedCapital ??
-                                      deployedCapitalFromMultiplier(
-                                        sub.multiplier,
-                                        subscriberBaseCapital,
-                                      ),
-                                  )
-                                }
+                                value={subscriberCapitalDisplay(sub)}
                                 onChange={(e) =>
                                   setCapitalDrafts((prev) => ({
                                     ...prev,
@@ -657,20 +691,12 @@ export default function AdminEditStrategyPage() {
                               />
                               <p className="text-[11px] text-white/45">
                                 Multiplier:{" "}
-                                {multiplierFromDeployedCapital(
-                                  parseDeployedCapital(
-                                    capitalDrafts[sub.userId] ??
-                                      String(
-                                        sub.deployedCapital ??
-                                          deployedCapitalFromMultiplier(
-                                            sub.multiplier,
-                                            subscriberBaseCapital,
-                                          ),
-                                      ),
-                                  ) ?? sub.multiplier,
-                                  subscriberBaseCapital,
-                                )}
-                                x
+                                <span className="tabular-nums">
+                                  {subscriberMultiplierPreview(sub)}x
+                                </span>
+                                {subscriberSaveFlash[sub.userId] ? (
+                                  <span className="ml-1.5 text-emerald-300">Saved</span>
+                                ) : null}
                               </p>
                             </div>
                           </td>
@@ -698,7 +724,7 @@ export default function AdminEditStrategyPage() {
                                 }
                                 className="rounded-lg border border-glassBorder bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-white/10 disabled:opacity-50"
                               >
-                                {busy ? "Saving…" : "Save mult."}
+                                {busy ? "Saving…" : "Save capital"}
                               </button>
                               <button
                                 type="button"

@@ -690,6 +690,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         });
       }
 
+      invalidateCopySubscriberCache();
       res.json({ subscription: updated });
     } catch (err) {
       next(err);
@@ -738,6 +739,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
           exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
         },
       });
+      invalidateCopySubscriberCache();
       res.json({ subscription: updated });
     } catch (err) {
       next(err);
