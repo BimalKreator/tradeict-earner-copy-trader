@@ -4,8 +4,6 @@ import {
   SubscriptionStatus,
 } from "@prisma/client";
 import {
-  MAX_SUBSCRIPTION_MULTIPLIER,
-  MIN_SUBSCRIPTION_MULTIPLIER,
   STRATEGY_PAYMENT_MODE,
 } from "../constants/subscription.js";
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
@@ -21,6 +19,11 @@ import {
   voidPendingEarnedCommissionsForSourceUser,
 } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
+import {
+  deployedCapitalRangeError,
+  parseMultiplierFromBody,
+  resolveStrategyBaseCapital,
+} from "../utils/subscriptionCapital.js";
 import {
   createStrategySubscriptionWithPaymentMode,
   hasBlockingUnpaidInvoicesForStrategy,
@@ -163,18 +166,6 @@ export function createSubscriptionController(prisma: PrismaClient) {
       };
     }
     return { ok: true, id: trimmed };
-  }
-
-  function parsePositiveMultiplier(v: unknown): number | null {
-    const n =
-      typeof v === "number"
-        ? v
-        : typeof v === "string"
-          ? Number(v)
-          : NaN;
-    if (!Number.isFinite(n) || n < MIN_SUBSCRIPTION_MULTIPLIER) return null;
-    if (n > MAX_SUBSCRIPTION_MULTIPLIER) return null;
-    return Math.round(n * 10) / 10;
   }
 
   async function resolveStrategyFeeQuote(
@@ -458,6 +449,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     description: true,
     monthlyFee: true,
     minCapital: true,
+    baseCapital: true,
     profitShare: true,
     slippage: true,
     performanceMetrics: true,
@@ -625,21 +617,35 @@ export function createSubscriptionController(prisma: PrismaClient) {
         rawStrategyId,
       );
 
-      const body = req.body as { multiplier?: unknown; exchangeAccountId?: unknown };
-      const multiplier = parsePositiveMultiplier(body.multiplier);
+      const body = req.body as {
+        deployedCapital?: unknown;
+        multiplier?: unknown;
+        exchangeAccountId?: unknown;
+      };
+
+      const sub = await prisma.userStrategySubscription.findFirst({
+        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
+        include: {
+          strategy: {
+            select: {
+              ...STRATEGY_SELECT_SUBSCRIBE_GATE,
+              baseCapital: true,
+              minCapital: true,
+              title: true,
+            },
+          },
+        },
+      });
+      if (!sub) return void res.status(404).json({ error: "Subscription not found" });
+
+      const multiplier = parseMultiplierFromBody(body, resolveStrategyBaseCapital(sub.strategy));
       if (multiplier == null) {
         return void res.status(400).json({
-          error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
+          error: deployedCapitalRangeError(resolveStrategyBaseCapital(sub.strategy)),
         });
       }
       const ex = await validateExchangeAccountOwnership(userId, body.exchangeAccountId);
       if (!ex.ok) return void res.status(400).json({ error: ex.error });
-
-      const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
-        include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
-      });
-      if (!sub) return void res.status(404).json({ error: "Subscription not found" });
 
       if (await hasUnpaidInvoicesForStrategy(userId, strategyId)) {
         return void res.status(403).json({ error: UNPAID_INVOICE_BLOCK_MESSAGE });
@@ -704,19 +710,25 @@ export function createSubscriptionController(prisma: PrismaClient) {
         prisma,
         rawStrategyId,
       );
-      const body = req.body as { multiplier?: unknown };
-      const multiplier = parsePositiveMultiplier(body.multiplier);
-      if (multiplier == null) {
-        return void res.status(400).json({
-          error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
-        });
-      }
-
+      const body = req.body as { deployedCapital?: unknown; multiplier?: unknown };
       const sub = await prisma.userStrategySubscription.findFirst({
         where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
-        select: { id: true },
+        select: {
+          id: true,
+          strategy: { select: { baseCapital: true, minCapital: true } },
+        },
       });
       if (!sub) return void res.status(404).json({ error: "Subscription not found" });
+
+      const multiplier = parseMultiplierFromBody(
+        body,
+        resolveStrategyBaseCapital(sub.strategy),
+      );
+      if (multiplier == null) {
+        return void res.status(400).json({
+          error: deployedCapitalRangeError(resolveStrategyBaseCapital(sub.strategy)),
+        });
+      }
 
       const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },

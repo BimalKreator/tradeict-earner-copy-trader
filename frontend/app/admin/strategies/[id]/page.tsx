@@ -14,6 +14,12 @@ import {
   type Strategy,
   type StrategySubscriber,
 } from "@/lib/adminStrategyForm";
+import {
+  deployedCapitalFromMultiplier,
+  multiplierFromDeployedCapital,
+  parseDeployedCapital,
+  resolveStrategyBaseCapital,
+} from "@/lib/subscription";
 
 type PageTab = "details" | "subscribers";
 
@@ -77,7 +83,8 @@ export default function AdminEditStrategyPage() {
   const [subscribers, setSubscribers] = useState<StrategySubscriber[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
   const [subscribersError, setSubscribersError] = useState<string | null>(null);
-  const [multiplierDrafts, setMultiplierDrafts] = useState<Record<string, string>>(
+  const [subscriberBaseCapital, setSubscriberBaseCapital] = useState(10);
+  const [capitalDrafts, setCapitalDrafts] = useState<Record<string, string>>(
     {},
   );
   const [savingSubscriberId, setSavingSubscriberId] = useState<string | null>(
@@ -169,15 +176,31 @@ export default function AdminEditStrategyPage() {
             : `Failed to load subscribers (${res.status})`;
         throw new Error(msg);
       }
-      const data = body as { subscribers?: StrategySubscriber[] };
+      const data = body as {
+        subscribers?: StrategySubscriber[];
+        baseCapital?: number;
+      };
       const rows = Array.isArray(data.subscribers) ? data.subscribers : [];
+      const baseCapital =
+        typeof data.baseCapital === "number" && data.baseCapital > 0
+          ? data.baseCapital
+          : resolveStrategyBaseCapital({ minCapital: Number(minCapital) || 10 });
+      setSubscriberBaseCapital(baseCapital);
       setSubscribers(rows);
-      setMultiplierDrafts(
-        Object.fromEntries(rows.map((r) => [r.userId, String(r.multiplier)])),
+      setCapitalDrafts(
+        Object.fromEntries(
+          rows.map((r) => [
+            r.userId,
+            String(
+              r.deployedCapital ??
+                deployedCapitalFromMultiplier(r.multiplier, baseCapital),
+            ),
+          ]),
+        ),
       );
     } catch (e) {
       setSubscribers([]);
-      setMultiplierDrafts({});
+      setCapitalDrafts({});
       setSubscribersError(
         e instanceof Error ? e.message : "Failed to load subscribers",
       );
@@ -195,11 +218,11 @@ export default function AdminEditStrategyPage() {
     void loadSubscribers();
   }, [strategyId, pageTab, loadSubscribers]);
 
-  async function saveSubscriberMultiplier(userId: string): Promise<void> {
-    const raw = multiplierDrafts[userId] ?? "";
-    const multiplier = Number.parseFloat(raw);
-    if (!Number.isFinite(multiplier) || multiplier <= 0) {
-      setSubscribersError("Multiplier must be a positive number.");
+  async function saveSubscriberCapital(userId: string): Promise<void> {
+    const raw = capitalDrafts[userId] ?? "";
+    const deployedCapital = parseDeployedCapital(raw);
+    if (deployedCapital == null) {
+      setSubscribersError("Allocated capital must be a positive number.");
       return;
     }
     setSavingSubscriberId(userId);
@@ -211,7 +234,7 @@ export default function AdminEditStrategyPage() {
         {
           method: "PUT",
           headers: adminAuthHeaders(),
-          body: JSON.stringify({ multiplier }),
+          body: JSON.stringify({ deployedCapital }),
         },
       );
       const body: unknown = await res.json().catch(() => ({}));
@@ -232,15 +255,24 @@ export default function AdminEditStrategyPage() {
             ? {
                 ...r,
                 multiplier: updated.multiplier,
+                deployedCapital:
+                  updated.deployedCapital ??
+                  deployedCapitalFromMultiplier(
+                    updated.multiplier,
+                    subscriberBaseCapital,
+                  ),
                 isActive: updated.isActive,
                 status: updated.status,
               }
             : r,
         ),
       );
-      setMultiplierDrafts((prev) => ({
+      setCapitalDrafts((prev) => ({
         ...prev,
-        [userId]: String(updated.multiplier),
+        [userId]: String(
+          updated.deployedCapital ??
+            deployedCapitalFromMultiplier(updated.multiplier, subscriberBaseCapital),
+        ),
       }));
     } catch (e) {
       setSubscribersError(e instanceof Error ? e.message : "Update failed");
@@ -504,7 +536,7 @@ export default function AdminEditStrategyPage() {
         </h1>
         <p className="mt-1 text-sm text-white/55">
           {pageTab === "subscribers"
-            ? "Manage copy-trading multipliers and per-user pause for this strategy."
+            ? "Manage allocated capital and per-user pause for this strategy."
             : (
               <>
                 Leader credentials use{" "}
@@ -560,7 +592,7 @@ export default function AdminEditStrategyPage() {
                   <tr>
                     <th className="px-3 py-2.5 font-medium text-white/70">Name</th>
                     <th className="px-3 py-2.5 font-medium text-white/70">Email</th>
-                    <th className="px-3 py-2.5 font-medium text-white/70">Multiplier</th>
+                    <th className="px-3 py-2.5 font-medium text-white/70">Allocated Capital (USD)</th>
                     <th className="px-3 py-2.5 font-medium text-white/70">Status</th>
                     <th className="px-3 py-2.5 font-medium text-white/70">Actions</th>
                   </tr>
@@ -599,23 +631,48 @@ export default function AdminEditStrategyPage() {
                             {sub.email}
                           </td>
                           <td className="px-3 py-3">
-                            <input
-                              type="number"
-                              min={0.1}
-                              step="any"
-                              disabled={busy}
-                              value={
-                                multiplierDrafts[sub.userId] ??
-                                String(sub.multiplier)
-                              }
-                              onChange={(e) =>
-                                setMultiplierDrafts((prev) => ({
-                                  ...prev,
-                                  [sub.userId]: e.target.value,
-                                }))
-                              }
-                              className="w-24 rounded-lg border border-glassBorder bg-black/40 px-2 py-1.5 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
-                            />
+                            <div className="space-y-1">
+                              <input
+                                type="number"
+                                min={0.01}
+                                step="0.01"
+                                disabled={busy}
+                                value={
+                                  capitalDrafts[sub.userId] ??
+                                  String(
+                                    sub.deployedCapital ??
+                                      deployedCapitalFromMultiplier(
+                                        sub.multiplier,
+                                        subscriberBaseCapital,
+                                      ),
+                                  )
+                                }
+                                onChange={(e) =>
+                                  setCapitalDrafts((prev) => ({
+                                    ...prev,
+                                    [sub.userId]: e.target.value,
+                                  }))
+                                }
+                                className="w-28 rounded-lg border border-glassBorder bg-black/40 px-2 py-1.5 text-sm text-white tabular-nums outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+                              />
+                              <p className="text-[11px] text-white/45">
+                                Multiplier:{" "}
+                                {multiplierFromDeployedCapital(
+                                  parseDeployedCapital(
+                                    capitalDrafts[sub.userId] ??
+                                      String(
+                                        sub.deployedCapital ??
+                                          deployedCapitalFromMultiplier(
+                                            sub.multiplier,
+                                            subscriberBaseCapital,
+                                          ),
+                                      ),
+                                  ) ?? sub.multiplier,
+                                  subscriberBaseCapital,
+                                )}
+                                x
+                              </p>
+                            </div>
                           </td>
                           <td className="px-3 py-3">
                             <span
@@ -637,7 +694,7 @@ export default function AdminEditStrategyPage() {
                                 type="button"
                                 disabled={busy}
                                 onClick={() =>
-                                  void saveSubscriberMultiplier(sub.userId)
+                                  void saveSubscriberCapital(sub.userId)
                                 }
                                 className="rounded-lg border border-glassBorder bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-white/10 disabled:opacity-50"
                               >

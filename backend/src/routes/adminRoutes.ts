@@ -833,6 +833,10 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           monthlyFee,
           profitShare,
           minCapital,
+          baseCapital:
+            typeof body.baseCapital === "number" && body.baseCapital > 0
+              ? body.baseCapital
+              : minCapital,
           syncActiveTrades,
         },
         select: STRATEGY_SELECT_ADMIN_SAFE,
@@ -922,6 +926,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         monthlyFee?: number;
         profitShare?: number;
         minCapital?: number;
+        baseCapital?: number;
         isActive?: boolean;
         syncActiveTrades?: boolean;
       } = {};
@@ -1016,6 +1021,13 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         }
         data.minCapital = body.minCapital;
       }
+      if (body.baseCapital !== undefined) {
+        if (typeof body.baseCapital !== "number" || body.baseCapital <= 0) {
+          res.status(400).json({ error: "baseCapital must be a positive number" });
+          return;
+        }
+        data.baseCapital = body.baseCapital;
+      }
       if (body.syncActiveTrades !== undefined) {
         if (typeof body.syncActiveTrades !== "boolean") {
           res.status(400).json({ error: "syncActiveTrades must be a boolean" });
@@ -1072,6 +1084,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           updateData.profitShare = data.profitShare;
         if (data.minCapital !== undefined)
           updateData.minCapital = data.minCapital;
+        if (data.baseCapital !== undefined)
+          updateData.baseCapital = data.baseCapital;
         if (data.syncActiveTrades !== undefined)
           updateData.syncActiveTrades = data.syncActiveTrades;
         if (data.isActive !== undefined) updateData.isActive = data.isActive;

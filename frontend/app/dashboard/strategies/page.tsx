@@ -6,7 +6,12 @@ import {
   mockSubscriberCount,
   resolvePerformanceMetrics,
 } from "@/lib/strategyPerformance";
-import { clampMultiplier } from "@/lib/subscription";
+import {
+  deployedCapitalFromMultiplier,
+  multiplierFromDeployedCapital,
+  parseDeployedCapital,
+  resolveStrategyBaseCapital,
+} from "@/lib/subscription";
 import {
   Layers,
   Loader2,
@@ -34,6 +39,7 @@ type Strategy = {
   description: string;
   monthlyFee: number;
   minCapital: number;
+  baseCapital?: number;
   profitShare: number;
   performanceMetrics?: unknown;
 };
@@ -100,7 +106,7 @@ export default function StrategySubscriptionLifecyclePage() {
   const [error, setError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [multiplier, setMultiplier] = useState(1);
+  const [deployedCapital, setDeployedCapital] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -186,30 +192,51 @@ export default function StrategySubscriptionLifecyclePage() {
   }
 
   function openDeploy(sub: SubscriptionRow) {
-    setMultiplier(clampMultiplier(sub.multiplier || 1));
+    const base = resolveStrategyBaseCapital(sub.strategy);
+    setDeployedCapital(
+      String(deployedCapitalFromMultiplier(sub.multiplier || 1, base)),
+    );
     setSelectedAccountId(sub.exchangeAccount?.id ?? accounts[0]?.id ?? "");
     setModal({ kind: "deploy", sub });
   }
   function openModify(sub: SubscriptionRow) {
-    setMultiplier(clampMultiplier(sub.multiplier || 1));
+    const base = resolveStrategyBaseCapital(sub.strategy);
+    setDeployedCapital(
+      String(deployedCapitalFromMultiplier(sub.multiplier || 1, base)),
+    );
     setModal({ kind: "modify", sub });
   }
 
+  const modalBaseCapital =
+    modal && modal.kind !== "checkout"
+      ? resolveStrategyBaseCapital(modal.sub.strategy)
+      : 10;
+  const modalDeployedCapitalNum = parseDeployedCapital(deployedCapital);
+  const modalPreviewMultiplier =
+    modalDeployedCapitalNum != null
+      ? multiplierFromDeployedCapital(modalDeployedCapitalNum, modalBaseCapital)
+      : null;
+
   async function submitModal() {
     if (!modal || modal.kind === "checkout") return;
+    const capital = parseDeployedCapital(deployedCapital);
+    if (capital == null) {
+      setError("Enter a valid capital amount greater than zero.");
+      return;
+    }
     setSubmitting(true);
     try {
       if (modal.kind === "deploy") {
         await post(`/subscriptions/${modal.sub.strategy.id}/deploy`, {
-          multiplier: clampMultiplier(multiplier),
+          deployedCapital: capital,
           exchangeAccountId: selectedAccountId,
         });
         setToast("Strategy deployed");
       } else if (modal.kind === "modify") {
         await patch(`/subscriptions/${modal.sub.strategy.id}/modify`, {
-          multiplier: clampMultiplier(multiplier),
+          deployedCapital: capital,
         });
-        setToast("Multiplier updated");
+        setToast("Capital allocation updated");
       }
       setModal(null);
       await load();
@@ -383,7 +410,15 @@ export default function StrategySubscriptionLifecyclePage() {
                   </div>
                   <p className="mt-2 text-sm text-white/60">{sub.strategy.description}</p>
                   <p className="mt-3 text-xs text-white/45">
-                    Multiplier: <span className="tabular-nums">{sub.multiplier}x</span>{" "}
+                    Capital:{" "}
+                    <span className="tabular-nums">
+                      $
+                      {deployedCapitalFromMultiplier(
+                        sub.multiplier,
+                        resolveStrategyBaseCapital(sub.strategy),
+                      ).toLocaleString("en-US")}
+                    </span>{" "}
+                    · Multiplier: <span className="tabular-nums">{sub.multiplier}x</span>{" "}
                     {sub.exchangeAccount ? `· Account: ${sub.exchangeAccount.nickname}` : "· Not configured"}
                   </p>
 
@@ -445,7 +480,7 @@ export default function StrategySubscriptionLifecyclePage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="glass-card w-full max-w-md border border-glassBorder p-6">
             <h2 className="text-lg font-semibold text-white">
-              {modal.kind === "deploy" ? "Deploy Strategy" : "Modify Multiplier"}
+              {modal.kind === "deploy" ? "Deploy Strategy" : "Modify Capital"}
             </h2>
             <p className="mt-2 text-sm text-white/60">{modal.sub.strategy.title}</p>
             {modal.kind === "deploy" && (
@@ -465,16 +500,20 @@ export default function StrategySubscriptionLifecyclePage() {
               </label>
             )}
             <label className="mt-4 block">
-              <span className="text-xs text-white/60">Multiplier</span>
+              <span className="text-xs text-white/60">Capital to Deploy (USD)</span>
               <input
                 type="number"
-                min={0.1}
-                max={10000}
-                step={0.1}
-                value={multiplier}
-                onChange={(e) => setMultiplier(clampMultiplier(Number(e.target.value)))}
+                min={0.01}
+                step="0.01"
+                value={deployedCapital}
+                onChange={(e) => setDeployedCapital(e.target.value)}
                 className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white"
               />
+              {modalPreviewMultiplier != null ? (
+                <p className="mt-1.5 text-xs text-white/50">
+                  Multiplier applied: <span className="tabular-nums">{modalPreviewMultiplier}x</span>
+                </p>
+              ) : null}
             </label>
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={() => setModal(null)} className="rounded-lg px-4 py-2 text-sm text-white/70">

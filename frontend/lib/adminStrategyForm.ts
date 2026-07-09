@@ -22,6 +22,7 @@ export type Strategy = {
   monthlyFee: number;
   profitShare: number;
   minCapital: number;
+  baseCapital?: number;
   isActive?: boolean;
   futureHedgeConfig?: FutureHedgeConfig | null;
   syncActiveTrades?: boolean;
@@ -42,6 +43,7 @@ export type StrategySubscriber = {
   name: string | null;
   email: string;
   multiplier: number;
+  deployedCapital?: number;
   isActive: boolean;
   status: string;
   joinedDate: string;

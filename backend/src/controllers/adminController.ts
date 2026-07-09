@@ -58,9 +58,11 @@ import {
   writeCsvToDownloads,
 } from "../utils/exportService.js";
 import {
-  MAX_SUBSCRIPTION_MULTIPLIER,
-  MIN_SUBSCRIPTION_MULTIPLIER,
-} from "../constants/subscription.js";
+  deployedCapitalFromMultiplier,
+  deployedCapitalRangeError,
+  parseMultiplierFromBody,
+  resolveStrategyBaseCapital,
+} from "../utils/subscriptionCapital.js";
 import { getAdminLiveTradesByStrategy } from "../services/liveTradesService.js";
 import {
   upsertFutureHedgeConfigForStrategy,
@@ -2772,18 +2774,6 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
-  function parseSubscriptionMultiplier(v: unknown): number | null {
-    const n =
-      typeof v === "number"
-        ? v
-        : typeof v === "string"
-          ? Number(v)
-          : NaN;
-    if (!Number.isFinite(n) || n < MIN_SUBSCRIPTION_MULTIPLIER) return null;
-    if (n > MAX_SUBSCRIPTION_MULTIPLIER) return null;
-    return Math.round(n * 10) / 10;
-  }
-
   /** Live trades grouped by strategy (master + subscribers per strategy). */
   async function getGroupedLiveTrades(
     _req: Request,
@@ -2821,12 +2811,13 @@ export function createAdminController(prisma: PrismaClient) {
 
       const strategy = await prisma.strategy.findUnique({
         where: { id: strategyId },
-        select: { id: true, title: true },
+        select: { id: true, title: true, baseCapital: true, minCapital: true },
       });
       if (!strategy) {
         res.status(404).json({ error: "Strategy not found" });
         return;
       }
+      const baseCapital = resolveStrategyBaseCapital(strategy);
 
       const rows = await prisma.userStrategySubscription.findMany({
         where: { strategyId },
@@ -2855,6 +2846,7 @@ export function createAdminController(prisma: PrismaClient) {
       res.json({
         strategyId: strategy.id,
         strategyTitle: strategy.title,
+        baseCapital,
         subscribers: rows.map((row) => ({
           subscriptionId: row.id,
           userId: row.user.id,
@@ -2863,6 +2855,7 @@ export function createAdminController(prisma: PrismaClient) {
           userStatus: row.user.status,
           copyTradingPaused: row.user.copyTradingPaused,
           multiplier: row.multiplier,
+          deployedCapital: deployedCapitalFromMultiplier(row.multiplier, baseCapital),
           isActive: row.isActive,
           status: row.status,
           syncStatus: row.syncStatus,
@@ -3292,7 +3285,11 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
-      const body = req.body as { multiplier?: unknown; isActive?: unknown };
+      const body = req.body as {
+        deployedCapital?: unknown;
+        multiplier?: unknown;
+        isActive?: unknown;
+      };
       const data: {
         multiplier?: number;
         isActive?: boolean;
@@ -3301,11 +3298,21 @@ export function createAdminController(prisma: PrismaClient) {
         syncError?: string | null;
       } = {};
 
-      if (body.multiplier !== undefined) {
-        const multiplier = parseSubscriptionMultiplier(body.multiplier);
+      const strategy = await prisma.strategy.findUnique({
+        where: { id: strategyId },
+        select: { baseCapital: true, minCapital: true },
+      });
+      if (!strategy) {
+        res.status(404).json({ error: "Strategy not found" });
+        return;
+      }
+      const baseCapital = resolveStrategyBaseCapital(strategy);
+
+      if (body.deployedCapital !== undefined || body.multiplier !== undefined) {
+        const multiplier = parseMultiplierFromBody(body, baseCapital);
         if (multiplier == null) {
           res.status(400).json({
-            error: `multiplier must be between ${MIN_SUBSCRIPTION_MULTIPLIER} and ${MAX_SUBSCRIPTION_MULTIPLIER}`,
+            error: deployedCapitalRangeError(baseCapital),
           });
           return;
         }
@@ -3326,7 +3333,7 @@ export function createAdminController(prisma: PrismaClient) {
         }
       }
       if (Object.keys(data).length === 0) {
-        res.status(400).json({ error: "multiplier and/or isActive is required" });
+        res.status(400).json({ error: "deployedCapital and/or isActive is required" });
         return;
       }
 
@@ -3397,6 +3404,7 @@ export function createAdminController(prisma: PrismaClient) {
         name: updated.user.name,
         email: updated.user.email,
         multiplier: updated.multiplier,
+        deployedCapital: deployedCapitalFromMultiplier(updated.multiplier, baseCapital),
         isActive: updated.isActive,
         status: updated.status,
         syncStatus: updated.syncStatus,
