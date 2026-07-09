@@ -681,54 +681,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/users", async (req, res, next) => {
-    try {
-      const { email, password, role, status } = req.body as {
-        email?: unknown;
-        password?: unknown;
-        role?: unknown;
-        status?: unknown;
-      };
-
-      if (typeof email !== "string" || typeof password !== "string") {
-        res.status(400).json({ error: "email and password are required" });
-        return;
-      }
-
-      if (role !== undefined && (typeof role !== "string" || !roleValues.has(role))) {
-        res.status(400).json({ error: "role must be ADMIN or USER" });
-        return;
-      }
-
-      if (
-        status !== undefined &&
-        (typeof status !== "string" || !statusValues.has(status))
-      ) {
-        res.status(400).json({ error: "status must be ACTIVE or SUSPENDED" });
-        return;
-      }
-
-      const user = await prisma.user.create({
-        data: {
-          email,
-          password,
-          ...(role !== undefined ? { role: role as Role } : {}),
-          ...(status !== undefined ? { status: status as UserStatus } : {}),
-        },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          status: true,
-          createdAt: true,
-        },
-      });
-
-      res.status(201).json(user);
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.post("/users", adminController.createPlatformUser);
 
   router.put("/users/:id", adminController.updateUserProfile);
   router.get("/users/:id/profile", adminController.getUserProfileDetails);

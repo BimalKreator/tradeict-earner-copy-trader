@@ -821,6 +821,90 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  /** POST /api/admin/users — platform user created by admin (login-ready credentials). */
+  async function createPlatformUser(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = req.body as {
+        email?: unknown;
+        password?: unknown;
+        role?: unknown;
+        status?: unknown;
+        name?: unknown;
+      };
+
+      const email =
+        typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password =
+        typeof body.password === "string" ? body.password : "";
+      const name =
+        typeof body.name === "string" && body.name.trim()
+          ? body.name.trim()
+          : undefined;
+
+      if (!email || !email.includes("@")) {
+        res.status(400).json({ error: "Valid email is required" });
+        return;
+      }
+      if (!password) {
+        res.status(400).json({ error: "password is required" });
+        return;
+      }
+
+      const roleRaw =
+        body.role !== undefined && typeof body.role === "string"
+          ? body.role.trim().toUpperCase()
+          : Role.USER;
+      if (!Object.values(Role).includes(roleRaw as Role)) {
+        res.status(400).json({ error: "role is invalid" });
+        return;
+      }
+
+      const statusRaw =
+        body.status !== undefined && typeof body.status === "string"
+          ? body.status.trim().toUpperCase()
+          : UserStatus.ACTIVE;
+      if (!Object.values(UserStatus).includes(statusRaw as UserStatus)) {
+        res.status(400).json({ error: "status must be ACTIVE or SUSPENDED" });
+        return;
+      }
+
+      const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+      const user = await prisma.user.create({
+        data: {
+          email,
+          password: passwordHash,
+          ...(name ? { name } : {}),
+          role: roleRaw as Role,
+          status: statusRaw as UserStatus,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      res.status(201).json(user);
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        res.status(409).json({ error: "An account with this email already exists" });
+        return;
+      }
+      next(err);
+    }
+  }
+
   /** Split stored `name` into first/last for admin UI (schema uses single `name` field). */
   function splitUserName(name: string | null): {
     firstName: string | null;
@@ -4381,6 +4465,7 @@ export function createAdminController(prisma: PrismaClient) {
     listAllTrades,
     listUsersMinimal,
     listUsersForAdmin,
+    createPlatformUser,
     searchUsers,
     listTeamMembers,
     upgradeTeamMember,

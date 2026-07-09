@@ -194,7 +194,7 @@ export default function AdminUsersPage() {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
-          email,
+          email: email.trim().toLowerCase(),
           password,
           role,
           status,
