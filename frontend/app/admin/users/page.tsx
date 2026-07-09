@@ -7,6 +7,7 @@ import { AdminProfileEditModal } from "@/components/admin/AdminProfileEditModal"
 import { useAdminEmailActions } from "@/components/admin/AdminEmailOptions";
 import { EmailManagerModal } from "@/components/admin/EmailManagerModal";
 import { useAdminProfileEdit } from "@/components/admin/useAdminProfileEdit";
+import { useAdminSession } from "@/context/AdminSessionContext";
 
 const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
@@ -35,6 +36,7 @@ type AdminUser = {
   email: string;
   role: string;
   status: string;
+  isOtpBypassed: boolean;
   createdAt: string;
   totalPnlToDate: number;
   walletBalance: number;
@@ -56,10 +58,12 @@ function fmtUsd(n: number | null | undefined): string {
 
 export default function AdminUsersPage() {
   const apiBase = useMemo(() => resolveAdminApiBase(), []);
+  const { isSuperAdmin } = useAdminSession();
 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [otpBypassSavingId, setOtpBypassSavingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
     null,
   );
@@ -102,6 +106,7 @@ export default function AdminUsersPage() {
           email: String(row.email ?? ""),
           role: String(row.role ?? ""),
           status: String(row.status ?? ""),
+          isOtpBypassed: row.isOtpBypassed === true,
           createdAt: String(row.createdAt ?? ""),
           totalPnlToDate:
             typeof row.totalPnlToDate === "number" && Number.isFinite(row.totalPnlToDate)
@@ -125,6 +130,49 @@ export default function AdminUsersPage() {
       setLoading(false);
     }
   }, [apiBase]);
+
+  async function toggleOtpBypass(userId: string, next: boolean): Promise<void> {
+    setOtpBypassSavingId(userId);
+    try {
+      const res = await fetch(`${apiBase}/admin/users/${encodeURIComponent(userId)}/otp-bypass`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ isOtpBypassed: next }),
+      });
+      const body: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          typeof body === "object" &&
+          body !== null &&
+          "error" in body &&
+          typeof (body as { error?: unknown }).error === "string"
+            ? (body as { error: string }).error
+            : `Request failed (${res.status})`;
+        throw new Error(msg);
+      }
+      const updated = body as { isOtpBypassed?: boolean };
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === userId
+            ? { ...u, isOtpBypassed: updated.isOtpBypassed === true }
+            : u,
+        ),
+      );
+      setToast({
+        type: "ok",
+        text: next
+          ? "OTP disabled — password-only login for this test account"
+          : "OTP re-enabled for this user",
+      });
+    } catch (e) {
+      setToast({
+        type: "err",
+        text: e instanceof Error ? e.message : "Failed to update OTP bypass",
+      });
+    } finally {
+      setOtpBypassSavingId(null);
+    }
+  }
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
@@ -226,6 +274,11 @@ export default function AdminUsersPage() {
                 <th className="px-4 py-3 font-medium text-white/70">User Name</th>
                 <th className="px-4 py-3 font-medium text-white/70">Email</th>
                 <th className="px-4 py-3 font-medium text-white/70">Status</th>
+                {isSuperAdmin ? (
+                  <th className="px-4 py-3 font-medium text-white/70">
+                    Disable OTP / Test Account
+                  </th>
+                ) : null}
                 <th className="px-4 py-3 font-medium text-white/70">Wallet Balance</th>
                 <th className="px-4 py-3 font-medium text-white/70">Delta Balance</th>
                 <th className="px-4 py-3 font-medium text-white/70">Total PnL</th>
@@ -237,13 +290,13 @@ export default function AdminUsersPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={isSuperAdmin ? 8 : 7} className="px-4 py-10 text-center text-white/45">
                     Loading users…
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-white/45">
+                  <td colSpan={isSuperAdmin ? 8 : 7} className="px-4 py-10 text-center text-white/45">
                     No users found.
                   </td>
                 </tr>
@@ -268,6 +321,42 @@ export default function AdminUsersPage() {
                         {u.status}
                       </span>
                     </td>
+                    {isSuperAdmin ? (
+                      <td className="px-4 py-3">
+                        <label className="inline-flex items-center gap-2 text-xs text-white/70">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={u.isOtpBypassed}
+                            aria-label={`Disable OTP for ${u.email}`}
+                            disabled={otpBypassSavingId === u.id}
+                            onClick={() =>
+                              void toggleOtpBypass(u.id, !u.isOtpBypassed)
+                            }
+                            className={`relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
+                              u.isOtpBypassed
+                                ? "bg-emerald-500/80"
+                                : "bg-white/20"
+                            }`}
+                          >
+                            <span
+                              className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                u.isOtpBypassed
+                                  ? "translate-x-4"
+                                  : "translate-x-0"
+                              }`}
+                            />
+                          </button>
+                          <span className="hidden sm:inline">
+                            {otpBypassSavingId === u.id
+                              ? "Saving…"
+                              : u.isOtpBypassed
+                                ? "On"
+                                : "Off"}
+                          </span>
+                        </label>
+                      </td>
+                    ) : null}
                     <td className="px-4 py-3 tabular-nums text-white/85">
                       {fmtUsd(u.walletBalance)}
                     </td>

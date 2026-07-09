@@ -767,6 +767,7 @@ export function createAdminController(prisma: PrismaClient) {
           email: true,
           role: true,
           status: true,
+          isOtpBypassed: true,
           createdAt: true,
           wallet: { select: { balance: true } },
         },
@@ -806,6 +807,7 @@ export function createAdminController(prisma: PrismaClient) {
             email: u.email,
             role: u.role,
             status: u.status,
+            isOtpBypassed: u.isOtpBypassed,
             createdAt: u.createdAt,
             totalPnlToDate: bookedByUser.get(u.id)?.grossPnl ?? 0,
             walletBalance: u.wallet?.balance ?? 0,
@@ -2622,6 +2624,34 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function patchUserOtpBypass(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      const body = req.body as { isOtpBypassed?: unknown };
+      if (typeof body.isOtpBypassed !== "boolean") {
+        res.status(400).json({ error: "isOtpBypassed must be a boolean" });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { isOtpBypassed: body.isOtpBypassed },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          isOtpBypassed: true,
+        },
+      });
+      res.json(user);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function patchUserCryptoArbitrageEnabled(
     req: Request,
     res: Response,
@@ -4397,6 +4427,7 @@ export function createAdminController(prisma: PrismaClient) {
     updateDepositStatus,
     getUserCryptoArbitrage,
     patchUserCryptoArbitrageEnabled,
+    patchUserOtpBypass,
     patchUserCryptoArbitrageBalance,
     patchUserCryptoArbitrageAllocation,
     listUserArbitrageWithdrawals,

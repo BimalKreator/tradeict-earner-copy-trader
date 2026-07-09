@@ -360,6 +360,12 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
+  router.patch(
+    "/users/:id/otp-bypass",
+    superAdminOnly,
+    adminController.patchUserOtpBypass,
+  );
+
   router.patch("/users/:id/status", async (req, res, next) => {
     try {
       const { id } = req.params;

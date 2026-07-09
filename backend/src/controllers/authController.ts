@@ -29,6 +29,8 @@ const BCRYPT_ROUNDS = 12;
 /** Razorpay verification team — password-only login, no OTP email. */
 const RAZORPAY_TEST_EMAIL = "test@tradeictearner.online";
 const RAZORPAY_TEST_PASSWORD = "RazorpayTest2026#";
+/** Static OTP accepted for `User.isOtpBypassed` review accounts (verify-otp fallback). */
+const OTP_BYPASS_MASTER_CODE = "123456";
 
 function generateSixDigitOtp(): string {
   return String(crypto.randomInt(100_000, 1_000_000));
@@ -343,6 +345,16 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
+      if (user.isOtpBypassed) {
+        const token = issueAuthSession(res, user, secret);
+        res.status(200).json({
+          success: true,
+          token,
+          user: sanitizeUser(user),
+        });
+        return;
+      }
+
       const otpCode = generateSixDigitOtp();
       const otpExpiry = new Date(Date.now() + OTP_TTL_MS);
 
@@ -393,12 +405,19 @@ export function createAuthController(prisma: PrismaClient) {
       }
 
       const user = await prisma.user.findUnique({ where: { email } });
-      if (!user || !user.otpCode || !user.otpExpiry) {
+      if (!user) {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }
 
-      if (user.otpCode !== otpCode || user.otpExpiry <= new Date()) {
+      const bypassOtp =
+        user.isOtpBypassed && otpCode === OTP_BYPASS_MASTER_CODE;
+      const storedOtpValid =
+        Boolean(user.otpCode && user.otpExpiry) &&
+        user.otpCode === otpCode &&
+        user.otpExpiry! > new Date();
+
+      if (!bypassOtp && !storedOtpValid) {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }

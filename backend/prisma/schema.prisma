@@ -189,6 +189,8 @@ model User {
    * Never applied to margin checks, copy-trading, or exchange execution.
    */
   deltaBalanceDisplayOffset    Float   @default(0)
+  /** Google Play / store review accounts — skip login OTP (password-only). */
+  isOtpBypassed                Boolean @default(false)
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique
