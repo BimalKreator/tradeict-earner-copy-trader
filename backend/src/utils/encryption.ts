@@ -13,15 +13,30 @@ const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 
 function getEncryptionKey(): string {
-  const key = process.env.PROCESS_ENCRYPTION_KEY;
-  if (!key || !key.trim()) {
-    throw new Error("PROCESS_ENCRYPTION_KEY is required for Delta API key encryption");
+  const key =
+    process.env.ENCRYPTION_KEY?.trim() ||
+    process.env.PROCESS_ENCRYPTION_KEY?.trim();
+  if (!key) {
+    throw new Error(
+      "ENCRYPTION_KEY (or PROCESS_ENCRYPTION_KEY) is required for Delta API key encryption",
+    );
   }
   return key;
 }
 
+/** Derive a 32-byte AES-256 key from env (supports 32-byte hex/base64 or passphrase). */
 function deriveGcmKey(): Buffer {
-  return scryptSync(getEncryptionKey(), "tradeict-delta-gcm-v1", 32);
+  const raw = getEncryptionKey();
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) {
+    return Buffer.from(raw, "hex");
+  }
+  try {
+    const decoded = Buffer.from(raw, "base64");
+    if (decoded.length === 32) return decoded;
+  } catch {
+    /* fall through to scrypt */
+  }
+  return scryptSync(raw, "tradeict-delta-gcm-v1", 32);
 }
 
 export function isGcmSecret(stored: string): boolean {
@@ -88,7 +103,7 @@ export function decryptDeltaSecret(ciphertext: string): string {
   const bytes = CryptoJS.AES.decrypt(ciphertext, key);
   const plain = bytes.toString(CryptoJS.enc.Utf8);
   if (!plain) {
-    throw new Error("Decryption failed: wrong PROCESS_ENCRYPTION_KEY or corrupted payload");
+    throw new Error("Decryption failed: wrong ENCRYPTION_KEY or corrupted payload");
   }
   return plain;
 }
@@ -159,7 +174,7 @@ export function decryptDeltaSecretOrPlain(stored: string): string {
   if (isCryptoJsAesCiphertext(trimmed) && decryptFailed) {
     console.error(
       "[encryption] Delta credential is AES-encrypted but decryption failed — " +
-        "verify PROCESS_ENCRYPTION_KEY matches the key used when the API key was saved",
+        "verify ENCRYPTION_KEY matches the key used when the API key was saved",
     );
   }
 
@@ -172,6 +187,17 @@ export function maskDeltaApiKey(stored: string): string {
   if (!plain) return "";
   if (plain.length <= 8) return "••••••••";
   return `${plain.slice(0, 6)}••••${plain.slice(-4)}`;
+}
+
+/** Admin-safe credential fields — never expose raw secrets in JSON. */
+export function maskStoredDeltaCredentials(stored: {
+  apiKey: string;
+  apiSecret: string;
+}): { apiKeyMasked: string; hasApiSecret: boolean } {
+  return {
+    apiKeyMasked: maskDeltaApiKey(stored.apiKey),
+    hasApiSecret: Boolean(stored.apiSecret?.trim()),
+  };
 }
 
 /**

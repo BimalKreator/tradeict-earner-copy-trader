@@ -63,21 +63,20 @@ type ArbitrageWithdrawal = {
   createdAt: string;
 };
 
+type StoredCredentialMeta = {
+  id: string;
+  nickname: string;
+  apiKeyMasked: string;
+  hasApiSecret: boolean;
+};
+
 type ManagementPayload = {
   user: UserState & {
     acquiredById?: string | null;
     acquiredBy?: AcquiredByUser | null;
   };
-  deltaApiKey: { id: string; nickname: string; apiKey: string; apiSecret: string } | null;
-  exchangeAccount:
-    | {
-        id: string;
-        nickname: string;
-        exchange: string;
-        apiKey: string;
-        apiSecret: string;
-      }
-    | null;
+  deltaApiKey: StoredCredentialMeta | null;
+  exchangeAccount: (StoredCredentialMeta & { exchange: string }) | null;
 };
 
 type UserStrategy = {
@@ -148,6 +147,8 @@ export default function AdminUserDetails({
   const [nicknameDraft, setNicknameDraft] = useState("Primary");
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [apiSecretDraft, setApiSecretDraft] = useState("");
+  const [apiKeyMasked, setApiKeyMasked] = useState("");
+  const [hasStoredApiSecret, setHasStoredApiSecret] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
@@ -312,8 +313,10 @@ export default function AdminUserDetails({
       setBalanceDisplayOffsetDraft(String(offset));
       const source = mg.deltaApiKey ?? mg.exchangeAccount;
       setNicknameDraft(source?.nickname ?? "Primary");
-      setApiKeyDraft(source?.apiKey ?? "");
-      setApiSecretDraft(source?.apiSecret ?? "");
+      setApiKeyMasked(source?.apiKeyMasked ?? "");
+      setHasStoredApiSecret(Boolean(source?.hasApiSecret));
+      setApiKeyDraft("");
+      setApiSecretDraft("");
       setBalanceUsd(nextBalance);
       setBalanceStatus(nextBalanceStatus);
       setStrategies(st.strategies ?? []);
@@ -698,28 +701,30 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const [statusRes, keysRes, copyRes] = await Promise.all([
-        fetch(`${API_BASE}/admin/users/${userId}/status`, {
-          method: "PATCH",
-          headers: { ...authHeaders, "Content-Type": "application/json" },
-          body: JSON.stringify({ status: statusDraft }),
-        }),
-        fetch(`${API_BASE}/admin/users/${userId}/api-keys`, {
-          method: "PUT",
-          headers: { ...authHeaders, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            nickname: nicknameDraft,
-            apiKey: apiKeyDraft,
-            apiSecret: apiSecretDraft,
-          }),
-        }),
-        fetch(`${API_BASE}/admin/users/${userId}/copy-trading`, {
-          method: "PATCH",
-          headers: { ...authHeaders, "Content-Type": "application/json" },
-          body: JSON.stringify({ paused: copyTradingPausedDraft }),
-        }),
-      ]);
-      if (!statusRes.ok || !keysRes.ok || !copyRes.ok) {
+      const keyUpdate =
+        apiKeyDraft.trim().length > 0 && apiSecretDraft.trim().length > 0;
+      const statusRes = await fetch(`${API_BASE}/admin/users/${userId}/status`, {
+        method: "PATCH",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: statusDraft }),
+      });
+      const keysRes = keyUpdate
+        ? await fetch(`${API_BASE}/admin/users/${userId}/api-keys`, {
+            method: "PUT",
+            headers: { ...authHeaders, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              nickname: nicknameDraft,
+              apiKey: apiKeyDraft.trim(),
+              apiSecret: apiSecretDraft.trim(),
+            }),
+          })
+        : null;
+      const copyRes = await fetch(`${API_BASE}/admin/users/${userId}/copy-trading`, {
+        method: "PATCH",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: copyTradingPausedDraft }),
+      });
+      if (!statusRes.ok || !copyRes.ok || (keysRes != null && !keysRes.ok)) {
         throw new Error("Failed to save management settings.");
       }
       setNotice("Management settings updated successfully.");
@@ -1297,17 +1302,35 @@ export default function AdminUserDetails({
                 </label>
                 <label className="text-sm text-white/70">
                   API Key
+                  {apiKeyMasked ? (
+                    <p className="mt-1 text-xs text-white/45">
+                      On file: <span className="font-mono">{apiKeyMasked}</span>
+                    </p>
+                  ) : null}
                   <input
                     value={apiKeyDraft}
                     onChange={(e) => setApiKeyDraft(e.target.value)}
+                    placeholder={
+                      apiKeyMasked ? "Paste new key to replace" : "Paste Delta API key"
+                    }
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
                 <label className="text-sm text-white/70">
                   API Secret
+                  {hasStoredApiSecret ? (
+                    <p className="mt-1 text-xs text-white/45">A secret is stored (not shown).</p>
+                  ) : null}
                   <input
                     value={apiSecretDraft}
                     onChange={(e) => setApiSecretDraft(e.target.value)}
+                    placeholder={
+                      hasStoredApiSecret
+                        ? "Paste new secret to replace"
+                        : "Paste Delta API secret"
+                    }
+                    type="password"
+                    autoComplete="off"
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>

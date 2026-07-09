@@ -5,6 +5,7 @@ const complianceLinks = [
   { href: "/terms", label: "Terms & Conditions" },
   { href: "/privacy", label: "Privacy Policy" },
   { href: "/refund", label: "Refund & Cancellation Policy" },
+  { href: "/delete-account", label: "Delete Account" },
   { href: "/contact", label: "Contact Us" },
   { href: "/pricing", label: "Pricing" },
 ] as const;

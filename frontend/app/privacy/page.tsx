@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { LegalPageShell, legalDocClass } from "@/components/legal/LegalPageShell";
 import { COMPANY } from "@/lib/company";
 
@@ -44,7 +45,11 @@ export default function PrivacyPage() {
             <li>Trading metadata: symbols, sizes, PnL, invoices, subscription status.</li>
             <li>Payment records from our payment gateway (transaction IDs, amounts, status).</li>
             <li>Technical logs: IP address, device/browser, session and security logs.</li>
-            <li>Communications with support (email, tickets).</li>
+            <li>
+              <Link href="/delete-account" className="text-cyan-400 hover:underline">
+                Account &amp; data deletion
+              </Link>
+            </li>
           </ul>
         </section>
 

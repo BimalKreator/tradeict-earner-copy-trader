@@ -53,10 +53,13 @@ function sanitizeUser(user: {
 
 function issueAuthSession(
   res: Response,
-  user: { id: string; email: string },
+  user: { id: string; email: string; role: Role },
   secret: string,
 ): string {
-  const token = signAuthToken({ sub: user.id, email: user.email }, secret);
+  const token = signAuthToken(
+    { sub: user.id, email: user.email, role: user.role },
+    secret,
+  );
   setAuthCookie(res, token);
   return token;
 }

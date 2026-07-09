@@ -46,7 +46,7 @@ export function authCookieOptions(): {
 }
 
 export function signAuthToken(
-  payload: { sub: string; email: string },
+  payload: { sub: string; email: string; role?: string },
   secret: string,
 ): string {
   return jwt.sign(payload, secret, {

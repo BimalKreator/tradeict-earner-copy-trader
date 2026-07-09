@@ -41,6 +41,7 @@ import { createFutureHedgeController } from "../controllers/futureHedgeControlle
 import {
   decryptDeltaSecretOrPlain,
   maskDeltaApiKey,
+  maskStoredDeltaCredentials,
   normalizeStoredDeltaSecret,
 } from "../utils/encryption.js";
 import {
@@ -304,8 +305,21 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
               }
             : null,
         },
-        deltaApiKey: user.deltaApiKeys[0] ?? null,
-        exchangeAccount: user.exchangeAccounts[0] ?? null,
+        deltaApiKey: user.deltaApiKeys[0]
+          ? {
+              id: user.deltaApiKeys[0].id,
+              nickname: user.deltaApiKeys[0].nickname,
+              ...maskStoredDeltaCredentials(user.deltaApiKeys[0]),
+            }
+          : null,
+        exchangeAccount: user.exchangeAccounts[0]
+          ? {
+              id: user.exchangeAccounts[0].id,
+              nickname: user.exchangeAccounts[0].nickname,
+              exchange: user.exchangeAccounts[0].exchange,
+              ...maskStoredDeltaCredentials(user.exchangeAccounts[0]),
+            }
+          : null,
       });
     } catch (err) {
       next(err);
@@ -407,6 +421,18 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           ? body.nickname.trim()
           : "Primary";
 
+      let storedApiKey: string;
+      let storedApiSecret: string;
+      try {
+        storedApiKey = normalizeStoredDeltaSecret(body.apiKey);
+        storedApiSecret = normalizeStoredDeltaSecret(body.apiSecret);
+      } catch (credErr) {
+        const msg =
+          credErr instanceof Error ? credErr.message : String(credErr);
+        res.status(400).json({ error: msg });
+        return;
+      }
+
       const existing = await prisma.deltaApiKey.findFirst({
         where: { userId: id },
         orderBy: { id: "desc" },
@@ -417,8 +443,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
             where: { id: existing.id },
             data: {
               nickname,
-              apiKey: body.apiKey.trim(),
-              apiSecret: body.apiSecret.trim(),
+              apiKey: storedApiKey,
+              apiSecret: storedApiSecret,
             },
             select: { id: true, nickname: true, apiKey: true, apiSecret: true },
           })
@@ -426,13 +452,19 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
             data: {
               userId: id,
               nickname,
-              apiKey: body.apiKey.trim(),
-              apiSecret: body.apiSecret.trim(),
+              apiKey: storedApiKey,
+              apiSecret: storedApiSecret,
             },
             select: { id: true, nickname: true, apiKey: true, apiSecret: true },
           });
 
-      res.json({ deltaApiKey });
+      res.json({
+        deltaApiKey: {
+          id: deltaApiKey.id,
+          nickname: deltaApiKey.nickname,
+          ...maskStoredDeltaCredentials(deltaApiKey),
+        },
+      });
     } catch (err) {
       next(err);
     }

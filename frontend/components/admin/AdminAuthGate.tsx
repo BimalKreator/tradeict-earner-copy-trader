@@ -26,7 +26,7 @@ export function AdminAuthGate({
     }
 
     if (!isPlatformAdminUser(user)) {
-      router.replace("/dashboard");
+      router.replace("/");
       setReady(false);
       return;
     }
