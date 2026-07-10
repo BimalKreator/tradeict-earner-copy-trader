@@ -16,6 +16,7 @@
     "db:migrate-encryption": "npm run build && node dist/scripts/migrate-encryption.js",
     "db:migrate-api-keys": "npm run build && node dist/scripts/migrateApiKeys.js",
     "setup-admins": "ts-node src/scripts/setupInitialAdmins.ts",
+    "set-exact-roles": "ts-node src/scripts/setExactRoles.ts",
     "sync-admins-to-members": "ts-node src/scripts/syncAdminsToMembers.ts"
   },
   "keywords": [],
