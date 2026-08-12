@@ -459,10 +459,14 @@ export function createSubscriptionController(prisma: PrismaClient) {
             });
 
             if (botSlaveId != null) {
-              await prisma.userStrategySubscription.update({
-                where: { id: subscription.id },
-                data: { botSlaveId: String(botSlaveId) },
-              });
+              await prisma.$executeRaw`
+                UPDATE "UserSubscription"
+                SET "botSlaveId" = ${String(botSlaveId)}
+                WHERE id = ${subscription.id}
+              `;
+              console.log(
+                `[Subscription] botSlaveId saved: ${subscription.id} → ${botSlaveId}`,
+              );
               console.log(
                 `[Subscription] Bot slave registered: userId=${userId} botSlaveId=${botSlaveId}`,
               );
