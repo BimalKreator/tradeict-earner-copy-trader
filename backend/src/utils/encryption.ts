@@ -12,21 +12,26 @@ export const GCM_SECRET_PREFIX = "gcm:v1:";
 const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 
-function getEncryptionKey(): string {
-  const key =
-    process.env.ENCRYPTION_KEY?.trim() ||
-    process.env.PROCESS_ENCRYPTION_KEY?.trim();
-  if (!key) {
+function encryptionKeyCandidates(): string[] {
+  const out: string[] = [];
+  const enc = process.env.ENCRYPTION_KEY?.trim();
+  const legacy = process.env.PROCESS_ENCRYPTION_KEY?.trim();
+  if (enc) out.push(enc);
+  if (legacy && legacy !== enc) out.push(legacy);
+  if (out.length === 0) {
     throw new Error(
       "ENCRYPTION_KEY (or PROCESS_ENCRYPTION_KEY) is required for Delta API key encryption",
     );
   }
-  return key;
+  return out;
+}
+
+function getEncryptionKey(): string {
+  return encryptionKeyCandidates()[0]!;
 }
 
 /** Derive a 32-byte AES-256 key from env (supports 32-byte hex/base64 or passphrase). */
-function deriveGcmKey(): Buffer {
-  const raw = getEncryptionKey();
+function deriveGcmKeyFromMaterial(raw: string): Buffer {
   if (/^[0-9a-fA-F]{64}$/.test(raw)) {
     return Buffer.from(raw, "hex");
   }
@@ -37,6 +42,10 @@ function deriveGcmKey(): Buffer {
     /* fall through to scrypt */
   }
   return scryptSync(raw, "tradeict-delta-gcm-v1", 32);
+}
+
+function deriveGcmKey(): Buffer {
+  return deriveGcmKeyFromMaterial(getEncryptionKey());
 }
 
 export function isGcmSecret(stored: string): boolean {
@@ -63,6 +72,13 @@ export function encryptSecretGCM(plaintext: string): string {
  * Decrypt ciphertext produced by {@link encryptSecretGCM}.
  */
 export function decryptSecretGCM(ciphertext: string): string {
+  return decryptSecretGCMWithMaterial(ciphertext, getEncryptionKey());
+}
+
+function decryptSecretGCMWithMaterial(
+  ciphertext: string,
+  keyMaterial: string,
+): string {
   const trimmed = ciphertext.trim();
   if (!trimmed.startsWith(GCM_SECRET_PREFIX)) {
     throw new Error("Not a GCM ciphertext");
@@ -74,7 +90,7 @@ export function decryptSecretGCM(ciphertext: string): string {
   const iv = raw.subarray(0, GCM_IV_BYTES);
   const tag = raw.subarray(GCM_IV_BYTES, GCM_IV_BYTES + GCM_TAG_BYTES);
   const encrypted = raw.subarray(GCM_IV_BYTES + GCM_TAG_BYTES);
-  const key = deriveGcmKey();
+  const key = deriveGcmKeyFromMaterial(keyMaterial);
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   const plain = Buffer.concat([
@@ -99,11 +115,17 @@ export function encryptDeltaSecret(plaintext: string): string {
  * Decrypt ciphertext produced by {@link encryptDeltaSecret}.
  */
 export function decryptDeltaSecret(ciphertext: string): string {
-  const key = getEncryptionKey();
-  const bytes = CryptoJS.AES.decrypt(ciphertext, key);
+  return decryptDeltaSecretWithMaterial(ciphertext, getEncryptionKey());
+}
+
+function decryptDeltaSecretWithMaterial(
+  ciphertext: string,
+  keyMaterial: string,
+): string {
+  const bytes = CryptoJS.AES.decrypt(ciphertext, keyMaterial);
   const plain = bytes.toString(CryptoJS.enc.Utf8);
   if (!plain) {
-    throw new Error("Decryption failed: wrong ENCRYPTION_KEY or corrupted payload");
+    throw new Error("Decryption failed: wrong encryption key or corrupted payload");
   }
   return plain;
 }
@@ -133,49 +155,54 @@ function isCryptoJsAesCiphertext(stored: string): boolean {
  * Decrypt stored Delta credentials, or return sanitized plaintext (legacy rows).
  *
  * Supports GCM (`gcm:v1:`), legacy CryptoJS AES-CBC, and plaintext rows.
+ * Tries ENCRYPTION_KEY first, then PROCESS_ENCRYPTION_KEY when both are set.
  */
 export function decryptDeltaSecretOrPlain(stored: string): string {
   if (!stored) return "";
   const trimmed = stored.trim();
 
   if (isGcmSecret(trimmed)) {
-    try {
-      const decrypted = hardSanitizeKey(decryptSecretGCM(trimmed));
-      if (isUsableCredential(decrypted)) {
-        return decrypted;
+    for (const keyMaterial of encryptionKeyCandidates()) {
+      try {
+        const decrypted = hardSanitizeKey(
+          decryptSecretGCMWithMaterial(trimmed, keyMaterial),
+        );
+        if (isUsableCredential(decrypted)) {
+          return decrypted;
+        }
+      } catch (err) {
+        console.error(
+          "[encryption] GCM credential decryption failed:",
+          err instanceof Error ? err.message : err,
+        );
       }
-    } catch (err) {
-      console.error(
-        "[encryption] GCM credential decryption failed:",
-        err instanceof Error ? err.message : err,
-      );
     }
     return "";
   }
 
-  let decryptFailed = false;
-  let decrypted = "";
-  try {
-    decrypted = hardSanitizeKey(decryptDeltaSecret(trimmed));
-  } catch {
-    decryptFailed = true;
-    decrypted = "";
-  }
-
-  if (isUsableCredential(decrypted)) {
-    return decrypted;
+  if (isCryptoJsAesCiphertext(trimmed)) {
+    for (const keyMaterial of encryptionKeyCandidates()) {
+      try {
+        const decrypted = hardSanitizeKey(
+          decryptDeltaSecretWithMaterial(trimmed, keyMaterial),
+        );
+        if (isUsableCredential(decrypted)) {
+          return decrypted;
+        }
+      } catch {
+        /* try next key */
+      }
+    }
+    console.error(
+      "[encryption] Delta credential is AES-encrypted but decryption failed — " +
+        "verify ENCRYPTION_KEY / PROCESS_ENCRYPTION_KEY matches the key used when saved",
+    );
+    return "";
   }
 
   const plainLegacy = hardSanitizeKey(trimmed);
-  if (isUsableCredential(plainLegacy) && !isCryptoJsAesCiphertext(trimmed)) {
+  if (isUsableCredential(plainLegacy)) {
     return plainLegacy;
-  }
-
-  if (isCryptoJsAesCiphertext(trimmed) && decryptFailed) {
-    console.error(
-      "[encryption] Delta credential is AES-encrypted but decryption failed — " +
-        "verify ENCRYPTION_KEY matches the key used when the API key was saved",
-    );
   }
 
   return "";
