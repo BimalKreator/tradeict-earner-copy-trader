@@ -365,6 +365,8 @@ model UserStrategySubscription {
   isStrategyFeePaid  Boolean             @default(false)
   /** Pay-later grace window end (UTC); copy pauses when unpaid after this. */
   strategyFeeCycleEndsAt DateTime?
+  /** Bot slave account ID on the Delta Bot — set when user subscribes to a bot-type strategy. */
+  botSlaveId         String?
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])

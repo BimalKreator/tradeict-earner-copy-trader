@@ -248,3 +248,63 @@ export async function findBotSlaveId(args: {
   }
   return null;
 }
+
+/**
+ * Called after a user successfully subscribes to a bot-type strategy.
+ * Registers user as slave on bot and returns botSlaveId.
+ * Returns null if registration fails (non-fatal — subscription still created).
+ */
+export async function onSubscriptionCreated(args: {
+  userId: string;
+  strategyId: string;
+  subscriptionId: string;
+  apiKey: string;
+  apiSecret: string;
+  userAllocatedCapitalUsd: number;
+}): Promise<number | null> {
+  const result = await registerUserWithBot({
+    apiKey: args.apiKey,
+    apiSecret: args.apiSecret,
+    userId: args.userId,
+    strategyId: args.strategyId,
+    subscriptionId: args.subscriptionId,
+    userAllocatedCapitalUsd: args.userAllocatedCapitalUsd,
+  });
+  if (result.success && result.botSlaveId != null) {
+    console.log(
+      `[BotBridge] onSubscriptionCreated: userId=${args.userId} botSlaveId=${result.botSlaveId}`,
+    );
+    return result.botSlaveId;
+  }
+  console.error(
+    `[BotBridge] onSubscriptionCreated failed: userId=${args.userId} error=${result.error}`,
+  );
+  return null;
+}
+
+/**
+ * Called when subscription is paused (funds insufficient, admin pause, etc.)
+ */
+export async function onSubscriptionPaused(args: {
+  botSlaveId: number;
+}): Promise<void> {
+  await pauseUserOnBot({ botSlaveId: args.botSlaveId });
+}
+
+/**
+ * Called when subscription is resumed (user paid, admin resume, etc.)
+ */
+export async function onSubscriptionResumed(args: {
+  botSlaveId: number;
+}): Promise<void> {
+  await resumeUserOnBot({ botSlaveId: args.botSlaveId });
+}
+
+/**
+ * Called when subscription is cancelled permanently.
+ */
+export async function onSubscriptionCancelled(args: {
+  botSlaveId: number;
+}): Promise<void> {
+  await removeUserFromBot({ botSlaveId: args.botSlaveId });
+}

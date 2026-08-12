@@ -1,0 +1,1 @@
+ALTER TABLE "UserSubscription" ADD COLUMN IF NOT EXISTS "botSlaveId" TEXT;

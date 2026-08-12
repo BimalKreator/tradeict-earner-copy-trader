@@ -413,6 +413,67 @@ export function createSubscriptionController(prisma: PrismaClient) {
         `[subscription] Strategy added id=${subscription.id} userId=${userId} strategyId=${strategyId} paymentMode=${paymentMode}`,
       );
 
+      // Bot bridge: register user on Delta Bot if this is a bot-type strategy
+      try {
+        const strategy = await prisma.strategy.findUnique({
+          where: { id: strategyId },
+          select: {
+            botStrategyType: true,
+            botUrl: true,
+            baseCapital: true,
+          },
+        });
+
+        if (strategy?.botStrategyType && strategy?.botUrl) {
+          // Get user's exchange account API keys
+          const subscription = await prisma.userStrategySubscription.findFirst({
+            where: { userId, strategyId },
+            include: { exchangeAccount: true },
+          });
+
+          if (subscription?.exchangeAccount) {
+            const { decryptDeltaSecretOrPlain } = await import(
+              '../utils/encryption.js'
+            );
+            const apiKey = decryptDeltaSecretOrPlain(
+              subscription.exchangeAccount.apiKey,
+            );
+            const apiSecret = decryptDeltaSecretOrPlain(
+              subscription.exchangeAccount.apiSecret,
+            );
+
+            // Calculate deployed capital
+            const deployedCapital =
+              subscription.multiplier * (strategy.baseCapital ?? 300);
+
+            const { onSubscriptionCreated } = await import(
+              '../services/botBridgeService.js'
+            );
+            const botSlaveId = await onSubscriptionCreated({
+              userId,
+              strategyId,
+              subscriptionId: subscription.id,
+              apiKey,
+              apiSecret,
+              userAllocatedCapitalUsd: deployedCapital,
+            });
+
+            if (botSlaveId != null) {
+              await prisma.userStrategySubscription.update({
+                where: { id: subscription.id },
+                data: { botSlaveId: String(botSlaveId) },
+              });
+              console.log(
+                `[Subscription] Bot slave registered: userId=${userId} botSlaveId=${botSlaveId}`,
+              );
+            }
+          }
+        }
+      } catch (botErr) {
+        // Non-fatal: subscription already created, bot registration failed
+        console.error('[Subscription] Bot bridge error (non-fatal):', botErr);
+      }
+
       void logUserActivity(prisma, {
         userId,
         kind: "SUBSCRIPTION_CREATED",
