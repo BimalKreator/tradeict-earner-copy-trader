@@ -1,0 +1,23 @@
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  const assetlinks = [
+    {
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: {
+        namespace: 'android_app',
+        package_name: 'online.tradeictearner.twa',
+        sha256_cert_fingerprints: [
+          '3B:87:A4:05:D8:61:93:98:4D:44:0C:D1:27:9F:AD:D6:D9:7C:BF:CF:92:2C:D6:06:5F:62:56:9B:17:85:AA:23',
+        ],
+      },
+    },
+  ];
+
+  return NextResponse.json(assetlinks, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=3600',
+    },
+  });
+}

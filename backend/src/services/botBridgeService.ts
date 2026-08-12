@@ -44,8 +44,8 @@ async function botFetch(
 
 export type BotSlaveResult = {
   success: boolean;
-  botSlaveId?: number;
-  error?: string;
+  botSlaveId?: number | undefined;
+  error?: string | undefined;
 };
 
 /**
