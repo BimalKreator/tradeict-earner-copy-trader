@@ -60,7 +60,7 @@ import {
 const CRYPTO_OPTIONS_GHOST_TITLE =
   "Crypto Options Trading - For Delta Ex India";
 
-const PORT = 5000;
+const PORT = parseInt(process.env.PORT ?? '4000', 10);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
