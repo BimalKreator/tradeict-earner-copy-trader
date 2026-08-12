@@ -34,6 +34,7 @@ import {
 } from "./routes/ticketRoutes.js";
 import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
+import { createInternalRouter } from "./routes/internalRoutes.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import {
   getMasterOrderPolicySnapshot,
@@ -196,6 +197,7 @@ app.get("/health/build", (_req, res) => {
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
+app.use("/api/internal", createInternalRouter(prisma));
 
 const publicRoutes = createPublicRoutes(prisma);
 app.use("/api/public", publicRoutes);
