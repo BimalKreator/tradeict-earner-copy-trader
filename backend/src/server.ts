@@ -50,6 +50,7 @@ import {
 } from "./services/telegramService.js";
 import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js";
 import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
+import { startBotSyncService } from "./services/botSyncService.js";
 import {
   hardDeleteStrategyByExactTitle,
   removeLegacyCryptoOptionsStrategies,
@@ -268,4 +269,5 @@ app.listen(PORT, "0.0.0.0", () => {
     "[BOOT] Future Hedge autonomous engine is DISABLED (SL/TP/breakeven/admin exits only).",
   );
   console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
+  startBotSyncService(prisma);
 });
