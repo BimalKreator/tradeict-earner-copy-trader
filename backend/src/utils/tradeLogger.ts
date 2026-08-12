@@ -24,6 +24,7 @@ const TRADE_LOG_MARKERS = [
   "[SYNC-MONITOR]",
   "[COPY-SYNC]",
   "[BOOT]",
+  "[BotSync]",
   "[tradeEngine]",
   "[affiliateCommission]",
 ];
