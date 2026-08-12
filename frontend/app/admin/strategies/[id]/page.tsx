@@ -43,6 +43,7 @@ export default function AdminEditStrategyPage() {
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [botStrategyType, setBotStrategyType] = useState<string | null>(null);
   const [masterApiKey, setMasterApiKey] = useState("");
   const [masterApiSecret, setMasterApiSecret] = useState("");
   const [slippage, setSlippage] = useState("0.5");
@@ -79,6 +80,9 @@ export default function AdminEditStrategyPage() {
   const [hedgeTargetProfitUsd, setHedgeTargetProfitUsd] = useState(
     String(DEFAULT_FUTURE_HEDGE.targetProfitUsd),
   );
+
+  const isBotPowered =
+    typeof botStrategyType === "string" && botStrategyType.trim().length > 0;
 
   const [subscribers, setSubscribers] = useState<StrategySubscriber[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
@@ -118,6 +122,11 @@ export default function AdminEditStrategyPage() {
     setMasterApiKeyMasked(applied.masterApiKeyMasked);
     setTitle(applied.title);
     setDescription(applied.description);
+    setBotStrategyType(
+      typeof s.botStrategyType === "string" && s.botStrategyType.trim()
+        ? s.botStrategyType.trim()
+        : null,
+    );
     setMasterApiKey("");
     setMasterApiSecret("");
     setSlippage(applied.slippage);
@@ -458,7 +467,7 @@ export default function AdminEditStrategyPage() {
 
     if (masterApiKey.trim()) {
       payload.masterApiKey = masterApiKey.trim();
-    } else if (!savedMasterApiKey) {
+    } else if (!isBotPowered && !savedMasterApiKey) {
       setFormError("Master Delta API key is required.");
       setSubmitting(false);
       return;
@@ -466,7 +475,7 @@ export default function AdminEditStrategyPage() {
 
     if (masterApiSecret.trim()) {
       payload.masterApiSecret = masterApiSecret.trim();
-    } else if (!savedMasterApiSecret) {
+    } else if (!isBotPowered && !savedMasterApiSecret) {
       setFormError("Master Delta API secret is required.");
       setSubmitting(false);
       return;
@@ -831,78 +840,87 @@ export default function AdminEditStrategyPage() {
 
             <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
               <h3 className="text-sm font-semibold text-primary">Master Delta API</h3>
-              <p className="text-xs text-white/55">
-                Delta Exchange India keys only. These map to{" "}
-                <code className="text-primary/90">masterApiKey</code> and{" "}
-                <code className="text-primary/90">masterApiSecret</code> in the
-                API payload.
-              </p>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">
-                  Master Delta API Key
-                </span>
-                <input
-                  type="text"
-                  value={masterApiKey}
-                  onChange={(e) => setMasterApiKey(e.target.value)}
-                  autoComplete="off"
-                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                  placeholder={
-                    savedMasterApiKey
-                      ? `Saved: ${masterApiKeyMasked || "••••••••"} — enter only to replace`
-                      : "Paste API key from Delta Exchange India"
-                  }
-                />
-                {savedMasterApiKey ? (
-                  <p className="mt-1 text-[11px] text-white/45">
-                    A key is already stored. Enter a new one only to replace it.
+              {isBotPowered ? (
+                <p className="rounded-lg border border-white/10 bg-black/25 px-3 py-3 text-sm text-white/75">
+                  This strategy is powered by Delta Bot (Short Strangle). Copy
+                  trading is managed automatically.
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs text-white/55">
+                    Delta Exchange India keys only. These map to{" "}
+                    <code className="text-primary/90">masterApiKey</code> and{" "}
+                    <code className="text-primary/90">masterApiSecret</code> in the
+                    API payload.
                   </p>
-                ) : null}
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-white/60">
-                  Master Delta API Secret
-                </span>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  value={masterApiSecret}
-                  onChange={(e) => setMasterApiSecret(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                  placeholder={
-                    savedMasterApiSecret
-                      ? "Leave blank to keep saved secret"
-                      : "Paste secret"
-                  }
-                />
-                {savedMasterApiSecret ? (
-                  <p className="mt-1 text-[11px] text-white/45">
-                    A secret is already stored. Enter a new one only if you want
-                    to replace it.
-                  </p>
-                ) : null}
-              </label>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => void handleTestMasterConnection()}
-                  disabled={testingMasterConnection}
-                  className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
-                >
-                  {testingMasterConnection ? "Testing…" : "Test connection"}
-                </button>
-                {masterConnectionMessage ? (
-                  <p
-                    className={`text-xs ${
-                      masterConnectionMessage.startsWith("Connected")
-                        ? "text-emerald-300"
-                        : "text-red-300"
-                    }`}
-                  >
-                    {masterConnectionMessage}
-                  </p>
-                ) : null}
-              </div>
+                  <label className="block">
+                    <span className="text-xs font-medium text-white/60">
+                      Master Delta API Key
+                    </span>
+                    <input
+                      type="text"
+                      value={masterApiKey}
+                      onChange={(e) => setMasterApiKey(e.target.value)}
+                      autoComplete="off"
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      placeholder={
+                        savedMasterApiKey
+                          ? `Saved: ${masterApiKeyMasked || "••••••••"} — enter only to replace`
+                          : "Paste API key from Delta Exchange India"
+                      }
+                    />
+                    {savedMasterApiKey ? (
+                      <p className="mt-1 text-[11px] text-white/45">
+                        A key is already stored. Enter a new one only to replace it.
+                      </p>
+                    ) : null}
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-medium text-white/60">
+                      Master Delta API Secret
+                    </span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={masterApiSecret}
+                      onChange={(e) => setMasterApiSecret(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      placeholder={
+                        savedMasterApiSecret
+                          ? "Leave blank to keep saved secret"
+                          : "Paste secret"
+                      }
+                    />
+                    {savedMasterApiSecret ? (
+                      <p className="mt-1 text-[11px] text-white/45">
+                        A secret is already stored. Enter a new one only if you want
+                        to replace it.
+                      </p>
+                    ) : null}
+                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void handleTestMasterConnection()}
+                      disabled={testingMasterConnection}
+                      className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
+                    >
+                      {testingMasterConnection ? "Testing…" : "Test connection"}
+                    </button>
+                    {masterConnectionMessage ? (
+                      <p
+                        className={`text-xs ${
+                          masterConnectionMessage.startsWith("Connected")
+                            ? "text-emerald-300"
+                            : "text-red-300"
+                        }`}
+                      >
+                        {masterConnectionMessage}
+                      </p>
+                    ) : null}
+                  </div>
+                </>
+              )}
               <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
                 <input
                   type="checkbox"

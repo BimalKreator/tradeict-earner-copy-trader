@@ -765,16 +765,27 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       const profitShare = body.profitShare;
       const minCapital = body.minCapital;
 
+      const botStrategyType =
+        typeof body.botStrategyType === "string" && body.botStrategyType.trim()
+          ? body.botStrategyType.trim()
+          : null;
+      const botUrl =
+        typeof body.botUrl === "string" && body.botUrl.trim()
+          ? body.botUrl.trim()
+          : null;
+      const isBotPowered = botStrategyType != null;
+
       if (
         typeof title !== "string" ||
         typeof description !== "string" ||
-        typeof masterApiKey !== "string" ||
+        (!isBotPowered && typeof masterApiKey !== "string") ||
         typeof monthlyFee !== "number" ||
         typeof minCapital !== "number"
       ) {
         res.status(400).json({
-          error:
-            "title, description, masterApiKey, monthlyFee, and minCapital are required (numbers where applicable)",
+          error: isBotPowered
+            ? "title, description, monthlyFee, and minCapital are required (numbers where applicable)"
+            : "title, description, masterApiKey, monthlyFee, and minCapital are required (numbers where applicable)",
         });
         return;
       }
@@ -800,7 +811,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       let storedMasterApiKey: string;
       let storedMasterApiSecret: string;
       try {
-        storedMasterApiKey = normalizeStoredDeltaSecret(masterApiKey);
+        const keyInput =
+          typeof masterApiKey === "string" ? masterApiKey : "";
+        storedMasterApiKey = normalizeStoredDeltaSecret(keyInput);
         storedMasterApiSecret = masterApiSecret
           ? normalizeStoredDeltaSecret(masterApiSecret)
           : "";
@@ -817,6 +830,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           description,
           masterApiKey: storedMasterApiKey,
           masterApiSecret: storedMasterApiSecret,
+          botStrategyType,
+          botUrl,
           ...(performanceMetrics !== undefined
             ? { performanceMetrics }
             : {}),

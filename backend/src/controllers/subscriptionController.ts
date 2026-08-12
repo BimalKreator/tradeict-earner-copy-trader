@@ -519,6 +519,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
     slippage: true,
     performanceMetrics: true,
     syncActiveTrades: true,
+    botStrategyType: true,
     createdAt: true,
   } as const;
 

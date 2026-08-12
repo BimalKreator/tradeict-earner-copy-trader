@@ -42,6 +42,7 @@ type Strategy = {
   baseCapital?: number;
   profitShare: number;
   performanceMetrics?: unknown;
+  botStrategyType?: string | null;
 };
 type ExchangeAccountOption = { id: string; nickname: string; exchange: string };
 type SubscriptionRow = {
@@ -52,12 +53,56 @@ type SubscriptionRow = {
   strategy: Strategy;
   exchangeAccount: ExchangeAccountOption | null;
 };
+type OpenTradeRow = {
+  id: string;
+  strategyId: string;
+  symbol: string;
+  entryPrice: number;
+  tradePnl: number;
+  pnl: number | null;
+  status: string;
+};
 type Tab = "marketplace" | "my";
 type ModalState =
   | { kind: "deploy"; sub: SubscriptionRow }
   | { kind: "modify"; sub: SubscriptionRow }
   | { kind: "checkout"; strategy: Strategy }
   | null;
+
+const BOT_PNL_POLL_MS = 30_000;
+
+function isBotStrategy(strategy: Strategy): boolean {
+  return (
+    typeof strategy.botStrategyType === "string" &&
+    strategy.botStrategyType.trim().length > 0
+  );
+}
+
+function tradePnlValue(trade: OpenTradeRow): number {
+  if (Number.isFinite(trade.tradePnl)) return trade.tradePnl;
+  if (trade.pnl !== null && Number.isFinite(trade.pnl)) return trade.pnl;
+  return 0;
+}
+
+function fmtUsd(n: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    signDisplay: "exceptZero",
+  }).format(n);
+}
+
+function fmtUsdSigned(n: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    signDisplay: "always",
+  }).format(n);
+}
 
 function pausedLike(status: string): boolean {
   return status.toUpperCase() !== "ACTIVE";
@@ -109,6 +154,7 @@ export default function StrategySubscriptionLifecyclePage() {
   const [deployedCapital, setDeployedCapital] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [openTrades, setOpenTrades] = useState<OpenTradeRow[]>([]);
 
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") ?? "" : "";
@@ -142,9 +188,32 @@ export default function StrategySubscriptionLifecyclePage() {
     }
   }, [apiBase, authHeaders]);
 
+  const loadOpenTrades = useCallback(async () => {
+    if (!apiBase || !token) return;
+    try {
+      const res = await fetch(
+        `${apiBase}/user/trades?status=OPEN&limit=100&t=${Date.now()}`,
+        { headers: authHeaders, cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as { trades?: OpenTradeRow[] };
+      setOpenTrades(Array.isArray(body.trades) ? body.trades : []);
+    } catch {
+      /* keep last successful snapshot */
+    }
+  }, [apiBase, authHeaders, token]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void loadOpenTrades();
+    const id = window.setInterval(() => {
+      void loadOpenTrades();
+    }, BOT_PNL_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [loadOpenTrades]);
 
   useEffect(() => {
     if (!toast) return;
@@ -153,6 +222,13 @@ export default function StrategySubscriptionLifecyclePage() {
   }, [toast]);
 
   const dedupedSubs = useMemo(() => dedupeSubscriptions(subs), [subs]);
+  const openTradeByStrategyId = useMemo(() => {
+    const map = new Map<string, OpenTradeRow>();
+    for (const trade of openTrades) {
+      if (!map.has(trade.strategyId)) map.set(trade.strategyId, trade);
+    }
+    return map;
+  }, [openTrades]);
   const subsByStrategy = useMemo(
     () => new Map(dedupedSubs.map((s) => [s.strategy.id, s])),
     [dedupedSubs],
@@ -400,6 +476,11 @@ export default function StrategySubscriptionLifecyclePage() {
             dedupedSubs.map((sub) => {
               const isPaused = pausedLike(sub.status);
               const configured = Boolean(sub.exchangeAccount);
+              const botPowered = isBotStrategy(sub.strategy);
+              const openTrade = botPowered
+                ? openTradeByStrategyId.get(sub.strategy.id)
+                : undefined;
+              const livePnl = openTrade ? tradePnlValue(openTrade) : 0;
               return (
                 <article key={sub.id} className="glass-card border border-glassBorder p-5">
                   <div className="flex items-center justify-between gap-3">
@@ -421,6 +502,69 @@ export default function StrategySubscriptionLifecyclePage() {
                     · Multiplier: <span className="tabular-nums">{sub.multiplier}x</span>{" "}
                     {sub.exchangeAccount ? `· Account: ${sub.exchangeAccount.nickname}` : "· Not configured"}
                   </p>
+
+                  {botPowered ? (
+                    <div className="mt-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-sm font-semibold text-primary">
+                          Live Trade
+                        </h4>
+                        <span className="text-[10px] uppercase tracking-wide text-white/40">
+                          Auto-refresh 30s
+                        </span>
+                      </div>
+                      {openTrade ? (
+                        <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                          <div>
+                            <dt className="text-[11px] uppercase tracking-wide text-white/45">
+                              Symbol
+                            </dt>
+                            <dd className="mt-0.5 font-medium text-white">
+                              {openTrade.symbol || "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-[11px] uppercase tracking-wide text-white/45">
+                              Status
+                            </dt>
+                            <dd className="mt-0.5">
+                              <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                                {openTrade.status || "OPEN"}
+                              </span>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-[11px] uppercase tracking-wide text-white/45">
+                              Entry Price
+                            </dt>
+                            <dd className="mt-0.5 tabular-nums text-white/90">
+                              {fmtUsd(openTrade.entryPrice)}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-[11px] uppercase tracking-wide text-white/45">
+                              Current P&amp;L
+                            </dt>
+                            <dd
+                              className={`mt-0.5 text-base font-semibold tabular-nums ${
+                                livePnl > 0
+                                  ? "text-emerald-400"
+                                  : livePnl < 0
+                                    ? "text-red-400"
+                                    : "text-white/70"
+                              }`}
+                            >
+                              {fmtUsdSigned(livePnl)}
+                            </dd>
+                          </div>
+                        </dl>
+                      ) : (
+                        <p className="mt-3 text-sm text-white/55">
+                          No active trade
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
 
                   <div className="mt-5 flex flex-wrap gap-2">
                     {isPaused && !configured ? (

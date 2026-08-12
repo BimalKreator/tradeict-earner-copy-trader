@@ -26,6 +26,9 @@ export type Strategy = {
   isActive?: boolean;
   futureHedgeConfig?: FutureHedgeConfig | null;
   syncActiveTrades?: boolean;
+  /** When set (e.g. 'short_strangle'), strategy is Delta Bot–powered — no master API keys. */
+  botStrategyType?: string | null;
+  botUrl?: string | null;
   createdAt: string;
 };
 

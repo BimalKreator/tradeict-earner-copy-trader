@@ -25,6 +25,10 @@ export default function AdminStrategiesPage() {
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  /** "standard" = Delta WebSocket copy; "bot" = Delta Bot short strangle */
+  const [strategyKind, setStrategyKind] = useState<"standard" | "bot">(
+    "standard",
+  );
   const [masterApiKey, setMasterApiKey] = useState("");
   const [masterApiSecret, setMasterApiSecret] = useState("");
   const [slippage, setSlippage] = useState("0.5");
@@ -44,6 +48,8 @@ export default function AdminStrategiesPage() {
   const [barLoss, setBarLoss] = useState("");
   const [heatmapText, setHeatmapText] = useState("");
   const [syncActiveTrades, setSyncActiveTrades] = useState(false);
+
+  const isBotPowered = strategyKind === "bot";
 
   const [syncToast, setSyncToast] = useState<{
     kind: "ok" | "err";
@@ -84,6 +90,7 @@ export default function AdminStrategiesPage() {
   function resetCreateForm() {
     setTitle("");
     setDescription("");
+    setStrategyKind("standard");
     setMasterApiKey("");
     setMasterApiSecret("");
     setSlippage("0.5");
@@ -242,14 +249,19 @@ export default function AdminStrategiesPage() {
     const payload: Record<string, unknown> = {
       title,
       description,
-      masterApiKey,
-      masterApiSecret,
+      masterApiKey: isBotPowered ? "" : masterApiKey,
+      masterApiSecret: isBotPowered ? "" : masterApiSecret,
       slippage: slippageNum,
       monthlyFee: monthlyFeeNum,
       profitShare: profitShareNum,
       minCapital: minCapitalNum,
       syncActiveTrades,
     };
+
+    if (isBotPowered) {
+      payload.botStrategyType = "short_strangle";
+      payload.botUrl = "http://127.0.0.1:8000";
+    }
 
     if (performanceMetrics !== undefined) {
       payload.performanceMetrics = performanceMetrics;
@@ -480,59 +492,86 @@ export default function AdminStrategiesPage() {
                     className="mt-1 w-full resize-y rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-white/60">
+                    Strategy Type
+                  </span>
+                  <select
+                    value={strategyKind}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setStrategyKind(next === "bot" ? "bot" : "standard");
+                      setMasterConnectionMessage(null);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                  >
+                    <option value="standard">
+                      Standard (Delta WebSocket)
+                    </option>
+                    <option value="bot">
+                      Bot-Powered (Short Strangle)
+                    </option>
+                  </select>
+                </label>
               </div>
 
               <div className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.06] p-4">
                 <h3 className="text-sm font-semibold text-primary">
                   Master Delta API
                 </h3>
-                <label className="block">
-                  <span className="text-xs font-medium text-white/60">
-                    Master Delta API Key
-                  </span>
-                  <input
-                    type="text"
-                    required
-                    value={masterApiKey}
-                    onChange={(e) => setMasterApiKey(e.target.value)}
-                    autoComplete="off"
-                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-xs font-medium text-white/60">
-                    Master Delta API Secret
-                  </span>
-                  <input
-                    type="password"
-                    required
-                    autoComplete="new-password"
-                    value={masterApiSecret}
-                    onChange={(e) => setMasterApiSecret(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
-                  />
-                </label>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void handleTestMasterConnection()}
-                    disabled={testingMasterConnection}
-                    className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
-                  >
-                    {testingMasterConnection ? "Testing…" : "Test connection"}
-                  </button>
-                  {masterConnectionMessage ? (
-                    <p
-                      className={`text-xs ${
-                        masterConnectionMessage.startsWith("Connected")
-                          ? "text-emerald-300"
-                          : "text-red-300"
-                      }`}
-                    >
-                      {masterConnectionMessage}
-                    </p>
-                  ) : null}
-                </div>
+                {!isBotPowered ? (
+                  <>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">
+                        Master Delta API Key
+                      </span>
+                      <input
+                        type="text"
+                        required
+                        value={masterApiKey}
+                        onChange={(e) => setMasterApiKey(e.target.value)}
+                        autoComplete="off"
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-medium text-white/60">
+                        Master Delta API Secret
+                      </span>
+                      <input
+                        type="password"
+                        required
+                        autoComplete="new-password"
+                        value={masterApiSecret}
+                        onChange={(e) => setMasterApiSecret(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </label>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleTestMasterConnection()}
+                        disabled={testingMasterConnection}
+                        className="rounded-lg border border-primary/40 bg-primary/15 px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/25 disabled:opacity-50"
+                      >
+                        {testingMasterConnection
+                          ? "Testing…"
+                          : "Test connection"}
+                      </button>
+                      {masterConnectionMessage ? (
+                        <p
+                          className={`text-xs ${
+                            masterConnectionMessage.startsWith("Connected")
+                              ? "text-emerald-300"
+                              : "text-red-300"
+                          }`}
+                        >
+                          {masterConnectionMessage}
+                        </p>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
                 <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-3">
                   <input
                     type="checkbox"
