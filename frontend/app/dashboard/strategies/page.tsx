@@ -154,6 +154,9 @@ export default function StrategySubscriptionLifecyclePage() {
   const [deployedCapital, setDeployedCapital] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [subscribeBlockedReason, setSubscribeBlockedReason] = useState<
+    string | null
+  >(null);
   const [openTrades, setOpenTrades] = useState<OpenTradeRow[]>([]);
 
   const token =
@@ -165,6 +168,8 @@ export default function StrategySubscriptionLifecyclePage() {
     }),
     [token],
   );
+
+  const hasExchangeAccount = accounts.length > 0;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -264,6 +269,13 @@ export default function StrategySubscriptionLifecyclePage() {
 
   function openCheckout(strategy: Strategy) {
     setError(null);
+    if (accounts.length === 0) {
+      setSubscribeBlockedReason(
+        "Please connect your Delta Exchange API key in Settings before subscribing.",
+      );
+      return;
+    }
+    setSubscribeBlockedReason(null);
     setModal({ kind: "checkout", strategy });
   }
 
@@ -391,6 +403,20 @@ export default function StrategySubscriptionLifecyclePage() {
       </div>
 
       {error && <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
+      {subscribeBlockedReason ? (
+        <div
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+          role="alert"
+        >
+          <p>{subscribeBlockedReason}</p>
+          <Link
+            href="/dashboard/settings"
+            className="mt-2 inline-flex rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-50 transition hover:bg-amber-500/25"
+          >
+            Go to Settings
+          </Link>
+        </div>
+      ) : null}
       {loading ? (
         <div className="py-20 text-center text-white/55"><Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" /></div>
       ) : tab === "marketplace" ? (
@@ -609,6 +635,7 @@ export default function StrategySubscriptionLifecyclePage() {
               strategyId={modal.strategy.id}
               strategyTitle={modal.strategy.title}
               monthlyFeeInr={modal.strategy.monthlyFee}
+              hasExchangeAccount={hasExchangeAccount}
               onSubscribed={() => {
                 setModal(null);
                 setToast("Added to My Strategies");

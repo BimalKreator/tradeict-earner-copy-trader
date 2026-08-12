@@ -18,6 +18,8 @@ type Props = {
   strategyId: string;
   strategyTitle: string;
   monthlyFeeInr: number;
+  /** When false, warn that copy trading won't start until an API key is added. */
+  hasExchangeAccount?: boolean;
   onSubscribed?: () => void;
   showSkipToDashboard?: boolean;
   className?: string;
@@ -27,6 +29,7 @@ export function StrategySubscriptionCheckout({
   strategyId,
   strategyTitle,
   monthlyFeeInr,
+  hasExchangeAccount = true,
   onSubscribed,
   showSkipToDashboard = true,
   className = "",
@@ -257,6 +260,16 @@ export function StrategySubscriptionCheckout({
     <div
       className={`rounded-xl border border-gray-800 bg-gray-950 p-5 text-gray-100 ${className}`}
     >
+      {!hasExchangeAccount ? (
+        <div
+          className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-100"
+          role="status"
+        >
+          ⚠️ No Delta API key connected. Your subscription will be created but
+          copy trading won&apos;t start until you add an API key in Settings.
+        </div>
+      ) : null}
+
       {successToast ? (
         <div
           className="mb-4 flex items-start gap-2 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-100"

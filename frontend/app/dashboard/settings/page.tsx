@@ -19,7 +19,7 @@ const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 const SERVER_IP =
-  process.env.NEXT_PUBLIC_SERVER_IP?.trim() || "SERVER_IP_HERE";
+  process.env.NEXT_PUBLIC_SERVER_IP?.trim() || "169.58.123.144";
 
 const DELTA_API_GUIDE_URL =
   "https://www.delta.exchange/support/api-trading/";
