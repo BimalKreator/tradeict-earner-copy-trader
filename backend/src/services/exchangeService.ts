@@ -1,6 +1,7 @@
 import axios from "axios";
 import ccxt from "ccxt";
 import { createHmac } from "node:crypto";
+import { setDefaultResultOrder } from "node:dns";
 import http from "node:http";
 import https from "node:https";
 import {
@@ -56,16 +57,21 @@ function numberOrNull(v: unknown): number | null {
 /** Delta Exchange India REST base (CCXT `delta` defaults to global `api.delta.exchange`). */
 const DELTA_INDIA_API_BASE = "https://api.india.delta.exchange";
 
+// Delta API key whitelist is IPv4-only — prefer/force IPv4 for all Delta REST.
+setDefaultResultOrder("ipv4first");
+
 /** Reuse TLS sessions across concurrent follower order placements. */
 const deltaHttpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 30_000,
   maxSockets: 64,
+  family: 4,
 });
 const deltaHttpsAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 30_000,
   maxSockets: 64,
+  family: 4,
 });
 
 const deltaAxios = axios.create({
@@ -1144,6 +1150,8 @@ export function initializeDeltaClient(
         private: DELTA_INDIA_API_BASE,
       },
     },
+    // Force IPv4 for CCXT's Node HTTP stack (Delta whitelist is IPv4-only).
+    agent: deltaHttpsAgent,
     ...(trimmedKey !== "" ? { apiKey: trimmedKey } : {}),
     ...(trimmedSecret !== "" ? { secret: trimmedSecret } : {}),
   });

@@ -2,9 +2,13 @@
  * PM2 / production entry: refuses to start if `dist/` was never rebuilt after
  * Delta India symbol fixes (avoids silent ticker failures from stale compiled JS).
  */
+import { setDefaultResultOrder } from "node:dns";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+
+// Force IPv4 before loading the API — Delta Exchange whitelist is IPv4-only.
+setDefaultResultOrder("ipv4first");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const exchangeSvc = path.join(__dirname, "dist", "services", "exchangeService.js");

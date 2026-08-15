@@ -1,3 +1,4 @@
+import "./utils/forceIpv4.js";
 import "dotenv/config";
 import { installTradeLogFilter } from "./utils/tradeLogger.js";
 
