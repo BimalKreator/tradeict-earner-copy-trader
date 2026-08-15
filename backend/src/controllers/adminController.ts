@@ -633,10 +633,12 @@ export function createAdminController(prisma: PrismaClient) {
 
       const statusRaw = req.query.status;
       const userIdRaw = req.query.userId;
+      const strategyTypeRaw = req.query.strategyType;
       const allowedStatuses = new Set(["OPEN", "CLOSED", "FAILED"]);
       const where: {
         status?: TradeStatus;
         userId?: string;
+        strategy?: { botStrategyType: { not: null } };
       } = {};
       if (typeof statusRaw === "string") {
         const upper = statusRaw.trim().toUpperCase();
@@ -646,6 +648,12 @@ export function createAdminController(prisma: PrismaClient) {
       }
       if (typeof userIdRaw === "string" && userIdRaw.trim()) {
         where.userId = userIdRaw.trim();
+      }
+      if (
+        typeof strategyTypeRaw === "string" &&
+        strategyTypeRaw.trim().toLowerCase() === "bot"
+      ) {
+        where.strategy = { botStrategyType: { not: null } };
       }
 
       const rows = await prisma.trade.findMany({
@@ -669,7 +677,9 @@ export function createAdminController(prisma: PrismaClient) {
           status: true,
           exitReason: true,
           user: { select: { email: true, name: true } },
-          strategy: { select: { title: true, profitShare: true } },
+          strategy: {
+            select: { title: true, profitShare: true, botStrategyType: true },
+          },
         },
       });
 
@@ -684,6 +694,7 @@ export function createAdminController(prisma: PrismaClient) {
           userName: r.user.name,
           strategyId: r.strategyId,
           strategyTitle: r.strategy.title,
+          botStrategyType: r.strategy.botStrategyType,
           symbol: r.symbol,
           side: r.side,
           size: r.size,

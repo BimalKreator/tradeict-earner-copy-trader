@@ -97,6 +97,7 @@ type StrategySection = {
 };
 
 const LIVE_TRADES_REFRESH_MS = 8_000;
+const BOT_TRADES_REFRESH_MS = 30_000;
 const BTC_TICKER_POLL_MS = 1_000;
 
 function BtcUsdLiveTicker() {
@@ -1525,6 +1526,18 @@ export default function AdminLiveTradesPage() {
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [closingKey, setClosingKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [botTrades, setBotTrades] = useState<
+    {
+      id: string;
+      userEmail: string;
+      symbol: string;
+      entryPrice: number;
+      tradePnl: number;
+      pnl: number | null;
+      status: string;
+      strategyTitle?: string;
+    }[]
+  >([]);
   const [granularSyncModal, setGranularSyncModal] = useState<{
     strategyId: string;
     userId: string;
@@ -1820,6 +1833,42 @@ export default function AdminLiveTradesPage() {
     void load();
   }, [load]);
 
+  const loadBotTrades = useCallback(async () => {
+    const base = resolveAdminApiBase();
+    if (!base) return;
+    try {
+      const res = await fetch(
+        `${base}/admin/trades?status=OPEN&strategyType=bot&limit=200&t=${Date.now()}`,
+        {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+        },
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as {
+        trades?: {
+          id: string;
+          userEmail: string;
+          symbol: string;
+          entryPrice: number;
+          tradePnl: number;
+          pnl: number | null;
+          status: string;
+          strategyTitle?: string;
+        }[];
+      };
+      setBotTrades(Array.isArray(body.trades) ? body.trades : []);
+    } catch {
+      /* keep last snapshot */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadBotTrades();
+  }, [loadBotTrades]);
+
   useEffect(() => {
     if (strategies.length === 0) {
       setActiveStrategyId(null);
@@ -1837,6 +1886,13 @@ export default function AdminLiveTradesPage() {
     }, LIVE_TRADES_REFRESH_MS);
     return () => window.clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadBotTrades();
+    }, BOT_TRADES_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [loadBotTrades]);
 
   useEffect(() => {
     if (!toast) return;
@@ -1907,66 +1963,165 @@ export default function AdminLiveTradesPage() {
         <div className="flex justify-center py-20">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
         </div>
-      ) : strategies.length === 0 && !error ? (
-        <p className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center text-sm text-white/50">
-          Future Hedge Strategy is not configured yet.
-        </p>
-      ) : strategies.length > 0 ? (
-        <div className="space-y-4">
-          <AdminLiveTradesStrategyTabs
-            strategies={strategies}
-            activeId={activeStrategyId ?? strategies[0]!.strategyId}
-            onSelect={setActiveStrategyId}
-          />
-          <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
-            {strategies.map((panel) => {
-              const isActive =
-                panel.strategyId ===
-                (activeStrategyId ?? strategies[0]!.strategyId);
-              const expanded =
-                expandedSubsByStrategy[panel.strategyId] ??
-                new Set(panel.subscribers.map((u) => u.userId));
-              return (
-                <div key={panel.strategyId} hidden={!isActive}>
-                  <StrategyLivePanel
-                    strategy={panel}
-                    isActiveTab={isActive}
-                    expandedSubs={expanded}
-                    onToggleSubscriber={(userId) =>
-                      toggleSubscriberExpanded(panel.strategyId, userId)
-                    }
-                    onCloseTrade={closeTrade}
-                    closingKey={closingKey}
-                    onOpenGranularSync={openGranularSync}
-                    onOpenAdjustQty={openAdjustQty}
-                    onOpenBulkAdjust={openBulkAdjust}
-                    onOpenMasterAdjust={openMasterAdjust}
-                    onOpenBulkMasterAdjust={openBulkMasterAdjust}
-                    onCloseAllPositions={closeAllPositions}
-                    onSyncAllToMaster={syncAllToMaster}
-                    bulkOpsBusy={bulkOpsStrategyId === panel.strategyId}
-                    onAutoExitSaved={(message, updated) => {
-                      setToast(message);
-                      if (updated) {
-                        setStrategies((prev) =>
-                          prev.map((row) =>
-                            row.strategyId === panel.strategyId
-                              ? { ...row, ...updated }
-                              : row,
-                          ),
+      ) : (
+        <div className="space-y-8">
+          <section className="space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold text-white">
+                Consistent Earning Strategy — Active Trades
+              </h2>
+              <p className="mt-1 text-sm text-white/50">
+                OPEN bot trades from BotSync (refreshes every{" "}
+                {BOT_TRADES_REFRESH_MS / 1000}s).
+              </p>
+            </div>
+            <div className="overflow-hidden rounded-xl border border-glassBorder">
+              <div className="scroll-table overflow-x-auto">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead className="border-b border-glassBorder bg-white/[0.03]">
+                    <tr>
+                      <th className="px-3 py-3 font-medium text-white/60">
+                        User email
+                      </th>
+                      <th className="px-3 py-3 font-medium text-white/60">
+                        Symbol
+                      </th>
+                      <th className="px-3 py-3 font-medium text-white/60">
+                        Entry Price
+                      </th>
+                      <th className="px-3 py-3 font-medium text-white/60">
+                        Current P&amp;L
+                      </th>
+                      <th className="px-3 py-3 font-medium text-white/60">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {botTrades.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={5}
+                          className="px-4 py-10 text-center text-sm text-white/50"
+                        >
+                          No active bot trades
+                        </td>
+                      </tr>
+                    ) : (
+                      botTrades.map((t) => {
+                        const pnl =
+                          Number.isFinite(t.tradePnl) && t.tradePnl !== 0
+                            ? t.tradePnl
+                            : typeof t.pnl === "number" && Number.isFinite(t.pnl)
+                              ? t.pnl
+                              : t.tradePnl;
+                        const positive = pnl > 0;
+                        const negative = pnl < 0;
+                        return (
+                          <tr
+                            key={t.id}
+                            className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                          >
+                            <td className="max-w-[220px] truncate px-3 py-3 text-white/85">
+                              {t.userEmail || "—"}
+                            </td>
+                            <td className="px-3 py-3 font-medium text-white">
+                              {t.symbol || "—"}
+                            </td>
+                            <td className="px-3 py-3 tabular-nums text-white/80">
+                              {fmtPrice(t.entryPrice)}
+                            </td>
+                            <td
+                              className={`px-3 py-3 tabular-nums font-semibold ${
+                                positive
+                                  ? "text-emerald-400"
+                                  : negative
+                                    ? "text-red-400"
+                                    : "text-white/70"
+                              }`}
+                            >
+                              {fmtPnl(pnl)}
+                            </td>
+                            <td className="px-3 py-3">
+                              <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                                {t.status || "OPEN"}
+                              </span>
+                            </td>
+                          </tr>
                         );
-                      }
-                      if (message.includes("saved")) {
-                        void load({ silent: true });
-                      }
-                    }}
-                  />
-                </div>
-              );
-            })}
-          </div>
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          {strategies.length === 0 && !error ? (
+            <p className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center text-sm text-white/50">
+              Future Hedge Strategy is not configured yet.
+            </p>
+          ) : strategies.length > 0 ? (
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold text-white">
+                Future Hedge — Master &amp; Followers
+              </h2>
+              <AdminLiveTradesStrategyTabs
+                strategies={strategies}
+                activeId={activeStrategyId ?? strategies[0]!.strategyId}
+                onSelect={setActiveStrategyId}
+              />
+              <div className="glass-card min-h-[420px] border border-glassBorder p-5 md:p-6">
+                {strategies.map((panel) => {
+                  const isActive =
+                    panel.strategyId ===
+                    (activeStrategyId ?? strategies[0]!.strategyId);
+                  const expanded =
+                    expandedSubsByStrategy[panel.strategyId] ??
+                    new Set(panel.subscribers.map((u) => u.userId));
+                  return (
+                    <div key={panel.strategyId} hidden={!isActive}>
+                      <StrategyLivePanel
+                        strategy={panel}
+                        isActiveTab={isActive}
+                        expandedSubs={expanded}
+                        onToggleSubscriber={(userId) =>
+                          toggleSubscriberExpanded(panel.strategyId, userId)
+                        }
+                        onCloseTrade={closeTrade}
+                        closingKey={closingKey}
+                        onOpenGranularSync={openGranularSync}
+                        onOpenAdjustQty={openAdjustQty}
+                        onOpenBulkAdjust={openBulkAdjust}
+                        onOpenMasterAdjust={openMasterAdjust}
+                        onOpenBulkMasterAdjust={openBulkMasterAdjust}
+                        onCloseAllPositions={closeAllPositions}
+                        onSyncAllToMaster={syncAllToMaster}
+                        bulkOpsBusy={bulkOpsStrategyId === panel.strategyId}
+                        onAutoExitSaved={(message, updated) => {
+                          setToast(message);
+                          if (updated) {
+                            setStrategies((prev) =>
+                              prev.map((row) =>
+                                row.strategyId === panel.strategyId
+                                  ? { ...row, ...updated }
+                                  : row,
+                              ),
+                            );
+                          }
+                          if (message.includes("saved")) {
+                            void load({ silent: true });
+                          }
+                        }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      )}
 
       {granularSyncModal ? (
         <GranularSyncModal

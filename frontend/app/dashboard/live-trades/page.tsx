@@ -15,6 +15,7 @@ const ENV_API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 const LIVE_TRADES_REFRESH_MS = 8_000;
+const BOT_TRADES_REFRESH_MS = 30_000;
 
 function resolveApiBase(): string {
   if (ENV_API_BASE) return ENV_API_BASE;
@@ -45,6 +46,18 @@ type UserStrategyGroup = {
   };
   userPositions: LiveRow[];
   masterOpenCount: number;
+};
+
+type BotOpenTrade = {
+  id: string;
+  strategyId: string;
+  strategyTitle: string;
+  botStrategyType?: string | null;
+  symbol: string;
+  entryPrice: number;
+  tradePnl: number;
+  pnl: number | null;
+  status: string;
 };
 
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
@@ -433,8 +446,105 @@ function LiveTradesStrategyTabs({
   );
 }
 
+function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
+  return (
+    <section className="space-y-4">
+      <div className="flex items-start gap-3">
+        <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/10 p-3">
+          <Activity className="h-5 w-5 text-cyan-300" aria-hidden />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-white">
+            Consistent Earning Strategy — Live Positions
+          </h2>
+          <p className="mt-1 text-sm text-white/50">
+            Open trades synced from Delta Bot (refreshes every{" "}
+            {BOT_TRADES_REFRESH_MS / 1000}s).
+          </p>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-glassBorder">
+        <div className="scroll-table overflow-x-auto">
+          <table className="w-full min-w-[520px] text-left text-sm">
+            <thead className="border-b border-glassBorder bg-white/[0.03]">
+              <tr>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Symbol
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Entry Price
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Current P&amp;L
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Status
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="px-4 py-10 text-center text-sm text-white/50"
+                  >
+                    No active trade
+                  </td>
+                </tr>
+              ) : (
+                trades.map((t) => {
+                  const pnl =
+                    Number.isFinite(t.tradePnl) && t.tradePnl !== 0
+                      ? t.tradePnl
+                      : typeof t.pnl === "number" && Number.isFinite(t.pnl)
+                        ? t.pnl
+                        : t.tradePnl;
+                  const positive = pnl > 0;
+                  const negative = pnl < 0;
+                  return (
+                    <tr
+                      key={t.id}
+                      className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                    >
+                      <td className="px-3 py-3 font-medium text-white sm:px-4">
+                        {t.symbol || "—"}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtPrice(t.entryPrice)}
+                      </td>
+                      <td
+                        className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${
+                          positive
+                            ? "text-emerald-400"
+                            : negative
+                              ? "text-red-400"
+                              : "text-white/70"
+                        }`}
+                      >
+                        {fmtPnl(pnl)}
+                      </td>
+                      <td className="px-3 py-3 sm:px-4">
+                        <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                          {t.status || "OPEN"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function DashboardLiveTradesPage() {
   const [groups, setGroups] = useState<UserStrategyGroup[]>([]);
+  const [botTrades, setBotTrades] = useState<BotOpenTrade[]>([]);
   const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -487,9 +597,38 @@ export default function DashboardLiveTradesPage() {
     }
   }, []);
 
+  const loadBotTrades = useCallback(async () => {
+    const base = resolveApiBase();
+    if (!base) return;
+    try {
+      const res = await fetch(
+        `${base}/user/trades?status=OPEN&limit=100&t=${Date.now()}`,
+        {
+          cache: "no-store",
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          },
+        },
+      );
+      if (!res.ok) return;
+      const body = (await res.json()) as { trades?: BotOpenTrade[] };
+      const rows = Array.isArray(body.trades) ? body.trades : [];
+      setBotTrades(
+        rows.filter(
+          (t) =>
+            typeof t.botStrategyType === "string" &&
+            t.botStrategyType.trim().length > 0,
+        ),
+      );
+    } catch {
+      /* keep last snapshot */
+    }
+  }, []);
+
   useEffect(() => {
     void load(false);
-  }, [load]);
+    void loadBotTrades();
+  }, [load, loadBotTrades]);
 
   useEffect(() => {
     if (groups.length === 0) {
@@ -509,6 +648,13 @@ export default function DashboardLiveTradesPage() {
     return () => window.clearInterval(id);
   }, [load]);
 
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadBotTrades();
+    }, BOT_TRADES_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [loadBotTrades]);
+
   if (unauthorized) {
     return (
       <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-6 py-10 text-center">
@@ -522,6 +668,10 @@ export default function DashboardLiveTradesPage() {
       </div>
     );
   }
+
+  const showFutureHedge = groups.length > 0;
+  const showEmpty =
+    !loading && !showFutureHedge && botTrades.length === 0;
 
   return (
     <div className="space-y-6 md:space-y-8">
@@ -570,44 +720,54 @@ export default function DashboardLiveTradesPage() {
             aria-label="Loading live trades"
           />
         </div>
-      ) : groups.length === 0 ? (
-        <div className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center">
-          <Layers className="mx-auto h-10 w-10 text-white/20" aria-hidden />
-          <p className="mt-4 text-sm text-white/60">
-            No active Future Hedge subscription.
-          </p>
-          <p className="mt-2 text-xs text-white/40">
-            Deploy Future Hedge Strategy from My Strategies to see live copy
-            positions here.
-          </p>
-          <Link
-            href="/dashboard/strategies"
-            className="mt-5 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white hover:bg-primary/90"
-          >
-            Browse strategies
-          </Link>
-        </div>
       ) : (
-        <div className="space-y-4">
-          <LiveTradesStrategyTabs
-            groups={groups}
-            activeId={activeStrategyId ?? groups[0]!.strategy.id}
-            onSelect={setActiveStrategyId}
-          />
-          <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
-            {groups.map((group) => {
-              const isActive =
-                group.strategy.id ===
-                (activeStrategyId ?? groups[0]!.strategy.id);
-              return (
-                <div key={group.strategy.id} hidden={!isActive}>
-                  <StrategyTabPanel group={group} />
-                </div>
-              );
-            })}
-          </div>
+        <div className="space-y-8">
+          <BotLiveTradesSection trades={botTrades} />
+
+          {showFutureHedge ? (
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold text-white">
+                Future Hedge — Live Copy Positions
+              </h2>
+              <LiveTradesStrategyTabs
+                groups={groups}
+                activeId={activeStrategyId ?? groups[0]!.strategy.id}
+                onSelect={setActiveStrategyId}
+              />
+              <div className="glass-card min-h-[360px] border border-glassBorder p-4 sm:p-5 md:p-6">
+                {groups.map((group) => {
+                  const isActive =
+                    group.strategy.id ===
+                    (activeStrategyId ?? groups[0]!.strategy.id);
+                  return (
+                    <div key={group.strategy.id} hidden={!isActive}>
+                      <StrategyTabPanel group={group} />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : showEmpty ? (
+            <div className="rounded-xl border border-glassBorder bg-white/[0.03] px-6 py-12 text-center">
+              <Layers className="mx-auto h-10 w-10 text-white/20" aria-hidden />
+              <p className="mt-4 text-sm text-white/60">
+                No active Future Hedge subscription.
+              </p>
+              <p className="mt-2 text-xs text-white/40">
+                Deploy Future Hedge Strategy from My Strategies to see live copy
+                positions here.
+              </p>
+              <Link
+                href="/dashboard/strategies"
+                className="mt-5 inline-flex rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white hover:bg-primary/90"
+              >
+                Browse strategies
+              </Link>
+            </div>
+          ) : null}
         </div>
       )}
     </div>
   );
 }
+

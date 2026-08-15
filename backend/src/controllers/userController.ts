@@ -678,7 +678,9 @@ export function createUserController(prisma: PrismaClient) {
           revenueShareAmt: true,
           status: true,
           exitReason: true,
-          strategy: { select: { title: true, profitShare: true } },
+          strategy: {
+            select: { title: true, profitShare: true, botStrategyType: true },
+          },
         },
       });
 
@@ -689,6 +691,7 @@ export function createUserController(prisma: PrismaClient) {
         createdAt: r.createdAt.toISOString(),
         strategyId: r.strategyId,
         strategyTitle: r.strategy.title,
+        botStrategyType: r.strategy.botStrategyType,
         symbol: r.symbol,
         side: r.side,
         size: r.size,
