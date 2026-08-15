@@ -20,7 +20,9 @@ import {
 } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
 import {
+  deployedCapitalFromMultiplier,
   deployedCapitalRangeError,
+  parseDeployedCapital,
   parseMultiplierFromBody,
   resolveStrategyBaseCapital,
 } from "../utils/subscriptionCapital.js";
@@ -782,20 +784,29 @@ export function createSubscriptionController(prisma: PrismaClient) {
         where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
         select: {
           id: true,
-          strategy: { select: { baseCapital: true, minCapital: true } },
+          botSlaveId: true,
+          strategy: {
+            select: {
+              baseCapital: true,
+              minCapital: true,
+              botStrategyType: true,
+            },
+          },
         },
       });
       if (!sub) return void res.status(404).json({ error: "Subscription not found" });
 
-      const multiplier = parseMultiplierFromBody(
-        body,
-        resolveStrategyBaseCapital(sub.strategy),
-      );
+      const baseCapital = resolveStrategyBaseCapital(sub.strategy);
+      const multiplier = parseMultiplierFromBody(body, baseCapital);
       if (multiplier == null) {
         return void res.status(400).json({
-          error: deployedCapitalRangeError(resolveStrategyBaseCapital(sub.strategy)),
+          error: deployedCapitalRangeError(baseCapital),
         });
       }
+
+      const newCapitalUsd =
+        parseDeployedCapital(body.deployedCapital) ??
+        deployedCapitalFromMultiplier(multiplier, baseCapital);
 
       const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
@@ -806,6 +817,37 @@ export function createSubscriptionController(prisma: PrismaClient) {
         },
       });
       invalidateCopySubscriberCache();
+
+      // Update bot slave capital if this is a bot-type strategy
+      if (
+        sub.botSlaveId &&
+        typeof sub.strategy.botStrategyType === "string" &&
+        sub.strategy.botStrategyType.trim()
+      ) {
+        const botSlaveIdNum = Number.parseInt(sub.botSlaveId, 10);
+        if (Number.isFinite(botSlaveIdNum)) {
+          try {
+            const { updateUserCapitalOnBot } = await import(
+              "../services/botBridgeService.js"
+            );
+            await updateUserCapitalOnBot({
+              botSlaveId: botSlaveIdNum,
+              userAllocatedCapitalUsd: newCapitalUsd,
+            });
+            console.log(
+              "[Capital] Updated bot slave capital:",
+              botSlaveIdNum,
+              newCapitalUsd,
+            );
+          } catch (botErr) {
+            console.error(
+              "[Capital] Bot slave capital update failed (non-fatal):",
+              botErr,
+            );
+          }
+        }
+      }
+
       res.json({ subscription: updated });
     } catch (err) {
       next(err);
