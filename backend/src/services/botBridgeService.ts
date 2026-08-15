@@ -283,6 +283,49 @@ export async function onSubscriptionCreated(args: {
 }
 
 /**
+ * Ensure a bot slave exists for this user+strategy subscription.
+ * - If slave already exists on the bot, returns its id (caller should persist).
+ * - Otherwise registers a new slave via onSubscriptionCreated.
+ * Returns null on failure (non-fatal).
+ */
+export async function ensureBotSlaveForSubscription(args: {
+  userId: string;
+  strategyId: string;
+  subscriptionId: string;
+  apiKey: string;
+  apiSecret: string;
+  userAllocatedCapitalUsd: number;
+}): Promise<number | null> {
+  try {
+    const existingSlaveId = await findBotSlaveId({
+      userId: args.userId,
+      strategyId: args.strategyId,
+    });
+    if (existingSlaveId != null) {
+      console.log(
+        `[BotBridge] Found existing slave botSlaveId=${existingSlaveId} for userId=${args.userId}`,
+      );
+      return existingSlaveId;
+    }
+
+    return await onSubscriptionCreated({
+      userId: args.userId,
+      strategyId: args.strategyId,
+      subscriptionId: args.subscriptionId,
+      apiKey: args.apiKey,
+      apiSecret: args.apiSecret,
+      userAllocatedCapitalUsd: args.userAllocatedCapitalUsd,
+    });
+  } catch (err) {
+    console.error(
+      `[BotBridge] ensureBotSlaveForSubscription failed userId=${args.userId}:`,
+      err,
+    );
+    return null;
+  }
+}
+
+/**
  * Called when subscription is paused (funds insufficient, admin pause, etc.)
  */
 export async function onSubscriptionPaused(args: {

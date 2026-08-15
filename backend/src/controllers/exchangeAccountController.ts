@@ -86,6 +86,72 @@ export function createExchangeAccountController(prisma: PrismaClient) {
         select: listSelect,
       });
 
+      // Auto-register bot slaves for existing bot-type strategy subscriptions
+      try {
+        const botSubs = await prisma.userStrategySubscription.findMany({
+          where: {
+            userId,
+            strategy: {
+              botStrategyType: { not: null },
+              botUrl: { not: null },
+            },
+          },
+          include: {
+            strategy: {
+              select: {
+                id: true,
+                botStrategyType: true,
+                botUrl: true,
+                baseCapital: true,
+                minCapital: true,
+              },
+            },
+          },
+        });
+
+        if (botSubs.length > 0) {
+          const {
+            ensureBotSlaveForSubscription,
+          } = await import("../services/botBridgeService.js");
+
+          for (const sub of botSubs) {
+            const deployedCapital =
+              (typeof sub.multiplier === "number" && Number.isFinite(sub.multiplier)
+                ? sub.multiplier
+                : 1) * (sub.strategy.baseCapital ?? 300);
+
+            const botSlaveId = await ensureBotSlaveForSubscription({
+              userId,
+              strategyId: sub.strategyId,
+              subscriptionId: sub.id,
+              apiKey,
+              apiSecret,
+              userAllocatedCapitalUsd: deployedCapital,
+            });
+
+            if (botSlaveId != null) {
+              await prisma.$executeRaw`
+                UPDATE "UserSubscription"
+                SET "botSlaveId" = ${String(botSlaveId)}, "isActive" = true
+                WHERE id = ${sub.id}
+              `;
+              console.log(
+                "[ExchangeAccount] Auto-registered bot slave:",
+                botSlaveId,
+                "for sub:",
+                sub.id,
+              );
+            }
+          }
+        }
+      } catch (autoRegErr) {
+        // Non-fatal — account already saved
+        console.error(
+          "[ExchangeAccount] Auto bot registration error:",
+          autoRegErr,
+        );
+      }
+
       res.status(201).json(account);
     } catch (err) {
       next(err);

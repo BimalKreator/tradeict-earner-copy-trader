@@ -427,57 +427,72 @@ export function createSubscriptionController(prisma: PrismaClient) {
         });
 
         if (strategy?.botStrategyType && strategy?.botUrl) {
-          // Get user's exchange account API keys
-          const subscription = await prisma.userStrategySubscription.findFirst({
+          const subRow = await prisma.userStrategySubscription.findFirst({
             where: { userId, strategyId },
             include: { exchangeAccount: true },
           });
 
-          if (subscription?.exchangeAccount) {
-            const { decryptDeltaSecretOrPlain } = await import(
-              '../utils/encryption.js'
-            );
-            const apiKey = decryptDeltaSecretOrPlain(
-              subscription.exchangeAccount.apiKey,
-            );
-            const apiSecret = decryptDeltaSecretOrPlain(
-              subscription.exchangeAccount.apiSecret,
-            );
+          if (subRow) {
+            // Prefer linked exchange account; fall back to user's latest account
+            let account = subRow.exchangeAccount;
+            if (!account) {
+              account = await prisma.exchangeAccount.findFirst({
+                where: { userId },
+                orderBy: { createdAt: "desc" },
+              });
+            }
 
-            // Calculate deployed capital
-            const deployedCapital =
-              subscription.multiplier * (strategy.baseCapital ?? 300);
-
-            const { onSubscriptionCreated } = await import(
-              '../services/botBridgeService.js'
-            );
-            const botSlaveId = await onSubscriptionCreated({
-              userId,
-              strategyId,
-              subscriptionId: subscription.id,
-              apiKey,
-              apiSecret,
-              userAllocatedCapitalUsd: deployedCapital,
-            });
-
-            if (botSlaveId != null) {
-              await prisma.$executeRaw`
-                UPDATE "UserSubscription"
-                SET "botSlaveId" = ${String(botSlaveId)}
-                WHERE id = ${subscription.id}
-              `;
-              console.log(
-                `[Subscription] botSlaveId saved: ${subscription.id} → ${botSlaveId}`,
+            if (account) {
+              const { decryptDeltaSecretOrPlain } = await import(
+                "../utils/encryption.js"
               );
+              const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
+              const apiSecret = decryptDeltaSecretOrPlain(account.apiSecret);
+
+              if (apiKey && apiSecret) {
+                const deployedCapital =
+                  subRow.multiplier * (strategy.baseCapital ?? 300);
+
+                const { ensureBotSlaveForSubscription } = await import(
+                  "../services/botBridgeService.js"
+                );
+                const botSlaveId = await ensureBotSlaveForSubscription({
+                  userId,
+                  strategyId,
+                  subscriptionId: subRow.id,
+                  apiKey,
+                  apiSecret,
+                  userAllocatedCapitalUsd: deployedCapital,
+                });
+
+                if (botSlaveId != null) {
+                  await prisma.$executeRaw`
+                    UPDATE "UserSubscription"
+                    SET "botSlaveId" = ${String(botSlaveId)}
+                    WHERE id = ${subRow.id}
+                  `;
+                  console.log(
+                    `[Subscription] botSlaveId saved: ${subRow.id} → ${botSlaveId}`,
+                  );
+                  console.log(
+                    `[Subscription] Bot slave registered: userId=${userId} botSlaveId=${botSlaveId}`,
+                  );
+                }
+              } else {
+                console.log(
+                  `[Subscription] Bot registration skipped — could not decrypt API keys for userId=${userId}`,
+                );
+              }
+            } else {
               console.log(
-                `[Subscription] Bot slave registered: userId=${userId} botSlaveId=${botSlaveId}`,
+                `[Subscription] Bot registration deferred — no exchange account yet for userId=${userId}`,
               );
             }
           }
         }
       } catch (botErr) {
         // Non-fatal: subscription already created, bot registration failed
-        console.error('[Subscription] Bot bridge error (non-fatal):', botErr);
+        console.error("[Subscription] Bot bridge error (non-fatal):", botErr);
       }
 
       void logUserActivity(prisma, {
