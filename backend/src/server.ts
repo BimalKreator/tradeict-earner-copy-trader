@@ -9,9 +9,12 @@ if (!process.env.PROCESS_ENCRYPTION_KEY) {
   process.exit(1);
 }
 
+import { assertBotWebhookSecretConfigured } from "./middleware/internalAuthMiddleware.js";
+assertBotWebhookSecretConfigured();
+
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import express from "express";
+import express, { type Request } from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import pg from "pg";
@@ -37,6 +40,7 @@ import {
 import { createPublicRoutes } from "./routes/publicRoutes.js";
 import { createArbitrageRoutes } from "./routes/arbitrageRoutes.js";
 import { createInternalRouter } from "./routes/internalRoutes.js";
+import { requireInternalSignature } from "./middleware/internalAuthMiddleware.js";
 import { DELTA_INDIA_CCXT_SAMPLE_SYMBOL } from "./services/exchangeService.js";
 import {
   getMasterOrderPolicySnapshot,
@@ -176,6 +180,18 @@ app.use(
   }),
 );
 app.use(cookieParser());
+
+app.use(
+  "/api/internal",
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as Request).rawBody = buf;
+    },
+  }),
+  requireInternalSignature,
+  createInternalRouter(prisma),
+);
+
 app.use(express.json());
 app.use(
   "/api/downloads",
@@ -205,8 +221,6 @@ app.get("/health/build", (_req, res) => {
 
 app.use("/api/admin", createAdminRoutes(prisma));
 app.use("/api/auth", createAuthRoutes(prisma));
-app.use("/api/internal", createInternalRouter(prisma));
-
 const publicRoutes = createPublicRoutes(prisma);
 app.use("/api/public", publicRoutes);
 app.use("/public", publicRoutes);

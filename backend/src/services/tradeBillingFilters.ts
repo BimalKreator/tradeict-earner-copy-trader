@@ -10,6 +10,11 @@ export function isBotSyncWritesEnabled(): boolean {
   return process.env.BOT_SYNC_WRITES_ENABLED === "true";
 }
 
+/** When false (default), internal bot webhook must not create PnLRecord rows. */
+export function isInternalWebhookPnlWritesEnabled(): boolean {
+  return process.env.INTERNAL_WEBHOOK_PNL_WRITES_ENABLED === "true";
+}
+
 export function isBotStrategyType(
   botStrategyType: string | null | undefined,
 ): boolean {

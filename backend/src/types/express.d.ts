@@ -14,6 +14,8 @@ declare global {
       userId?: string;
       /** Set by admin middleware for platform admins (`role === ADMIN`). */
       admin?: AdminContext;
+      /** Raw JSON body bytes — set only on `/api/internal` for HMAC verification. */
+      rawBody?: Buffer;
     }
   }
 }

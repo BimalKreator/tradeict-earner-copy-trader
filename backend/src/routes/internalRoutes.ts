@@ -1,6 +1,10 @@
 import express from 'express';
 import type { PrismaClient } from '@prisma/client';
 import { recordTradePnl } from '../controllers/subscriptionController.js';
+import {
+  isInternalWebhookPnlWritesEnabled,
+  TRADE_SOURCE_BOT_SYNC_LEGACY,
+} from '../services/tradeBillingFilters.js';
 
 export function createInternalRouter(prisma: PrismaClient) {
   const router = express.Router();
@@ -105,6 +109,7 @@ export function createInternalRouter(prisma: PrismaClient) {
                 pnl: userPnl,
                 tradePnl: userPnl,
                 exitPrice: slave.call_fill_price ?? 0,
+                source: TRADE_SOURCE_BOT_SYNC_LEGACY,
                 updatedAt: new Date(),
               },
             });
@@ -123,17 +128,26 @@ export function createInternalRouter(prisma: PrismaClient) {
                 tradePnl: userPnl,
                 status: 'CLOSED',
                 exitReason,
+                source: TRADE_SOURCE_BOT_SYNC_LEGACY,
               },
             });
           }
 
-          // Record PnL for revenue share calculation
+          // Record PnL for revenue share calculation (retired — gated off by default)
           if (userPnl !== 0) {
-            await recordTradePnl(prisma, {
-              userId,
-              strategyId: subscription.strategyId,
-              tradeProfit: userPnl,
-            });
+            if (isInternalWebhookPnlWritesEnabled()) {
+              await recordTradePnl(prisma, {
+                userId,
+                strategyId: subscription.strategyId,
+                tradeProfit: userPnl,
+              });
+            } else {
+              console.log(
+                `[InternalWebhook] P&L write skipped ` +
+                  `(INTERNAL_WEBHOOK_PNL_WRITES_ENABLED=false) ` +
+                  `userId=${userId} pnl=${userPnl.toFixed(4)}`,
+              );
+            }
           }
 
           // Update subscription sync status
