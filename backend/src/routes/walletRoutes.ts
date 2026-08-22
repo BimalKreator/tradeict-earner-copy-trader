@@ -1,15 +1,20 @@
 import { Router } from "express";
-import type { PrismaClient } from "@prisma/client";
+import { AdminRole, type PrismaClient } from "@prisma/client";
 import { createWalletController } from "../controllers/walletController.js";
 import {
   authenticateJwt,
+  authorizeRoles,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
 
 export function createWalletRoutes(prisma: PrismaClient): Router {
   const router = Router();
   const jwtAuth = authenticateJwt(prisma);
-  const adminOnly = [jwtAuth, requireAdmin(prisma)];
+  const adminOnly = [
+    jwtAuth,
+    requireAdmin(prisma),
+    authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+  ];
 
   const wallet = createWalletController(prisma);
 

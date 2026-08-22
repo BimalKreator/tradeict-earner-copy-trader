@@ -80,7 +80,7 @@ export const authenticateToken = authenticateJwt;
 
 /**
  * Must run after `authenticateJwt`. Requires platform admin access verified from DB
- * (`role === ADMIN` or `adminRole` set). Sets `req.admin` with RBAC role.
+ * (`role === ADMIN` and `adminRole` set). Sets `req.admin` with RBAC role.
  */
 export function requireAdmin(prisma: PrismaClient): (
   req: Request,
@@ -136,7 +136,7 @@ export function requireAdmin(prisma: PrismaClient): (
 
       req.admin = {
         id: user.id,
-        role: user.adminRole ?? AdminRole.SUPER_ADMIN,
+        role: user.adminRole ?? AdminRole.SUPPORT,
         email: user.email,
         name: user.name,
       };

@@ -39,7 +39,7 @@ type NavItem = {
   href: string;
   label: string;
   icon: LucideIcon;
-  /** Visible to platform SUPER_ADMIN and platform MANAGER (not SUPPORT). */
+  /** Visible only to platform SUPER_ADMIN. */
   superAdminOnly?: boolean;
   /** Visible to platform SUPER_ADMIN and platform MANAGER (not SUPPORT). */
   managerOrAbove?: boolean;
@@ -120,6 +120,7 @@ const navGroups: NavGroup[] = [
         href: "/admin/debug/inject-trade",
         label: "Inject Trade",
         icon: TestTube2,
+        superAdminOnly: true,
       },
     ],
   },
@@ -154,15 +155,17 @@ function filterNavItems(
   platformRole: PlatformAdminRole | null,
 ): NavItem[] {
   if (!platformRole) return [];
-
-  const fullNavAccess =
-    platformRole === "SUPER_ADMIN" || platformRole === "MANAGER";
+  // Backend default-deny: SUPPORT has no admin panel access.
+  if (platformRole === "SUPPORT") return [];
 
   return items.filter((item) => {
-    if (item.superAdminOnly || item.managerOrAbove) {
-      return fullNavAccess;
+    if (item.superAdminOnly) {
+      return platformRole === "SUPER_ADMIN";
     }
-    return true;
+    if (item.managerOrAbove) {
+      return platformRole === "SUPER_ADMIN" || platformRole === "MANAGER";
+    }
+    return platformRole === "SUPER_ADMIN" || platformRole === "MANAGER";
   });
 }
 

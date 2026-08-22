@@ -92,7 +92,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const cancellationBilling = createCancellationBillingController(prisma);
   const deltaSimulator = createDeltaRevenueSimulatorController(prisma);
 
-  router.use(authenticateToken(prisma), isAdmin(prisma));
+  router.use(
+    authenticateToken(prisma),
+    isAdmin(prisma),
+    authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+  );
 
   const superAdminOnly = authorizeRoles(AdminRole.SUPER_ADMIN);
   const walletManagers = authorizeRoles(
@@ -172,9 +176,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   }
 
   /** POST /api/admin/debug/inject-trade — PnL + commission test (no exchange). */
-  router.post("/debug/inject-trade", injectTradeHandler);
+  router.post("/debug/inject-trade", superAdminOnly, injectTradeHandler);
   /** @deprecated use /debug/inject-trade */
-  router.post("/debug/inject-dummy-trade", injectTradeHandler);
+  router.post("/debug/inject-dummy-trade", superAdminOnly, injectTradeHandler);
 
   /** POST /api/admin/delta-ledger/sync — trigger Delta wallet ledger ingestion. */
   router.post("/delta-ledger/sync", async (req, res, next) => {
@@ -307,7 +311,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /** DELETE /api/admin/debug/clear-dummy-trades — purge injected test data. */
-  router.delete("/debug/clear-dummy-trades", async (_req, res, next) => {
+  router.delete("/debug/clear-dummy-trades", superAdminOnly, async (_req, res, next) => {
     try {
       const result = await clearDummyTrades(prisma);
       res.json({ ok: true, ...result });
@@ -470,6 +474,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.post(
     "/users/:id/close-structure-and-finalise-billing",
+    superAdminOnly,
     cancellationBilling.adminCloseStructureAndFinalise,
   );
 
@@ -555,9 +560,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.put("/users/:id/api-keys", async (req, res, next) => {
+  router.put("/users/:id/api-keys", superAdminOnly, async (req, res, next) => {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       const body = req.body as {
         apiKey?: unknown;
         apiSecret?: unknown;
@@ -766,14 +771,22 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     adminController.patchUserDeltaBalanceDisplayOffset,
   );
   router.post("/users/:id/reset-password-link", adminController.sendResetPasswordLink);
-  router.post("/users/flush-trades", adminController.flushUserTrades);
-  router.post("/trades/flush-all", adminController.flushAllPlatformTrades);
+  router.post("/users/flush-trades", superAdminOnly, adminController.flushUserTrades);
+  router.post("/trades/flush-all", superAdminOnly, adminController.flushAllPlatformTrades);
   router.post(
     "/users/:id/trades/reconcile-stale-open",
     adminController.reconcileUserStaleOpenTrades,
   );
-  router.post("/users/flush-arbitrage-trades", adminController.flushArbitrageTrades);
-  router.delete("/users/:id/trades/flush", adminController.flushUserTrades);
+  router.post(
+    "/users/flush-arbitrage-trades",
+    superAdminOnly,
+    adminController.flushArbitrageTrades,
+  );
+  router.delete(
+    "/users/:id/trades/flush",
+    superAdminOnly,
+    adminController.flushUserTrades,
+  );
   router.get("/trades", adminController.listAllTrades);
   router.post("/trades/export", adminController.exportTrades);
   router.patch(
@@ -1322,9 +1335,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
    * Force mirror master Delta open positions to all ACTIVE subscribers (same as late-join `executeTrade` path).
    * Does not require `syncActiveTrades` on the strategy.
    */
-  router.post("/strategies/:id/force-sync", async (req, res, next) => {
+  router.post("/strategies/:id/force-sync", superAdminOnly, async (req, res, next) => {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       const { forceMirrorOpenPositionsForAllSubscribers } = await import(
         "../services/tradeEngine.js"
       );
@@ -1351,9 +1364,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/strategies/:id", async (req, res, next) => {
+  router.delete("/strategies/:id", superAdminOnly, async (req, res, next) => {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       await prisma.strategy.delete({ where: { id } });
       res.status(204).send();
     } catch (err) {
@@ -1383,7 +1396,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
    *
    * NOTE: keep behind admin auth; remove or feature-flag before production.
    */
-  router.post("/trigger-billing-cron", async (req, res, next) => {
+  router.post("/trigger-billing-cron", superAdminOnly, async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         month?: unknown;
@@ -1604,9 +1617,14 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
    * Body: `{ userId, strategyId, legs: [{ symbol, side, addLots }] }`
    */
   router.post("/live-trades/granular-sync", adminController.granularSyncLiveTrades);
-  router.post("/live-trades/close-all", adminController.closeAllLiveTrades);
+  router.post(
+    "/live-trades/close-all",
+    superAdminOnly,
+    adminController.closeAllLiveTrades,
+  );
   router.post(
     "/live-trades/sync-all-followers",
+    superAdminOnly,
     adminController.syncAllFollowersToMaster,
   );
 
