@@ -13,6 +13,8 @@ import {
   fetchDeltaBalanceBreakdownUsd,
 } from "./exchangeService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { sumDeltaPipelineInvoices } from "./deltaPipelineBillingService.js";
+import { excludeLegacyBotSyncTradesWhere } from "./tradeBillingFilters.js";
 
 export type { DeltaBalanceBreakdown };
 
@@ -483,6 +485,7 @@ export async function computeUsersBookedPnlAndRevenueDue(
     where: {
       userId: { in: userIds },
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
       ...(since ? { createdAt: { gte: since } } : {}),
     },
     select: {
@@ -516,10 +519,39 @@ export async function computeUsersBookedPnlAndRevenueDue(
   }
 
   for (const [userId, userTrades] of tradesByUser) {
+    const tradeBooked = computeBookedPnlAndRevenueDueFromTrades(
+      userTrades,
+      sharePctById,
+    );
+    const deltaBooked = await sumDeltaPipelineInvoices(prisma, userId, { since });
     out.set(
       userId,
-      computeBookedPnlAndRevenueDueFromTrades(userTrades, sharePctById),
+      withPnlAliases({
+        grossPnl: tradeBooked.grossPnl + deltaBooked.grossPnl,
+        appRevenue: floorRevenueShareDue(
+          tradeBooked.appRevenue + deltaBooked.appRevenue,
+        ),
+        netEarnedPnl:
+          tradeBooked.grossPnl +
+          deltaBooked.grossPnl -
+          floorRevenueShareDue(tradeBooked.appRevenue + deltaBooked.appRevenue),
+      }),
     );
+  }
+
+  for (const userId of userIds) {
+    if (tradesByUser.has(userId)) continue;
+    const deltaBooked = await sumDeltaPipelineInvoices(prisma, userId, { since });
+    if (deltaBooked.grossPnl !== 0 || deltaBooked.appRevenue !== 0) {
+      out.set(
+        userId,
+        withPnlAliases({
+          grossPnl: deltaBooked.grossPnl,
+          appRevenue: deltaBooked.appRevenue,
+          netEarnedPnl: deltaBooked.grossPnl - deltaBooked.appRevenue,
+        }),
+      );
+    }
   }
 
   return out;
@@ -538,6 +570,7 @@ export async function computeUserBookedPnlAndRevenueDue(
     where: {
       userId,
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
       ...(since ? { createdAt: { gte: since } } : {}),
     },
     select: {
@@ -548,17 +581,27 @@ export async function computeUserBookedPnlAndRevenueDue(
     },
   });
 
-  if (trades.length === 0) {
-    return withPnlAliases(ZERO_PNL_BREAKDOWN);
+  let tradeBooked = withPnlAliases(ZERO_PNL_BREAKDOWN);
+  if (trades.length > 0) {
+    const strategies = await prisma.strategy.findMany({
+      where: { id: { in: [...new Set(trades.map((t) => t.strategyId))] } },
+      select: { id: true, profitShare: true },
+    });
+    const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
+    tradeBooked = computeBookedPnlAndRevenueDueFromTrades(trades, sharePctById);
   }
 
-  const strategies = await prisma.strategy.findMany({
-    where: { id: { in: [...new Set(trades.map((t) => t.strategyId))] } },
-    select: { id: true, profitShare: true },
+  const deltaBooked = await sumDeltaPipelineInvoices(prisma, userId, { since });
+  return withPnlAliases({
+    grossPnl: tradeBooked.grossPnl + deltaBooked.grossPnl,
+    appRevenue: floorRevenueShareDue(
+      tradeBooked.appRevenue + deltaBooked.appRevenue,
+    ),
+    netEarnedPnl:
+      tradeBooked.grossPnl +
+      deltaBooked.grossPnl -
+      floorRevenueShareDue(tradeBooked.appRevenue + deltaBooked.appRevenue),
   });
-  const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
-
-  return computeBookedPnlAndRevenueDueFromTrades(trades, sharePctById);
 }
 
 /** Calendar-month subscription fee renewal — days until next joinedDate anniversary. */
@@ -599,6 +642,7 @@ export async function monthlyWinRate(
     where: {
       userId,
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
       createdAt: { gte: monthStart },
     },
     select: { tradePnl: true, pnl: true },
@@ -800,7 +844,11 @@ export async function systemClosedPnlSince(
   since: Date,
 ): Promise<number> {
   const trades = await prisma.trade.findMany({
-    where: { status: TradeStatus.CLOSED, createdAt: { gte: since } },
+    where: {
+      status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
+      createdAt: { gte: since },
+    },
     select: { tradePnl: true, pnl: true },
   });
   return trades.reduce((s, t) => s + realizedTradePnl(t), 0);

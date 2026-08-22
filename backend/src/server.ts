@@ -53,6 +53,7 @@ import {
 import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js";
 import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
 import { startBotSyncService } from "./services/botSyncService.js";
+import { countLegacyBotSyncTrades } from "./services/deltaPipelineBillingService.js";
 import { initDeltaLedgerCronJobs } from "./services/deltaLedgerService.js";
 import { initStructureRevenueCronJobs } from "./services/structureRevenueService.js";
 import {
@@ -277,4 +278,9 @@ app.listen(PORT, "0.0.0.0", () => {
   );
   console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
   startBotSyncService(prisma);
+  void countLegacyBotSyncTrades(prisma).then((count) => {
+    console.log(
+      `[BOOT] BOT_SYNC_LEGACY Trade rows marked for comparison: ${count} (billing excludes these)`,
+    );
+  });
 });

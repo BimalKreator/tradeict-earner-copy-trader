@@ -1,5 +1,18 @@
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, TradeStatus, type PrismaClient } from "@prisma/client";
 import { LEG_CLOSE_GRACE_MS, listEligibleStructurePnlUserIds } from "./structurePnlService.js";
+import {
+  countLegacyBotSyncTrades,
+  istMonthWindow,
+} from "./deltaPipelineBillingService.js";
+import {
+  floorRevenueShareDue,
+  realizedTradePnl,
+  resolveStoredOrComputedTradeRevenueShare,
+} from "./dashboardMetricsService.js";
+import {
+  TRADE_SOURCE_BOT_SYNC_LEGACY,
+  botStrategyWhere,
+} from "./tradeBillingFilters.js";
 
 const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
 
@@ -307,5 +320,102 @@ export async function getAdminRevenueUserDetail(
       commissionAmount: dec(inv.commissionAmount),
       status: inv.status,
     })),
+  };
+}
+
+export async function getAdminRevenueReconcile(
+  prisma: PrismaClient,
+  periodYear: number,
+  periodMonth: number,
+) {
+  const legacyBotSyncTradeCount = await countLegacyBotSyncTrades(prisma);
+  const { start, endExclusive } = istMonthWindow(periodYear, periodMonth);
+  const eligibleIds = await listEligibleStructurePnlUserIds(prisma);
+
+  const usersMeta = await prisma.user.findMany({
+    where: { id: { in: eligibleIds } },
+    select: { id: true, email: true, name: true },
+    orderBy: { email: "asc" },
+  });
+
+  const invoices = await prisma.monthlyRevenueInvoice.findMany({
+    where: { periodYear, periodMonth, userId: { in: eligibleIds } },
+  });
+  const invoiceByUser = new Map(invoices.map((inv) => [inv.userId, inv]));
+
+  const users: Array<{
+    userId: string;
+    email: string;
+    name: string | null;
+    legacyCommission: number;
+    deltaCommission: number;
+    difference: number;
+    legacyTradeCount: number;
+  }> = [];
+
+  let totalLegacy = 0;
+  let totalDelta = 0;
+
+  for (const user of usersMeta) {
+    const legacyTrades = await prisma.trade.findMany({
+      where: {
+        userId: user.id,
+        status: TradeStatus.CLOSED,
+        OR: [
+          { source: TRADE_SOURCE_BOT_SYNC_LEGACY },
+          {
+            exitReason: "BOT_SYNC_CLOSE",
+            strategy: botStrategyWhere(),
+          },
+        ],
+        updatedAt: { gte: start, lt: endExclusive },
+      },
+      select: {
+        tradePnl: true,
+        pnl: true,
+        revenueShareAmt: true,
+        strategy: { select: { profitShare: true } },
+      },
+    });
+
+    let legacyCommissionRaw = 0;
+    for (const t of legacyTrades) {
+      const realized = realizedTradePnl(t);
+      legacyCommissionRaw += resolveStoredOrComputedTradeRevenueShare({
+        realizedPnl: realized,
+        profitSharePct: t.strategy.profitShare,
+        revenueShareAmt: t.revenueShareAmt,
+      });
+    }
+    const legacyCommission = floorRevenueShareDue(legacyCommissionRaw);
+
+    const inv = invoiceByUser.get(user.id);
+    const deltaCommission = inv ? dec(inv.commissionAmount) : 0;
+    const difference = deltaCommission - legacyCommission;
+
+    totalLegacy += legacyCommission;
+    totalDelta += deltaCommission;
+
+    users.push({
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      legacyCommission,
+      deltaCommission,
+      difference,
+      legacyTradeCount: legacyTrades.length,
+    });
+  }
+
+  return {
+    periodYear,
+    periodMonth,
+    legacyBotSyncTradeCount,
+    users,
+    totals: {
+      legacyCommission: totalLegacy,
+      deltaCommission: totalDelta,
+      difference: totalDelta - totalLegacy,
+    },
   };
 }

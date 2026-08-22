@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import {
   computeAllUsersLedgerHealth,
   getAdminRevenueOverview,
+  getAdminRevenueReconcile,
   getAdminRevenueUserDetail,
 } from "../services/adminDeltaRevenueService.js";
 import { listEligibleStructurePnlUserIds } from "../services/structurePnlService.js";
@@ -149,10 +150,25 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function getReconcile(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const { year, month } = parsePeriod(req.query.year, req.query.month);
+      const data = await getAdminRevenueReconcile(prisma, year, month);
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getOverview,
     getUserDetail,
     getHealth,
+    getReconcile,
     patchProfitShareOverride,
   };
 }

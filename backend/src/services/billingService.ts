@@ -9,6 +9,16 @@ import {
 import cron from "node-cron";
 import { triggerMarkCommissionsAsPayable } from "./affiliateCommissionService.js";
 import { SUBSCRIPTION_SYNC_STATUS } from "./subscriptionSyncService.js";
+import {
+  getBotStrategyMtdFromSnapshots,
+  sumDeltaPipelineCommissionForIstMonth,
+  currentIstCalendarParts,
+} from "./deltaPipelineBillingService.js";
+import {
+  excludeLegacyBotSyncTradesWhere,
+  isBotStrategyType,
+  nonBotStrategyWhere,
+} from "./tradeBillingFilters.js";
 
 /** Days a generated invoice has before it goes OVERDUE and pauses the subscription. */
 const INVOICE_DUE_DAYS = 5;
@@ -86,10 +96,14 @@ export async function getCurrentMonthBilling(
 ): Promise<CurrentMonthBilling> {
   const strategy = await prisma.strategy.findUnique({
     where: { id: strategyId },
-    select: { profitShare: true },
+    select: { profitShare: true, botStrategyType: true },
   });
   if (!strategy) {
     throw new Error(`Strategy not found: ${strategyId}`);
+  }
+
+  if (isBotStrategyType(strategy.botStrategyType)) {
+    return getBotStrategyMtdFromSnapshots(prisma, userId);
   }
 
   const now = new Date();
@@ -100,6 +114,7 @@ export async function getCurrentMonthBilling(
       userId,
       strategyId,
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
       createdAt: { gte: monthStart, lte: now },
     },
     select: { tradePnl: true, pnl: true },
@@ -151,7 +166,7 @@ export async function getCurrentMonthBillingForUser(
     where: { userId, status: SubscriptionStatus.ACTIVE },
     select: {
       strategyId: true,
-      strategy: { select: { title: true, profitShare: true } },
+      strategy: { select: { title: true, profitShare: true, botStrategyType: true } },
     },
   });
 
@@ -163,11 +178,26 @@ export async function getCurrentMonthBillingForUser(
   let totalDue = 0;
 
   for (const sub of subs) {
+    if (isBotStrategyType(sub.strategy.botStrategyType)) {
+      const mtd = await getBotStrategyMtdFromSnapshots(prisma, userId);
+      byStrategy.push({
+        strategyId: sub.strategyId,
+        strategyTitle: sub.strategy.title,
+        profitShare: sub.strategy.profitShare,
+        cumulativePnl: mtd.cumulativePnl,
+        estimatedDue: mtd.estimatedDue,
+      });
+      totalCumulative += mtd.cumulativePnl;
+      totalDue += mtd.estimatedDue;
+      continue;
+    }
+
     const trades = await prisma.trade.findMany({
       where: {
         userId,
         strategyId: sub.strategyId,
         status: TradeStatus.CLOSED,
+        ...excludeLegacyBotSyncTradesWhere(),
         createdAt: { gte: monthStart, lte: now },
       },
       select: { tradePnl: true, pnl: true },
@@ -227,6 +257,7 @@ export async function getPlatformRevenueStats(
   const trades = await prisma.trade.findMany({
     where: {
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
       createdAt: { gte: monthStart, lte: now },
     },
     select: { userId: true, strategyId: true, tradePnl: true, pnl: true },
@@ -246,18 +277,35 @@ export async function getPlatformRevenueStats(
     select: {
       userId: true,
       strategyId: true,
-      strategy: { select: { profitShare: true } },
+      strategy: { select: { profitShare: true, botStrategyType: true } },
     },
   });
 
   let expectedRevenue = 0;
+  const ist = currentIstCalendarParts(now);
+  const deltaCommission = await sumDeltaPipelineCommissionForIstMonth(
+    prisma,
+    ist.year,
+    ist.month,
+  );
+  expectedRevenue += deltaCommission;
+
   for (const sub of subs) {
+    if (isBotStrategyType(sub.strategy.botStrategyType)) {
+      continue;
+    }
     const key = `${sub.userId}::${sub.strategyId}`;
     const cum = perPair.get(key) ?? 0;
     if (cum > 0) {
       expectedRevenue += cum * (sub.strategy.profitShare / 100);
     }
   }
+
+  const deltaPnlAgg = await prisma.monthlyRevenueInvoice.aggregate({
+    where: { periodYear: ist.year, periodMonth: ist.month },
+    _sum: { realizedPnl: true },
+  });
+  totalPlatformPnl += deltaPnlAgg._sum.realizedPnl?.toNumber() ?? 0;
 
   return { totalPlatformPnl, expectedRevenue };
 }
@@ -325,6 +373,7 @@ export async function generateMonthlyInvoices(
 
   const subscriptionWhere: Prisma.UserStrategySubscriptionWhereInput = {
     status: SubscriptionStatus.ACTIVE,
+    strategy: nonBotStrategyWhere(),
   };
   if (opts.scope?.userIds && opts.scope.userIds.length > 0) {
     subscriptionWhere.userId = { in: opts.scope.userIds };
@@ -352,6 +401,7 @@ export async function generateMonthlyInvoices(
         userId: sub.userId,
         strategyId: sub.strategyId,
         status: TradeStatus.CLOSED,
+        ...excludeLegacyBotSyncTradesWhere(),
         createdAt: { gte: start, lt: end },
       },
       select: { tradePnl: true, pnl: true },

@@ -24,6 +24,8 @@ import {
   formatIstCalendarDate,
   formatIstMonthYear,
   formatIstSnapshotDay,
+  currentIstYearMonth,
+  isUtcInstantInIstMonth,
 } from "@/lib/istDates";
 
 type StructureLeg = {
@@ -207,14 +209,9 @@ export function PerformanceDashboard() {
   const openStructures = structures.filter((s) => s.status !== "closed");
 
   const thisMonthRealized = useMemo(() => {
-    const now = new Date();
-    const y = now.getUTCFullYear();
-    const m = now.getUTCMonth();
+    const { year, month } = currentIstYearMonth();
     return snapshots
-      .filter((s) => {
-        const d = new Date(s.snapshotDate);
-        return d.getUTCFullYear() === y && d.getUTCMonth() === m;
-      })
+      .filter((s) => isUtcInstantInIstMonth(s.snapshotDate, year, month))
       .reduce((sum, s) => sum + s.realizedDelta, 0);
   }, [snapshots]);
 
@@ -301,7 +298,7 @@ export function PerformanceDashboard() {
           <SummaryCard
             title="This month's realized"
             loading={loading}
-            basis="Structures that closed this calendar month (UTC)."
+            basis="Structures that closed this calendar month (IST)."
             value={<MoneyCell usd={hasClosedHistory || thisMonthRealized !== 0 ? thisMonthRealized : null} />}
           />
         </div>
@@ -519,7 +516,7 @@ export function PerformanceDashboard() {
           ) : invoices.length === 0 ? (
             <p className="px-6 py-10 text-center text-sm text-white/45">
               No monthly revenue invoices yet. Invoices are generated for closed structures each
-              calendar month.
+              IST calendar month.
             </p>
           ) : (
             <table className="w-full min-w-[720px] text-left text-sm">

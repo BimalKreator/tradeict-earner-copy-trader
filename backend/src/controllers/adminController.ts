@@ -167,7 +167,15 @@ export function createAdminController(prisma: PrismaClient) {
     try {
       const now = new Date();
       const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-      const [paidAgg, pendingAgg, monthPnlAgg, allClosedTrades] = await Promise.all([
+      const istParts = {
+        year: now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", year: "numeric" }),
+        month: now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", month: "numeric" }),
+      };
+      const istYear = parseInt(istParts.year, 10);
+      const istMonth = parseInt(istParts.month, 10);
+
+      const [paidAgg, pendingAgg, monthPnlAgg, deltaMonthAgg, allClosedTrades] =
+        await Promise.all([
         prisma.invoice.aggregate({
           where: { status: InvoiceStatus.PAID },
           _sum: { amountDue: true },
@@ -180,8 +188,31 @@ export function createAdminController(prisma: PrismaClient) {
           where: { timestamp: { gte: monthStart } },
           _sum: { commissionAmount: true },
         }),
+        prisma.monthlyRevenueInvoice.aggregate({
+          where: {
+            periodYear: istYear,
+            periodMonth: istMonth,
+          },
+          _sum: { commissionAmount: true },
+        }),
         prisma.trade.findMany({
-          where: { status: TradeStatus.CLOSED },
+          where: {
+            status: TradeStatus.CLOSED,
+            NOT: {
+              OR: [
+                { source: "BOT_SYNC_LEGACY" },
+                {
+                  exitReason: "BOT_SYNC_CLOSE",
+                  strategy: {
+                    AND: [
+                      { botStrategyType: { not: null } },
+                      { NOT: { botStrategyType: "" } },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
           select: {
             strategyId: true,
             tradePnl: true,
@@ -219,7 +250,9 @@ export function createAdminController(prisma: PrismaClient) {
       res.json({
         stats: {
           totalRevenueGenerated: paidAgg._sum.amountDue ?? 0,
-          thisMonthRevenue: monthPnlAgg._sum.commissionAmount ?? 0,
+          thisMonthRevenue:
+            (monthPnlAgg._sum.commissionAmount ?? 0) +
+            (deltaMonthAgg._sum.commissionAmount?.toNumber() ?? 0),
           totalUserPnl,
           pendingPaymentsReceivables: pendingAgg._sum.amountDue ?? 0,
         },

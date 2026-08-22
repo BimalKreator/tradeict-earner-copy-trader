@@ -37,3 +37,30 @@ export function formatIstMonthYear(month: number, year: number): string {
     return `${year}-${String(month).padStart(2, "0")}`;
   }
 }
+
+/** Current IST calendar year and month (1-indexed). */
+export function currentIstYearMonth(ref = new Date()): {
+  year: number;
+  month: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: IST_TIMEZONE,
+    year: "numeric",
+    month: "numeric",
+  }).formatToParts(ref);
+  const year = parseInt(parts.find((p) => p.type === "year")?.value ?? "0", 10);
+  const month = parseInt(parts.find((p) => p.type === "month")?.value ?? "0", 10);
+  return { year, month };
+}
+
+/** True when a UTC instant falls in the given IST calendar month. */
+export function isUtcInstantInIstMonth(
+  isoOrDate: string | Date,
+  year: number,
+  month: number,
+): boolean {
+  const d = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
+  if (Number.isNaN(d.getTime())) return false;
+  const parts = currentIstYearMonth(d);
+  return parts.year === year && parts.month === month;
+}

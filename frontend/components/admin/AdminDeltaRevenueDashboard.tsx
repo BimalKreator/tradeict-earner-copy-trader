@@ -31,6 +31,7 @@ import {
   formatIstCalendarDate,
   formatIstMonthYear,
   formatIstSnapshotDay,
+  currentIstYearMonth,
 } from "@/lib/istDates";
 
 const UNMATCHED_AMBER_THRESHOLD = 3;
@@ -105,8 +106,7 @@ function pnlClass(n: number): string {
 }
 
 function defaultPeriod(): { year: number; month: number } {
-  const now = new Date();
-  return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1 };
+  return currentIstYearMonth();
 }
 
 export function AdminDeltaRevenueDashboard() {
