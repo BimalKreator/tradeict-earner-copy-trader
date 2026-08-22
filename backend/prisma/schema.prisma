@@ -939,15 +939,17 @@ model CommissionLedger {
 
 /** Monthly partner commission withdrawal request (Phase 9). */
 model PayoutRequest {
-  id            String              @id @default(uuid())
-  userId        String
-  amount        Float
-  status        PayoutRequestStatus @default(PENDING)
-  requestedAt   DateTime            @default(now())
-  completedAt   DateTime?
-  completedById String?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  id               String              @id @default(uuid())
+  userId           String
+  amount           Float
+  status           PayoutRequestStatus @default(PENDING)
+  requestedAt      DateTime            @default(now())
+  completedAt      DateTime?
+  completedById    String?
+  /** UTR / bank transaction id — required when marking COMPLETED. */
+  paymentReference String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 
   user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   completedBy       User?              @relation("PayoutCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)

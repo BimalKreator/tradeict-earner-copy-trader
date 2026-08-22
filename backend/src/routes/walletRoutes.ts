@@ -6,6 +6,7 @@ import {
   authorizeRoles,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
+import { createAdminAuditMiddleware } from "../middleware/adminAuditMiddleware.js";
 
 export function createWalletRoutes(prisma: PrismaClient): Router {
   const router = Router();
@@ -14,6 +15,7 @@ export function createWalletRoutes(prisma: PrismaClient): Router {
     jwtAuth,
     requireAdmin(prisma),
     authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+    createAdminAuditMiddleware(prisma),
   ];
 
   const wallet = createWalletController(prisma);

@@ -70,6 +70,7 @@ export default function AdminPayoutsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rowBusy, setRowBusy] = useState<Record<string, boolean>>({});
+  const [paymentRefs, setPaymentRefs] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -127,12 +128,21 @@ export default function AdminPayoutsPage() {
 
   async function markPaid(id: string) {
     if (!token || rowBusy[id]) return;
+    const paymentReference = (paymentRefs[id] ?? "").trim();
+    if (!paymentReference) {
+      setError("Enter UTR / bank transaction id before marking paid.");
+      return;
+    }
     setRowBusy((prev) => ({ ...prev, [id]: true }));
     setError(null);
     try {
       const res = await fetch(`${apiBase}/admin/payouts/${id}/complete`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ paymentReference }),
       });
       const body: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -146,6 +156,11 @@ export default function AdminPayoutsPage() {
         throw new Error(msg);
       }
       setToast("Payout marked as paid.");
+      setPaymentRefs((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to mark payout paid");
@@ -281,19 +296,38 @@ export default function AdminPayoutsPage() {
                         </p>
                       </td>
                       <td className="whitespace-nowrap px-5 py-4 text-right sm:px-6">
-                        <button
-                          type="button"
-                          onClick={() => void markPaid(row.id)}
-                          disabled={!!rowBusy[row.id]}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:opacity-50"
-                        >
-                          {rowBusy[row.id] ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                          ) : (
-                            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
-                          )}
-                          Mark as Paid
-                        </button>
+                        <div className="flex flex-col items-end gap-2">
+                          <input
+                            type="text"
+                            value={paymentRefs[row.id] ?? ""}
+                            onChange={(e) =>
+                              setPaymentRefs((prev) => ({
+                                ...prev,
+                                [row.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="UTR / bank txn id"
+                            disabled={!!rowBusy[row.id]}
+                            className="w-44 rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-emerald-500/50 focus:outline-none disabled:opacity-50"
+                            aria-label={`Payment reference for ${row.user.email}`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void markPaid(row.id)}
+                            disabled={
+                              !!rowBusy[row.id] ||
+                              !(paymentRefs[row.id] ?? "").trim()
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:opacity-50"
+                          >
+                            {rowBusy[row.id] ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                            )}
+                            Mark as Paid
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

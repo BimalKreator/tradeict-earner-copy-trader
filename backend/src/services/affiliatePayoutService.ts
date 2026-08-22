@@ -156,7 +156,17 @@ export async function completePartnerPayout(
   prisma: PrismaClient,
   payoutRequestId: string,
   adminUserId: string,
+  paymentReference: string,
 ): Promise<CompletePartnerPayoutOutcome> {
+  const ref = paymentReference.trim();
+  if (!ref) {
+    return {
+      ok: false,
+      status: 400,
+      message: "paymentReference (UTR / bank txn id) is required",
+    };
+  }
+
   const row = await prisma.payoutRequest.findUnique({
     where: { id: payoutRequestId },
     select: { id: true, status: true },
@@ -176,6 +186,7 @@ export async function completePartnerPayout(
       status: PayoutRequestStatus.COMPLETED,
       completedAt: new Date(),
       completedById: adminUserId,
+      paymentReference: ref,
     },
   });
 

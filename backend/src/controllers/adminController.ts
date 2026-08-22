@@ -3910,17 +3910,34 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
+      const body = req.body as { paymentReference?: unknown };
+      const paymentReference =
+        typeof body?.paymentReference === "string"
+          ? body.paymentReference.trim()
+          : "";
+      if (!paymentReference) {
+        res.status(400).json({
+          error: "paymentReference (UTR / bank txn id) is required",
+        });
+        return;
+      }
+
       const outcome = await completePartnerPayout(
         prisma,
         payoutId.trim(),
         adminUserId,
+        paymentReference,
       );
       if (!outcome.ok) {
         res.status(outcome.status).json({ error: outcome.message });
         return;
       }
 
-      res.json({ ok: true, payoutRequestId: outcome.payoutRequestId });
+      res.json({
+        ok: true,
+        payoutRequestId: outcome.payoutRequestId,
+        paymentReference,
+      });
     } catch (err) {
       next(err);
     }

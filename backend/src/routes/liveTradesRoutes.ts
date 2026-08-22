@@ -5,6 +5,7 @@ import {
   authorizeRoles,
   isAdmin,
 } from "../middleware/authMiddleware.js";
+import { createAdminAuditMiddleware } from "../middleware/adminAuditMiddleware.js";
 import { createAdminController } from "../controllers/adminController.js";
 import { createUserController } from "../controllers/userController.js";
 
@@ -15,6 +16,7 @@ export function createLiveTradesRoutes(prisma: PrismaClient): Router {
     jwtAuth,
     isAdmin(prisma),
     authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+    createAdminAuditMiddleware(prisma),
   ];
   const admin = createAdminController(prisma);
   const user = createUserController(prisma);

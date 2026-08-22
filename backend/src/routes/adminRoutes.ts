@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import { authenticateToken, isAdmin, authorizeRoles } from "../middleware/authMiddleware.js";
+import { createAdminAuditMiddleware } from "../middleware/adminAuditMiddleware.js";
 import { getAdminMasterPositionSnapshots } from "../services/liveTradesService.js";
 import {
   generateMonthlyInvoices,
@@ -96,6 +97,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     authenticateToken(prisma),
     isAdmin(prisma),
     authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+    createAdminAuditMiddleware(prisma),
   );
 
   const superAdminOnly = authorizeRoles(AdminRole.SUPER_ADMIN);

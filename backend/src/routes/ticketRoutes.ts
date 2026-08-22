@@ -5,6 +5,7 @@ import {
   authorizeRoles,
   requireAdmin,
 } from "../middleware/authMiddleware.js";
+import { createAdminAuditMiddleware } from "../middleware/adminAuditMiddleware.js";
 import { createTicketController } from "../controllers/ticketController.js";
 
 export function createTicketRoutes(prisma: PrismaClient): Router {
@@ -23,24 +24,19 @@ export function createTicketRoutes(prisma: PrismaClient): Router {
 
 export function createAdminTicketRoutes(prisma: PrismaClient): Router {
   const router = Router();
-  const jwtAuth = authenticateJwt(prisma);
-  const admin = requireAdmin(prisma);
-  const managerOrAbove = authorizeRoles(
-    AdminRole.SUPER_ADMIN,
-    AdminRole.MANAGER,
-  );
   const tickets = createTicketController(prisma);
 
-  router.get("/", jwtAuth, admin, managerOrAbove, tickets.listAllTickets);
-  router.get("/:id", jwtAuth, admin, managerOrAbove, tickets.getAdminTicket);
-  router.post("/:id/reply", jwtAuth, admin, managerOrAbove, tickets.adminReply);
-  router.post(
-    "/:id/close",
-    jwtAuth,
-    admin,
-    managerOrAbove,
-    tickets.adminCloseTicket,
+  router.use(
+    authenticateJwt(prisma),
+    requireAdmin(prisma),
+    authorizeRoles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER),
+    createAdminAuditMiddleware(prisma),
   );
+
+  router.get("/", tickets.listAllTickets);
+  router.get("/:id", tickets.getAdminTicket);
+  router.post("/:id/reply", tickets.adminReply);
+  router.post("/:id/close", tickets.adminCloseTicket);
 
   return router;
 }
