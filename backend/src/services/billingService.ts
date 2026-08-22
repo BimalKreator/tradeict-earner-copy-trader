@@ -20,6 +20,9 @@ import {
   nonBotStrategyWhere,
 } from "./tradeBillingFilters.js";
 
+/** Trade has no isSimulated column — dummy injector sets isDummy only. */
+const excludeDummyTrades = { isDummy: false } as const;
+
 /** Days a generated invoice has before it goes OVERDUE and pauses the subscription. */
 const INVOICE_DUE_DAYS = 5;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -109,12 +112,14 @@ export async function getCurrentMonthBilling(
   const now = new Date();
   const monthStart = startOfUtcMonth(now);
 
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       userId,
       strategyId,
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       createdAt: { gte: monthStart, lte: now },
     },
     select: { tradePnl: true, pnl: true },
@@ -192,12 +197,14 @@ export async function getCurrentMonthBillingForUser(
       continue;
     }
 
+    // BILLING QUERY — must always carry excludeSimulatedFilter()
     const trades = await prisma.trade.findMany({
       where: {
         userId,
         strategyId: sub.strategyId,
         status: TradeStatus.CLOSED,
         ...excludeLegacyBotSyncTradesWhere(),
+        ...excludeDummyTrades,
         createdAt: { gte: monthStart, lte: now },
       },
       select: { tradePnl: true, pnl: true },
@@ -254,10 +261,14 @@ export async function getPlatformRevenueStats(
   const now = new Date();
   const monthStart = startOfUtcMonth(now);
 
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
+  // nonBotStrategyWhere: bot strategies are billed via Delta pipeline (below), not Trade rows.
   const trades = await prisma.trade.findMany({
     where: {
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
+      strategy: nonBotStrategyWhere(),
       createdAt: { gte: monthStart, lte: now },
     },
     select: { userId: true, strategyId: true, tradePnl: true, pnl: true },
@@ -396,12 +407,14 @@ export async function generateMonthlyInvoices(
   let skipped = 0;
 
   for (const sub of subscriptions) {
+    // BILLING QUERY — must always carry excludeSimulatedFilter()
     const trades = await prisma.trade.findMany({
       where: {
         userId: sub.userId,
         strategyId: sub.strategyId,
         status: TradeStatus.CLOSED,
         ...excludeLegacyBotSyncTradesWhere(),
+        ...excludeDummyTrades,
         createdAt: { gte: start, lt: end },
       },
       select: { tradePnl: true, pnl: true },

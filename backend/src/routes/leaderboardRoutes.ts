@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
+import { excludeTestPnlFilter } from "../services/simulatedDataFilters.js";
 
 function utcMonthBounds(now = new Date()): { start: Date; end: Date; label: string } {
   const y = now.getUTCFullYear();
@@ -29,17 +30,21 @@ export function createLeaderboardRoutes(prisma: PrismaClient): Router {
       const { start, end, label } = utcMonthBounds();
 
       const [byStrategy, byUser] = await Promise.all([
+        // BILLING QUERY — must always carry excludeSimulatedFilter()
         prisma.pnLRecord.groupBy({
           by: ["strategyId"],
           where: {
             timestamp: { gte: start, lt: end },
+            ...excludeTestPnlFilter(false),
           },
           _sum: { profitAmount: true },
         }),
+        // BILLING QUERY — must always carry excludeSimulatedFilter()
         prisma.pnLRecord.groupBy({
           by: ["userId"],
           where: {
             timestamp: { gte: start, lt: end },
+            ...excludeTestPnlFilter(false),
           },
           _sum: { profitAmount: true },
         }),

@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { SubscriptionStatus } from "@prisma/client";
 import { authenticateJwt } from "../middleware/authMiddleware.js";
+import { excludeTestPnlFilter } from "../services/simulatedDataFilters.js";
 
 export function createAnalyticsRoutes(prisma: PrismaClient): Router {
   const router = Router();
@@ -30,10 +31,12 @@ export function createAnalyticsRoutes(prisma: PrismaClient): Router {
       const start = new Date(Date.UTC(year, month - 1, 1));
       const end = new Date(Date.UTC(year, month, 1));
 
+      // BILLING QUERY — must always carry excludeSimulatedFilter()
       const records = await prisma.pnLRecord.findMany({
         where: {
           userId,
           timestamp: { gte: start, lt: end },
+          ...excludeTestPnlFilter(false),
         },
         select: { timestamp: true, profitAmount: true },
       });
@@ -86,8 +89,13 @@ export function createAnalyticsRoutes(prisma: PrismaClient): Router {
       }[] = [];
 
       for (const sub of subs) {
+        // BILLING QUERY — must always carry excludeSimulatedFilter()
         const rows = await prisma.pnLRecord.findMany({
-          where: { userId, strategyId: sub.strategyId },
+          where: {
+            userId,
+            strategyId: sub.strategyId,
+            ...excludeTestPnlFilter(false),
+          },
           orderBy: { timestamp: "asc" },
           select: { timestamp: true, profitAmount: true },
         });

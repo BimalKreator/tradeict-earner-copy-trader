@@ -15,6 +15,10 @@ import {
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import { sumDeltaPipelineInvoices } from "./deltaPipelineBillingService.js";
 import { excludeLegacyBotSyncTradesWhere } from "./tradeBillingFilters.js";
+import { excludeTestPnlFilter } from "./simulatedDataFilters.js";
+
+/** Trade has no isSimulated column — dummy injector sets isDummy only. */
+const excludeDummyTrades = { isDummy: false } as const;
 
 export type { DeltaBalanceBreakdown };
 
@@ -371,10 +375,13 @@ export async function sumClosedTradePnlSince(
   userId: string,
   since: Date,
 ): Promise<number> {
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       userId,
       status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       createdAt: { gte: since },
     },
     select: { tradePnl: true, pnl: true },
@@ -387,8 +394,14 @@ export async function sumAllClosedTradePnl(
   prisma: PrismaClient,
   userId: string,
 ): Promise<number> {
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
-    where: { userId, status: TradeStatus.CLOSED },
+    where: {
+      userId,
+      status: TradeStatus.CLOSED,
+      ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
+    },
     select: { tradePnl: true, pnl: true },
   });
   return trades.reduce((s, t) => s + realizedTradePnl(t), 0);
@@ -481,11 +494,13 @@ export async function computeUsersBookedPnlAndRevenueDue(
   }
   if (userIds.length === 0) return out;
 
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       userId: { in: userIds },
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       ...(since ? { createdAt: { gte: since } } : {}),
     },
     select: {
@@ -566,11 +581,13 @@ export async function computeUserBookedPnlAndRevenueDue(
   userId: string,
   since: Date | null,
 ): Promise<BookedPnlAndRevenueDue> {
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       userId,
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       ...(since ? { createdAt: { gte: since } } : {}),
     },
     select: {
@@ -638,11 +655,13 @@ export async function monthlyWinRate(
   userId: string,
 ): Promise<number> {
   const monthStart = startOfUtcMonth();
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       userId,
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       createdAt: { gte: monthStart },
     },
     select: { tradePnl: true, pnl: true },
@@ -828,10 +847,12 @@ export async function computeTodaysPnl(
   const dayStart = startOfDayInTimeZone(ref, timeZone);
   const dayEnd = endOfDayInTimeZone(ref, timeZone);
 
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const agg = await prisma.pnLRecord.aggregate({
     where: {
       userId,
       timestamp: { gte: dayStart, lt: dayEnd },
+      ...excludeTestPnlFilter(false),
     },
     _sum: { profitAmount: true },
   });
@@ -843,10 +864,12 @@ export async function systemClosedPnlSince(
   prisma: PrismaClient,
   since: Date,
 ): Promise<number> {
+  // BILLING QUERY — must always carry excludeSimulatedFilter()
   const trades = await prisma.trade.findMany({
     where: {
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
+      ...excludeDummyTrades,
       createdAt: { gte: since },
     },
     select: { tradePnl: true, pnl: true },
