@@ -102,6 +102,44 @@ export function endOfDayInTimeZone(
   return startOfDayInTimeZone(new Date(start.getTime() + 36 * 3_600_000), timeZone);
 }
 
+/** Calendar Y/M/D for `ref` in `timeZone` (billing uses Asia/Kolkata / IST). */
+export function calendarPartsInTimeZone(
+  ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
+): { year: number; month: number; day: number } {
+  const ymd = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(ref);
+  const parts = ymd.split("-").map((x) => Number(x));
+  return {
+    year: parts[0] ?? 0,
+    month: parts[1] ?? 0,
+    day: parts[2] ?? 0,
+  };
+}
+
+/** UTC instant when the calendar month containing `ref` begins in `timeZone`. */
+export function startOfMonthInTimeZone(
+  ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
+): Date {
+  const { year, month } = calendarPartsInTimeZone(ref, timeZone);
+  const utcProbe = Date.UTC(year, month - 1, 1, 12, 0, 0, 0);
+  return startOfDayInTimeZone(new Date(utcProbe), timeZone);
+}
+
+/** Exclusive upper bound for the calendar month containing `ref` in `timeZone`. */
+export function endOfMonthInTimeZone(
+  ref = new Date(),
+  timeZone = DASHBOARD_PNL_DAY_TIMEZONE,
+): Date {
+  const start = startOfMonthInTimeZone(ref, timeZone);
+  return startOfMonthInTimeZone(new Date(start.getTime() + 32 * 86_400_000), timeZone);
+}
+
 export function realizedTradePnl(trade: {
   tradePnl: number;
   pnl: number | null;

@@ -236,7 +236,7 @@ function legRealizedPnl(totals: LegTotals, leg: BotLeg): Prisma.Decimal | null {
   return totals.grossCashflow.add(totals.commissionTotal);
 }
 
-async function listEligibleStructurePnlUserIds(
+export async function listEligibleStructurePnlUserIds(
   prisma: PrismaClient,
 ): Promise<string[]> {
   const subs = await prisma.userStrategySubscription.findMany({

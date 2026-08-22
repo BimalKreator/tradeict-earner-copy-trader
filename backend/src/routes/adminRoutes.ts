@@ -19,6 +19,10 @@ import {
 import { runDeltaLedgerSyncForUsers } from "../services/deltaLedgerService.js";
 import { recomputeStructurePnlForUsers } from "../services/structurePnlService.js";
 import {
+  runDailyPnlSnapshots,
+  runMonthlyRevenueInvoices,
+} from "../services/structureRevenueService.js";
+import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
 } from "../prisma/strategySelect.js";
@@ -211,6 +215,82 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         res.status(404).json({
           error: "User not eligible for structure P&L recompute",
         });
+        return;
+      }
+
+      res.json({ ok: true, results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** POST /api/admin/revenue/snapshot — daily P&L snapshot (IST). */
+  router.post("/revenue/snapshot", async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { userId?: unknown; date?: unknown };
+      const userId =
+        typeof body.userId === "string" && body.userId.trim().length > 0
+          ? body.userId.trim()
+          : undefined;
+      const date =
+        typeof body.date === "string" && body.date.trim().length > 0
+          ? body.date.trim()
+          : undefined;
+
+      const results = await runDailyPnlSnapshots(
+        prisma,
+        userId || date ? { ...(userId ? { userId } : {}), ...(date ? { date } : {}) } : undefined,
+      );
+
+      if (userId && Object.keys(results).length === 0) {
+        res.status(404).json({ error: "User not eligible for daily snapshot" });
+        return;
+      }
+
+      res.json({ ok: true, results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** POST /api/admin/revenue/invoice — monthly revenue invoice (IST). */
+  router.post("/revenue/invoice", async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as {
+        userId?: unknown;
+        year?: unknown;
+        month?: unknown;
+      };
+      const userId =
+        typeof body.userId === "string" && body.userId.trim().length > 0
+          ? body.userId.trim()
+          : undefined;
+      const year =
+        typeof body.year === "number"
+          ? body.year
+          : typeof body.year === "string"
+            ? parseInt(body.year, 10)
+            : undefined;
+      const month =
+        typeof body.month === "number"
+          ? body.month
+          : typeof body.month === "string"
+            ? parseInt(body.month, 10)
+            : undefined;
+
+      const results = await runMonthlyRevenueInvoices(
+        prisma,
+        userId || year != null || month != null
+          ? {
+              ...(userId ? { userId } : {}),
+              ...(year != null && Number.isFinite(year) ? { year } : {}),
+              ...(month != null && Number.isFinite(month) ? { month } : {}),
+            }
+          : undefined,
+      );
+
+      if (userId && Object.keys(results).length === 0) {
+        res.status(404).json({ error: "User not eligible for monthly invoice" });
         return;
       }
 

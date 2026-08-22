@@ -212,6 +212,8 @@ model User {
   pnlRecords    PnLRecord[]
   deltaLedgerEntries DeltaLedgerEntry[]
   structurePnls      StructurePnl[]
+  dailyPnlSnapshots  DailyPnlSnapshot[]
+  monthlyRevenueInvoices MonthlyRevenueInvoice[]
   activities    UserActivity[]
   profileUpdateRequests ProfileUpdateRequest[]
   depositRequests      DepositRequest[]
@@ -464,6 +466,45 @@ model StructureLegPnl {
   structure StructurePnl @relation(fields: [structurePnlId], references: [id], onDelete: Cascade)
 
   @@unique([structurePnlId, botLegId])
+}
+
+/** Daily cumulative realized P&L snapshot (IST calendar day, closed structures only). */
+model DailyPnlSnapshot {
+  id                   String   @id @default(cuid())
+  userId               String
+  snapshotDate         DateTime
+  realizedDelta        Decimal  @db.Decimal(24, 10)
+  cumulativeRealized   Decimal  @db.Decimal(24, 10)
+  highWaterMark        Decimal  @db.Decimal(24, 10)
+  commissionAccrued    Decimal  @db.Decimal(24, 10)
+  commissionCumulative Decimal  @db.Decimal(24, 10)
+  openStructureCount   Int
+  computedAt           DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, snapshotDate])
+}
+
+/** Monthly revenue invoice accrued from structure P&L (IST calendar month). */
+model MonthlyRevenueInvoice {
+  id               String   @id @default(cuid())
+  userId           String
+  periodYear       Int
+  periodMonth      Int
+  structuresClosed Int
+  realizedPnl      Decimal  @db.Decimal(24, 10)
+  hwmBefore        Decimal  @db.Decimal(24, 10)
+  hwmAfter         Decimal  @db.Decimal(24, 10)
+  billableProfit   Decimal  @db.Decimal(24, 10)
+  profitSharePct   Decimal  @db.Decimal(6, 3)
+  commissionAmount Decimal  @db.Decimal(24, 10)
+  status           String
+  generatedAt      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodYear, periodMonth])
 }
 
 model Trade {

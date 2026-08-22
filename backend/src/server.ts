@@ -53,6 +53,7 @@ import { startFutureHedgeDataEngine } from "./services/futureHedgeDataService.js
 import { startFutureHedgeEngine } from "./services/futureHedgeEngine.js";
 import { startBotSyncService } from "./services/botSyncService.js";
 import { initDeltaLedgerCronJobs } from "./services/deltaLedgerService.js";
+import { initStructureRevenueCronJobs } from "./services/structureRevenueService.js";
 import {
   hardDeleteStrategyByExactTitle,
   removeLegacyCryptoOptionsStrategies,
@@ -126,6 +127,7 @@ void (async () => {
 initBillingCronJobs(prisma);
 initAffiliateCommissionCronJobs(prisma);
 initDeltaLedgerCronJobs(prisma);
+initStructureRevenueCronJobs(prisma);
 initArbitrageEngine(prisma);
 initTelegramBot(prisma);
 initTelegramCronJobs(prisma);
