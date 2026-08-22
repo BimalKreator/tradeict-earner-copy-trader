@@ -48,6 +48,28 @@ export type BotSlaveResult = {
   error?: string | undefined;
 };
 
+export type CloseSlaveStructureResult = {
+  success: boolean;
+  status: number;
+  blocked?: boolean;
+  error?: string;
+  failedBaskets?: number[];
+  counts?: Record<string, unknown>;
+};
+
+function parseFailedBaskets(data: unknown): number[] {
+  if (data == null || typeof data !== "object") return [];
+  const d = data as Record<string, unknown>;
+  const raw = d.failed_baskets ?? d.failedBaskets ?? d.failed_basket_ids;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x): x is number => typeof x === "number");
+}
+
+function parseCloseCounts(data: unknown): Record<string, unknown> | undefined {
+  if (data == null || typeof data !== "object") return undefined;
+  return data as Record<string, unknown>;
+}
+
 /**
  * Register a new Earner user as a slave on the Delta Bot.
  * Called when user subscribes to a bot-type strategy and connects API keys.
@@ -350,4 +372,73 @@ export async function onSubscriptionCancelled(args: {
   botSlaveId: number;
 }): Promise<void> {
   await removeUserFromBot({ botSlaveId: args.botSlaveId });
+}
+
+/**
+ * Close all open baskets and the hedge for a slave, then deactivate it.
+ * Idempotent — safe to retry on network failure.
+ */
+export async function closeSlaveStructure(args: {
+  botSlaveId: number;
+  userId: string;
+  reason: string;
+}): Promise<CloseSlaveStructureResult> {
+  const result = await botFetch(
+    `/api/slave/${args.botSlaveId}/close-structure`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        reason: args.reason,
+        earner_user_id: args.userId,
+      }),
+    },
+  );
+
+  if (result.status === 0) {
+    return {
+      success: false,
+      status: 0,
+      error: "Delta Bot is unreachable. Positions were not closed — try again.",
+    };
+  }
+
+  if (result.status === 409) {
+    const failedBaskets = parseFailedBaskets(result.data);
+    const errMsg =
+      result.data && typeof result.data === "object"
+        ? String(
+            (result.data as Record<string, unknown>).detail ??
+              "One or more baskets failed to close",
+          )
+        : "One or more baskets failed to close";
+    const blocked: CloseSlaveStructureResult = {
+      success: false,
+      status: 409,
+      blocked: true,
+      error: errMsg,
+      failedBaskets,
+    };
+    const counts = parseCloseCounts(result.data);
+    if (counts) blocked.counts = counts;
+    return blocked;
+  }
+
+  if (!result.ok) {
+    const errMsg =
+      result.data && typeof result.data === "object"
+        ? String((result.data as Record<string, unknown>).detail ?? result.status)
+        : String(result.status);
+    return { success: false, status: result.status, error: errMsg };
+  }
+
+  console.log(
+    `[BotBridge] close-structure slave=${args.botSlaveId} user=${args.userId} reason=${args.reason}`,
+  );
+  const success: CloseSlaveStructureResult = {
+    success: true,
+    status: result.status,
+  };
+  const counts = parseCloseCounts(result.data);
+  if (counts) success.counts = counts;
+  return success;
 }

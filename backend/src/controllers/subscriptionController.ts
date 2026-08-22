@@ -659,12 +659,38 @@ export function createSubscriptionController(prisma: PrismaClient) {
             in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
           },
         },
-        select: { id: true },
+        select: {
+          id: true,
+          userId: true,
+          strategyId: true,
+          botSlaveId: true,
+          strategy: { select: { botStrategyType: true } },
+        },
       });
 
       if (!sub) {
         res.status(404).json({ error: "Subscription not found" });
         return;
+      }
+
+      const {
+        closeAndBillForBotSubscription,
+        mapCancellationBillingError,
+      } = await import("../services/cancellationBillingService.js");
+
+      try {
+        await closeAndBillForBotSubscription(
+          prisma,
+          sub,
+          "SUBSCRIPTION_CANCELLED",
+        );
+      } catch (billingErr) {
+        const mapped = mapCancellationBillingError(billingErr);
+        if (mapped) {
+          res.status(mapped.status).json(mapped.body);
+          return;
+        }
+        throw billingErr;
       }
 
       await prisma.userStrategySubscription.delete({

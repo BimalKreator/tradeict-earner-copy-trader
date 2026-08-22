@@ -1,0 +1,2 @@
+ALTER TABLE "MonthlyRevenueInvoice"
+  ADD COLUMN IF NOT EXISTS "isFinal" BOOLEAN NOT NULL DEFAULT false;

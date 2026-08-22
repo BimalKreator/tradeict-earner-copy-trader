@@ -23,6 +23,7 @@ import {
   runMonthlyRevenueInvoices,
 } from "../services/structureRevenueService.js";
 import { createAdminDeltaRevenueController } from "../controllers/adminDeltaRevenueController.js";
+import { createCancellationBillingController } from "../controllers/cancellationBillingController.js";
 import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
@@ -87,6 +88,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const adminEmail = createAdminEmailController(prisma);
   const futureHedge = createFutureHedgeController(prisma);
   const deltaRevenue = createAdminDeltaRevenueController(prisma);
+  const cancellationBilling = createCancellationBillingController(prisma);
 
   router.use(authenticateToken(prisma), isAdmin(prisma));
 
@@ -463,6 +465,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  router.post(
+    "/users/:id/close-structure-and-finalise-billing",
+    cancellationBilling.adminCloseStructureAndFinalise,
+  );
 
   router.get("/users/:id/crypto-arbitrage", adminController.getUserCryptoArbitrage);
   router.patch(

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
+import { AdminUserStructureBillingPanel } from "@/components/admin/AdminUserStructureBillingPanel";
 import { Loader2, Pencil, X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
@@ -1362,6 +1363,12 @@ export default function AdminUserDetails({
                 </button>
               </div>
             </div>
+
+            <AdminUserStructureBillingPanel
+              userId={userId}
+              onNotice={(message) => setNotice(message)}
+              onError={(message) => setError(message)}
+            />
 
             <div className="space-y-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.03] p-4">
               <h2 className="text-lg font-semibold text-white">Display Settings</h2>

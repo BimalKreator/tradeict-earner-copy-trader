@@ -502,6 +502,7 @@ model MonthlyRevenueInvoice {
   profitSharePct   Decimal  @db.Decimal(6, 3)
   commissionAmount Decimal  @db.Decimal(24, 10)
   status           String
+  isFinal          Boolean  @default(false)
   generatedAt      DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

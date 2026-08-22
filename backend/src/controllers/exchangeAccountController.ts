@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import type { PrismaClient } from "@prisma/client";
+import { SubscriptionStatus, type PrismaClient } from "@prisma/client";
 import { initializeDeltaClient } from "../services/exchangeService.js";
 import {
   decryptDeltaSecretOrPlain,
@@ -184,6 +184,51 @@ export function createExchangeAccountController(prisma: PrismaClient) {
       if (!existing) {
         res.status(404).json({ error: "Exchange account not found" });
         return;
+      }
+
+      const botSubs = await prisma.userStrategySubscription.findMany({
+        where: {
+          userId,
+          exchangeAccountId: existing.id,
+          status: {
+            in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAUSED_DUE_TO_FUNDS],
+          },
+          strategy: {
+            AND: [
+              { botStrategyType: { not: null } },
+              { NOT: { botStrategyType: "" } },
+            ],
+          },
+        },
+        select: {
+          id: true,
+          userId: true,
+          strategyId: true,
+          botSlaveId: true,
+          strategy: { select: { botStrategyType: true } },
+        },
+      });
+
+      const {
+        closeAndBillForBotSubscription,
+        mapCancellationBillingError,
+      } = await import("../services/cancellationBillingService.js");
+
+      for (const sub of botSubs) {
+        try {
+          await closeAndBillForBotSubscription(
+            prisma,
+            sub,
+            "API_DISCONNECTED",
+          );
+        } catch (billingErr) {
+          const mapped = mapCancellationBillingError(billingErr);
+          if (mapped) {
+            res.status(mapped.status).json(mapped.body);
+            return;
+          }
+          throw billingErr;
+        }
       }
 
       await prisma.exchangeAccount.delete({
