@@ -23,7 +23,7 @@ export type TradeFlushRow = {
   createdAt: Date;
 };
 
-export type PurgeAnalyticsResult = {
+type PurgeAnalyticsResult = {
   pnlRecordsRemoved: number;
   commissionLedgersRemoved: number;
 };
@@ -290,8 +290,9 @@ export type FlushAllPlatformResult = {
   backupPath: string | null;
 };
 
-/** Wipe every PnL row and partner commission ledger (platform-wide reset). */
-export async function purgeAllPlatformAnalytics(
+// PRIVATE: never call directly. Only the guarded flow may call this --
+// snapshotBeforePurge() + AdminAuditLog must run first.
+async function purgeAllPlatformAnalytics(
   prisma: DbClient,
 ): Promise<PurgeAnalyticsResult> {
   const commissionOut = await prisma.commissionLedger.deleteMany({});
