@@ -2,6 +2,7 @@
 
 import { AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { authFetch, buildApiUrl, formatFetchError } from "@/lib/authFetch";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
@@ -18,18 +19,24 @@ type StructureSummary = {
 
 type Props = {
   userId: string;
+  /** Customer email required for backend typed confirmation. */
+  userEmail: string;
   onNotice?: (message: string) => void;
   onError?: (message: string) => void;
 };
 
 export function AdminUserStructureBillingPanel({
   userId,
+  userEmail,
   onNotice,
   onError,
 }: Props) {
   const [loading, setLoading] = useState(true);
   const [structures, setStructures] = useState<StructureSummary[]>([]);
   const [finalising, setFinalising] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [modalResult, setModalResult] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadStructures = useCallback(async () => {
@@ -59,19 +66,20 @@ export function AdminUserStructureBillingPanel({
   const openCount = structures.filter((s) => s.status !== "closed").length;
   const closedCount = structures.filter((s) => s.status === "closed").length;
 
-  async function finaliseBilling() {
-    const ok = window.confirm(
-      "Close this user's open bot structure on Delta, sync ledger, recompute P&L, " +
-        "and issue a final invoice for the current IST month? This cannot be undone.",
-    );
-    if (!ok) return;
-
+  async function runFinalise(confirmation: string) {
     setFinalising(true);
+    setModalError(null);
+    setModalResult(null);
     try {
       const path = `/admin/users/${userId}/close-structure-and-finalise-billing`;
-      const res = await authFetch(path, { method: "POST" });
+      const res = await authFetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      });
       const body = (await res.json().catch(() => ({}))) as {
         error?: string;
+        expectedHint?: string;
         failedBaskets?: number[];
         invoice?: { commissionAmount?: number; billableProfit?: number; isFinal?: boolean };
       };
@@ -80,16 +88,21 @@ export function AdminUserStructureBillingPanel({
           body.failedBaskets && body.failedBaskets.length > 0
             ? ` Failed baskets: ${body.failedBaskets.join(", ")}.`
             : "";
+        const hint = body.expectedHint ? ` ${body.expectedHint}` : "";
         throw new Error(
-          (body.error ?? formatFetchError("finalise billing", res, buildApiUrl(path))) + extra,
+          (body.error ?? formatFetchError("finalise billing", res, buildApiUrl(path))) +
+            hint +
+            extra,
         );
       }
-      onNotice?.(
-        `Structure closed and final invoice issued (commission ${fmtUsd(body.invoice?.commissionAmount ?? 0)}).`,
-      );
+      const msg = `Structure closed and final invoice issued (commission ${fmtUsd(body.invoice?.commissionAmount ?? 0)}).`;
+      setModalResult(msg);
+      onNotice?.(msg);
       await loadStructures();
     } catch (err) {
-      onError?.(err instanceof Error ? err.message : "Finalise billing failed");
+      const message = err instanceof Error ? err.message : "Finalise billing failed";
+      setModalError(message);
+      onError?.(message);
     } finally {
       setFinalising(false);
     }
@@ -110,11 +123,15 @@ export function AdminUserStructureBillingPanel({
         </div>
         <button
           type="button"
-          disabled={finalising || loading}
-          onClick={() => void finaliseBilling()}
+          disabled={finalising || loading || !userEmail}
+          onClick={() => {
+            setModalError(null);
+            setModalResult(null);
+            setModalOpen(true);
+          }}
           className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-2 text-xs font-medium text-sky-100 hover:bg-sky-500/25 disabled:opacity-60"
         >
-          {finalising ? "Finalising…" : "Close structure and finalise billing"}
+          {finalising ? "Finalising..." : "Close structure and finalise billing"}
         </button>
       </div>
 
@@ -134,10 +151,10 @@ export function AdminUserStructureBillingPanel({
       ) : (
         <>
           <p className="text-sm text-white/70">
-            <span className="font-medium text-white">{structures.length}</span> structures ·{" "}
+            <span className="font-medium text-white">{structures.length}</span> structures · 
             <span className={openCount > 0 ? "text-amber-300" : "text-emerald-300"}>
               {openCount} open
-            </span>{" "}
+            </span> 
             · {closedCount} closed
           </p>
           <div className="max-h-48 overflow-y-auto rounded-lg border border-white/10">
@@ -168,6 +185,22 @@ export function AdminUserStructureBillingPanel({
           </div>
         </>
       )}
+
+      <ConfirmDestructiveModal
+        open={modalOpen}
+        title="Close structure and finalise billing"
+        description={`This closes LIVE Delta positions for this customer (${openCount} open structure(s)), syncs the ledger, recomputes P&L, and issues a final invoice for the current IST month. This cannot be undone.`}
+        expectedConfirmation={userEmail}
+        customerEmail={userEmail}
+        confirmButtonText="Close structure & finalise"
+        busy={finalising}
+        error={modalError}
+        result={modalResult}
+        onClose={() => {
+          if (!finalising) setModalOpen(false);
+        }}
+        onConfirm={(confirmation) => void runFinalise(confirmation)}
+      />
     </div>
   );
 }

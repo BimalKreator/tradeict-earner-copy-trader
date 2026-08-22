@@ -64,6 +64,11 @@ import {
   isInjectTradeClientError,
 } from "../services/dummyTradeInjectorService.js";
 import {
+  CONFIRM_CLEAR_DUMMY_TRADES,
+  CONFIRM_INJECT_TEST_TRADE,
+  requireTypedConfirmation,
+} from "../utils/requireTypedConfirmation.js";
+import {
   getDeltaRestPauseStatus,
   setDeltaRestApiManualPause,
 } from "../utils/deltaRateLimiter.js";
@@ -163,6 +168,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     next: NextFunction,
   ): Promise<void> {
     try {
+      if (!requireTypedConfirmation(req, res, CONFIRM_INJECT_TEST_TRADE)) {
+        return;
+      }
       const result = await handleInjectTradeRequest(
         prisma,
         (req.body ?? {}) as Record<string, unknown>,
@@ -313,8 +321,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   /** DELETE /api/admin/debug/clear-dummy-trades — purge injected test data. */
-  router.delete("/debug/clear-dummy-trades", superAdminOnly, async (_req, res, next) => {
+  router.delete("/debug/clear-dummy-trades", superAdminOnly, async (req, res, next) => {
     try {
+      if (!requireTypedConfirmation(req, res, CONFIRM_CLEAR_DUMMY_TRADES)) {
+        return;
+      }
       const result = await clearDummyTrades(prisma);
       res.json({ ok: true, ...result });
     } catch (err) {

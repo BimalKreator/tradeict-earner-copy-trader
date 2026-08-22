@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { Loader2, TestTube2, Trash2 } from "lucide-react";
 
 const ENV_API_BASE =
@@ -75,6 +76,10 @@ export default function AdminInjectTradePage() {
   const [strategyId, setStrategyId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [injectModalOpen, setInjectModalOpen] = useState(false);
+  const [clearModalOpen, setClearModalOpen] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [modalResult, setModalResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [result, setResult] = useState<InjectTradeResponse | null>(null);
@@ -111,61 +116,89 @@ export default function AdminInjectTradePage() {
     return () => window.clearTimeout(t);
   }, [success]);
 
-  async function handleClearDummyTrades() {
-    const confirmed = window.confirm(
-      "Delete ALL injected dummy trades, their PnL records, and partner commission ledger rows? Real trades are not affected.",
-    );
-    if (!confirmed) return;
+  function openClearModal() {
+    setModalError(null);
+    setModalResult(null);
+    setClearModalOpen(true);
+  }
 
+  async function runClearDummyTrades(confirmation: string) {
     setClearing(true);
+    setModalError(null);
+    setModalResult(null);
     setError(null);
     setSuccess(null);
     try {
       const res = await fetch(`${apiBase}/admin/debug/clear-dummy-trades`, {
         method: "DELETE",
         headers: authHeaders(),
+        body: JSON.stringify({ confirmation }),
       });
       const data: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(
+        const msg =
           typeof data === "object" &&
-            data !== null &&
-            "error" in data &&
-            typeof (data as { error: unknown }).error === "string"
+          data !== null &&
+          "error" in data &&
+          typeof (data as { error: unknown }).error === "string"
             ? (data as { error: string }).error
-            : `Clear failed (${res.status})`,
-        );
+            : `Clear failed (${res.status})`;
+        const hint =
+          typeof data === "object" &&
+          data !== null &&
+          "expectedHint" in data &&
+          typeof (data as { expectedHint: unknown }).expectedHint === "string"
+            ? ` ${(data as { expectedHint: string }).expectedHint}`
+            : "";
+        throw new Error(msg + hint);
       }
       const cleared = data as ClearDummyTradesResponse;
       setResult(null);
-      setSuccess(
-        `Cleaned up ${cleared.tradesDeleted} trade(s), ${cleared.pnlRecordsDeleted} PnL record(s), and ${cleared.commissionLedgersDeleted} commission row(s).`,
-      );
+      const msg = `Cleaned up ${cleared.tradesDeleted} trade(s), ${cleared.pnlRecordsDeleted} PnL record(s), and ${cleared.commissionLedgersDeleted} commission row(s).`;
+      setModalResult(msg);
+      setSuccess(msg);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to clear dummy trades");
+      const message =
+        e instanceof Error ? e.message : "Failed to clear dummy trades";
+      setModalError(message);
+      setError(message);
     } finally {
       setClearing(false);
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  function openInjectModal(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSuccess(null);
     setResult(null);
+    setModalError(null);
+    setModalResult(null);
+    if (!userId.trim()) {
+      setError("Select or enter a user ID");
+      return;
+    }
+    const pnl = Number.parseFloat(grossPnl);
+    if (!Number.isFinite(pnl)) {
+      setError("Enter a valid gross PnL number");
+      return;
+    }
+    setInjectModalOpen(true);
+  }
+
+  async function runInjectTrade(confirmation: string) {
     setSubmitting(true);
+    setModalError(null);
+    setModalResult(null);
+    setError(null);
+    setSuccess(null);
+    setResult(null);
     try {
       const pnl = Number.parseFloat(grossPnl);
-      if (!userId.trim()) {
-        throw new Error("Select or enter a user ID");
-      }
-      if (!Number.isFinite(pnl)) {
-        throw new Error("Enter a valid gross PnL number");
-      }
-
       const body: Record<string, string | number> = {
         userId: userId.trim(),
         grossPnl: pnl,
+        confirmation,
       };
       if (symbol.trim()) body.symbol = symbol.trim();
       if (strategyId.trim()) body.strategyId = strategyId.trim();
@@ -177,22 +210,34 @@ export default function AdminInjectTradePage() {
       });
       const data: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(
+        const msg =
           typeof data === "object" &&
-            data !== null &&
-            "error" in data &&
-            typeof (data as { error: unknown }).error === "string"
+          data !== null &&
+          "error" in data &&
+          typeof (data as { error: unknown }).error === "string"
             ? (data as { error: string }).error
-            : `Request failed (${res.status})`,
-        );
+            : `Request failed (${res.status})`;
+        const hint =
+          typeof data === "object" &&
+          data !== null &&
+          "expectedHint" in data &&
+          typeof (data as { expectedHint: unknown }).expectedHint === "string"
+            ? ` ${(data as { expectedHint: string }).expectedHint}`
+            : "";
+        throw new Error(msg + hint);
       }
       setResult(data as InjectTradeResponse);
+      setModalResult("Test trade injected.");
+      setSuccess("Test trade injected.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Inject trade failed");
+      const message = e instanceof Error ? e.message : "Inject trade failed";
+      setModalError(message);
+      setError(message);
     } finally {
       setSubmitting(false);
     }
   }
+
 
   return (
     <div className="space-y-8">
@@ -224,7 +269,7 @@ export default function AdminInjectTradePage() {
       ) : null}
 
       <div className="glass-card max-w-xl border border-glassBorder p-6 md:p-8">
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={openInjectModal} className="space-y-5">
           <label className="block text-sm text-white/70">
             User
             <select
@@ -313,7 +358,7 @@ export default function AdminInjectTradePage() {
           </p>
           <button
             type="button"
-            onClick={() => void handleClearDummyTrades()}
+            onClick={() => openClearModal()}
             disabled={submitting || clearing}
             className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-600/90 px-5 py-3 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
           >
@@ -401,6 +446,35 @@ export default function AdminInjectTradePage() {
           ) : null}
         </section>
       ) : null}
+
+      <ConfirmDestructiveModal
+        open={injectModalOpen}
+        title="Inject test trade"
+        description="Creates a dummy trade with PnL and partner commission rows for testing. No exchange orders are placed. Type INJECT TEST TRADE to continue."
+        expectedConfirmation="INJECT TEST TRADE"
+        confirmButtonText="Inject test trade"
+        busy={submitting}
+        error={injectModalOpen ? modalError : null}
+        result={injectModalOpen ? modalResult : null}
+        onClose={() => {
+          if (!submitting) setInjectModalOpen(false);
+        }}
+        onConfirm={(confirmation) => void runInjectTrade(confirmation)}
+      />
+      <ConfirmDestructiveModal
+        open={clearModalOpen}
+        title="Clear dummy trades"
+        description="Deletes ALL injected dummy trades, their PnL records, and partner commission ledger rows. Real trades are not affected. This cannot be undone."
+        expectedConfirmation="CLEAR DUMMY TRADES"
+        confirmButtonText="Clear dummy trades"
+        busy={clearing}
+        error={clearModalOpen ? modalError : null}
+        result={clearModalOpen ? modalResult : null}
+        onClose={() => {
+          if (!clearing) setClearModalOpen(false);
+        }}
+        onConfirm={(confirmation) => void runClearDummyTrades(confirmation)}
+      />
     </div>
   );
 }

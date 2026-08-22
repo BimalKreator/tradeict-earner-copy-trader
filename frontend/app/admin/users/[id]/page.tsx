@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { AdminUserStructureBillingPanel } from "@/components/admin/AdminUserStructureBillingPanel";
+import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { AdminUserSimulationPanel } from "@/components/admin/AdminUserSimulationPanel";
 import { Loader2, Pencil, X } from "lucide-react";
 
@@ -157,6 +158,10 @@ export default function AdminUserDetails({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
+  const [flushModalOpen, setFlushModalOpen] = useState(false);
+  const [flushModalError, setFlushModalError] = useState<string | null>(null);
+  const [flushModalResult, setFlushModalResult] = useState<string | null>(null);
+  const [flushPendingIds, setFlushPendingIds] = useState<string[] | undefined>(undefined);
   const [reconcilingStaleOpen, setReconcilingStaleOpen] = useState(false);
   const [selectedTradeIds, setSelectedTradeIds] = useState<string[]>([]);
   const [sendingReset, setSendingReset] = useState(false);
@@ -836,15 +841,19 @@ export default function AdminUserDetails({
     }
   }
 
-  async function flushTrades(tradeIds?: string[]): Promise<void> {
+  function openFlushModal(tradeIds?: string[]): void {
+    setFlushPendingIds(tradeIds);
+    setFlushModalError(null);
+    setFlushModalResult(null);
+    setFlushModalOpen(true);
+  }
+
+  async function runFlushTrades(confirmation: string): Promise<void> {
+    const tradeIds = flushPendingIds;
     const selective = Boolean(tradeIds?.length);
-    const ok = window.confirm(
-      selective
-        ? `Delete ${tradeIds!.length} selected closed/failed trade(s)? A backup CSV will be created.`
-        : "Delete all closed/failed trades for this user? Open trades will be kept and a backup CSV will be created.",
-    );
-    if (!ok) return;
     setFlushing(true);
+    setFlushModalError(null);
+    setFlushModalResult(null);
     setError(null);
     setNotice(null);
     try {
@@ -853,34 +862,39 @@ export default function AdminUserDetails({
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
+          confirmation,
           ...(selective ? { tradeIds } : {}),
         }),
       });
-      if (!res.ok) {
-        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(errBody.error ?? "Failed to flush trade history.");
-      }
-      const body = (await res.json()) as {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        expectedHint?: string;
         backupFile?: string;
         deleted?: number;
         analyticsRemoved?: number;
       };
+      if (!res.ok) {
+        const hint = body.expectedHint ? ` ${body.expectedHint}` : "";
+        throw new Error((body.error ?? "Failed to flush trade history.") + hint);
+      }
       setSelectedTradeIds([]);
-      setNotice(
-        body.backupFile
-          ? `Flush backup created. ${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`
-          : `${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`,
-      );
+      const msg = body.backupFile
+        ? `Flush backup created. ${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`
+        : `${body.deleted ?? 0} trade(s) removed; ${body.analyticsRemoved ?? 0} analytics row(s) cleared.`;
+      setFlushModalResult(msg);
+      setNotice(msg);
       await loadAll();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to flush trade history.");
+      const message = e instanceof Error ? e.message : "Failed to flush trade history.";
+      setFlushModalError(message);
+      setError(message);
     } finally {
       setFlushing(false);
     }
   }
 
   async function flushTradeHistory(): Promise<void> {
-    await flushTrades();
+    openFlushModal();
   }
 
   async function flushSelectedTrades(): Promise<void> {
@@ -888,7 +902,7 @@ export default function AdminUserDetails({
       setError("Select at least one closed or failed trade to flush.");
       return;
     }
-    await flushTrades(selectedTradeIds);
+    openFlushModal(selectedTradeIds);
   }
 
   async function sendResetLink(): Promise<void> {
@@ -1417,9 +1431,31 @@ export default function AdminUserDetails({
 
             <AdminUserStructureBillingPanel
               userId={userId}
+              userEmail={user?.email ?? ""}
               onNotice={(message) => setNotice(message)}
               onError={(message) => setError(message)}
             />
+
+      <ConfirmDestructiveModal
+        open={flushModalOpen}
+        title="Flush user trades"
+        description={
+          flushPendingIds?.length
+            ? `Permanently delete ${flushPendingIds.length} selected closed/failed trade(s) for this customer. A backup CSV is written first. Open trades are kept. This cannot be undone.`
+            : "Permanently delete all closed/failed trades for this customer. A backup CSV is written first. Open trades are kept. This cannot be undone."
+        }
+        expectedConfirmation={user?.email ?? ""}
+        customerEmail={user?.email ?? ""}
+        confirmButtonText="Flush trades"
+        busy={flushing}
+        error={flushModalError}
+        result={flushModalResult}
+        onClose={() => {
+          if (!flushing) setFlushModalOpen(false);
+        }}
+        onConfirm={(confirmation) => void runFlushTrades(confirmation)}
+      />
+
 
             <AdminUserSimulationPanel
               userId={userId}

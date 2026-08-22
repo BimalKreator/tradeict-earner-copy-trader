@@ -56,6 +56,11 @@ import {
 } from "../services/exchangeService.js";
 import { sendPasswordResetLinkEmail } from "../utils/emailService.js";
 import {
+  CONFIRM_CLOSE_ALL_POSITIONS,
+  CONFIRM_SYNC_ALL_FOLLOWERS,
+  requireTypedConfirmation,
+} from "../utils/requireTypedConfirmation.js";
+import {
   buildTimestampTag,
   rowsToCsv,
   writeCsvToDownloads,
@@ -1553,6 +1558,10 @@ export function createAdminController(prisma: PrismaClient) {
       });
       if (!user) {
         res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      if (!requireTypedConfirmation(req, res, user.email)) {
         return;
       }
 
@@ -3180,6 +3189,10 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
+      if (!requireTypedConfirmation(req, res, CONFIRM_CLOSE_ALL_POSITIONS)) {
+        return;
+      }
+
       const body = req.body as { strategyId?: unknown };
       const strategyId = String(body.strategyId ?? "").trim();
       if (!strategyId) {
@@ -3210,6 +3223,10 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
+      if (!requireTypedConfirmation(req, res, CONFIRM_SYNC_ALL_FOLLOWERS)) {
+        return;
+      }
+
       const body = req.body as { strategyId?: unknown };
       const strategyId = String(body.strategyId ?? "").trim();
       if (!strategyId) {

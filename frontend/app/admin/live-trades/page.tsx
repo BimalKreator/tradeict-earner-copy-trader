@@ -24,6 +24,7 @@ import {
   GranularSyncModal,
   type GranularSyncMasterLeg,
 } from "@/components/admin/GranularSyncModal";
+import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import {
   AdjustQtyModal,
   type AdjustQtyTarget,
@@ -1556,6 +1557,13 @@ export default function AdminLiveTradesPage() {
   const [bulkOpsStrategyId, setBulkOpsStrategyId] = useState<string | null>(
     null,
   );
+  const [destructiveModal, setDestructiveModal] = useState<null | {
+    kind: "close-all" | "sync-all";
+    strategyId: string;
+  }>(null);
+  const [destructiveBusy, setDestructiveBusy] = useState(false);
+  const [destructiveError, setDestructiveError] = useState<string | null>(null);
+  const [destructiveResult, setDestructiveResult] = useState<string | null>(null);
   const [expandedSubsByStrategy, setExpandedSubsByStrategy] = useState<
     Record<string, Set<string>>
   >({});
@@ -1734,13 +1742,17 @@ export default function AdminLiveTradesPage() {
     [load],
   );
 
-  const closeAllPositions = useCallback(
-    async (strategyId: string) => {
-      const ok = window.confirm(
-        "Close ALL open positions on the master account and every active follower for this strategy? This places reduce-only market orders on Delta.",
-      );
-      if (!ok) return;
+  const closeAllPositions = useCallback(async (strategyId: string) => {
+    setDestructiveError(null);
+    setDestructiveResult(null);
+    setDestructiveModal({ kind: "close-all", strategyId });
+  }, []);
+
+  const runCloseAllPositions = useCallback(
+    async (strategyId: string, confirmation: string) => {
+      setDestructiveBusy(true);
       setBulkOpsStrategyId(strategyId);
+      setDestructiveError(null);
       setError(null);
       try {
         const base = resolveAdminApiBase();
@@ -1750,7 +1762,7 @@ export default function AdminLiveTradesPage() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
           },
-          body: JSON.stringify({ strategyId }),
+          body: JSON.stringify({ strategyId, confirmation }),
         });
         const payload: unknown = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -1761,7 +1773,14 @@ export default function AdminLiveTradesPage() {
             typeof (payload as { error: unknown }).error === "string"
               ? (payload as { error: string }).error
               : `Close all failed (${res.status})`;
-          throw new Error(msg);
+          const hint =
+            typeof payload === "object" &&
+            payload !== null &&
+            "expectedHint" in payload &&
+            typeof (payload as { expectedHint: unknown }).expectedHint === "string"
+              ? ` ${(payload as { expectedHint: string }).expectedHint}`
+              : "";
+          throw new Error(msg + hint);
         }
         const message =
           typeof payload === "object" &&
@@ -1770,24 +1789,33 @@ export default function AdminLiveTradesPage() {
           typeof (payload as { message: unknown }).message === "string"
             ? (payload as { message: string }).message
             : "All positions closed.";
+        setDestructiveResult(message);
         setToast(message);
         await load({ silent: true });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to close all positions");
+        const message =
+          e instanceof Error ? e.message : "Failed to close all positions";
+        setDestructiveError(message);
+        setError(message);
       } finally {
+        setDestructiveBusy(false);
         setBulkOpsStrategyId(null);
       }
     },
     [load],
   );
 
-  const syncAllToMaster = useCallback(
-    async (strategyId: string) => {
-      const ok = window.confirm(
-        "Sync ALL active followers to match master open legs and lot sizes (× each user's multiplier)? Extra follower-only legs will be closed.",
-      );
-      if (!ok) return;
+  const syncAllToMaster = useCallback(async (strategyId: string) => {
+    setDestructiveError(null);
+    setDestructiveResult(null);
+    setDestructiveModal({ kind: "sync-all", strategyId });
+  }, []);
+
+  const runSyncAllToMaster = useCallback(
+    async (strategyId: string, confirmation: string) => {
+      setDestructiveBusy(true);
       setBulkOpsStrategyId(strategyId);
+      setDestructiveError(null);
       setError(null);
       try {
         const base = resolveAdminApiBase();
@@ -1797,7 +1825,7 @@ export default function AdminLiveTradesPage() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
           },
-          body: JSON.stringify({ strategyId }),
+          body: JSON.stringify({ strategyId, confirmation }),
         });
         const payload: unknown = await res.json().catch(() => ({}));
         if (!res.ok && res.status !== 207) {
@@ -1808,7 +1836,14 @@ export default function AdminLiveTradesPage() {
             typeof (payload as { error: unknown }).error === "string"
               ? (payload as { error: string }).error
               : `Sync all failed (${res.status})`;
-          throw new Error(msg);
+          const hint =
+            typeof payload === "object" &&
+            payload !== null &&
+            "expectedHint" in payload &&
+            typeof (payload as { expectedHint: unknown }).expectedHint === "string"
+              ? ` ${(payload as { expectedHint: string }).expectedHint}`
+              : "";
+          throw new Error(msg + hint);
         }
         const message =
           typeof payload === "object" &&
@@ -1817,11 +1852,16 @@ export default function AdminLiveTradesPage() {
           typeof (payload as { message: unknown }).message === "string"
             ? (payload as { message: string }).message
             : "Followers synced to master.";
+        setDestructiveResult(message);
         setToast(message);
         await load({ silent: true });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to sync followers");
+        const message =
+          e instanceof Error ? e.message : "Failed to sync followers";
+        setDestructiveError(message);
+        setError(message);
       } finally {
+        setDestructiveBusy(false);
         setBulkOpsStrategyId(null);
       }
     },
@@ -2216,6 +2256,44 @@ export default function AdminLiveTradesPage() {
           void load({ silent: true });
         }}
         onError={(message) => setError(message)}
+      />
+
+      <ConfirmDestructiveModal
+        open={destructiveModal != null}
+        title={
+          destructiveModal?.kind === "sync-all"
+            ? "Sync all followers to master"
+            : "Close all live positions"
+        }
+        description={
+          destructiveModal?.kind === "sync-all"
+            ? "Sync ALL active followers to match master open legs and lot sizes (x each user multiplier). Extra follower-only legs will be closed. This places live Delta orders."
+            : "Close ALL open positions on the master account and every active follower for this strategy. This places reduce-only market orders on Delta and cannot be undone from this screen."
+        }
+        expectedConfirmation={
+          destructiveModal?.kind === "sync-all"
+            ? "SYNC ALL FOLLOWERS"
+            : "CLOSE ALL POSITIONS"
+        }
+        confirmButtonText={
+          destructiveModal?.kind === "sync-all"
+            ? "Sync all followers"
+            : "Close all positions"
+        }
+        busy={destructiveBusy}
+        error={destructiveError}
+        result={destructiveResult}
+        onClose={() => {
+          if (!destructiveBusy) setDestructiveModal(null);
+        }}
+        onConfirm={(confirmation) => {
+          if (!destructiveModal) return;
+          if (destructiveModal.kind === "sync-all") {
+            void runSyncAllToMaster(destructiveModal.strategyId, confirmation);
+          } else {
+            void runCloseAllPositions(destructiveModal.strategyId, confirmation);
+          }
+        }}
       />
     </div>
   );
