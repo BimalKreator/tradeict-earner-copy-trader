@@ -469,6 +469,8 @@ model StructureLegPnl {
   side             String
   quantity         Int
   openedAt         DateTime
+  /** Ledger window start override; null = use openedAt. */
+  attributionFrom  DateTime?
   closedAt         DateTime?
   grossCashflow    Decimal  @db.Decimal(24, 10)
   commissionTotal  Decimal  @db.Decimal(24, 10)

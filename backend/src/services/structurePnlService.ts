@@ -29,8 +29,17 @@ type BotLeg = {
   side: string;
   quantity: number;
   openedAt: Date;
+  /** Explicit bot override; null means use openedAt for window start. */
+  attributionFrom: Date | null;
   closedAt: Date | null;
 };
+
+function legWindowStart(leg: {
+  openedAt: Date;
+  attributionFrom: Date | null;
+}): Date {
+  return leg.attributionFrom ?? leg.openedAt;
+}
 
 type BotStructure = {
   botStructureId: number;
@@ -125,6 +134,7 @@ function parseBotLeg(raw: Record<string, unknown>): BotLeg | null {
   if (botLegId === null || productId === null || !openedAt) return null;
 
   const closedAtRaw = parseDate(raw.closed_at);
+  const attributionFrom = parseDate(raw.attribution_from);
   const basketSeq = numberOrNull(raw.basket_seq);
   const adjSeq = numberOrNull(raw.adj_seq);
   const quantity = numberOrNull(raw.quantity) ?? 0;
@@ -143,6 +153,7 @@ function parseBotLeg(raw: Record<string, unknown>): BotLeg | null {
     side: String(raw.side ?? "unknown"),
     quantity: Math.trunc(quantity),
     openedAt,
+    attributionFrom,
     closedAt: closedAtRaw,
   };
 }
@@ -208,7 +219,7 @@ function legWindowUpper(leg: BotLeg): Date | null {
 
 function txnMatchesLeg(txn: LedgerRow, leg: BotLeg): boolean {
   if (txn.productId !== leg.productId) return false;
-  if (txn.occurredAt < leg.openedAt) return false;
+  if (txn.occurredAt < legWindowStart(leg)) return false;
   const upper = legWindowUpper(leg);
   if (upper && txn.occurredAt > upper) return false;
   return true;
@@ -255,7 +266,8 @@ function legRealizedPnl(totals: LegTotals, leg: BotLeg): Prisma.Decimal | null {
 
 export type LegAttributionWindow = {
   productId: number;
-  openedAt: Date;
+  /** Window start — use attributionFrom when set, else openedAt. */
+  attributionFrom: Date;
   closedAt: Date | null;
 };
 
@@ -265,11 +277,18 @@ export function ledgerTxnMatchesLegWindow(
   leg: LegAttributionWindow,
 ): boolean {
   if (txn.productId !== leg.productId) return false;
-  if (txn.occurredAt < leg.openedAt) return false;
+  if (txn.occurredAt < leg.attributionFrom) return false;
   if (!leg.closedAt) return true;
   const upper = new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
   if (txn.occurredAt > upper) return false;
   return true;
+}
+
+export function resolveLegAttributionWindowStart(leg: {
+  openedAt: Date;
+  attributionFrom?: Date | null;
+}): Date {
+  return leg.attributionFrom ?? leg.openedAt;
 }
 
 type LegAttributionFailure = {
@@ -510,6 +529,7 @@ async function recomputeStructurePnlForUser(
           side: leg.side,
           quantity: leg.quantity,
           openedAt: leg.openedAt,
+          attributionFrom: leg.attributionFrom,
           closedAt: leg.closedAt,
           grossCashflow: totals.grossCashflow,
           commissionTotal: totals.commissionTotal,
@@ -526,6 +546,7 @@ async function recomputeStructurePnlForUser(
           side: leg.side,
           quantity: leg.quantity,
           openedAt: leg.openedAt,
+          attributionFrom: leg.attributionFrom,
           closedAt: leg.closedAt,
           grossCashflow: totals.grossCashflow,
           commissionTotal: totals.commissionTotal,

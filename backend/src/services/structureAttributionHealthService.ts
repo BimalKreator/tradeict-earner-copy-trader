@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   ATTRIBUTION_STATUS,
   ledgerTxnMatchesLegWindow,
+  resolveLegAttributionWindowStart,
 } from "./structurePnlService.js";
 
 const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
@@ -76,7 +77,7 @@ export async function getAttributionHealthForUser(
         const matched = ledgerRows.filter((txn) =>
           ledgerTxnMatchesLegWindow(txn, {
             productId: leg.productId,
-            openedAt: leg.openedAt,
+            attributionFrom: resolveLegAttributionWindowStart(leg),
             closedAt: leg.closedAt,
           }),
         );

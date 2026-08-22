@@ -1,5 +1,5 @@
 import { Prisma, TradeStatus, type PrismaClient } from "@prisma/client";
-import { LEG_CLOSE_GRACE_MS, listEligibleStructurePnlUserIds } from "./structurePnlService.js";
+import { LEG_CLOSE_GRACE_MS, listEligibleStructurePnlUserIds, resolveLegAttributionWindowStart } from "./structurePnlService.js";
 import {
   countLegacyBotSyncTrades,
   istMonthWindow,
@@ -22,6 +22,7 @@ type DbLeg = {
   botLegId: number;
   productId: number;
   openedAt: Date;
+  attributionFrom: Date | null;
   closedAt: Date | null;
 };
 
@@ -36,7 +37,7 @@ function txnMatchesLeg(
   leg: DbLeg,
 ): boolean {
   if (productId !== leg.productId) return false;
-  if (occurredAt < leg.openedAt) return false;
+  if (occurredAt < resolveLegAttributionWindowStart(leg)) return false;
   const upper = legWindowUpper(leg);
   if (upper && occurredAt > upper) return false;
   return true;
@@ -88,6 +89,7 @@ export async function computeUserLedgerHealth(
         botLegId: true,
         productId: true,
         openedAt: true,
+        attributionFrom: true,
         closedAt: true,
         structure: { select: { botStructureId: true } },
       },
@@ -99,6 +101,7 @@ export async function computeUserLedgerHealth(
     botLegId: leg.botLegId,
     productId: leg.productId,
     openedAt: leg.openedAt,
+    attributionFrom: leg.attributionFrom,
     closedAt: leg.closedAt,
   }));
 

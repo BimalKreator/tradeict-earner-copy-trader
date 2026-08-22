@@ -1,5 +1,5 @@
 /**
- * One-off backfill: shift leg openedAt backward so pre-fix entry fills fall
+ * One-off backfill: set leg attribution_from so pre-fix entry fills fall
  * inside the attribution window, then recompute structure P&L.
  *
  * Default is dry-run (no DB writes). Pass --apply to persist changes.
@@ -35,8 +35,13 @@ type CashflowRow = {
 
 type LegWindow = {
   productId: number;
-  openedAt: Date;
+  attributionFrom: Date;
   closedAt: Date | null;
+};
+
+type LegWindowContext = LegWindow & {
+  /** Actual leg open time — used for candidate search and exit sign, not window start. */
+  openedAt: Date;
 };
 
 type RepairCandidate = {
@@ -49,8 +54,9 @@ type LegRepairPlan = {
   legId: string;
   botLegId: number;
   side: string;
-  oldOpenedAt: Date;
-  newOpenedAt: Date;
+  openedAt: Date;
+  oldAttributionFrom: Date;
+  newAttributionFrom: Date;
   candidate: RepairCandidate;
   oldLegPnl: number;
   newLegPnl: number;
@@ -158,7 +164,7 @@ function computeLegTotals(
 
 function exitCashflowSign(
   ledger: CashflowRow[],
-  leg: LegWindow,
+  leg: LegWindowContext,
 ): number | null {
   const rows = ledger.filter(
     (txn) =>
@@ -187,12 +193,7 @@ function entrySignMatchesSide(side: string, amount: number): boolean {
 
 function findEntryCandidate(
   ledger: CashflowRow[],
-  leg: {
-    productId: number;
-    openedAt: Date;
-    closedAt: Date | null;
-    side: string;
-  },
+  leg: LegWindowContext & { side: string },
   lookbackSeconds: number,
 ): { candidate: RepairCandidate | null; reason: string | null } {
   const lookbackMs = lookbackSeconds * 1_000;
@@ -262,26 +263,33 @@ function findEntryCandidate(
 }
 
 function isLegAlreadyRepaired(
-  currentOpenedAt: Date,
+  currentAttributionFrom: Date | null,
+  openedAt: Date,
   candidateOccurredAt: Date,
 ): boolean {
   const target = new Date(candidateOccurredAt.getTime() - OPENED_AT_OFFSET_MS);
-  return Math.abs(currentOpenedAt.getTime() - target.getTime()) <= 500;
+  const current = currentAttributionFrom ?? openedAt;
+  return Math.abs(current.getTime() - target.getTime()) <= 500;
 }
 
-async function patchBotLegOpenedAt(
+async function patchBotLegAttributionFrom(
   botLegId: number,
-  openedAt: Date,
+  attributionFrom: Date,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), BOT_TIMEOUT_MS);
-    const res = await fetch(`${BOT_BASE_URL}/api/legs/${botLegId}`, {
-      method: "PATCH",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ opened_at: openedAt.toISOString() }),
-    });
+    const res = await fetch(
+      `${BOT_BASE_URL}/api/structures/legs/${botLegId}/attribution-from`,
+      {
+        method: "PATCH",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attribution_from: attributionFrom.toISOString(),
+        }),
+      },
+    );
     clearTimeout(timer);
     if (res.ok) return { ok: true };
     let detail = String(res.status);
@@ -343,6 +351,7 @@ async function buildStructurePlan(
       productId: number;
       side: string;
       openedAt: Date;
+      attributionFrom: Date | null;
       closedAt: Date | null;
       realizedPnl: Prisma.Decimal | null;
     }>;
@@ -358,14 +367,16 @@ async function buildStructurePlan(
       legSkips.push({ botLegId: leg.botLegId, reason: "leg not closed" });
       proposedLegWindows.set(leg.botLegId, {
         productId: leg.productId,
-        openedAt: leg.openedAt,
+        attributionFrom: leg.attributionFrom ?? leg.openedAt,
         closedAt: leg.closedAt,
       });
       continue;
     }
 
-    const currentWindow: LegWindow = {
+    const currentWindowStart = leg.attributionFrom ?? leg.openedAt;
+    const currentWindow: LegWindowContext = {
       productId: leg.productId,
+      attributionFrom: currentWindowStart,
       openedAt: leg.openedAt,
       closedAt: leg.closedAt,
     };
@@ -375,9 +386,7 @@ async function buildStructurePlan(
     const { candidate, reason } = findEntryCandidate(
       ledger,
       {
-        productId: leg.productId,
-        openedAt: leg.openedAt,
-        closedAt: leg.closedAt,
+        ...currentWindow,
         side: leg.side,
       },
       lookbackSeconds,
@@ -392,11 +401,19 @@ async function buildStructurePlan(
       continue;
     }
 
-    const newOpenedAt = new Date(candidate.occurredAt.getTime() - OPENED_AT_OFFSET_MS);
-    if (isLegAlreadyRepaired(leg.openedAt, candidate.occurredAt)) {
+    const newAttributionFrom = new Date(
+      candidate.occurredAt.getTime() - OPENED_AT_OFFSET_MS,
+    );
+    if (
+      isLegAlreadyRepaired(
+        leg.attributionFrom,
+        leg.openedAt,
+        candidate.occurredAt,
+      )
+    ) {
       legSkips.push({
         botLegId: leg.botLegId,
-        reason: "already repaired (openedAt matches candidate)",
+        reason: "already repaired (attributionFrom matches candidate)",
       });
       proposedLegWindows.set(leg.botLegId, currentWindow);
       continue;
@@ -404,7 +421,7 @@ async function buildStructurePlan(
 
     const newWindow: LegWindow = {
       productId: leg.productId,
-      openedAt: newOpenedAt,
+      attributionFrom: newAttributionFrom,
       closedAt: leg.closedAt,
     };
     const newTotals = computeLegTotals(ledger, newWindow);
@@ -414,8 +431,9 @@ async function buildStructurePlan(
       legId: leg.id,
       botLegId: leg.botLegId,
       side: leg.side,
-      oldOpenedAt: leg.openedAt,
-      newOpenedAt,
+      openedAt: leg.openedAt,
+      oldAttributionFrom: currentWindowStart,
+      newAttributionFrom,
       candidate,
       oldLegPnl,
       newLegPnl,
@@ -468,7 +486,10 @@ function printStructurePlan(plan: StructureRepairPlan, dryRun: boolean): void {
 
   for (const repair of plan.legRepairs) {
     console.log(`  leg ${repair.botLegId} (${repair.side}):`);
-    console.log(`    openedAt: ${repair.oldOpenedAt.toISOString()} -> ${repair.newOpenedAt.toISOString()}`);
+    console.log(`    openedAt: ${repair.openedAt.toISOString()} (unchanged)`);
+    console.log(
+      `    attributionFrom: ${repair.oldAttributionFrom.toISOString()} -> ${repair.newAttributionFrom.toISOString()}`,
+    );
     console.log(
       `    candidate txn: ${repair.candidate.deltaUuid} @ ${repair.candidate.occurredAt.toISOString()} amount=${repair.candidate.amount}`,
     );
@@ -490,9 +511,9 @@ async function applyStructureRepairs(
   const botPatchFailures: string[] = [];
 
   for (const repair of plan.legRepairs) {
-    const botPatch = await patchBotLegOpenedAt(
+    const botPatch = await patchBotLegAttributionFrom(
       repair.botLegId,
-      repair.newOpenedAt,
+      repair.newAttributionFrom,
     );
     if (!botPatch.ok) {
       botPatchFailures.push(
@@ -506,7 +527,7 @@ async function applyStructureRepairs(
 
     await prisma.structureLegPnl.update({
       where: { id: repair.legId },
-      data: { openedAt: repair.newOpenedAt },
+      data: { attributionFrom: repair.newAttributionFrom },
     });
     appliedLegs += 1;
   }
@@ -596,7 +617,7 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log(`\nApplied openedAt repairs to ${totalAppliedLegs} leg(s)`);
+    console.log(`\nApplied attributionFrom repairs to ${totalAppliedLegs} leg(s)`);
 
     for (const uid of usersToRecompute) {
       console.log(`[repair] Recomputing structure P&L for user=${uid} ...`);
