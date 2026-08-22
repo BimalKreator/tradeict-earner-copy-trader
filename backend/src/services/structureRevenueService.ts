@@ -44,10 +44,34 @@ function sumStructureRealized(
   }, zero());
 }
 
-/** Exclude structures flagged with incomplete leg attribution from billing. */
-function billableStructureFilter(): Prisma.StructurePnlWhereInput {
+// ASYMMETRIC BY DESIGN. A suspect gain is never billed. A suspect
+// loss still lowers the high-water mark. Resolving doubt in the
+// customer's favour is the rule; symmetric exclusion charges a
+// losing customer.
+function isSuspectAttribution(status: string | null): boolean {
+  return status === ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE;
+}
+
+/** Structures that may contribute to this month's billable realized P&L (OK only). */
+function billableStructuresFilter(): Prisma.StructurePnlWhereInput {
   return {
     NOT: { attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE },
+  };
+}
+
+/**
+ * Structures that feed lifetime cumulative / HWM:
+ * OK rows, plus SUSPECT_INCOMPLETE rows with realizedPnl < 0.
+ */
+function cumulativeStructuresFilter(): Prisma.StructurePnlWhereInput {
+  return {
+    OR: [
+      { NOT: { attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE } },
+      {
+        attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+        realizedPnl: { lt: 0 },
+      },
+    ],
   };
 }
 
@@ -76,20 +100,46 @@ async function structuresClosedInIstWindow(
   });
 }
 
-function partitionBillableStructures(rows: ClosedStructureRow[]): {
+function partitionStructures(rows: ClosedStructureRow[]): {
   billable: ClosedStructureRow[];
+  cumulative: ClosedStructureRow[];
   suspectCount: number;
+  suspectLossesCountedCount: number;
+  suspectLossesCountedAmount: Prisma.Decimal;
 } {
   const billable: ClosedStructureRow[] = [];
+  const cumulative: ClosedStructureRow[] = [];
   let suspectCount = 0;
+  let suspectLossesCountedCount = 0;
+  let suspectLossesCountedAmount = zero();
+
   for (const row of rows) {
-    if (row.attributionStatus === ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE) {
+    const suspect = isSuspectAttribution(row.attributionStatus);
+    const pnl = row.realizedPnl;
+    const isLoss = pnl != null && pnl.lessThan(0);
+
+    if (suspect) {
       suspectCount += 1;
-    } else {
-      billable.push(row);
+      if (isLoss) {
+        cumulative.push(row);
+        suspectLossesCountedCount += 1;
+        suspectLossesCountedAmount = suspectLossesCountedAmount.add(pnl);
+      }
+      // suspect gains: excluded from billable AND cumulative
+      continue;
     }
+
+    billable.push(row);
+    cumulative.push(row);
   }
-  return { billable, suspectCount };
+
+  return {
+    billable,
+    cumulative,
+    suspectCount,
+    suspectLossesCountedCount,
+    suspectLossesCountedAmount,
+  };
 }
 
 /** IST calendar day that just ended relative to `ref` (for 00:05 IST daily job). */
@@ -169,7 +219,7 @@ async function runningHwmBeforeMonthStart(
     where: {
       userId,
       ...scopedSimulatedFilter(isSimulated),
-      ...billableStructureFilter(),
+      ...cumulativeStructuresFilter(),
       closedAt: { lt: monthStart },
       realizedPnl: { not: null },
     },
@@ -198,7 +248,7 @@ async function lifetimeCumulativeRealizedToDate(
     where: {
       userId,
       ...scopedSimulatedFilter(isSimulated),
-      ...billableStructureFilter(),
+      ...cumulativeStructuresFilter(),
       closedAt: { lt: periodEndExclusive },
       realizedPnl: { not: null },
     },
@@ -237,6 +287,8 @@ async function resolveHwmBeforeForPeriod(
 export type MonthlyInvoiceMetrics = {
   structuresClosed: number;
   suspectStructuresCount: number;
+  suspectLossesCountedCount: number;
+  suspectLossesCountedAmount: Prisma.Decimal;
   realizedPnl: Prisma.Decimal;
   cumulativeRealizedPnl: Prisma.Decimal;
   hwmBefore: Prisma.Decimal;
@@ -266,7 +318,14 @@ export async function computeMonthlyInvoiceMetrics(
     monthEndExclusive,
     isSimulated,
   );
-  const { billable, suspectCount } = partitionBillableStructures(closedInMonth);
+    const {
+    billable,
+    suspectCount,
+    suspectLossesCountedCount,
+    suspectLossesCountedAmount,
+  } = partitionStructures(closedInMonth);
+  // Month realizedPnl is billable-only (suspect losses omitted on purpose —
+  // they still affect cumulative / HWM via cumulativeStructuresFilter).
   const realizedPnl = sumStructureRealized(billable);
   const cumulativeRealizedPnl = await lifetimeCumulativeRealizedToDate(
     prisma,
@@ -295,6 +354,8 @@ export async function computeMonthlyInvoiceMetrics(
   return {
     structuresClosed: billable.length,
     suspectStructuresCount: suspectCount,
+    suspectLossesCountedCount,
+    suspectLossesCountedAmount,
     realizedPnl,
     cumulativeRealizedPnl,
     hwmBefore,
@@ -432,6 +493,8 @@ export async function recomputeInvoiceChain(
     const data = {
       structuresClosed: metrics.structuresClosed,
       suspectStructuresCount: metrics.suspectStructuresCount,
+      suspectLossesCountedCount: metrics.suspectLossesCountedCount,
+      suspectLossesCountedAmount: metrics.suspectLossesCountedAmount,
       realizedPnl: metrics.realizedPnl,
       cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
       hwmBefore: metrics.hwmBefore,
@@ -532,6 +595,8 @@ export async function computeMonthlyRevenueInvoiceForUser(
   const data = {
     structuresClosed: metrics.structuresClosed,
     suspectStructuresCount: metrics.suspectStructuresCount,
+    suspectLossesCountedCount: metrics.suspectLossesCountedCount,
+    suspectLossesCountedAmount: metrics.suspectLossesCountedAmount,
     realizedPnl: metrics.realizedPnl,
     cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
     hwmBefore: metrics.hwmBefore,

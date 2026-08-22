@@ -329,6 +329,12 @@ export async function getAdminRevenueUserDetail(
       periodYear: inv.periodYear,
       periodMonth: inv.periodMonth,
       structuresClosed: inv.structuresClosed,
+      suspectStructuresCount: inv.suspectStructuresCount ?? null,
+      suspectLossesCountedCount: inv.suspectLossesCountedCount ?? null,
+      suspectLossesCountedAmount:
+        inv.suspectLossesCountedAmount != null
+          ? dec(inv.suspectLossesCountedAmount)
+          : null,
       realizedPnl: dec(inv.realizedPnl),
       cumulativeRealizedPnl: inv.cumulativeRealizedPnl
         ? dec(inv.cumulativeRealizedPnl)

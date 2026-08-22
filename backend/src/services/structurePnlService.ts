@@ -50,6 +50,8 @@ type BotStructure = {
   closedAt: Date | null;
   closeReason: string | null;
   legs: BotLeg[];
+  /** Bot-side attribution warning — treated as SUSPECT_INCOMPLETE. */
+  attributionWarning: string | null;
 };
 
 type LedgerRow = {
@@ -158,6 +160,13 @@ function parseBotLeg(raw: Record<string, unknown>): BotLeg | null {
   };
 }
 
+
+function parseAttributionWarning(raw: Record<string, unknown>): string | null {
+  const v = raw.attribution_warning ?? raw.attributionWarning;
+  if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  return null;
+}
+
 function parseBotStructure(raw: Record<string, unknown>): BotStructure | null {
   const botStructureId = numberOrNull(raw.id ?? raw.structure_id ?? raw.bot_structure_id);
   const hedgePositionId = numberOrNull(
@@ -186,6 +195,7 @@ function parseBotStructure(raw: Record<string, unknown>): BotStructure | null {
     closeReason:
       typeof raw.close_reason === "string" ? raw.close_reason : null,
     legs,
+    attributionWarning: parseAttributionWarning(raw),
   };
 }
 
@@ -569,7 +579,17 @@ async function recomputeStructurePnlForUser(
       realizedTotal += structureRealized.toNumber();
     }
 
-    const attribution = evaluateStructureAttribution(structure, legTotals);
+    let attribution = evaluateStructureAttribution(structure, legTotals);
+    if (structure.attributionWarning) {
+      const warn = structure.attributionWarning;
+      const note = attribution.note
+        ? `${attribution.note}; bot attribution_warning: ${warn}`
+        : `bot attribution_warning: ${warn}`;
+      attribution = {
+        status: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+        note,
+      };
+    }
 
     await prisma.structurePnl.update({
       where: { id: structureRow.id },

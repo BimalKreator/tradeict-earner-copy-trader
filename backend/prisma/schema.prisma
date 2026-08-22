@@ -512,6 +512,10 @@ model MonthlyRevenueInvoice {
   structuresClosed Int
   /** Closed structures excluded from billing due to incomplete leg attribution. */
   suspectStructuresCount Int?
+  /** Suspect losses included in cumulative/HWM (not billed). */
+  suspectLossesCountedCount Int?
+  /** Sum of suspect-loss realizedPnl counted into cumulative/HWM. */
+  suspectLossesCountedAmount Decimal? @db.Decimal(24, 10)
   realizedPnl      Decimal  @db.Decimal(24, 10)
   /** Lifetime cumulative realized P&L at period end — audit trail for HWM. */
   cumulativeRealizedPnl Decimal? @db.Decimal(24, 10)
