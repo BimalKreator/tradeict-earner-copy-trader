@@ -4,3 +4,6 @@ dist/
 .env
 
 /generated/prisma
+
+# Financial purge recovery snapshots (must not be committed)
+backups/

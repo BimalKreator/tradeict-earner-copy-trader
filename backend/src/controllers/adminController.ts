@@ -120,7 +120,7 @@ import {
   listWalletWithdrawalRequests,
   processWalletWithdrawalRequest,
 } from "../services/walletWithdrawalService.js";
-import { auditFromRequest } from "../utils/auditLogger.js";
+import { auditFromRequest, getRequestIp } from "../utils/auditLogger.js";
 import { ReferralRequestStatus, SalesTier } from "@prisma/client";
 
 const BCRYPT_ROUNDS = 12;
@@ -1757,12 +1757,19 @@ export function createAdminController(prisma: PrismaClient) {
           openTradesPreserved: includeOpen
             ? 0
             : await prisma.trade.count({ where: { status: TradeStatus.OPEN } }),
+          backupPath: null,
           message: "No trades to flush. Open positions were preserved.",
         });
         return;
       }
 
-      let backupFile: string | undefined;
+      const adminId = req.admin?.id ?? req.userId;
+      if (!adminId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      let tradeCsvBackupFile: string | undefined;
       if (flushableTrades.length > 0) {
         const fileName = `Flush_All_Platform_Trades_${buildTimestampTag()}.csv`;
         const csv = rowsToCsv(
@@ -1802,7 +1809,7 @@ export function createAdminController(prisma: PrismaClient) {
           ],
         );
         const saved = writeCsvToDownloads(fileName, csv);
-        backupFile = saved.relativePath;
+        tradeCsvBackupFile = saved.relativePath;
         await prisma.downloadFile.create({
           data: {
             fileName,
@@ -1816,6 +1823,10 @@ export function createAdminController(prisma: PrismaClient) {
       const result = await flushAllPlatformTrades(prisma, {
         includeOpen,
         purgeFinancialsOnly,
+        audit: {
+          adminId,
+          ip: getRequestIp(req) ?? null,
+        },
       });
 
       res.json({
@@ -1828,7 +1839,8 @@ export function createAdminController(prisma: PrismaClient) {
         tradePositionsRemoved: result.tradePositionsRemoved,
         openTradesPreserved: result.openTradesPreserved,
         usersAffected: new Set(flushableTrades.map((t) => t.userId)).size,
-        backupFile,
+        backupPath: result.backupPath,
+        backupFile: tradeCsvBackupFile,
         message:
           result.deletedTrades > 0
             ? `Flushed ${result.deletedTrades} trade(s) across all users. PnL, commission, and pending invoices cleared.`

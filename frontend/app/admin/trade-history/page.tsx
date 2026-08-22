@@ -160,6 +160,7 @@ export default function AdminTradeHistoryPage() {
         usersAffected?: number;
         openTradesPreserved?: number;
         backupFile?: string;
+        backupPath?: string | null;
       };
       if (!res.ok) {
         throw new Error(body.error ?? "Failed to flush all trades.");
@@ -167,14 +168,17 @@ export default function AdminTradeHistoryPage() {
       setFlushModalOpen(false);
       setFlushConfirmText("");
       setIncludeOpenTrades(false);
+      const backupNote = body.backupPath
+        ? ` Financial backup: ${body.backupPath}.`
+        : "";
       setFlushSuccess(
-        body.message ??
+        (body.message ??
           `Removed ${body.deleted ?? 0} trade(s) for ${body.usersAffected ?? 0} user(s). ` +
             `PnL rows: ${body.pnlRecordsRemoved ?? 0}, commission rows: ${body.commissionLedgersRemoved ?? 0}, ` +
             `pending invoices: ${body.pendingInvoicesRemoved ?? 0}.` +
             (body.openTradesPreserved
               ? ` ${body.openTradesPreserved} open trade(s) preserved.`
-              : ""),
+              : "")) + backupNote,
       );
       setRows([]);
       void load(true);

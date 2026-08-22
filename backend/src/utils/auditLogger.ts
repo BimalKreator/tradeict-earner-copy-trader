@@ -1,6 +1,11 @@
 import type { Request } from "express";
 import { Prisma, type PrismaClient } from "@prisma/client";
 
+/** Minimal client surface for audit writes (PrismaClient or TransactionClient). */
+type AuditDb = {
+  adminAuditLog: PrismaClient["adminAuditLog"];
+};
+
 export function getRequestIp(req: Request): string | undefined {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.trim()) {
@@ -17,7 +22,7 @@ export function getRequestIp(req: Request): string | undefined {
  * Persist an admin audit log entry. Failures are logged and never thrown to callers.
  */
 export async function logAdminAction(
-  prisma: PrismaClient,
+  prisma: AuditDb,
   adminId: string,
   action: string,
   resource: string,
@@ -42,6 +47,32 @@ export async function logAdminAction(
       `[auditLogger] Failed action=${action} resource=${resource} adminId=${adminId}: ${message}`,
     );
   }
+}
+
+/**
+ * Same as {@link logAdminAction}, but throws on failure.
+ * Use only where the caller must abort if the audit row cannot be written
+ * (e.g. irreversible financial purge).
+ */
+export async function logAdminActionOrThrow(
+  prisma: AuditDb,
+  adminId: string,
+  action: string,
+  resource: string,
+  resourceId: string | null | undefined,
+  details: Prisma.InputJsonValue | null | undefined,
+  ip?: string | null,
+): Promise<void> {
+  await prisma.adminAuditLog.create({
+    data: {
+      adminId,
+      action,
+      resource,
+      resourceId: resourceId ?? null,
+      details: details ?? Prisma.JsonNull,
+      ipAddress: ip ?? null,
+    },
+  });
 }
 
 /** Fire-and-forget audit helper for controllers. */
