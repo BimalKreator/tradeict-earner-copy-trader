@@ -13,14 +13,18 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  authFetch,
+  buildApiUrl,
+  formatFetchErrors,
+} from "@/lib/authFetch";
+import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd, formatINRApprox } from "@/lib/currency";
 import {
   formatIstCalendarDate,
   formatIstMonthYear,
   formatIstSnapshotDay,
 } from "@/lib/istDates";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 type StructureLeg = {
   id: string;
@@ -91,10 +95,6 @@ function fmtSnapshotDay(iso: string): string {
   return formatIstSnapshotDay(iso);
 }
 
-function authHeaders(): HeadersInit {
-  return { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` };
-}
-
 function MoneyCell({
   usd,
   muted = false,
@@ -144,7 +144,7 @@ export function PerformanceDashboard() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!API_BASE) {
+    if (!resolveApiBase()) {
       setError("API URL is not configured.");
       setLoading(false);
       return;
@@ -152,14 +152,38 @@ export function PerformanceDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const headers = authHeaders();
+      const structuresPath = "/me/structures?limit=100";
+      const dailyPath = "/me/pnl/daily";
+      const invoicesPath = "/me/revenue/invoices";
       const [sRes, pRes, iRes] = await Promise.all([
-        fetch(`${API_BASE}/api/me/structures?limit=100`, { headers }),
-        fetch(`${API_BASE}/api/me/pnl/daily`, { headers }),
-        fetch(`${API_BASE}/api/me/revenue/invoices`, { headers }),
+        authFetch(structuresPath),
+        authFetch(dailyPath),
+        authFetch(invoicesPath),
       ]);
-      if (!sRes.ok || !pRes.ok || !iRes.ok) {
-        throw new Error("Failed to load performance data");
+      const failures: Array<{ label: string; res: Response; url: string }> = [];
+      if (!sRes.ok) {
+        failures.push({
+          label: "structures",
+          res: sRes,
+          url: buildApiUrl(structuresPath),
+        });
+      }
+      if (!pRes.ok) {
+        failures.push({
+          label: "daily P&L",
+          res: pRes,
+          url: buildApiUrl(dailyPath),
+        });
+      }
+      if (!iRes.ok) {
+        failures.push({
+          label: "invoices",
+          res: iRes,
+          url: buildApiUrl(invoicesPath),
+        });
+      }
+      if (failures.length > 0) {
+        throw new Error(formatFetchErrors(failures));
       }
       const sJson = (await sRes.json()) as { structures: StructureRow[] };
       const pJson = (await pRes.json()) as { snapshots: DailySnapshot[] };

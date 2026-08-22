@@ -19,6 +19,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  authFetch,
+  buildApiUrl,
+  formatFetchError,
+  formatFetchErrors,
+} from "@/lib/authFetch";
+import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
 import {
   formatIstCalendarDate,
@@ -26,7 +33,6 @@ import {
   formatIstSnapshotDay,
 } from "@/lib/istDates";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 const UNMATCHED_AMBER_THRESHOLD = 3;
 
 type OverviewUser = {
@@ -92,10 +98,6 @@ type UserDetail = {
   }>;
 };
 
-function authHeaders(): HeadersInit {
-  return { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` };
-}
-
 function pnlClass(n: number): string {
   if (n > 0) return "text-emerald-400";
   if (n < 0) return "text-red-300";
@@ -126,18 +128,34 @@ export function AdminDeltaRevenueDashboard() {
   const [savingOverride, setSavingOverride] = useState(false);
 
   const loadOverview = useCallback(async () => {
-    if (!API_BASE) return;
+    if (!resolveApiBase()) return;
     setLoading(true);
     setError(null);
     try {
+      const overviewPath = `/admin/revenue/overview?year=${period.year}&month=${period.month}`;
+      const healthPath = "/admin/revenue/health";
       const [ovRes, hRes] = await Promise.all([
-        fetch(
-          `${API_BASE}/api/admin/revenue/overview?year=${period.year}&month=${period.month}`,
-          { headers: authHeaders() },
-        ),
-        fetch(`${API_BASE}/api/admin/revenue/health`, { headers: authHeaders() }),
+        authFetch(overviewPath),
+        authFetch(healthPath),
       ]);
-      if (!ovRes.ok || !hRes.ok) throw new Error("Failed to load revenue data");
+      const failures: Array<{ label: string; res: Response; url: string }> = [];
+      if (!ovRes.ok) {
+        failures.push({
+          label: "overview",
+          res: ovRes,
+          url: buildApiUrl(overviewPath),
+        });
+      }
+      if (!hRes.ok) {
+        failures.push({
+          label: "health",
+          res: hRes,
+          url: buildApiUrl(healthPath),
+        });
+      }
+      if (failures.length > 0) {
+        throw new Error(formatFetchErrors(failures));
+      }
       const ov = (await ovRes.json()) as {
         users: OverviewUser[];
         totals: typeof totals;
@@ -158,13 +176,14 @@ export function AdminDeltaRevenueDashboard() {
   }, [loadOverview]);
 
   const loadDetail = useCallback(async (userId: string) => {
-    if (!API_BASE) return;
+    if (!resolveApiBase()) return;
     setDetailLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/revenue/user/${userId}`, {
-        headers: authHeaders(),
-      });
-      if (!res.ok) throw new Error("Failed to load user detail");
+      const detailPath = `/admin/revenue/user/${userId}`;
+      const res = await authFetch(detailPath);
+      if (!res.ok) {
+        throw new Error(formatFetchError("user detail", res, buildApiUrl(detailPath)));
+      }
       const data = (await res.json()) as UserDetail;
       setDetail(data);
       setOverrideInput(
@@ -199,7 +218,7 @@ export function AdminDeltaRevenueDashboard() {
   );
 
   async function saveOverride() {
-    if (!selectedUserId || !API_BASE) return;
+    if (!selectedUserId || !resolveApiBase()) return;
     setSavingOverride(true);
     try {
       const val = overrideInput.trim();
@@ -207,11 +226,15 @@ export function AdminDeltaRevenueDashboard() {
         val === ""
           ? { profitShareOverride: null }
           : { profitShareOverride: parseFloat(val) };
-      await fetch(`${API_BASE}/api/admin/revenue/user/${selectedUserId}/profit-share`, {
+      const overridePath = `/admin/revenue/user/${selectedUserId}/profit-share`;
+      const res = await authFetch(overridePath, {
         method: "PATCH",
-        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (!res.ok) {
+        throw new Error(formatFetchError("profit share", res, buildApiUrl(overridePath)));
+      }
       await loadDetail(selectedUserId);
       await loadOverview();
     } finally {
