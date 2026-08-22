@@ -77,6 +77,8 @@ type ManagementPayload = {
     acquiredById?: string | null;
     acquiredBy?: AcquiredByUser | null;
   };
+  /** True when an ExchangeAccount exists — ledger/billing can sync this user. */
+  billingReady?: boolean;
   deltaApiKey: StoredCredentialMeta | null;
   exchangeAccount: (StoredCredentialMeta & { exchange: string }) | null;
 };
@@ -151,6 +153,7 @@ export default function AdminUserDetails({
   const [apiSecretDraft, setApiSecretDraft] = useState("");
   const [apiKeyMasked, setApiKeyMasked] = useState("");
   const [hasStoredApiSecret, setHasStoredApiSecret] = useState(false);
+  const [billingReady, setBillingReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [flushing, setFlushing] = useState(false);
@@ -313,10 +316,16 @@ export default function AdminUserDetails({
           ? mg.user.balanceDisplayOffset
           : 0;
       setBalanceDisplayOffsetDraft(String(offset));
-      const source = mg.deltaApiKey ?? mg.exchangeAccount;
+      // Prefer ExchangeAccount (billing source of truth) over legacy DeltaApiKey.
+      const source = mg.exchangeAccount ?? mg.deltaApiKey;
       setNicknameDraft(source?.nickname ?? "Primary");
       setApiKeyMasked(source?.apiKeyMasked ?? "");
       setHasStoredApiSecret(Boolean(source?.hasApiSecret));
+      setBillingReady(
+        typeof mg.billingReady === "boolean"
+          ? mg.billingReady
+          : Boolean(mg.exchangeAccount),
+      );
       setApiKeyDraft("");
       setApiSecretDraft("");
       setBalanceUsd(nextBalance);
@@ -726,10 +735,39 @@ export default function AdminUserDetails({
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ paused: copyTradingPausedDraft }),
       });
+      const keysBody =
+        keysRes != null
+          ? ((await keysRes.json().catch(() => ({}))) as {
+              error?: string;
+              billingReady?: boolean;
+              connectionTest?: {
+                success?: boolean;
+                error?: string | null;
+              };
+            })
+          : null;
+
       if (!statusRes.ok || !copyRes.ok || (keysRes != null && !keysRes.ok)) {
-        throw new Error("Failed to save management settings.");
+        throw new Error(
+          keysBody?.error ?? "Failed to save management settings.",
+        );
       }
-      setNotice("Management settings updated successfully.");
+
+      let noticeMsg = "Management settings updated successfully.";
+      if (keysBody != null) {
+        if (typeof keysBody.billingReady === "boolean") {
+          setBillingReady(keysBody.billingReady);
+        }
+        const conn = keysBody.connectionTest;
+        if (conn) {
+          noticeMsg = conn.success
+            ? "API keys saved to ExchangeAccount. Connection OK — Billing ready."
+            : `API keys saved to ExchangeAccount, but connection failed: ${conn.error ?? "unknown error"}. Billing ready (account exists); fix keys if sync fails.`;
+        } else if (keysBody.billingReady) {
+          noticeMsg = "API keys saved to ExchangeAccount. Billing ready.";
+        }
+      }
+      setNotice(noticeMsg);
       await loadAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save settings.");
@@ -1302,6 +1340,18 @@ export default function AdminUserDetails({
                     className="mt-1 w-full rounded-lg border border-glassBorder bg-black/40 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                   />
                 </label>
+                <div className="flex flex-col justify-end text-sm">
+                  <span className="text-white/55">Billing status</span>
+                  {billingReady ? (
+                    <span className="mt-1 inline-flex w-fit rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-200">
+                      Billing ready
+                    </span>
+                  ) : (
+                    <span className="mt-1 inline-flex w-fit rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-100">
+                      Not billing — no exchange account
+                    </span>
+                  )}
+                </div>
                 <label className="text-sm text-white/70">
                   API Key
                   {apiKeyMasked ? (

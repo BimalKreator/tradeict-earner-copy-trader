@@ -231,6 +231,7 @@ async function listEligibleDeltaLedgerUsers(
       user: {
         select: {
           id: true,
+          email: true,
           deltaLedgerSyncedUpTo: true,
           exchangeAccounts: {
             orderBy: { createdAt: "desc" },
@@ -243,6 +244,9 @@ async function listEligibleDeltaLedgerUsers(
   });
 
   const byUser = new Map<string, EligibleLedgerUser>();
+  /** userId → email for users we saw without ExchangeAccount credentials. */
+  const missingCredsByUser = new Map<string, string>();
+
   for (const sub of subs) {
     if (byUser.has(sub.userId)) continue;
 
@@ -251,10 +255,17 @@ async function listEligibleDeltaLedgerUsers(
       credsFromExchangeAccount(sub.user.exchangeAccounts[0] ?? null);
 
     if (!creds) {
-      console.warn(`[DeltaLedger] SKIP user=${sub.userId} reason=no_credentials`);
+      const email = sub.user.email ?? "(no email)";
+      if (!missingCredsByUser.has(sub.userId)) {
+        console.warn(
+          `[DeltaLedger] SKIP user=${sub.userId} email=${email} reason=no_credentials`,
+        );
+        missingCredsByUser.set(sub.userId, email);
+      }
       continue;
     }
 
+    missingCredsByUser.delete(sub.userId);
     byUser.set(sub.userId, {
       userId: sub.userId,
       apiKeyStored: creds.apiKeyStored,
@@ -262,6 +273,13 @@ async function listEligibleDeltaLedgerUsers(
       syncedUpTo: sub.user.deltaLedgerSyncedUpTo,
     });
   }
+
+  if (missingCredsByUser.size > 0) {
+    console.warn(
+      `[DeltaLedger] ${missingCredsByUser.size} users skipped for missing credentials`,
+    );
+  }
+
   return [...byUser.values()];
 }
 

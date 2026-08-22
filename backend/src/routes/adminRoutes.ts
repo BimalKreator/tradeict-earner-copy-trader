@@ -451,6 +451,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
               }
             : null,
         },
+        billingReady: user.exchangeAccounts.length > 0,
         deltaApiKey: user.deltaApiKeys[0]
           ? {
               id: user.deltaApiKeys[0].id,
@@ -577,6 +578,16 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         res.status(400).json({ error: "apiKey and apiSecret are required" });
         return;
       }
+
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
       const nickname =
         typeof body.nickname === "string" && body.nickname.trim()
           ? body.nickname.trim()
@@ -585,6 +596,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       let storedApiKey: string;
       let storedApiSecret: string;
       try {
+        // Same encryption path as exchangeAccountController.create
         storedApiKey = normalizeStoredDeltaSecret(body.apiKey);
         storedApiSecret = normalizeStoredDeltaSecret(body.apiSecret);
       } catch (credErr) {
@@ -594,36 +606,67 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         return;
       }
 
-      const existing = await prisma.deltaApiKey.findFirst({
+      const existing = await prisma.exchangeAccount.findFirst({
         where: { userId: id },
-        orderBy: { id: "desc" },
+        orderBy: { createdAt: "desc" },
         select: { id: true },
       });
-      const deltaApiKey = existing
-        ? await prisma.deltaApiKey.update({
+
+      const exchangeAccount = existing
+        ? await prisma.exchangeAccount.update({
             where: { id: existing.id },
             data: {
               nickname,
+              exchange: "Delta",
               apiKey: storedApiKey,
               apiSecret: storedApiSecret,
             },
-            select: { id: true, nickname: true, apiKey: true, apiSecret: true },
+            select: {
+              id: true,
+              nickname: true,
+              exchange: true,
+              apiKey: true,
+              apiSecret: true,
+            },
           })
-        : await prisma.deltaApiKey.create({
+        : await prisma.exchangeAccount.create({
             data: {
               userId: id,
               nickname,
+              exchange: "Delta",
               apiKey: storedApiKey,
               apiSecret: storedApiSecret,
             },
-            select: { id: true, nickname: true, apiKey: true, apiSecret: true },
+            select: {
+              id: true,
+              nickname: true,
+              exchange: true,
+              apiKey: true,
+              apiSecret: true,
+            },
           });
 
+      clearDeltaAuthClientCache();
+      const connectionTest = await testDeltaIndiaConnection(
+        exchangeAccount.apiKey,
+        exchangeAccount.apiSecret,
+      );
+
+      const billingReady = true;
+
       res.json({
-        deltaApiKey: {
-          id: deltaApiKey.id,
-          nickname: deltaApiKey.nickname,
-          ...maskStoredDeltaCredentials(deltaApiKey),
+        billingReady,
+        connectionTest: {
+          success: connectionTest.success,
+          error: connectionTest.error ?? null,
+          openPositionCount: connectionTest.openPositionCount ?? null,
+          availableBalanceUsd: connectionTest.availableBalanceUsd ?? null,
+        },
+        exchangeAccount: {
+          id: exchangeAccount.id,
+          nickname: exchangeAccount.nickname,
+          exchange: exchangeAccount.exchange,
+          ...maskStoredDeltaCredentials(exchangeAccount),
         },
       });
     } catch (err) {
