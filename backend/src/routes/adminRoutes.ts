@@ -17,6 +17,7 @@ import {
   runOverdueCheck,
 } from "../services/billingService.js";
 import { runDeltaLedgerSyncForUsers } from "../services/deltaLedgerService.js";
+import { recomputeStructurePnlForUsers } from "../services/structurePnlService.js";
 import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
@@ -182,6 +183,33 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
       if (userId && Object.keys(results).length === 0) {
         res.status(404).json({
           error: "User not eligible for Delta ledger sync or has no ExchangeAccount credentials",
+        });
+        return;
+      }
+
+      res.json({ ok: true, results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** POST /api/admin/structure-pnl/recompute — structure P&L from Delta ledger. */
+  router.post("/structure-pnl/recompute", async (req, res, next) => {
+    try {
+      const rawUserId = (req.body as { userId?: unknown })?.userId;
+      const userId =
+        typeof rawUserId === "string" && rawUserId.trim().length > 0
+          ? rawUserId.trim()
+          : undefined;
+
+      const results = await recomputeStructurePnlForUsers(
+        prisma,
+        userId ? { userId } : undefined,
+      );
+
+      if (userId && Object.keys(results).length === 0) {
+        res.status(404).json({
+          error: "User not eligible for structure P&L recompute",
         });
         return;
       }

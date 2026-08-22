@@ -211,6 +211,7 @@ model User {
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
   deltaLedgerEntries DeltaLedgerEntry[]
+  structurePnls      StructurePnl[]
   activities    UserActivity[]
   profileUpdateRequests ProfileUpdateRequest[]
   depositRequests      DepositRequest[]
@@ -413,6 +414,56 @@ model DeltaLedgerEntry {
 
   @@unique([userId, deltaUuid])
   @@index([userId, productId, occurredAt])
+}
+
+/** Realized P&L for one bot structure, computed from the user's Delta ledger. */
+model StructurePnl {
+  id                 String   @id @default(cuid())
+  userId             String
+  botStructureId     Int
+  hedgePositionId    Int
+  underlying         String
+  status             String
+  openedAt           DateTime
+  closedAt           DateTime?
+  closeReason        String?
+  grossCashflow      Decimal  @db.Decimal(24, 10)
+  commissionTotal    Decimal  @db.Decimal(24, 10)
+  realizedPnl        Decimal? @db.Decimal(24, 10)
+  legCount           Int
+  closedLegCount     Int
+  matchedTxnCount    Int
+  computedAt         DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  legs StructureLegPnl[]
+
+  @@unique([userId, botStructureId])
+}
+
+/** Per-leg P&L attribution within a structure (product_id + time window). */
+model StructureLegPnl {
+  id               String   @id @default(cuid())
+  structurePnlId   String
+  botLegId         Int
+  legRole          String
+  basketSeq        Int?
+  adjSeq           Int?
+  productId        Int
+  symbol           String?
+  strike           Float?
+  side             String
+  quantity         Int
+  openedAt         DateTime
+  closedAt         DateTime?
+  grossCashflow    Decimal  @db.Decimal(24, 10)
+  commissionTotal  Decimal  @db.Decimal(24, 10)
+  realizedPnl      Decimal? @db.Decimal(24, 10)
+  matchedTxnCount  Int
+
+  structure StructurePnl @relation(fields: [structurePnlId], references: [id], onDelete: Cascade)
+
+  @@unique([structurePnlId, botLegId])
 }
 
 model Trade {
