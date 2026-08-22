@@ -197,6 +197,8 @@ model User {
   telegramLinkToken    String?              @unique
   telegramLinkExpires  DateTime?
   createdAt     DateTime            @default(now())
+  /** High-water mark for Delta wallet transaction ledger ingestion (UTC). */
+  deltaLedgerSyncedUpTo DateTime?
 
   deltaApiKeys     DeltaApiKey[]
   exchangeAccounts ExchangeAccount[]
@@ -208,6 +210,7 @@ model User {
   walletWithdrawalRequests WalletWithdrawalRequest[]
   invoices      Invoice[]
   pnlRecords    PnLRecord[]
+  deltaLedgerEntries DeltaLedgerEntry[]
   activities    UserActivity[]
   profileUpdateRequests ProfileUpdateRequest[]
   depositRequests      DepositRequest[]
@@ -390,6 +393,26 @@ model ExchangeAccount {
   subscriptions  UserStrategySubscription[]
 
   @@index([userId])
+}
+
+/** Immutable copy of Delta wallet transactions — source of truth for customer P&L. */
+model DeltaLedgerEntry {
+  id              String   @id @default(cuid())
+  userId          String
+  deltaUuid       String
+  productId       Int?
+  productSymbol   String?
+  transactionType String
+  amount          Decimal  @db.Decimal(24, 10)
+  balanceAfter    Decimal? @db.Decimal(24, 10)
+  metaJson        Json?
+  occurredAt      DateTime
+  ingestedAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deltaUuid])
+  @@index([userId, productId, occurredAt])
 }
 
 model Trade {

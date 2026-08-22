@@ -530,6 +530,32 @@ async function fetchDeltaProductCashflowSince(
   }
 }
 
+/** One page of wallet transactions — all types (no cashflow filter). */
+export async function fetchDeltaWalletTransactionsPage(
+  apiKey: string,
+  secret: string,
+  query: Record<string, string>,
+): Promise<{
+  rows: Record<string, unknown>[];
+  after: string | null;
+}> {
+  const response = await deltaIndiaSignedRequest<{
+    result?: unknown;
+    meta?: { after?: string | null };
+  }>({
+    apiKey,
+    secret,
+    method: "GET",
+    path: "/v2/wallet/transactions",
+    query,
+  });
+  const afterRaw = response.meta?.after;
+  return {
+    rows: normalizeDeltaApiRows(response.result),
+    after: afterRaw != null && String(afterRaw).length > 0 ? String(afterRaw) : null,
+  };
+}
+
 /**
  * Poll Delta order + fills until exit price, commission, and gross realized PnL are available.
  */
