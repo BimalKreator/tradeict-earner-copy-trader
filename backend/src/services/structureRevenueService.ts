@@ -10,6 +10,7 @@ import {
   startOfMonthInTimeZone,
 } from "./dashboardMetricsService.js";
 import { listEligibleStructurePnlUserIds } from "./structurePnlService.js";
+import { ATTRIBUTION_STATUS } from "./structurePnlService.js";
 import { scopedSimulatedFilter } from "./simulatedDataFilters.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
@@ -41,6 +42,54 @@ function sumStructureRealized(
     if (row.realizedPnl == null) return sum;
     return sum.add(row.realizedPnl);
   }, zero());
+}
+
+/** Exclude structures flagged with incomplete leg attribution from billing. */
+function billableStructureFilter(): Prisma.StructurePnlWhereInput {
+  return {
+    NOT: { attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE },
+  };
+}
+
+type ClosedStructureRow = {
+  realizedPnl: Prisma.Decimal | null;
+  attributionStatus: string | null;
+};
+
+async function structuresClosedInIstWindow(
+  prisma: PrismaClient,
+  userId: string,
+  windowStart: Date,
+  windowEndExclusive: Date,
+  isSimulated?: boolean,
+): Promise<ClosedStructureRow[]> {
+  return prisma.structurePnl.findMany({
+    where: {
+      userId,
+      ...(isSimulated !== undefined
+        ? scopedSimulatedFilter(isSimulated)
+        : {}),
+      closedAt: { gte: windowStart, lt: windowEndExclusive },
+      realizedPnl: { not: null },
+    },
+    select: { realizedPnl: true, attributionStatus: true },
+  });
+}
+
+function partitionBillableStructures(rows: ClosedStructureRow[]): {
+  billable: ClosedStructureRow[];
+  suspectCount: number;
+} {
+  const billable: ClosedStructureRow[] = [];
+  let suspectCount = 0;
+  for (const row of rows) {
+    if (row.attributionStatus === ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE) {
+      suspectCount += 1;
+    } else {
+      billable.push(row);
+    }
+  }
+  return { billable, suspectCount };
 }
 
 /** IST calendar day that just ended relative to `ref` (for 00:05 IST daily job). */
@@ -88,26 +137,6 @@ async function resolveUserProfitSharePct(
   return sub?.strategy.profitShare ?? 0;
 }
 
-async function structuresClosedInIstWindow(
-  prisma: PrismaClient,
-  userId: string,
-  windowStart: Date,
-  windowEndExclusive: Date,
-  isSimulated?: boolean,
-) {
-  return prisma.structurePnl.findMany({
-    where: {
-      userId,
-      ...(isSimulated !== undefined
-        ? scopedSimulatedFilter(isSimulated)
-        : {}),
-      closedAt: { gte: windowStart, lt: windowEndExclusive },
-      realizedPnl: { not: null },
-    },
-    select: { realizedPnl: true },
-  });
-}
-
 function previousCalendarMonth(
   year: number,
   month: number,
@@ -140,6 +169,7 @@ async function runningHwmBeforeMonthStart(
     where: {
       userId,
       ...scopedSimulatedFilter(isSimulated),
+      ...billableStructureFilter(),
       closedAt: { lt: monthStart },
       realizedPnl: { not: null },
     },
@@ -168,6 +198,7 @@ async function lifetimeCumulativeRealizedToDate(
     where: {
       userId,
       ...scopedSimulatedFilter(isSimulated),
+      ...billableStructureFilter(),
       closedAt: { lt: periodEndExclusive },
       realizedPnl: { not: null },
     },
@@ -205,6 +236,7 @@ async function resolveHwmBeforeForPeriod(
 
 export type MonthlyInvoiceMetrics = {
   structuresClosed: number;
+  suspectStructuresCount: number;
   realizedPnl: Prisma.Decimal;
   cumulativeRealizedPnl: Prisma.Decimal;
   hwmBefore: Prisma.Decimal;
@@ -234,7 +266,8 @@ export async function computeMonthlyInvoiceMetrics(
     monthEndExclusive,
     isSimulated,
   );
-  const realizedPnl = sumStructureRealized(closedInMonth);
+  const { billable, suspectCount } = partitionBillableStructures(closedInMonth);
+  const realizedPnl = sumStructureRealized(billable);
   const cumulativeRealizedPnl = await lifetimeCumulativeRealizedToDate(
     prisma,
     userId,
@@ -260,7 +293,8 @@ export async function computeMonthlyInvoiceMetrics(
   );
 
   return {
-    structuresClosed: closedInMonth.length,
+    structuresClosed: billable.length,
+    suspectStructuresCount: suspectCount,
     realizedPnl,
     cumulativeRealizedPnl,
     hwmBefore,
@@ -397,6 +431,7 @@ export async function recomputeInvoiceChain(
 
     const data = {
       structuresClosed: metrics.structuresClosed,
+      suspectStructuresCount: metrics.suspectStructuresCount,
       realizedPnl: metrics.realizedPnl,
       cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
       hwmBefore: metrics.hwmBefore,
@@ -496,6 +531,7 @@ export async function computeMonthlyRevenueInvoiceForUser(
 
   const data = {
     structuresClosed: metrics.structuresClosed,
+    suspectStructuresCount: metrics.suspectStructuresCount,
     realizedPnl: metrics.realizedPnl,
     cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
     hwmBefore: metrics.hwmBefore,

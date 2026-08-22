@@ -5,6 +5,17 @@ const BOT_TIMEOUT_MS = 10_000;
 /** Grace after leg close — Delta may book commission slightly after the fill. */
 export const LEG_CLOSE_GRACE_MS = 60_000;
 
+export const ATTRIBUTION_STATUS = {
+  OK: "OK",
+  SUSPECT_INCOMPLETE: "SUSPECT_INCOMPLETE",
+} as const;
+
+export type AttributionStatus =
+  (typeof ATTRIBUTION_STATUS)[keyof typeof ATTRIBUTION_STATUS];
+
+/** Minimum matched billing txns for a closed leg (entry+exit cashflow + commissions). */
+const MIN_CLOSED_LEG_MATCHED_TXNS = 4;
+
 const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
 
 type BotLeg = {
@@ -211,6 +222,8 @@ type LegTotals = {
   grossCashflow: Prisma.Decimal;
   commissionTotal: Prisma.Decimal;
   matchedTxnCount: number;
+  cashflowHasPositive: boolean;
+  cashflowHasNegative: boolean;
 };
 
 function emptyLegTotals(): LegTotals {
@@ -218,6 +231,8 @@ function emptyLegTotals(): LegTotals {
     grossCashflow: zeroDecimal(),
     commissionTotal: zeroDecimal(),
     matchedTxnCount: 0,
+    cashflowHasPositive: false,
+    cashflowHasNegative: false,
   };
 }
 
@@ -226,6 +241,8 @@ function applyTxnToLegTotals(totals: LegTotals, txn: LedgerRow): void {
   const tt = txn.transactionType.toLowerCase();
   if (tt === "cashflow") {
     totals.grossCashflow = totals.grossCashflow.add(txn.amount);
+    if (txn.amount.greaterThan(0)) totals.cashflowHasPositive = true;
+    if (txn.amount.lessThan(0)) totals.cashflowHasNegative = true;
   } else if (tt === "commission") {
     totals.commissionTotal = totals.commissionTotal.add(txn.amount);
   }
@@ -234,6 +251,93 @@ function applyTxnToLegTotals(totals: LegTotals, txn: LedgerRow): void {
 function legRealizedPnl(totals: LegTotals, leg: BotLeg): Prisma.Decimal | null {
   if (!leg.closedAt) return null;
   return totals.grossCashflow.add(totals.commissionTotal);
+}
+
+export type LegAttributionWindow = {
+  productId: number;
+  openedAt: Date;
+  closedAt: Date | null;
+};
+
+/** Whether a ledger row falls inside a leg's product + time attribution window. */
+export function ledgerTxnMatchesLegWindow(
+  txn: { productId: number | null; occurredAt: Date },
+  leg: LegAttributionWindow,
+): boolean {
+  if (txn.productId !== leg.productId) return false;
+  if (txn.occurredAt < leg.openedAt) return false;
+  if (!leg.closedAt) return true;
+  const upper = new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
+  if (txn.occurredAt > upper) return false;
+  return true;
+}
+
+type LegAttributionFailure = {
+  botLegId: number;
+  matchedTxnCount: number;
+  reason: string;
+};
+
+function evaluateClosedLegAttribution(
+  totals: LegTotals,
+  leg: BotLeg,
+): LegAttributionFailure | null {
+  if (!leg.closedAt) return null;
+
+  const hasBothCashflowSigns =
+    totals.cashflowHasPositive && totals.cashflowHasNegative;
+  if (!hasBothCashflowSigns) {
+    return {
+      botLegId: leg.botLegId,
+      matchedTxnCount: totals.matchedTxnCount,
+      reason: "missing both cashflow signs (+ and -)",
+    };
+  }
+
+  if (totals.matchedTxnCount < MIN_CLOSED_LEG_MATCHED_TXNS) {
+    return {
+      botLegId: leg.botLegId,
+      matchedTxnCount: totals.matchedTxnCount,
+      reason: `matchedTxnCount < ${MIN_CLOSED_LEG_MATCHED_TXNS}`,
+    };
+  }
+
+  return null;
+}
+
+function evaluateStructureAttribution(
+  structure: BotStructure,
+  legTotals: Map<string, LegTotals>,
+): { status: AttributionStatus | null; note: string | null } {
+  const isClosed =
+    structure.status === "closed" &&
+    structure.legs.length > 0 &&
+    structure.legs.every((leg) => leg.closedAt != null);
+
+  if (!isClosed) {
+    return { status: null, note: null };
+  }
+
+  const failures: LegAttributionFailure[] = [];
+  for (const leg of structure.legs) {
+    const totals =
+      legTotals.get(legKey(structure.botStructureId, leg.botLegId)) ??
+      emptyLegTotals();
+    const failure = evaluateClosedLegAttribution(totals, leg);
+    if (failure) failures.push(failure);
+  }
+
+  if (failures.length === 0) {
+    return { status: ATTRIBUTION_STATUS.OK, note: null };
+  }
+
+  const note = failures
+    .map(
+      (f) =>
+        `leg ${f.botLegId}: ${f.reason} (matchedTxnCount=${f.matchedTxnCount})`,
+    )
+    .join("; ");
+  return { status: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE, note };
 }
 
 export async function listEligibleStructurePnlUserIds(
@@ -444,6 +548,8 @@ async function recomputeStructurePnlForUser(
       realizedTotal += structureRealized.toNumber();
     }
 
+    const attribution = evaluateStructureAttribution(structure, legTotals);
+
     await prisma.structurePnl.update({
       where: { id: structureRow.id },
       data: {
@@ -453,6 +559,8 @@ async function recomputeStructurePnlForUser(
         closedLegCount,
         matchedTxnCount: structMatched,
         computedAt,
+        attributionStatus: attribution.status,
+        attributionNote: attribution.note,
       },
     });
   }

@@ -7,6 +7,7 @@ import {
   getAdminRevenueReconcile,
   getAdminRevenueUserDetail,
 } from "../services/adminDeltaRevenueService.js";
+import { getAttributionHealthForUser } from "../services/structureAttributionHealthService.js";
 import { listEligibleStructurePnlUserIds } from "../services/structurePnlService.js";
 import {
   previousIstCalendarMonth,
@@ -184,6 +185,40 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function getAttributionHealth(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const raw = req.query.userId;
+      const userId =
+        typeof raw === "string" && raw.trim()
+          ? raw.trim()
+          : Array.isArray(raw) && typeof raw[0] === "string"
+            ? raw[0].trim()
+            : "";
+      if (!userId) {
+        res.status(400).json({ error: "userId query parameter is required" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const data = await getAttributionHealthForUser(prisma, userId);
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function postRecomputeChain(
     req: Request,
     res: Response,
@@ -227,6 +262,7 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     getUserDetail,
     getHealth,
     getReconcile,
+    getAttributionHealth,
     patchProfitShareOverride,
     postRecomputeChain,
   };

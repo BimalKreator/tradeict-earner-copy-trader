@@ -442,6 +442,9 @@ model StructurePnl {
   closedLegCount     Int
   matchedTxnCount    Int
   computedAt         DateTime
+  /** OK = complete entry+exit attribution; SUSPECT_INCOMPLETE = billing blocked. */
+  attributionStatus  String?
+  attributionNote    String?
   isSimulated        Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -449,6 +452,7 @@ model StructurePnl {
 
   @@unique([userId, botStructureId])
   @@index([isSimulated])
+  @@index([attributionStatus])
 }
 
 /** Per-leg P&L attribution within a structure (product_id + time window). */
@@ -504,6 +508,8 @@ model MonthlyRevenueInvoice {
   periodYear       Int
   periodMonth      Int
   structuresClosed Int
+  /** Closed structures excluded from billing due to incomplete leg attribution. */
+  suspectStructuresCount Int?
   realizedPnl      Decimal  @db.Decimal(24, 10)
   /** Lifetime cumulative realized P&L at period end — audit trail for HWM. */
   cumulativeRealizedPnl Decimal? @db.Decimal(24, 10)
