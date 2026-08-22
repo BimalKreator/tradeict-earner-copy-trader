@@ -437,6 +437,7 @@ export async function simulateDeltaRevenueStructure(
       input.userId,
       istParts.year,
       istParts.month,
+      { isSimulated: true },
     );
     await prisma.monthlyRevenueInvoice.update({
       where: { id: invoice.id },

@@ -327,6 +327,9 @@ export async function getAdminRevenueUserDetail(
       periodMonth: inv.periodMonth,
       structuresClosed: inv.structuresClosed,
       realizedPnl: dec(inv.realizedPnl),
+      cumulativeRealizedPnl: inv.cumulativeRealizedPnl
+        ? dec(inv.cumulativeRealizedPnl)
+        : null,
       hwmBefore: dec(inv.hwmBefore),
       hwmAfter: dec(inv.hwmAfter),
       billableProfit: dec(inv.billableProfit),

@@ -10,6 +10,7 @@ import {
   startOfMonthInTimeZone,
 } from "./dashboardMetricsService.js";
 import { listEligibleStructurePnlUserIds } from "./structurePnlService.js";
+import { scopedSimulatedFilter } from "./simulatedDataFilters.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
 const MS_PER_DAY = 86_400_000;
@@ -92,14 +93,435 @@ async function structuresClosedInIstWindow(
   userId: string,
   windowStart: Date,
   windowEndExclusive: Date,
+  isSimulated?: boolean,
 ) {
   return prisma.structurePnl.findMany({
     where: {
       userId,
+      ...(isSimulated !== undefined
+        ? scopedSimulatedFilter(isSimulated)
+        : {}),
       closedAt: { gte: windowStart, lt: windowEndExclusive },
       realizedPnl: { not: null },
     },
     select: { realizedPnl: true },
+  });
+}
+
+function previousCalendarMonth(
+  year: number,
+  month: number,
+): { year: number; month: number } {
+  if (month <= 1) return { year: year - 1, month: 12 };
+  return { year, month: month - 1 };
+}
+
+function istMonthBounds(
+  periodYear: number,
+  periodMonth: number,
+): { monthStart: Date; monthEndExclusive: Date } {
+  const monthProbe = new Date(
+    Date.UTC(periodYear, periodMonth - 1, 15, 12, 0, 0),
+  );
+  return {
+    monthStart: startOfMonthInTimeZone(monthProbe, BILLING_TIMEZONE),
+    monthEndExclusive: endOfMonthInTimeZone(monthProbe, BILLING_TIMEZONE),
+  };
+}
+
+/** Running lifetime HWM from all structures closed strictly before `monthStart`. */
+async function runningHwmBeforeMonthStart(
+  prisma: PrismaClient,
+  userId: string,
+  monthStart: Date,
+  isSimulated: boolean,
+): Promise<Prisma.Decimal> {
+  const structures = await prisma.structurePnl.findMany({
+    where: {
+      userId,
+      ...scopedSimulatedFilter(isSimulated),
+      closedAt: { lt: monthStart },
+      realizedPnl: { not: null },
+    },
+    select: { closedAt: true, realizedPnl: true },
+    orderBy: { closedAt: "asc" },
+  });
+
+  let cumulative = zero();
+  let hwm = zero();
+  for (const row of structures) {
+    if (row.realizedPnl == null) continue;
+    cumulative = cumulative.add(row.realizedPnl);
+    hwm = maxDec(hwm, cumulative);
+  }
+  return hwm;
+}
+
+/** Lifetime cumulative realized P&L through end of period (exclusive month end bound). */
+async function lifetimeCumulativeRealizedToDate(
+  prisma: PrismaClient,
+  userId: string,
+  periodEndExclusive: Date,
+  isSimulated: boolean,
+): Promise<Prisma.Decimal> {
+  const rows = await prisma.structurePnl.findMany({
+    where: {
+      userId,
+      ...scopedSimulatedFilter(isSimulated),
+      closedAt: { lt: periodEndExclusive },
+      realizedPnl: { not: null },
+    },
+    select: { realizedPnl: true },
+  });
+  return sumStructureRealized(rows);
+}
+
+async function resolveHwmBeforeForPeriod(
+  prisma: PrismaClient,
+  userId: string,
+  periodYear: number,
+  periodMonth: number,
+  isSimulated: boolean,
+): Promise<Prisma.Decimal> {
+  const prior = previousCalendarMonth(periodYear, periodMonth);
+  const priorInvoice = await prisma.monthlyRevenueInvoice.findUnique({
+    where: {
+      userId_periodYear_periodMonth: {
+        userId,
+        periodYear: prior.year,
+        periodMonth: prior.month,
+      },
+    },
+    select: { hwmAfter: true, isSimulated: true },
+  });
+
+  if (priorInvoice && priorInvoice.isSimulated === isSimulated) {
+    return maxDec(zero(), priorInvoice.hwmAfter);
+  }
+
+  const { monthStart } = istMonthBounds(periodYear, periodMonth);
+  return runningHwmBeforeMonthStart(prisma, userId, monthStart, isSimulated);
+}
+
+export type MonthlyInvoiceMetrics = {
+  structuresClosed: number;
+  realizedPnl: Prisma.Decimal;
+  cumulativeRealizedPnl: Prisma.Decimal;
+  hwmBefore: Prisma.Decimal;
+  hwmAfter: Prisma.Decimal;
+  billableProfit: Prisma.Decimal;
+  profitSharePct: number;
+  commissionAmount: Prisma.Decimal;
+};
+
+export async function computeMonthlyInvoiceMetrics(
+  prisma: PrismaClient,
+  userId: string,
+  periodYear: number,
+  periodMonth: number,
+  isSimulated: boolean,
+  hwmBeforeOverride?: Prisma.Decimal,
+): Promise<MonthlyInvoiceMetrics> {
+  const { monthStart, monthEndExclusive } = istMonthBounds(
+    periodYear,
+    periodMonth,
+  );
+
+  const closedInMonth = await structuresClosedInIstWindow(
+    prisma,
+    userId,
+    monthStart,
+    monthEndExclusive,
+    isSimulated,
+  );
+  const realizedPnl = sumStructureRealized(closedInMonth);
+  const cumulativeRealizedPnl = await lifetimeCumulativeRealizedToDate(
+    prisma,
+    userId,
+    monthEndExclusive,
+    isSimulated,
+  );
+
+  const hwmBefore =
+    hwmBeforeOverride ??
+    (await resolveHwmBeforeForPeriod(
+      prisma,
+      userId,
+      periodYear,
+      periodMonth,
+      isSimulated,
+    ));
+  const hwmAfter = maxDec(hwmBefore, cumulativeRealizedPnl);
+  const billableProfit = maxDec(zero(), hwmAfter.sub(hwmBefore));
+
+  const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
+  const commissionAmount = dec(
+    billableProfit.toNumber() * (profitSharePct / 100),
+  );
+
+  return {
+    structuresClosed: closedInMonth.length,
+    realizedPnl,
+    cumulativeRealizedPnl,
+    hwmBefore,
+    hwmAfter,
+    billableProfit,
+    profitSharePct,
+    commissionAmount,
+  };
+}
+
+function invoiceToSummary(
+  inv: {
+    periodYear: number;
+    periodMonth: number;
+    realizedPnl: Prisma.Decimal;
+    cumulativeRealizedPnl: Prisma.Decimal | null;
+    hwmBefore: Prisma.Decimal;
+    hwmAfter: Prisma.Decimal;
+    billableProfit: Prisma.Decimal;
+    commissionAmount: Prisma.Decimal;
+  },
+): {
+  periodYear: number;
+  periodMonth: number;
+  realizedPnl: number;
+  cumulativeRealizedPnl: number;
+  hwmBefore: number;
+  hwmAfter: number;
+  billableProfit: number;
+  commissionAmount: number;
+} {
+  return {
+    periodYear: inv.periodYear,
+    periodMonth: inv.periodMonth,
+    realizedPnl: inv.realizedPnl.toNumber(),
+    cumulativeRealizedPnl: inv.cumulativeRealizedPnl?.toNumber() ?? 0,
+    hwmBefore: inv.hwmBefore.toNumber(),
+    hwmAfter: inv.hwmAfter.toNumber(),
+    billableProfit: inv.billableProfit.toNumber(),
+    commissionAmount: inv.commissionAmount.toNumber(),
+  };
+}
+
+export type RecomputeInvoiceChainResult = {
+  ok: true;
+  userId: string;
+  isSimulated: boolean;
+  before: ReturnType<typeof invoiceToSummary>[];
+  after: ReturnType<typeof invoiceToSummary>[];
+  changed: Array<{
+    periodYear: number;
+    periodMonth: number;
+    fields: string[];
+  }>;
+};
+
+/** Recompute all invoices chronologically — required after late-arriving structure data. */
+export async function recomputeInvoiceChain(
+  prisma: PrismaClient,
+  userId: string,
+  isSimulated: boolean,
+): Promise<RecomputeInvoiceChainResult> {
+  const simFilter = scopedSimulatedFilter(isSimulated);
+
+  const [existingInvoices, structureCloses] = await Promise.all([
+    prisma.monthlyRevenueInvoice.findMany({
+      where: { userId, ...simFilter },
+      orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+    }),
+    prisma.structurePnl.findMany({
+      where: {
+        userId,
+        ...simFilter,
+        status: "closed",
+        closedAt: { not: null },
+        realizedPnl: { not: null },
+      },
+      select: { closedAt: true },
+    }),
+  ]);
+
+  const before = existingInvoices.map(invoiceToSummary);
+  const periodKeys = new Map<string, { year: number; month: number }>();
+
+  for (const inv of existingInvoices) {
+    periodKeys.set(`${inv.periodYear}-${inv.periodMonth}`, {
+      year: inv.periodYear,
+      month: inv.periodMonth,
+    });
+  }
+
+  for (const row of structureCloses) {
+    if (!row.closedAt) continue;
+    const parts = calendarPartsInTimeZone(row.closedAt, BILLING_TIMEZONE);
+    periodKeys.set(`${parts.year}-${parts.month}`, {
+      year: parts.year,
+      month: parts.month,
+    });
+  }
+
+  const periods = Array.from(periodKeys.values()).sort((a, b) =>
+    a.year !== b.year ? a.year - b.year : a.month - b.month,
+  );
+
+  let hwmCarry: Prisma.Decimal | undefined;
+  const after: ReturnType<typeof invoiceToSummary>[] = [];
+  const generatedAt = new Date();
+
+  for (const period of periods) {
+    const existing = existingInvoices.find(
+      (inv) =>
+        inv.periodYear === period.year && inv.periodMonth === period.month,
+    );
+
+    if (
+      existing &&
+      (existing.status === INVOICE_STATUS.INVOICED ||
+        existing.status === INVOICE_STATUS.PAID)
+    ) {
+      after.push(invoiceToSummary(existing));
+      hwmCarry = maxDec(zero(), existing.hwmAfter);
+      continue;
+    }
+
+    const metrics = await computeMonthlyInvoiceMetrics(
+      prisma,
+      userId,
+      period.year,
+      period.month,
+      isSimulated,
+      hwmCarry,
+    );
+    hwmCarry = metrics.hwmAfter;
+
+    const data = {
+      structuresClosed: metrics.structuresClosed,
+      realizedPnl: metrics.realizedPnl,
+      cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
+      hwmBefore: metrics.hwmBefore,
+      hwmAfter: metrics.hwmAfter,
+      billableProfit: metrics.billableProfit,
+      profitSharePct: dec(metrics.profitSharePct),
+      commissionAmount: metrics.commissionAmount,
+      status: INVOICE_STATUS.ACCRUED,
+      isSimulated,
+      generatedAt,
+    };
+
+    const saved = existing
+      ? await prisma.monthlyRevenueInvoice.update({
+          where: { id: existing.id },
+          data,
+        })
+      : await prisma.monthlyRevenueInvoice.create({
+          data: {
+            userId,
+            periodYear: period.year,
+            periodMonth: period.month,
+            ...data,
+          },
+        });
+
+    after.push(invoiceToSummary(saved));
+  }
+
+  const changed: RecomputeInvoiceChainResult["changed"] = [];
+  for (const post of after) {
+    const pre = before.find(
+      (row) =>
+        row.periodYear === post.periodYear &&
+        row.periodMonth === post.periodMonth,
+    );
+    if (!pre) {
+      changed.push({
+        periodYear: post.periodYear,
+        periodMonth: post.periodMonth,
+        fields: ["created"],
+      });
+      continue;
+    }
+    const fields: string[] = [];
+    if (pre.realizedPnl !== post.realizedPnl) fields.push("realizedPnl");
+    if (pre.cumulativeRealizedPnl !== post.cumulativeRealizedPnl) {
+      fields.push("cumulativeRealizedPnl");
+    }
+    if (pre.hwmBefore !== post.hwmBefore) fields.push("hwmBefore");
+    if (pre.hwmAfter !== post.hwmAfter) fields.push("hwmAfter");
+    if (pre.billableProfit !== post.billableProfit) fields.push("billableProfit");
+    if (pre.commissionAmount !== post.commissionAmount) {
+      fields.push("commissionAmount");
+    }
+    if (fields.length > 0) {
+      changed.push({
+        periodYear: post.periodYear,
+        periodMonth: post.periodMonth,
+        fields,
+      });
+    }
+  }
+
+  return { ok: true, userId, isSimulated, before, after, changed };
+}
+
+export async function computeMonthlyRevenueInvoiceForUser(
+  prisma: PrismaClient,
+  userId: string,
+  periodYear: number,
+  periodMonth: number,
+  opts?: { isSimulated?: boolean },
+): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
+  const existing = await prisma.monthlyRevenueInvoice.findUnique({
+    where: {
+      userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
+    },
+  });
+  if (
+    existing &&
+    (existing.status === INVOICE_STATUS.INVOICED ||
+      existing.status === INVOICE_STATUS.PAID)
+  ) {
+    return existing;
+  }
+
+  const isSimulated = opts?.isSimulated ?? existing?.isSimulated ?? false;
+  const metrics = await computeMonthlyInvoiceMetrics(
+    prisma,
+    userId,
+    periodYear,
+    periodMonth,
+    isSimulated,
+  );
+  const generatedAt = new Date();
+
+  const data = {
+    structuresClosed: metrics.structuresClosed,
+    realizedPnl: metrics.realizedPnl,
+    cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
+    hwmBefore: metrics.hwmBefore,
+    hwmAfter: metrics.hwmAfter,
+    billableProfit: metrics.billableProfit,
+    profitSharePct: dec(metrics.profitSharePct),
+    commissionAmount: metrics.commissionAmount,
+    status: INVOICE_STATUS.ACCRUED,
+    isSimulated,
+    generatedAt,
+  };
+
+  if (existing) {
+    return prisma.monthlyRevenueInvoice.update({
+      where: { id: existing.id },
+      data,
+    });
+  }
+
+  return prisma.monthlyRevenueInvoice.create({
+    data: {
+      userId,
+      periodYear,
+      periodMonth,
+      ...data,
+    },
   });
 }
 
@@ -204,95 +626,6 @@ export async function runDailyPnlSnapshots(
     `[StructureRevenue] daily snapshot date=${snapshotDate.toISOString()} users=${userIds.length}`,
   );
   return results;
-}
-
-export async function computeMonthlyRevenueInvoiceForUser(
-  prisma: PrismaClient,
-  userId: string,
-  periodYear: number,
-  periodMonth: number,
-): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
-  const existing = await prisma.monthlyRevenueInvoice.findUnique({
-    where: {
-      userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
-    },
-  });
-  if (
-    existing &&
-    (existing.status === INVOICE_STATUS.INVOICED ||
-      existing.status === INVOICE_STATUS.PAID)
-  ) {
-    return existing;
-  }
-
-  const monthProbe = new Date(Date.UTC(periodYear, periodMonth - 1, 15, 12, 0, 0));
-  const monthStart = startOfMonthInTimeZone(monthProbe, BILLING_TIMEZONE);
-  const monthEnd = endOfMonthInTimeZone(monthProbe, BILLING_TIMEZONE);
-
-  const closedInMonth = await structuresClosedInIstWindow(
-    prisma,
-    userId,
-    monthStart,
-    monthEnd,
-  );
-  const realizedPnl = sumStructureRealized(closedInMonth);
-  const structuresClosed = closedInMonth.length;
-
-  const priorMonthEnd = startOfDayInTimeZone(
-    new Date(monthStart.getTime() - MS_PER_DAY),
-    BILLING_TIMEZONE,
-  );
-  const priorSnap = await prisma.dailyPnlSnapshot.findUnique({
-    where: {
-      userId_snapshotDate: { userId, snapshotDate: priorMonthEnd },
-    },
-  });
-
-  const hwmBefore = priorSnap?.highWaterMark ?? zero();
-  const cumulativeBefore = priorSnap?.cumulativeRealized ?? zero();
-  const cumulativeAfter = cumulativeBefore.add(realizedPnl);
-  const hwmAfter = maxDec(hwmBefore, cumulativeAfter);
-  const billableProfit = maxDec(zero(), hwmAfter.sub(hwmBefore));
-
-  const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
-  const commissionAmount = dec(
-    billableProfit.toNumber() * (profitSharePct / 100),
-  );
-  const generatedAt = new Date();
-
-  if (existing) {
-    return prisma.monthlyRevenueInvoice.update({
-      where: { id: existing.id },
-      data: {
-        structuresClosed,
-        realizedPnl,
-        hwmBefore,
-        hwmAfter,
-        billableProfit,
-        profitSharePct: dec(profitSharePct),
-        commissionAmount,
-        status: INVOICE_STATUS.ACCRUED,
-        generatedAt,
-      },
-    });
-  }
-
-  return prisma.monthlyRevenueInvoice.create({
-    data: {
-      userId,
-      periodYear,
-      periodMonth,
-      structuresClosed,
-      realizedPnl,
-      hwmBefore,
-      hwmAfter,
-      billableProfit,
-      profitSharePct: dec(profitSharePct),
-      commissionAmount,
-      status: INVOICE_STATUS.ACCRUED,
-      generatedAt,
-    },
-  });
 }
 
 /** Previous IST calendar month relative to `ref`. */

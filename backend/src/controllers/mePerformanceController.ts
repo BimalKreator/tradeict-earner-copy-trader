@@ -184,6 +184,7 @@ export function createMePerformanceController(prisma: PrismaClient) {
           periodMonth: row.periodMonth,
           structuresClosed: row.structuresClosed,
           realizedPnl: dec(row.realizedPnl) ?? 0,
+          cumulativeRealizedPnl: dec(row.cumulativeRealizedPnl) ?? 0,
           hwmBefore: dec(row.hwmBefore) ?? 0,
           hwmAfter: dec(row.hwmAfter) ?? 0,
           billableProfit: dec(row.billableProfit) ?? 0,

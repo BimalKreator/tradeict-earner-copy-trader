@@ -24,6 +24,11 @@ export function excludeTestPnlFilter(
   return { isSimulated: false, isDummy: false };
 }
 
+/** Scope queries to exactly real or simulated rows (never mix). */
+export function scopedSimulatedFilter(isSimulated: boolean): { isSimulated: boolean } {
+  return { isSimulated };
+}
+
 export function parseIncludeSimulated(raw: unknown): boolean {
   if (raw === true || raw === "true" || raw === "1") return true;
   return false;

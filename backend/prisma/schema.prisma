@@ -505,6 +505,8 @@ model MonthlyRevenueInvoice {
   periodMonth      Int
   structuresClosed Int
   realizedPnl      Decimal  @db.Decimal(24, 10)
+  /** Lifetime cumulative realized P&L at period end — audit trail for HWM. */
+  cumulativeRealizedPnl Decimal? @db.Decimal(24, 10)
   hwmBefore        Decimal  @db.Decimal(24, 10)
   hwmAfter         Decimal  @db.Decimal(24, 10)
   billableProfit   Decimal  @db.Decimal(24, 10)

@@ -8,7 +8,10 @@ import {
   getAdminRevenueUserDetail,
 } from "../services/adminDeltaRevenueService.js";
 import { listEligibleStructurePnlUserIds } from "../services/structurePnlService.js";
-import { previousIstCalendarMonth } from "../services/structureRevenueService.js";
+import {
+  previousIstCalendarMonth,
+  recomputeInvoiceChain,
+} from "../services/structureRevenueService.js";
 import { parseIncludeSimulated } from "../services/simulatedDataFilters.js";
 
 function parsePeriod(
@@ -181,11 +184,50 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function postRecomputeChain(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const body = (req.body ?? {}) as {
+        userId?: unknown;
+        isSimulated?: unknown;
+      };
+      const userId =
+        typeof body.userId === "string" && body.userId.trim()
+          ? body.userId.trim()
+          : "";
+      if (!userId) {
+        res.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      const isSimulated =
+        body.isSimulated === true || body.isSimulated === "true";
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const result = await recomputeInvoiceChain(prisma, userId, isSimulated);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getOverview,
     getUserDetail,
     getHealth,
     getReconcile,
     patchProfitShareOverride,
+    postRecomputeChain,
   };
 }
