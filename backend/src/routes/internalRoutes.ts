@@ -1,10 +1,6 @@
 import express from 'express';
 import type { PrismaClient } from '@prisma/client';
-import { recordTradePnl } from '../controllers/subscriptionController.js';
-import {
-  isInternalWebhookPnlWritesEnabled,
-  TRADE_SOURCE_BOT_SYNC_LEGACY,
-} from '../services/tradeBillingFilters.js';
+import { TRADE_SOURCE_BOT_SYNC_LEGACY } from '../services/tradeBillingFilters.js';
 
 export function createInternalRouter(prisma: PrismaClient) {
   const router = express.Router();
@@ -12,8 +8,12 @@ export function createInternalRouter(prisma: PrismaClient) {
   /**
    * POST /api/internal/bot-trade-closed
    * Called by Delta Bot when a master trade closes.
-   * Finds earner users from slave list, records P&L, closes Trade records.
+   * Finds earner users from slave list, closes Trade records for audit.
    */
+  // This endpoint accepts IDs and timestamps only.
+  // P&L NEVER comes from the bot -- it is computed from the
+  // customer's own Delta wallet ledger. See routes_structures.py
+  // in the bot repo for the same rule.
   router.post('/bot-trade-closed', async (req, res) => {
     try {
       const body = req.body as {
@@ -33,7 +33,6 @@ export function createInternalRouter(prisma: PrismaClient) {
 
       const masterTradeId = body.master_trade_id;
       const exitReason = body.exit_reason ?? 'BOT_EXIT';
-      const finalPnl = typeof body.final_pnl === 'number' ? body.final_pnl : 0;
       const slaves = Array.isArray(body.slaves) ? body.slaves : [];
 
       if (!masterTradeId) {
@@ -41,9 +40,22 @@ export function createInternalRouter(prisma: PrismaClient) {
         return;
       }
 
+      const moneyFieldsPresent =
+        body.final_pnl !== undefined ||
+        slaves.some(
+          (s) =>
+            s.call_fill_price !== undefined || s.put_fill_price !== undefined,
+        );
+      if (moneyFieldsPresent) {
+        console.log(
+          `[InternalWebhook] money fields ignored (Delta ledger is the only ` +
+            `P&L source) master_trade_id=${masterTradeId}`,
+        );
+      }
+
       console.log(
         `[InternalWebhook] bot-trade-closed master=${masterTradeId} ` +
-        `reason=${exitReason} pnl=${finalPnl} slaves=${slaves.length}`,
+          `reason=${exitReason} slaves=${slaves.length}`,
       );
 
       const results: Array<{
@@ -85,11 +97,8 @@ export function createInternalRouter(prisma: PrismaClient) {
             continue;
           }
 
-          // Calculate user P&L proportional to their multiplier
-          const userPnl = finalPnl * (subscription.multiplier ?? 1.0);
-
           // Find existing OPEN Trade record for this user+strategy
-          // or create one if it doesn't exist
+          // or create one if it doesn't exist (audit only — no money fields)
           let trade = await prisma.trade.findFirst({
             where: {
               userId,
@@ -100,21 +109,19 @@ export function createInternalRouter(prisma: PrismaClient) {
           });
 
           if (trade) {
-            // Close the existing trade
+            // Close the existing trade — do not touch pnl / tradePnl / prices
             await prisma.trade.update({
               where: { id: trade.id },
               data: {
                 status: 'CLOSED',
                 exitReason,
-                pnl: userPnl,
-                tradePnl: userPnl,
-                exitPrice: slave.call_fill_price ?? 0,
                 source: TRADE_SOURCE_BOT_SYNC_LEGACY,
                 updatedAt: new Date(),
               },
             });
           } else {
-            // Create and immediately close a trade record
+            // Create and immediately close a trade record (audit stub)
+            // entryPrice is required by schema; use 0 — never bot fill prices.
             trade = await prisma.trade.create({
               data: {
                 userId,
@@ -122,32 +129,12 @@ export function createInternalRouter(prisma: PrismaClient) {
                 symbol: 'BTC-OPTIONS',
                 side: 'SELL',
                 size: slave.actual_quantity ?? 1,
-                entryPrice: (slave.call_fill_price ?? 0) + (slave.put_fill_price ?? 0),
-                exitPrice: 0,
-                pnl: userPnl,
-                tradePnl: userPnl,
+                entryPrice: 0,
                 status: 'CLOSED',
                 exitReason,
                 source: TRADE_SOURCE_BOT_SYNC_LEGACY,
               },
             });
-          }
-
-          // Record PnL for revenue share calculation (retired — gated off by default)
-          if (userPnl !== 0) {
-            if (isInternalWebhookPnlWritesEnabled()) {
-              await recordTradePnl(prisma, {
-                userId,
-                strategyId: subscription.strategyId,
-                tradeProfit: userPnl,
-              });
-            } else {
-              console.log(
-                `[InternalWebhook] P&L write skipped ` +
-                  `(INTERNAL_WEBHOOK_PNL_WRITES_ENABLED=false) ` +
-                  `userId=${userId} pnl=${userPnl.toFixed(4)}`,
-              );
-            }
           }
 
           // Update subscription sync status
@@ -161,7 +148,7 @@ export function createInternalRouter(prisma: PrismaClient) {
 
           console.log(
             `[InternalWebhook] Processed userId=${userId} ` +
-            `pnl=${userPnl.toFixed(4)} tradeId=${trade.id}`,
+              `tradeId=${trade.id} (money fields not written)`,
           );
 
           results.push({ earner_user_id: userId, status: 'ok' });
