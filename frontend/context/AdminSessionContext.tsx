@@ -46,13 +46,16 @@ function parsePlatformAdminRole(value: unknown): PlatformAdminRole | null {
   return null;
 }
 
+/** Matches backend `isPlatformAdminUser`: ADMIN + non-null adminRole. */
 function isPlatformAdminUser(user: AuthUser | null | undefined): boolean {
-  return user?.role === "ADMIN" || Boolean(user?.adminRole);
+  return user?.role === "ADMIN" && user.adminRole != null;
 }
 
-function platformRoleFromAuthUser(user: AuthUser | null | undefined): PlatformAdminRole | null {
+function platformRoleFromAuthUser(
+  user: AuthUser | null | undefined,
+): PlatformAdminRole | null {
   if (!isPlatformAdminUser(user)) return null;
-  return user?.adminRole ?? "SUPER_ADMIN";
+  return parsePlatformAdminRole(user?.adminRole) ?? "SUPPORT";
 }
 
 function parseAdminSession(data: unknown): AdminSession | null {
@@ -65,7 +68,7 @@ function parseAdminSession(data: unknown): AdminSession | null {
   const role =
     parsePlatformAdminRole(admin.adminRole) ??
     parsePlatformAdminRole(admin.role) ??
-    "SUPER_ADMIN";
+    "SUPPORT";
 
   return {
     id: admin.id,

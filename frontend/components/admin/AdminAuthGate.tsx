@@ -5,8 +5,11 @@ import { useEffect, useState } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth } from "@/context/AuthContext";
 
-function isPlatformAdminUser(user: { role: string; adminRole?: string } | null): boolean {
-  return user?.role === "ADMIN" || Boolean(user?.adminRole);
+/** Matches backend `isPlatformAdminUser`: ADMIN + non-null adminRole. */
+function isPlatformAdminUser(
+  user: { role: string; adminRole?: string | null } | null,
+): boolean {
+  return user?.role === "ADMIN" && user.adminRole != null;
 }
 
 export function AdminAuthGate({
@@ -15,6 +18,7 @@ export function AdminAuthGate({
   const router = useRouter();
   const { isLoading, isAuthenticated, user } = useAuth();
   const [ready, setReady] = useState(false);
+  const [denied, setDenied] = useState(false);
 
   useEffect(() => {
     if (isLoading) return;
@@ -22,19 +26,39 @@ export function AdminAuthGate({
     if (!isAuthenticated) {
       router.replace("/login?redirect=/admin");
       setReady(false);
+      setDenied(false);
       return;
     }
 
     if (!isPlatformAdminUser(user)) {
-      router.replace("/");
+      setDenied(true);
       setReady(false);
-      return;
+      const timer = window.setTimeout(() => {
+        router.replace("/");
+      }, 2500);
+      return () => window.clearTimeout(timer);
     }
 
+    setDenied(false);
     setReady(true);
   }, [isLoading, isAuthenticated, user, router]);
 
-  if (isLoading || !ready) {
+  if (isLoading) {
+    return <AuthLoadingScreen message="Checking admin session…" />;
+  }
+
+  if (denied) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-[#0a0a12] px-6 text-center">
+        <p className="text-base font-medium text-white/90">
+          You don&apos;t have access to the admin panel
+        </p>
+        <p className="text-sm text-white/50">Redirecting to your dashboard…</p>
+      </div>
+    );
+  }
+
+  if (!ready) {
     return <AuthLoadingScreen message="Checking admin session…" />;
   }
 
