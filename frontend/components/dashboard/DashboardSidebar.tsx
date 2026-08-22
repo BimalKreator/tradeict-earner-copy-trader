@@ -10,6 +10,7 @@ import { useAuth } from "@/context/AuthContext";
 const baseLinks = [
   { href: "/dashboard", label: "Home" },
   { href: "/dashboard/analytics", label: "Analytics" },
+  { href: "/dashboard/performance", label: "Performance" },
   { href: "/dashboard/strategies", label: "Strategies" },
   { href: "/dashboard/live-trades", label: "Live trades" },
   { href: "/dashboard/dex-arbitrage", label: "Dex Arbitrage" },

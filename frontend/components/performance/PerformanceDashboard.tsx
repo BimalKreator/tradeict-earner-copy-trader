@@ -1,0 +1,551 @@
+"use client";
+
+import { ChevronDown, ChevronRight, Loader2, RefreshCw, TrendingUp } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { fmtUsd, formatINRApprox } from "@/lib/currency";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
+
+type StructureLeg = {
+  id: string;
+  botLegId: number;
+  legRole: string;
+  productId: number;
+  symbol: string | null;
+  strike: number | null;
+  side: string;
+  quantity: number;
+  openedAt: string;
+  closedAt: string | null;
+  grossCashflow: number;
+  commissionTotal: number;
+  realizedPnl: number | null;
+  matchedTxnCount: number;
+};
+
+type StructureRow = {
+  id: string;
+  botStructureId: number;
+  underlying: string;
+  status: string;
+  openedAt: string;
+  closedAt: string | null;
+  closeReason: string | null;
+  grossCashflow: number;
+  commissionTotal: number;
+  realizedPnl: number | null;
+  legCount: number;
+  closedLegCount: number;
+  matchedTxnCount: number;
+  legs: StructureLeg[];
+};
+
+type DailySnapshot = {
+  snapshotDate: string;
+  realizedDelta: number;
+  cumulativeRealized: number;
+  highWaterMark: number;
+  commissionAccrued: number;
+  commissionCumulative: number;
+  openStructureCount: number;
+};
+
+type RevenueInvoice = {
+  id: string;
+  periodYear: number;
+  periodMonth: number;
+  structuresClosed: number;
+  realizedPnl: number;
+  billableProfit: number;
+  profitSharePct: number;
+  commissionAmount: number;
+  status: string;
+};
+
+const dayFmt = new Intl.DateTimeFormat("en-IN", {
+  month: "short",
+  day: "2-digit",
+  year: "numeric",
+});
+
+const monthFmt = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  year: "numeric",
+});
+
+function authHeaders(): HeadersInit {
+  return { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` };
+}
+
+function fmtDay(iso: string): string {
+  try {
+    return dayFmt.format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function fmtPeriod(month: number, year: number): string {
+  try {
+    return monthFmt.format(new Date(Date.UTC(year, month - 1, 1)));
+  } catch {
+    return `${year}-${String(month).padStart(2, "0")}`;
+  }
+}
+
+function MoneyCell({
+  usd,
+  muted = false,
+}: {
+  usd: number | null;
+  muted?: boolean;
+}) {
+  if (usd === null) {
+    return <span className="text-white/45">—</span>;
+  }
+  return (
+    <div className={muted ? "text-white/70" : ""}>
+      <div className="font-medium tabular-nums">{fmtUsd(usd)}</div>
+      <div className="text-xs text-white/45 tabular-nums">{formatINRApprox(usd)}</div>
+    </div>
+  );
+}
+
+function SummaryCard({
+  title,
+  value,
+  basis,
+  loading,
+}: {
+  title: string;
+  value: ReactNode;
+  basis?: string;
+  loading?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+      <p className="text-xs uppercase tracking-wide text-white/45">{title}</p>
+      <div className="mt-2 min-h-[2rem] text-xl font-semibold text-white">
+        {loading ? <Loader2 className="h-5 w-5 animate-spin text-white/40" /> : value}
+      </div>
+      {basis ? <p className="mt-2 text-xs leading-relaxed text-white/40">{basis}</p> : null}
+    </div>
+  );
+}
+
+export function PerformanceDashboard() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [structures, setStructures] = useState<StructureRow[]>([]);
+  const [snapshots, setSnapshots] = useState<DailySnapshot[]>([]);
+  const [invoices, setInvoices] = useState<RevenueInvoice[]>([]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!API_BASE) {
+      setError("API URL is not configured.");
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const headers = authHeaders();
+      const [sRes, pRes, iRes] = await Promise.all([
+        fetch(`${API_BASE}/api/me/structures?limit=100`, { headers }),
+        fetch(`${API_BASE}/api/me/pnl/daily`, { headers }),
+        fetch(`${API_BASE}/api/me/revenue/invoices`, { headers }),
+      ]);
+      if (!sRes.ok || !pRes.ok || !iRes.ok) {
+        throw new Error("Failed to load performance data");
+      }
+      const sJson = (await sRes.json()) as { structures: StructureRow[] };
+      const pJson = (await pRes.json()) as { snapshots: DailySnapshot[] };
+      const iJson = (await iRes.json()) as { invoices: RevenueInvoice[] };
+      setStructures(sJson.structures ?? []);
+      setSnapshots(pJson.snapshots ?? []);
+      setInvoices(iJson.invoices ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+  const closedStructures = structures.filter((s) => s.status === "closed");
+  const openStructures = structures.filter((s) => s.status !== "closed");
+
+  const thisMonthRealized = useMemo(() => {
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    return snapshots
+      .filter((s) => {
+        const d = new Date(s.snapshotDate);
+        return d.getUTCFullYear() === y && d.getUTCMonth() === m;
+      })
+      .reduce((sum, s) => sum + s.realizedDelta, 0);
+  }, [snapshots]);
+
+  const chartData = useMemo(
+    () =>
+      snapshots.map((s) => ({
+        day: s.snapshotDate.slice(0, 10),
+        cumulativeRealized: s.cumulativeRealized,
+        highWaterMark: s.highWaterMark,
+        hwmGap: Math.max(0, s.highWaterMark - s.cumulativeRealized),
+      })),
+    [snapshots],
+  );
+
+  const hasClosedHistory =
+    closedStructures.length > 0 ||
+    snapshots.some((s) => s.cumulativeRealized !== 0 || s.realizedDelta !== 0);
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-[#0A84FF]">
+            <TrendingUp className="h-5 w-5" />
+            <span className="text-sm font-medium uppercase tracking-wide">Performance</span>
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">Your Delta account</h1>
+          <p className="mt-2 max-w-2xl text-sm text-white/55">
+            All figures come from your own Delta wallet transactions. Open positions are never
+            shown as realized P&amp;L.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          disabled={loading}
+          className="inline-flex items-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm text-white/80 hover:bg-white/5 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {error}
+        </div>
+      ) : null}
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium text-white">Summary</h2>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <SummaryCard
+            title="Cumulative realized P&L"
+            loading={loading}
+            basis="Realized from your Delta account. Open positions are not included."
+            value={<MoneyCell usd={latest?.cumulativeRealized ?? (hasClosedHistory ? 0 : null)} />}
+          />
+          <SummaryCard
+            title="High-water mark"
+            loading={loading}
+            basis="Your lifetime best cumulative realized P&L."
+            value={<MoneyCell usd={latest?.highWaterMark ?? (hasClosedHistory ? 0 : null)} />}
+          />
+          <SummaryCard
+            title="Commission to date"
+            loading={loading}
+            basis="Accrued only on profit above your previous best."
+            value={
+              <MoneyCell usd={latest?.commissionCumulative ?? (hasClosedHistory ? 0 : null)} />
+            }
+          />
+          <SummaryCard
+            title="Open structures"
+            loading={loading}
+            value={
+              latest != null
+                ? String(latest.openStructureCount)
+                : openStructures.length > 0
+                  ? String(openStructures.length)
+                  : "0"
+            }
+          />
+          <SummaryCard
+            title="This month's realized"
+            loading={loading}
+            basis="Structures that closed this calendar month (UTC)."
+            value={<MoneyCell usd={hasClosedHistory || thisMonthRealized !== 0 ? thisMonthRealized : null} />}
+          />
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium text-white">Daily cumulative P&L</h2>
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+          {loading ? (
+            <div className="flex h-64 items-center justify-center">
+              <Loader2 className="h-8 w-8 animate-spin text-white/30" />
+            </div>
+          ) : chartData.length === 0 ? (
+            <p className="py-12 text-center text-sm text-white/45">
+              No daily snapshots yet. Once a structure closes, your cumulative realized P&amp;L
+              will appear here — matched to your Delta account.
+            </p>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                <XAxis dataKey="day" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 11 }} />
+                <YAxis tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 11 }} />
+                <Tooltip
+                  contentStyle={{
+                    background: "#1a1a1a",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 8,
+                  }}
+                  formatter={(value: number, name: string) => {
+                    if (name === "hwmGap") return [fmtUsd(value), "Protected (no re-bill)"];
+                    return [fmtUsd(value), name === "highWaterMark" ? "High-water mark" : "Cumulative realized"];
+                  }}
+                />
+                <Legend />
+                <Area
+                  type="monotone"
+                  dataKey="cumulativeRealized"
+                  stackId="hwm"
+                  fill="transparent"
+                  stroke="none"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="hwmGap"
+                  stackId="hwm"
+                  fill="rgba(251, 191, 36, 0.15)"
+                  stroke="none"
+                  name="Protected (no re-bill)"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="cumulativeRealized"
+                  stroke="#34d399"
+                  strokeWidth={2}
+                  dot={false}
+                  name="Cumulative realized"
+                />
+                <Line
+                  type="stepAfter"
+                  dataKey="highWaterMark"
+                  stroke="#0A84FF"
+                  strokeWidth={2}
+                  dot={false}
+                  name="High-water mark"
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
+          <p className="mt-2 text-xs text-white/40">
+            Shaded area = profit below your high-water mark — you do not pay commission on that
+            portion again.
+          </p>
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium text-white">Structure history</h2>
+        {loading ? (
+          <div className="flex justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-white/30" />
+          </div>
+        ) : structures.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-white/15 px-6 py-12 text-center">
+            <p className="text-sm text-white/55">No bot structures recorded yet.</p>
+            <p className="mt-2 text-xs text-white/40">
+              When the bot opens and closes positions on your Delta account, each structure will
+              appear here with P&amp;L matched to your wallet transactions.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {structures.map((s) => {
+              const isOpen = s.status !== "closed" || s.realizedPnl === null;
+              const expanded = expandedId === s.id;
+              return (
+                <div
+                  key={s.id}
+                  className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden"
+                >
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-white/[0.03]"
+                    onClick={() => setExpandedId(expanded ? null : s.id)}
+                  >
+                    {expanded ? (
+                      <ChevronDown className="h-4 w-4 shrink-0 text-white/45" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4 shrink-0 text-white/45" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium text-white">
+                          {s.underlying} · #{s.botStructureId}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ${
+                            isOpen
+                              ? "bg-amber-500/15 text-amber-200"
+                              : "bg-emerald-500/15 text-emerald-200"
+                          }`}
+                        >
+                          {s.status}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-xs text-white/45">
+                        Opened {fmtDay(s.openedAt)}
+                        {s.closedAt ? ` · Closed ${fmtDay(s.closedAt)}` : ""}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      {isOpen ? (
+                        <div>
+                          <span className="text-white/45">—</span>
+                          <p className="mt-0.5 max-w-[12rem] text-[10px] text-white/35">
+                            Still open — P&L is booked when the structure closes
+                          </p>
+                        </div>
+                      ) : (
+                        <MoneyCell usd={s.realizedPnl} />
+                      )}
+                    </div>
+                  </button>
+                  {expanded ? (
+                    <div className="border-t border-white/10 px-4 py-3">
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[640px] text-left text-sm">
+                          <thead>
+                            <tr className="text-xs uppercase text-white/40">
+                              <th className="pb-2 pr-3">Leg</th>
+                              <th className="pb-2 pr-3">Symbol</th>
+                              <th className="pb-2 pr-3">Window</th>
+                              <th className="pb-2 pr-3">Cashflow</th>
+                              <th className="pb-2 pr-3">Commission</th>
+                              <th className="pb-2 pr-3">Realized</th>
+                              <th className="pb-2">Txns</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/5">
+                            {s.legs.map((leg) => {
+                              const legOpen = leg.closedAt == null || leg.realizedPnl === null;
+                              return (
+                                <tr key={leg.id} className="text-white/80">
+                                  <td className="py-2 pr-3">
+                                    {leg.legRole} · {leg.side} ×{leg.quantity}
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    {leg.symbol ?? leg.productId}
+                                    {leg.strike != null ? ` @ ${leg.strike}` : ""}
+                                  </td>
+                                  <td className="py-2 pr-3 text-xs text-white/50">
+                                    {fmtDay(leg.openedAt)}
+                                    {leg.closedAt ? ` → ${fmtDay(leg.closedAt)}` : " → open"}
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    <MoneyCell usd={leg.grossCashflow} muted />
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    <MoneyCell usd={leg.commissionTotal} muted />
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    {legOpen ? (
+                                      <span className="text-white/45">—</span>
+                                    ) : (
+                                      <MoneyCell usd={leg.realizedPnl} muted />
+                                    )}
+                                  </td>
+                                  <td className="py-2 tabular-nums">{leg.matchedTxnCount}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium text-white">Billing</h2>
+        <p className="text-sm text-white/55">
+          You are charged only on profit above your previous best. A losing month reduces what is
+          billable later — you never pay twice on the same profit.
+        </p>
+        <div className="overflow-x-auto rounded-xl border border-white/10">
+          {loading ? (
+            <div className="flex justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-white/30" />
+            </div>
+          ) : invoices.length === 0 ? (
+            <p className="px-6 py-10 text-center text-sm text-white/45">
+              No monthly revenue invoices yet. Invoices are generated for closed structures each
+              calendar month.
+            </p>
+          ) : (
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase text-white/40">
+                <tr>
+                  <th className="px-4 py-3">Period</th>
+                  <th className="px-4 py-3">Closed</th>
+                  <th className="px-4 py-3">Realized P&L</th>
+                  <th className="px-4 py-3">Billable profit</th>
+                  <th className="px-4 py-3">Share %</th>
+                  <th className="px-4 py-3">Commission</th>
+                  <th className="px-4 py-3">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {invoices.map((inv) => (
+                  <tr key={inv.id} className="text-white/85">
+                    <td className="px-4 py-3">{fmtPeriod(inv.periodMonth, inv.periodYear)}</td>
+                    <td className="px-4 py-3 tabular-nums">{inv.structuresClosed}</td>
+                    <td className="px-4 py-3">
+                      <MoneyCell usd={inv.realizedPnl} muted />
+                    </td>
+                    <td className="px-4 py-3">
+                      <MoneyCell usd={inv.billableProfit} muted />
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">{inv.profitSharePct.toFixed(1)}%</td>
+                    <td className="px-4 py-3">
+                      <MoneyCell usd={inv.commissionAmount} muted />
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs">
+                        {inv.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
