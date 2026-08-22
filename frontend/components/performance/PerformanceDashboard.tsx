@@ -14,6 +14,11 @@ import {
   YAxis,
 } from "recharts";
 import { fmtUsd, formatINRApprox } from "@/lib/currency";
+import {
+  formatIstCalendarDate,
+  formatIstMonthYear,
+  formatIstSnapshotDay,
+} from "@/lib/istDates";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
@@ -73,35 +78,21 @@ type RevenueInvoice = {
   status: string;
 };
 
-const dayFmt = new Intl.DateTimeFormat("en-IN", {
-  month: "short",
-  day: "2-digit",
-  year: "numeric",
-});
-
-const monthFmt = new Intl.DateTimeFormat("en-US", {
-  month: "long",
-  year: "numeric",
-});
-
-function authHeaders(): HeadersInit {
-  return { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` };
-}
 
 function fmtDay(iso: string): string {
-  try {
-    return dayFmt.format(new Date(iso));
-  } catch {
-    return iso;
-  }
+  return formatIstCalendarDate(iso);
 }
 
 function fmtPeriod(month: number, year: number): string {
-  try {
-    return monthFmt.format(new Date(Date.UTC(year, month - 1, 1)));
-  } catch {
-    return `${year}-${String(month).padStart(2, "0")}`;
-  }
+  return formatIstMonthYear(month, year);
+}
+
+function fmtSnapshotDay(iso: string): string {
+  return formatIstSnapshotDay(iso);
+}
+
+function authHeaders(): HeadersInit {
+  return { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` };
 }
 
 function MoneyCell({
@@ -206,7 +197,7 @@ export function PerformanceDashboard() {
   const chartData = useMemo(
     () =>
       snapshots.map((s) => ({
-        day: s.snapshotDate.slice(0, 10),
+        day: fmtSnapshotDay(s.snapshotDate),
         cumulativeRealized: s.cumulativeRealized,
         highWaterMark: s.highWaterMark,
         hwmGap: Math.max(0, s.highWaterMark - s.cumulativeRealized),

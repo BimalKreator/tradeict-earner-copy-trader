@@ -22,6 +22,7 @@ import {
   runDailyPnlSnapshots,
   runMonthlyRevenueInvoices,
 } from "../services/structureRevenueService.js";
+import { createAdminDeltaRevenueController } from "../controllers/adminDeltaRevenueController.js";
 import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
@@ -85,6 +86,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const adminNotifications = createAdminNotificationController(prisma);
   const adminEmail = createAdminEmailController(prisma);
   const futureHedge = createFutureHedgeController(prisma);
+  const deltaRevenue = createAdminDeltaRevenueController(prisma);
 
   router.use(authenticateToken(prisma), isAdmin(prisma));
 
@@ -1342,6 +1344,12 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   });
 
   router.get("/revenue", adminController.getRevenueAnalytics);
+
+  /** Delta-derived revenue (StructurePnl / DailyPnlSnapshot / MonthlyRevenueInvoice). */
+  router.get("/revenue/overview", deltaRevenue.getOverview);
+  router.get("/revenue/health", deltaRevenue.getHealth);
+  router.get("/revenue/user/:userId", deltaRevenue.getUserDetail);
+  router.patch("/revenue/user/:userId/profit-share", deltaRevenue.patchProfitShareOverride);
 
   /**
    * Manual fire-the-cron endpoint for QA / staging.

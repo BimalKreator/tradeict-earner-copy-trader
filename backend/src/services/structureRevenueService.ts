@@ -81,6 +81,9 @@ async function resolveUserProfitSharePct(
     orderBy: { joinedDate: "desc" },
     include: { strategy: { select: { profitShare: true } } },
   });
+  if (sub?.profitShareOverride != null) {
+    return sub.profitShareOverride.toNumber();
+  }
   return sub?.strategy.profitShare ?? 0;
 }
 

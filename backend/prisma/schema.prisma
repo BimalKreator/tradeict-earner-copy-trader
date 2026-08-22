@@ -373,6 +373,8 @@ model UserStrategySubscription {
   strategyFeeCycleEndsAt DateTime?
   /** Bot slave account ID on the Delta Bot — set when user subscribes to a bot-type strategy. */
   botSlaveId         String?
+  /** Admin override for revenue share % on this subscription (null = use strategy default). */
+  profitShareOverride Decimal? @db.Decimal(6, 3)
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])

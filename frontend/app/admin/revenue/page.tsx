@@ -259,6 +259,14 @@ export default function AdminRevenuePage() {
 
   return (
     <div className="mx-auto max-w-6xl">
+      <div className="mb-6 rounded-lg border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+        <strong className="font-semibold">Legacy</strong> — based on bot-reported P&amp;L.
+        Superseded by{" "}
+        <Link href="/admin/revenue-delta" className="underline text-amber-50">
+          Revenue (Delta)
+        </Link>
+        .
+      </div>
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-3">
           <div className="rounded-xl border border-glassBorder bg-primary/10 p-3">

@@ -23,6 +23,7 @@ import {
   Radio,
   Settings,
   Shield,
+  ShieldCheck,
   Tag,
   TestTube2,
   Users,
@@ -82,6 +83,7 @@ const navGroups: NavGroup[] = [
     label: "Financials",
     items: [
       { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
+      { href: "/admin/revenue-delta", label: "Revenue (Delta)", icon: ShieldCheck },
       { href: "/admin/payouts", label: "Payouts", icon: Banknote },
       { href: "/admin/wallet", label: "Wallet Management", icon: CircleDollarSign },
       { href: "/admin/funds", label: "Funds", icon: Wallet },
