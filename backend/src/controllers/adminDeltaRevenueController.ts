@@ -9,6 +9,7 @@ import {
 } from "../services/adminDeltaRevenueService.js";
 import { listEligibleStructurePnlUserIds } from "../services/structurePnlService.js";
 import { previousIstCalendarMonth } from "../services/structureRevenueService.js";
+import { parseIncludeSimulated } from "../services/simulatedDataFilters.js";
 
 function parsePeriod(
   yearRaw: unknown,
@@ -40,7 +41,8 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
   ): Promise<void> {
     try {
       const { year, month } = parsePeriod(req.query.year, req.query.month);
-      const data = await getAdminRevenueOverview(prisma, year, month);
+      const includeSimulated = parseIncludeSimulated(req.query.includeSimulated);
+      const data = await getAdminRevenueOverview(prisma, year, month, includeSimulated);
       res.json(data);
     } catch (err) {
       next(err);
@@ -59,7 +61,11 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
         res.status(400).json({ error: "userId required" });
         return;
       }
-      const detail = await getAdminRevenueUserDetail(prisma, userId.trim());
+      const detail = await getAdminRevenueUserDetail(
+        prisma,
+        userId.trim(),
+        parseIncludeSimulated(req.query.includeSimulated),
+      );
       if (!detail) {
         res.status(404).json({ error: "User not found" });
         return;
@@ -71,13 +77,18 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
   }
 
   async function getHealth(
-    _req: Request,
+    req: Request,
     res: Response,
     next: NextFunction,
   ): Promise<void> {
     try {
       const userIds = await listEligibleStructurePnlUserIds(prisma);
-      const health = await computeAllUsersLedgerHealth(prisma, userIds);
+      const includeSimulated = parseIncludeSimulated(req.query.includeSimulated);
+      const health = await computeAllUsersLedgerHealth(
+        prisma,
+        userIds,
+        includeSimulated,
+      );
       const users = await prisma.user.findMany({
         where: { id: { in: userIds } },
         select: { id: true, email: true, name: true },
@@ -157,7 +168,13 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
   ): Promise<void> {
     try {
       const { year, month } = parsePeriod(req.query.year, req.query.month);
-      const data = await getAdminRevenueReconcile(prisma, year, month);
+      const includeSimulated = parseIncludeSimulated(req.query.includeSimulated);
+      const data = await getAdminRevenueReconcile(
+        prisma,
+        year,
+        month,
+        includeSimulated,
+      );
       res.json(data);
     } catch (err) {
       next(err);

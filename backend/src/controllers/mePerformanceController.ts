@@ -5,6 +5,7 @@ import {
   endOfDayInTimeZone,
   startOfDayInTimeZone,
 } from "../services/dashboardMetricsService.js";
+import { excludeSimulatedFilter } from "../services/simulatedDataFilters.js";
 
 function dec(value: Prisma.Decimal | null | undefined): number | null {
   if (value == null) return null;
@@ -48,7 +49,10 @@ export function createMePerformanceController(prisma: PrismaClient) {
           : "";
       const limit = parseLimit(req.query.limit);
 
-      const where: Prisma.StructurePnlWhereInput = { userId };
+      const where: Prisma.StructurePnlWhereInput = {
+        userId,
+        ...excludeSimulatedFilter(false),
+      };
       if (statusRaw === "closed") where.status = "closed";
       else if (statusRaw === "active") where.status = { not: "closed" };
 
@@ -125,6 +129,7 @@ export function createMePerformanceController(prisma: PrismaClient) {
       const rows = await prisma.dailyPnlSnapshot.findMany({
         where: {
           userId,
+          ...excludeSimulatedFilter(false),
           ...(from || toStart
             ? {
                 snapshotDate: {
@@ -168,7 +173,7 @@ export function createMePerformanceController(prisma: PrismaClient) {
       }
 
       const rows = await prisma.monthlyRevenueInvoice.findMany({
-        where: { userId },
+        where: { userId, ...excludeSimulatedFilter(false) },
         orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }],
       });
 

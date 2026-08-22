@@ -810,8 +810,12 @@ export async function assertUserSafeToDelete(
     downlineMembers,
     acquiredUsers,
   ] = await Promise.all([
-    prisma.commissionLedger.count({ where: { beneficiaryUserId: userId } }),
-    prisma.commissionLedger.count({ where: { sourceUserId: userId } }),
+    prisma.commissionLedger.count({
+      where: { beneficiaryUserId: userId, isSimulated: false },
+    }),
+    prisma.commissionLedger.count({
+      where: { sourceUserId: userId, isSimulated: false },
+    }),
     prisma.payoutRequest.count({
       where: { userId, status: PayoutRequestStatus.PENDING },
     }),

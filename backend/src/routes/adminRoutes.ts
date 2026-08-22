@@ -24,6 +24,7 @@ import {
 } from "../services/structureRevenueService.js";
 import { createAdminDeltaRevenueController } from "../controllers/adminDeltaRevenueController.js";
 import { createCancellationBillingController } from "../controllers/cancellationBillingController.js";
+import { createDeltaRevenueSimulatorController } from "../controllers/deltaRevenueSimulatorController.js";
 import {
   STRATEGY_SELECT_ADMIN_LIST,
   STRATEGY_SELECT_ADMIN_SAFE,
@@ -89,6 +90,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   const futureHedge = createFutureHedgeController(prisma);
   const deltaRevenue = createAdminDeltaRevenueController(prisma);
   const cancellationBilling = createCancellationBillingController(prisma);
+  const deltaSimulator = createDeltaRevenueSimulatorController(prisma);
 
   router.use(authenticateToken(prisma), isAdmin(prisma));
 
@@ -469,6 +471,15 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.post(
     "/users/:id/close-structure-and-finalise-billing",
     cancellationBilling.adminCloseStructureAndFinalise,
+  );
+
+  router.post("/simulate/structure", superAdminOnly, deltaSimulator.postSimulateStructure);
+  router.post("/simulate/purge", superAdminOnly, deltaSimulator.postPurge);
+  router.get("/simulate/chain/:userId", superAdminOnly, deltaSimulator.getChain);
+  router.patch(
+    "/users/:id/allow-simulation",
+    superAdminOnly,
+    deltaSimulator.patchAllowSimulation,
   );
 
   router.get("/users/:id/crypto-arbitrage", adminController.getUserCryptoArbitrage);

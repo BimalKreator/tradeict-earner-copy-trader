@@ -297,6 +297,8 @@ export type DistributeRevenueShareCommissionsArgs = {
   appRevenueBase: number;
   /** Profit booking time — used for profitDate and unlockDate (+30d). */
   profitDate: Date;
+  /** Isolated simulation — never included in payouts unless explicitly requested. */
+  isSimulated?: boolean;
 };
 
 /**
@@ -378,6 +380,7 @@ export async function distributeRevenueShareCommissions(
             unlockDate,
             idempotencyKey,
             pnlRecordId: args.pnlRecordId,
+            isSimulated: args.isSimulated === true,
           },
         });
         created += 1;
@@ -425,6 +428,7 @@ export async function voidPendingEarnedCommissionsForSourceUser(
       sourceUserId,
       status: CommissionLedgerStatus.EARNED,
       invoiceId: null,
+      isSimulated: false,
     },
   });
   if (result.count > 0) {
@@ -479,6 +483,8 @@ export async function resolvePnlRecordIdsForInvoice(
       strategyId: invoice.strategyId,
       commissionAmount: { gt: 0 },
       timestamp: { gte: start, lt: end },
+      isSimulated: false,
+      isDummy: false,
     },
     select: { id: true },
   });
@@ -518,6 +524,7 @@ export async function markCommissionsAsPayable(
     sourceUserId: invoice.userId,
     status: CommissionLedgerStatus.EARNED,
     invoiceId: null,
+    isSimulated: false,
   };
 
   if (pnlRecordIds.length > 0) {
@@ -578,6 +585,7 @@ export async function processMaturedCommissions(
     where: {
       status: CommissionLedgerStatus.PAYABLE,
       unlockDate: { lte: now },
+      isSimulated: false,
     },
     data: {
       status: CommissionLedgerStatus.WITHDRAWABLE,

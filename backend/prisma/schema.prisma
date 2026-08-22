@@ -191,6 +191,8 @@ model User {
   deltaBalanceDisplayOffset    Float   @default(0)
   /** Google Play / store review accounts — skip login OTP (password-only). */
   isOtpBypassed                Boolean @default(false)
+  /** Admin-granted permission to run Delta revenue pipeline simulations. */
+  allowSimulation              Boolean @default(false)
   otpCode       String?
   otpExpiry     DateTime?
   telegramChatId       String?              @unique
@@ -413,11 +415,13 @@ model DeltaLedgerEntry {
   metaJson        Json?
   occurredAt      DateTime
   ingestedAt      DateTime @default(now())
+  isSimulated     Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, deltaUuid])
   @@index([userId, productId, occurredAt])
+  @@index([isSimulated])
 }
 
 /** Realized P&L for one bot structure, computed from the user's Delta ledger. */
@@ -438,11 +442,13 @@ model StructurePnl {
   closedLegCount     Int
   matchedTxnCount    Int
   computedAt         DateTime
+  isSimulated        Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   legs StructureLegPnl[]
 
   @@unique([userId, botStructureId])
+  @@index([isSimulated])
 }
 
 /** Per-leg P&L attribution within a structure (product_id + time window). */
@@ -464,6 +470,7 @@ model StructureLegPnl {
   commissionTotal  Decimal  @db.Decimal(24, 10)
   realizedPnl      Decimal? @db.Decimal(24, 10)
   matchedTxnCount  Int
+  isSimulated      Boolean  @default(false)
 
   structure StructurePnl @relation(fields: [structurePnlId], references: [id], onDelete: Cascade)
 
@@ -482,10 +489,12 @@ model DailyPnlSnapshot {
   commissionCumulative Decimal  @db.Decimal(24, 10)
   openStructureCount   Int
   computedAt           DateTime
+  isSimulated          Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, snapshotDate])
+  @@index([isSimulated])
 }
 
 /** Monthly revenue invoice accrued from structure P&L (IST calendar month). */
@@ -503,11 +512,13 @@ model MonthlyRevenueInvoice {
   commissionAmount Decimal  @db.Decimal(24, 10)
   status           String
   isFinal          Boolean  @default(false)
+  isSimulated      Boolean  @default(false)
   generatedAt      DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, periodYear, periodMonth])
+  @@index([isSimulated])
 }
 
 model Trade {
@@ -774,6 +785,7 @@ model PnLRecord {
   commissionAmount Float
   /** Admin-injected test PnL — triggers same commission path without exchange. */
   isDummy          Boolean  @default(false)
+  isSimulated      Boolean  @default(false)
   timestamp        DateTime @default(now())
 
   user              User               @relation(fields: [userId], references: [id])
@@ -896,6 +908,7 @@ model CommissionLedger {
   payableAt           DateTime?
   withdrawableAt      DateTime?
   withdrawnAt         DateTime?
+  isSimulated         Boolean                @default(false)
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
 

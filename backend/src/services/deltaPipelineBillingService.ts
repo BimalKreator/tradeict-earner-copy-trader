@@ -8,6 +8,7 @@ import {
   startOfMonthInTimeZone,
 } from "./dashboardMetricsService.js";
 import { isBotStrategyType } from "./tradeBillingFilters.js";
+import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
 
 function dec(value: Prisma.Decimal | null | undefined): number {
   if (value == null) return 0;
@@ -22,7 +23,11 @@ export async function getBotStrategyMtdFromSnapshots(
 ): Promise<{ cumulativePnl: number; estimatedDue: number }> {
   const monthStart = startOfMonthInTimeZone(ref, DASHBOARD_PNL_DAY_TIMEZONE);
   const snapshots = await prisma.dailyPnlSnapshot.findMany({
-    where: { userId, snapshotDate: { gte: monthStart } },
+    where: {
+      userId,
+      snapshotDate: { gte: monthStart },
+      ...excludeSimulatedFilter(false),
+    },
     select: { realizedDelta: true, commissionAccrued: true },
   });
 
@@ -47,7 +52,10 @@ export async function sumDeltaPipelineInvoices(
     since?: Date | null;
   },
 ): Promise<{ grossPnl: number; appRevenue: number }> {
-  const where: Prisma.MonthlyRevenueInvoiceWhereInput = { userId };
+  const where: Prisma.MonthlyRevenueInvoiceWhereInput = {
+    userId,
+    ...excludeSimulatedFilter(false),
+  };
   if (opts?.periodYear != null && opts?.periodMonth != null) {
     where.periodYear = opts.periodYear;
     where.periodMonth = opts.periodMonth;
@@ -75,7 +83,7 @@ export async function sumDeltaPipelineCommissionForIstMonth(
   periodMonth: number,
 ): Promise<number> {
   const agg = await prisma.monthlyRevenueInvoice.aggregate({
-    where: { periodYear, periodMonth },
+    where: { periodYear, periodMonth, ...excludeSimulatedFilter(false) },
     _sum: { commissionAmount: true },
   });
   return floorRevenueShareDue(dec(agg._sum.commissionAmount));

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { AdminUserStructureBillingPanel } from "@/components/admin/AdminUserStructureBillingPanel";
+import { AdminUserSimulationPanel } from "@/components/admin/AdminUserSimulationPanel";
 import { Loader2, Pencil, X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
@@ -1365,6 +1366,12 @@ export default function AdminUserDetails({
             </div>
 
             <AdminUserStructureBillingPanel
+              userId={userId}
+              onNotice={(message) => setNotice(message)}
+              onError={(message) => setError(message)}
+            />
+
+            <AdminUserSimulationPanel
               userId={userId}
               onNotice={(message) => setNotice(message)}
               onError={(message) => setError(message)}

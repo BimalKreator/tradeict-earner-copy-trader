@@ -45,6 +45,7 @@ export async function requestPartnerPayout(
     where: {
       beneficiaryUserId: userId,
       status: CommissionLedgerStatus.WITHDRAWABLE,
+      isSimulated: false,
     },
     _sum: { amount: true },
   });
@@ -60,6 +61,7 @@ export async function requestPartnerPayout(
       where: {
         beneficiaryUserId: userId,
         status: CommissionLedgerStatus.WITHDRAWABLE,
+        isSimulated: false,
       },
       select: { id: true, amount: true },
     });
@@ -81,6 +83,7 @@ export async function requestPartnerPayout(
       where: {
         beneficiaryUserId: userId,
         status: CommissionLedgerStatus.WITHDRAWABLE,
+        isSimulated: false,
       },
       data: {
         status: CommissionLedgerStatus.WITHDRAWN,

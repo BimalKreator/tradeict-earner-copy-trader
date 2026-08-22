@@ -55,6 +55,7 @@ async function sumCommissionWalletsByStatus(
     where: {
       beneficiaryUserId,
       status: { in: [...COMMISSION_WALLET_STATUSES] },
+      isSimulated: false,
     },
     _sum: { amount: true },
   });
@@ -295,6 +296,7 @@ async function loadUserFinancialMaps(
         where: {
           beneficiaryUserId,
           sourceUserId: { in: userIds },
+          isSimulated: false,
         },
         _sum: { amount: true },
       }),

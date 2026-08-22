@@ -13,6 +13,7 @@ import {
   TRADE_SOURCE_BOT_SYNC_LEGACY,
   botStrategyWhere,
 } from "./tradeBillingFilters.js";
+import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
 
 const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
 
@@ -55,12 +56,15 @@ export type UserLedgerHealth = {
 export async function computeUserLedgerHealth(
   prisma: PrismaClient,
   userId: string,
+  includeSimulated = false,
 ): Promise<UserLedgerHealth> {
+  const simFilter = excludeSimulatedFilter(includeSimulated);
   const [ledgerAgg, user, structures, legs] = await Promise.all([
     prisma.deltaLedgerEntry.aggregate({
       where: {
         userId,
         transactionType: { in: [...BILLING_TXN_TYPES] },
+        ...simFilter,
       },
       _count: { _all: true },
       _max: { occurredAt: true },
@@ -70,7 +74,7 @@ export async function computeUserLedgerHealth(
       select: { deltaLedgerSyncedUpTo: true },
     }),
     prisma.structurePnl.findMany({
-      where: { userId },
+      where: { userId, ...simFilter },
       select: {
         id: true,
         botStructureId: true,
@@ -79,7 +83,7 @@ export async function computeUserLedgerHealth(
       },
     }),
     prisma.structureLegPnl.findMany({
-      where: { structure: { userId } },
+      where: { structure: { userId, ...simFilter }, ...simFilter },
       select: {
         botLegId: true,
         productId: true,
@@ -103,6 +107,7 @@ export async function computeUserLedgerHealth(
       userId,
       transactionType: { in: [...BILLING_TXN_TYPES] },
       productId: { not: null },
+      ...simFilter,
     },
     select: {
       deltaUuid: true,
@@ -148,11 +153,12 @@ export async function computeUserLedgerHealth(
 export async function computeAllUsersLedgerHealth(
   prisma: PrismaClient,
   userIds: string[],
+  includeSimulated = false,
 ): Promise<UserLedgerHealth[]> {
   const results: UserLedgerHealth[] = [];
   for (const userId of userIds) {
     try {
-      results.push(await computeUserLedgerHealth(prisma, userId));
+      results.push(await computeUserLedgerHealth(prisma, userId, includeSimulated));
     } catch {
       results.push({
         userId,
@@ -178,12 +184,14 @@ export async function getAdminRevenueOverview(
   prisma: PrismaClient,
   periodYear: number,
   periodMonth: number,
+  includeSimulated = false,
 ) {
+  const simFilter = excludeSimulatedFilter(includeSimulated);
   const eligibleIds = await listEligibleStructurePnlUserIds(prisma);
 
   const [invoices, usersMeta] = await Promise.all([
     prisma.monthlyRevenueInvoice.findMany({
-      where: { periodYear, periodMonth },
+      where: { periodYear, periodMonth, ...simFilter },
       include: {
         user: { select: { id: true, email: true, name: true } },
       },
@@ -212,6 +220,7 @@ export async function getAdminRevenueOverview(
       commissionAmount: inv ? dec(inv.commissionAmount) : 0,
       invoiceStatus: inv?.status ?? "—",
       invoiceId: inv?.id ?? null,
+      isSimulated: inv?.isSimulated ?? false,
     };
   });
 
@@ -236,25 +245,27 @@ export async function getAdminRevenueOverview(
 export async function getAdminRevenueUserDetail(
   prisma: PrismaClient,
   userId: string,
+  includeSimulated = false,
 ) {
+  const simFilter = excludeSimulatedFilter(includeSimulated);
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, name: true },
+    select: { id: true, email: true, name: true, allowSimulation: true },
   });
   if (!user) return null;
 
   const [snapshots, structures, invoices, subs] = await Promise.all([
     prisma.dailyPnlSnapshot.findMany({
-      where: { userId },
+      where: { userId, ...simFilter },
       orderBy: { snapshotDate: "asc" },
     }),
     prisma.structurePnl.findMany({
-      where: { userId },
+      where: { userId, ...simFilter },
       orderBy: { openedAt: "desc" },
-      include: { legs: { orderBy: { openedAt: "asc" } } },
+      include: { legs: { where: simFilter, orderBy: { openedAt: "asc" } } },
     }),
     prisma.monthlyRevenueInvoice.findMany({
-      where: { userId },
+      where: { userId, ...simFilter },
       orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }],
     }),
     prisma.userStrategySubscription.findMany({
@@ -270,6 +281,7 @@ export async function getAdminRevenueUserDetail(
 
   return {
     user,
+    allowSimulation: user.allowSimulation,
     profitShareOverride: subs[0]?.profitShareOverride?.toNumber() ?? null,
     strategyProfitShare: subs[0]?.strategy.profitShare ?? null,
     strategyTitle: subs[0]?.strategy.title ?? null,
@@ -281,11 +293,13 @@ export async function getAdminRevenueUserDetail(
       commissionAccrued: dec(row.commissionAccrued),
       commissionCumulative: dec(row.commissionCumulative),
       openStructureCount: row.openStructureCount,
+      isSimulated: row.isSimulated,
     })),
     structures: structures.map((s) => ({
       id: s.id,
       botStructureId: s.botStructureId,
       status: s.status,
+      isSimulated: s.isSimulated,
       openedAt: s.openedAt.toISOString(),
       closedAt: s.closedAt?.toISOString() ?? null,
       realizedPnl: s.realizedPnl != null ? dec(s.realizedPnl) : null,
@@ -319,6 +333,7 @@ export async function getAdminRevenueUserDetail(
       profitSharePct: dec(inv.profitSharePct),
       commissionAmount: dec(inv.commissionAmount),
       status: inv.status,
+      isSimulated: inv.isSimulated,
     })),
   };
 }
@@ -327,7 +342,9 @@ export async function getAdminRevenueReconcile(
   prisma: PrismaClient,
   periodYear: number,
   periodMonth: number,
+  includeSimulated = false,
 ) {
+  const simFilter = excludeSimulatedFilter(includeSimulated);
   const legacyBotSyncTradeCount = await countLegacyBotSyncTrades(prisma);
   const { start, endExclusive } = istMonthWindow(periodYear, periodMonth);
   const eligibleIds = await listEligibleStructurePnlUserIds(prisma);
@@ -339,7 +356,7 @@ export async function getAdminRevenueReconcile(
   });
 
   const invoices = await prisma.monthlyRevenueInvoice.findMany({
-    where: { periodYear, periodMonth, userId: { in: eligibleIds } },
+    where: { periodYear, periodMonth, userId: { in: eligibleIds }, ...simFilter },
   });
   const invoiceByUser = new Map(invoices.map((inv) => [inv.userId, inv]));
 

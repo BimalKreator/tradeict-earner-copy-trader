@@ -94,6 +94,12 @@ export async function recordTradePnl(
       `[recordTradePnl] dummy PnLRecord id=${row.id} user=${args.userId} ` +
         `profit=$${args.tradeProfit.toFixed(2)} appRevenue=$${commissionAmount.toFixed(4)}`,
     );
+    return {
+      pnlRecordId: row.id,
+      commissionAmount,
+      commissionsCreated: 0,
+      commissionsSkipped: 0,
+    };
   }
 
   if (booked.appRevenue <= 0) {
