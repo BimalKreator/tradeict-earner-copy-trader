@@ -1,6 +1,11 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { roundInr, usdToInr } from "./paymentFeeService.js";
 import { getUsdInrRate } from "./settingsService.js";
+import {
+  distributeMonthlyRevenueInvoiceCommissions,
+  markMonthlyRevenueInvoiceCommissionsAsPayable,
+  resolveCommissionChainForUser,
+} from "./affiliateCommissionService.js";
 
 /** Matches legacy `billingService` INVOICE_DUE_DAYS; override via env. */
 const LEGACY_INVOICE_DUE_DAYS = 5;
@@ -140,6 +145,13 @@ export async function transitionMonthlyRevenueInvoiceStatus(
     status: targetStatus,
   };
 
+  const shouldDistributeCommissions =
+    invoice.status === INVOICE_STATUS.ACCRUED &&
+    targetStatus === INVOICE_STATUS.INVOICED;
+  const commissionChain = shouldDistributeCommissions
+    ? await resolveCommissionChainForUser(prisma, invoice.userId)
+    : [];
+
   if (targetStatus === INVOICE_STATUS.INVOICED) {
     const rate =
       opts?.usdInrRate != null && Number.isFinite(opts.usdInrRate) && opts.usdInrRate > 0
@@ -170,8 +182,36 @@ export async function transitionMonthlyRevenueInvoiceStatus(
     data.voidReason = reason;
   }
 
-  return prisma.monthlyRevenueInvoice.update({
-    where: { id: invoiceId },
-    data,
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.monthlyRevenueInvoice.update({
+      where: { id: invoiceId },
+      data,
+    });
+
+    if (
+      invoice.status === INVOICE_STATUS.ACCRUED &&
+      targetStatus === INVOICE_STATUS.INVOICED
+    ) {
+      await distributeMonthlyRevenueInvoiceCommissions(
+        tx,
+        {
+          id: updated.id,
+          userId: updated.userId,
+          commissionAmount: updated.commissionAmount,
+          isSimulated: updated.isSimulated,
+          invoicedAt: now,
+        },
+        commissionChain,
+      );
+    }
+
+    if (
+      invoice.status === INVOICE_STATUS.INVOICED &&
+      targetStatus === INVOICE_STATUS.PAID
+    ) {
+      await markMonthlyRevenueInvoiceCommissionsAsPayable(tx, updated.id);
+    }
+
+    return updated;
   });
 }

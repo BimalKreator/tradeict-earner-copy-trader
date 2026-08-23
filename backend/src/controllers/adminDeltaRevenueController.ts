@@ -328,6 +328,76 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function getInvoiceCommissions(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const invoiceId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof invoiceId !== "string" || !invoiceId.trim()) {
+        res.status(400).json({ error: "invoice id required" });
+        return;
+      }
+
+      const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+        where: { id: invoiceId.trim() },
+        select: {
+          id: true,
+          userId: true,
+          periodYear: true,
+          periodMonth: true,
+          status: true,
+          commissionAmount: true,
+          isSimulated: true,
+        },
+      });
+      if (!invoice) {
+        res.status(404).json({ error: "Invoice not found" });
+        return;
+      }
+
+      const rows = await prisma.commissionLedger.findMany({
+        where: { monthlyRevenueInvoiceId: invoice.id },
+        include: {
+          beneficiaryUser: {
+            select: { id: true, email: true, name: true },
+          },
+        },
+        orderBy: [{ beneficiaryUserId: "asc" }, { createdAt: "asc" }],
+      });
+
+      res.json({
+        invoiceId: invoice.id,
+        userId: invoice.userId,
+        periodYear: invoice.periodYear,
+        periodMonth: invoice.periodMonth,
+        invoiceStatus: invoice.status,
+        commissionAmount: invoice.commissionAmount.toNumber(),
+        isSimulated: invoice.isSimulated,
+        commissions: rows.map((row) => ({
+          id: row.id,
+          beneficiaryUserId: row.beneficiaryUserId,
+          beneficiaryEmail: row.beneficiaryUser.email,
+          beneficiaryName: row.beneficiaryUser.name,
+          amount: row.amount,
+          appRevenueBase: row.appRevenueBase,
+          commissionRate: row.commissionRate,
+          beneficiaryTier: row.beneficiaryTier,
+          status: row.status,
+          profitDate: row.profitDate,
+          unlockDate: row.unlockDate.toISOString(),
+          payableAt: row.payableAt?.toISOString() ?? null,
+          isSimulated: row.isSimulated,
+          idempotencyKey: row.idempotencyKey,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getOverview,
     getUserDetail,
@@ -337,5 +407,6 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     patchProfitShareOverride,
     postRecomputeChain,
     postInvoiceStatus,
+    getInvoiceCommissions,
   };
 }

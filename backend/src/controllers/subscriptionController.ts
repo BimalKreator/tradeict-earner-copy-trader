@@ -118,6 +118,7 @@ export async function recordTradePnl(
       pnlRecordId: row.id,
       appRevenueBase: commissionAmount,
       profitDate: row.timestamp,
+      isSimulated: false,
     };
     if (args.awaitCommissionDistribution === true) {
       const dist = await distributeRevenueShareCommissions(prisma, distArgs);

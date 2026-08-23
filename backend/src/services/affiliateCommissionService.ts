@@ -4,7 +4,7 @@ import {
   InvoiceStatus,
   Role,
   SalesTier,
-  type Prisma,
+  Prisma,
   type PrismaClient,
 } from "@prisma/client";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
@@ -298,7 +298,9 @@ export type DistributeRevenueShareCommissionsArgs = {
   /** Profit booking time — used for profitDate and unlockDate (+30d). */
   profitDate: Date;
   /** Isolated simulation — never included in payouts unless explicitly requested. */
-  isSimulated?: boolean;
+  isSimulated: boolean;
+  /** Dummy / test PnL — never generates partner commission. */
+  isDummy?: boolean;
 };
 
 /**
@@ -308,6 +310,14 @@ export async function distributeRevenueShareCommissions(
   prisma: PrismaClient,
   args: DistributeRevenueShareCommissionsArgs,
 ): Promise<{ created: number; skipped: number }> {
+  if (args.isDummy === true) {
+    console.log(
+      `[affiliateCommission] skip distribution sourceUser=${args.sourceUserId} ` +
+        `pnlRecord=${args.pnlRecordId} — isDummy`,
+    );
+    return { created: 0, skipped: 0 };
+  }
+
   const appRevenueBase = args.appRevenueBase;
   if (!Number.isFinite(appRevenueBase) || appRevenueBase <= 0) {
     console.log(
@@ -380,7 +390,7 @@ export async function distributeRevenueShareCommissions(
             unlockDate,
             idempotencyKey,
             pnlRecordId: args.pnlRecordId,
-            isSimulated: args.isSimulated === true,
+            isSimulated: args.isSimulated,
           },
         });
         created += 1;
@@ -396,8 +406,8 @@ export async function distributeRevenueShareCommissions(
           err.code === "P2002"
         ) {
           skipped += 1;
-          console.log(
-            `[affiliateCommission] ledger skip duplicate status=EARNED ` +
+          console.error(
+            `[affiliateCommission] DUPLICATE idempotency collision status=EARNED ` +
               `partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
               `sourceUser=${args.sourceUserId} key=${idempotencyKey}`,
           );
@@ -416,6 +426,159 @@ export async function distributeRevenueShareCommissions(
   }
 
   return { created, skipped };
+}
+
+export type MonthlyRevenueInvoiceCommissionInput = {
+  id: string;
+  userId: string;
+  commissionAmount: Prisma.Decimal;
+  isSimulated: boolean;
+  invoicedAt: Date;
+};
+
+/** Resolve partner commission chain for a trader (read-only — safe outside transactions). */
+export async function resolveCommissionChainForUser(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<CommissionChainSlice[]> {
+  const source = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, acquiredById: true, parentId: true },
+  });
+  if (!source) return [];
+  return resolveCommissionChain(prisma, source);
+}
+
+/**
+ * Insert EARNED commission rows when a MonthlyRevenueInvoice transitions to INVOICED.
+ * Must run inside the same DB transaction as the status update.
+ */
+export async function distributeMonthlyRevenueInvoiceCommissions(
+  tx: Prisma.TransactionClient,
+  invoice: MonthlyRevenueInvoiceCommissionInput,
+  chain: CommissionChainSlice[],
+): Promise<{ created: number }> {
+  const appRevenueBaseDec = invoice.commissionAmount;
+  if (appRevenueBaseDec.lte(0)) {
+    console.log(
+      `[affiliateCommission] skip monthly invoice commission invoice=${invoice.id} ` +
+        `sourceUser=${invoice.userId} — commissionAmount<=0`,
+    );
+    return { created: 0 };
+  }
+
+  if (chain.length === 0) {
+    console.log(
+      `[affiliateCommission] no commission chain for monthly invoice=${invoice.id} ` +
+        `sourceUser=${invoice.userId}`,
+    );
+    return { created: 0 };
+  }
+
+  const appRevenueBase = appRevenueBaseDec.toNumber();
+  console.log(
+    `[affiliateCommission] monthly invoice commission invoice=${invoice.id} ` +
+      `sourceUser=${invoice.userId} appRevenueBase=$${appRevenueBase.toFixed(2)} ` +
+      `chainLen=${chain.length} isSimulated=${invoice.isSimulated}`,
+  );
+
+  const profitDate = startOfUtcDay(invoice.invoicedAt);
+  const unlockDate = new Date(profitDate);
+  unlockDate.setUTCDate(unlockDate.getUTCDate() + 30);
+
+  let created = 0;
+
+  for (const slice of chain) {
+    if (slice.commissionRate <= 0) continue;
+
+    const amountDec = appRevenueBaseDec
+      .mul(slice.commissionRate)
+      .div(100)
+      .toDecimalPlaces(10, Prisma.Decimal.ROUND_HALF_EVEN);
+    if (amountDec.lte(0)) continue;
+
+    const amount = amountDec.toNumber();
+    const idempotencyKey = `INV:${invoice.id}:${slice.beneficiaryUserId}:EARNED`;
+
+    try {
+      const row = await tx.commissionLedger.create({
+        data: {
+          profitDate,
+          sourceUserId: invoice.userId,
+          beneficiaryUserId: slice.beneficiaryUserId,
+          amount,
+          appRevenueBase,
+          commissionRate: slice.commissionRate,
+          beneficiaryTier: slice.beneficiaryTier,
+          status: CommissionLedgerStatus.EARNED,
+          unlockDate,
+          idempotencyKey,
+          monthlyRevenueInvoiceId: invoice.id,
+          isSimulated: invoice.isSimulated,
+        },
+      });
+      created += 1;
+      console.log(
+        `[affiliateCommission] monthly invoice ledger insert id=${row.id} status=EARNED ` +
+          `invoice=${invoice.id} partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
+          `rate=${slice.commissionRate}% tier=${slice.beneficiaryTier}`,
+      );
+    } catch (err) {
+      if (
+        err instanceof PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        console.error(
+          `[affiliateCommission] DUPLICATE monthly invoice idempotency collision ` +
+            `invoice=${invoice.id} partnerId=${slice.beneficiaryUserId} ` +
+            `amount=$${amount.toFixed(4)} key=${idempotencyKey}`,
+        );
+        throw new Error(
+          `Commission idempotency collision for monthly invoice ${invoice.id} key=${idempotencyKey}`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  if (created > 0) {
+    console.log(
+      `[affiliateCommission] monthly invoice distributed invoice=${invoice.id} ` +
+        `sourceUser=${invoice.userId} base=$${appRevenueBase.toFixed(2)} rows=${created}`,
+    );
+  }
+
+  return { created };
+}
+
+/**
+ * Move EARNED → PAYABLE for commissions linked to a paid MonthlyRevenueInvoice.
+ * Must run inside the same DB transaction as the PAID status update.
+ */
+export async function markMonthlyRevenueInvoiceCommissionsAsPayable(
+  tx: Prisma.TransactionClient,
+  monthlyRevenueInvoiceId: string,
+): Promise<{ updated: number }> {
+  const payableAt = new Date();
+  const result = await tx.commissionLedger.updateMany({
+    where: {
+      monthlyRevenueInvoiceId,
+      status: CommissionLedgerStatus.EARNED,
+    },
+    data: {
+      status: CommissionLedgerStatus.PAYABLE,
+      payableAt,
+    },
+  });
+
+  if (result.count > 0) {
+    console.log(
+      `[affiliateCommission] marked ${result.count} commission row(s) PAYABLE ` +
+        `monthlyRevenueInvoice=${monthlyRevenueInvoiceId}`,
+    );
+  }
+
+  return { updated: result.count };
 }
 
 /** Remove unpaid EARNED partner commissions when trader net PnL is not positive. */

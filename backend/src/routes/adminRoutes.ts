@@ -1437,6 +1437,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/revenue/reconcile", deltaRevenue.getReconcile);
   router.post("/revenue/recompute-chain", deltaRevenue.postRecomputeChain);
   router.post("/revenue/invoice/:id/status", deltaRevenue.postInvoiceStatus);
+  router.get("/revenue/invoice/:id/commissions", deltaRevenue.getInvoiceCommissions);
   router.get("/revenue/health", deltaRevenue.getHealth);
   router.get("/revenue/attribution-health", deltaRevenue.getAttributionHealth);
   router.get("/revenue/user/:userId", deltaRevenue.getUserDetail);

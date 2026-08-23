@@ -561,7 +561,8 @@ model MonthlyRevenueInvoice {
   isSimulated      Boolean  @default(false)
   generatedAt      DateTime
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commissionLedgers  CommissionLedger[]
 
   @@unique([userId, periodYear, periodMonth])
   @@index([isSimulated])
@@ -944,6 +945,8 @@ model CommissionLedger {
   idempotencyKey      String                 @unique
   /** Set when source user pays invoice / revenue share (Phase 6). */
   invoiceId           String?
+  /** Set when linked to a MonthlyRevenueInvoice (delta pipeline billing). */
+  monthlyRevenueInvoiceId String?
   /** Optional link to the PnL / profit event that triggered accrual (Phase 5). */
   pnlRecordId         String?
   /** Set when payment webhook confirms revenue-share settlement (Phase 6). */
@@ -961,6 +964,7 @@ model CommissionLedger {
   sourceUser          User                @relation("CommissionSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
   beneficiaryUser     User                @relation("CommissionBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Cascade)
   invoice             Invoice?            @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  monthlyRevenueInvoice MonthlyRevenueInvoice? @relation(fields: [monthlyRevenueInvoiceId], references: [id], onDelete: SetNull)
   pnlRecord           PnLRecord?          @relation(fields: [pnlRecordId], references: [id], onDelete: SetNull)
   paymentTransaction  PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
   payoutRequest       PayoutRequest?      @relation(fields: [payoutRequestId], references: [id], onDelete: SetNull)
@@ -970,6 +974,7 @@ model CommissionLedger {
   @@index([sourceUserId, profitDate])
   @@index([status, unlockDate])
   @@index([invoiceId])
+  @@index([monthlyRevenueInvoiceId])
   @@index([profitDate])
 }
 
