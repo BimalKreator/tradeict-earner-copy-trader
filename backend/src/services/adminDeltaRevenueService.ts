@@ -55,7 +55,7 @@ export async function computeUserLedgerHealth(
   includeSimulated = false,
 ): Promise<UserLedgerHealth> {
   const simFilter = excludeSimulatedFilter(includeSimulated);
-  const [ledgerAgg, user, structures, legs] = await Promise.all([
+  const [ledgerAgg, user, structures, legs, accountCursor] = await Promise.all([
     prisma.deltaLedgerEntry.aggregate({
       where: {
         userId,
@@ -88,6 +88,10 @@ export async function computeUserLedgerHealth(
         closedAt: true,
         structure: { select: { botStructureId: true } },
       },
+    }),
+    prisma.exchangeAccount.aggregate({
+      where: { userId },
+      _max: { deltaLedgerSyncedUpTo: true },
     }),
   ]);
 
@@ -130,11 +134,16 @@ export async function computeUserLedgerHealth(
     (s) => s.matchedTxnCount === 0 && s.status === "closed",
   ).length;
 
+  const lastLedgerSyncAt =
+    accountCursor._max.deltaLedgerSyncedUpTo ??
+    user?.deltaLedgerSyncedUpTo ??
+    null;
+
   return {
     userId,
     ledgerRowCount: ledgerAgg._count._all,
     lastLedgerOccurredAt: ledgerAgg._max.occurredAt?.toISOString() ?? null,
-    lastLedgerSyncAt: user?.deltaLedgerSyncedUpTo?.toISOString() ?? null,
+    lastLedgerSyncAt: lastLedgerSyncAt?.toISOString() ?? null,
     structuresMatched,
     unmatchedTxnCount,
     zeroMatchStructureCount,

@@ -45,6 +45,7 @@ export type IngestDeltaLedgerResult = {
 
 export type DeltaLedgerCycleSummary = {
   users: number;
+  accounts: number;
   inserted: number;
   skipped: number;
   conflicts: number;
@@ -255,7 +256,7 @@ async function flagLateRowIfInvoicedPeriod(
 }
 
 /**
- * Ingest Delta wallet transactions for one user from `since` forward.
+ * Ingest Delta wallet transactions for one user (one exchange account) from `since` forward.
  * Rows are keyed on (userId, deltaUuid) — safe to retry; stored amounts are never overwritten.
  */
 export async function ingestDeltaLedgerForUser(
@@ -267,6 +268,8 @@ export async function ingestDeltaLedgerForUser(
     since: Date;
     /** When true, newly inserted rows in invoiced periods flag recompute. */
     deepSweep?: boolean;
+    /** Account that produced these wallet rows (null only for legacy callers). */
+    exchangeAccountId?: string;
   },
 ): Promise<IngestDeltaLedgerResult> {
   const rows = await fetchAllWalletTransactionsSince(
@@ -287,7 +290,9 @@ export async function ingestDeltaLedgerForUser(
         ? row.uuid.trim()
         : typeof row.id === "string"
           ? row.id.trim()
-          : "";
+          : row.id != null
+            ? String(row.id).trim()
+            : "";
     if (!deltaUuid) {
       skipped += 1;
       continue;
@@ -356,6 +361,9 @@ export async function ingestDeltaLedgerForUser(
     await prisma.deltaLedgerEntry.create({
       data: {
         userId: args.userId,
+        ...(args.exchangeAccountId
+          ? { exchangeAccountId: args.exchangeAccountId }
+          : {}),
         deltaUuid,
         productId: productId != null ? Math.trunc(productId) : null,
         productSymbol,
@@ -382,23 +390,23 @@ export async function ingestDeltaLedgerForUser(
   return { inserted, skipped, conflicts, lateRows, lastOccurredAt };
 }
 
-type EligibleLedgerUser = {
+type EligibleLedgerAccount = {
   userId: string;
+  exchangeAccountId: string;
   apiKeyStored: string;
   apiSecretStored: string;
   syncedUpTo: Date | null;
+  email: string | null;
 };
 
-function credsFromExchangeAccount(
-  row: { apiKey: string; apiSecret: string } | null | undefined,
-): { apiKeyStored: string; apiSecretStored: string } | null {
-  if (!row?.apiKey?.trim() || !row?.apiSecret?.trim()) return null;
-  return { apiKeyStored: row.apiKey, apiSecretStored: row.apiSecret };
-}
-
-async function listEligibleDeltaLedgerUsers(
+/**
+ * Eligible = users with an active bot-strategy subscription.
+ * Sync target = every ExchangeAccount for those users that has credentials
+ * (not just the first / subscription-linked account).
+ */
+async function listEligibleDeltaLedgerAccounts(
   prisma: PrismaClient,
-): Promise<EligibleLedgerUser[]> {
+): Promise<EligibleLedgerAccount[]> {
   const subs = await prisma.userStrategySubscription.findMany({
     where: {
       OR: [{ isActive: true }, { status: "ACTIVE" }],
@@ -409,62 +417,66 @@ async function listEligibleDeltaLedgerUsers(
         ],
       },
     },
-    include: {
-      exchangeAccount: {
-        select: { apiKey: true, apiSecret: true },
-      },
-      user: {
-        select: {
-          id: true,
-          email: true,
-          deltaLedgerSyncedUpTo: true,
-          exchangeAccounts: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { apiKey: true, apiSecret: true },
-          },
-        },
-      },
+    select: {
+      userId: true,
+      user: { select: { email: true } },
     },
   });
 
-  const byUser = new Map<string, EligibleLedgerUser>();
+  const eligibleUserIds = [...new Set(subs.map((s) => s.userId))];
+  const emailByUser = new Map(
+    subs.map((s) => [s.userId, s.user.email ?? null] as const),
+  );
+
+  if (eligibleUserIds.length === 0) return [];
+
+  const accounts = await prisma.exchangeAccount.findMany({
+    where: { userId: { in: eligibleUserIds } },
+    select: {
+      id: true,
+      userId: true,
+      apiKey: true,
+      apiSecret: true,
+      deltaLedgerSyncedUpTo: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const result: EligibleLedgerAccount[] = [];
+  const usersWithCreds = new Set<string>();
   const missingCredsByUser = new Map<string, string>();
 
-  for (const sub of subs) {
-    if (byUser.has(sub.userId)) continue;
+  for (const userId of eligibleUserIds) {
+    missingCredsByUser.set(userId, emailByUser.get(userId) ?? "(no email)");
+  }
 
-    const creds =
-      credsFromExchangeAccount(sub.exchangeAccount) ??
-      credsFromExchangeAccount(sub.user.exchangeAccounts[0] ?? null);
-
-    if (!creds) {
-      const email = sub.user.email ?? "(no email)";
-      if (!missingCredsByUser.has(sub.userId)) {
-        console.warn(
-          `[DeltaLedger] SKIP user=${sub.userId} email=${email} reason=no_credentials`,
-        );
-        missingCredsByUser.set(sub.userId, email);
-      }
-      continue;
-    }
-
-    missingCredsByUser.delete(sub.userId);
-    byUser.set(sub.userId, {
-      userId: sub.userId,
-      apiKeyStored: creds.apiKeyStored,
-      apiSecretStored: creds.apiSecretStored,
-      syncedUpTo: sub.user.deltaLedgerSyncedUpTo,
+  for (const account of accounts) {
+    if (!account.apiKey?.trim() || !account.apiSecret?.trim()) continue;
+    usersWithCreds.add(account.userId);
+    missingCredsByUser.delete(account.userId);
+    result.push({
+      userId: account.userId,
+      exchangeAccountId: account.id,
+      apiKeyStored: account.apiKey,
+      apiSecretStored: account.apiSecret,
+      syncedUpTo: account.deltaLedgerSyncedUpTo,
+      email: emailByUser.get(account.userId) ?? null,
     });
   }
 
+  for (const [userId, email] of missingCredsByUser) {
+    console.warn(
+      `[DeltaLedger] SKIP user=${userId} email=${email} reason=no_credentials`,
+    );
+  }
   if (missingCredsByUser.size > 0) {
     console.warn(
       `[DeltaLedger] ${missingCredsByUser.size} users skipped for missing credentials`,
     );
   }
 
-  return [...byUser.values()];
+  void usersWithCreds;
+  return result;
 }
 
 function mergeIntoCycleSummary(
@@ -479,8 +491,9 @@ function mergeIntoCycleSummary(
 
 function logDeltaLedgerCycleSummary(summary: DeltaLedgerCycleSummary): void {
   console.log(
-    `[DeltaLedger] cycle users=${summary.users} inserted=${summary.inserted} ` +
-      `skipped=${summary.skipped} conflicts=${summary.conflicts} lateRows=${summary.lateRows}`,
+    `[DeltaLedger] cycle users=${summary.users} accounts=${summary.accounts} ` +
+      `inserted=${summary.inserted} skipped=${summary.skipped} ` +
+      `conflicts=${summary.conflicts} lateRows=${summary.lateRows}`,
   );
   if (summary.conflicts > 0 || summary.lateRows > 0) {
     console.error(
@@ -489,36 +502,52 @@ function logDeltaLedgerCycleSummary(summary: DeltaLedgerCycleSummary): void {
   }
 }
 
-async function syncOneEligibleUser(
+async function syncOneEligibleAccount(
   prisma: PrismaClient,
-  user: EligibleLedgerUser,
+  account: EligibleLedgerAccount,
   opts?: { since?: Date; deepSweep?: boolean; advanceCursor?: boolean },
 ): Promise<IngestDeltaLedgerResult> {
-  const since = opts?.since ?? resolveDeltaLedgerSyncSince(user.syncedUpTo);
-  const apiKey = decryptDeltaSecretOrPlain(user.apiKeyStored);
-  const apiSecret = decryptDeltaSecretOrPlain(user.apiSecretStored);
+  const since = opts?.since ?? resolveDeltaLedgerSyncSince(account.syncedUpTo);
+  const apiKey = decryptDeltaSecretOrPlain(account.apiKeyStored);
+  const apiSecret = decryptDeltaSecretOrPlain(account.apiSecretStored);
 
   const result = await ingestDeltaLedgerForUser(prisma, {
-    userId: user.userId,
+    userId: account.userId,
     apiKey,
     apiSecret,
     since,
+    exchangeAccountId: account.exchangeAccountId,
     ...(opts?.deepSweep ? { deepSweep: true } : {}),
   });
 
   const advanceCursor = opts?.advanceCursor ?? !opts?.deepSweep;
   if (advanceCursor && result.lastOccurredAt) {
-    const prior = user.syncedUpTo;
+    const prior = account.syncedUpTo;
     const next =
       prior && prior > result.lastOccurredAt ? prior : result.lastOccurredAt;
-    await prisma.user.update({
-      where: { id: user.userId },
+    await prisma.exchangeAccount.update({
+      where: { id: account.exchangeAccountId },
       data: { deltaLedgerSyncedUpTo: next },
+    });
+    // Legacy User cursor = max across accounts (admin health); never move it backward.
+    const userRow = await prisma.user.findUnique({
+      where: { id: account.userId },
+      select: { deltaLedgerSyncedUpTo: true },
+    });
+    const userNext =
+      userRow?.deltaLedgerSyncedUpTo &&
+      userRow.deltaLedgerSyncedUpTo > next
+        ? userRow.deltaLedgerSyncedUpTo
+        : next;
+    await prisma.user.update({
+      where: { id: account.userId },
+      data: { deltaLedgerSyncedUpTo: userNext },
     });
   }
 
   console.log(
-    `[DeltaLedger] user=${user.userId} inserted=${result.inserted} skipped=${result.skipped} ` +
+    `[DeltaLedger] user=${account.userId} account=${account.exchangeAccountId} ` +
+      `inserted=${result.inserted} skipped=${result.skipped} ` +
       `conflicts=${result.conflicts} lateRows=${result.lateRows} ` +
       `upTo=${result.lastOccurredAt?.toISOString() ?? "n/a"}`,
   );
@@ -526,18 +555,39 @@ async function syncOneEligibleUser(
   return result;
 }
 
-/** Run ledger ingestion for eligible users (optional single-user filter). */
+function mergeUserResults(
+  a: IngestDeltaLedgerResult,
+  b: IngestDeltaLedgerResult,
+): IngestDeltaLedgerResult {
+  const lastOccurredAt =
+    a.lastOccurredAt && b.lastOccurredAt
+      ? a.lastOccurredAt > b.lastOccurredAt
+        ? a.lastOccurredAt
+        : b.lastOccurredAt
+      : (a.lastOccurredAt ?? b.lastOccurredAt);
+  return {
+    inserted: a.inserted + b.inserted,
+    skipped: a.skipped + b.skipped,
+    conflicts: a.conflicts + b.conflicts,
+    lateRows: a.lateRows + b.lateRows,
+    lastOccurredAt,
+  };
+}
+
+/** Run ledger ingestion for every exchange account of eligible bot-strategy users. */
 export async function runDeltaLedgerSyncForUsers(
   prisma: PrismaClient,
   opts?: { userId?: string },
 ): Promise<Record<string, IngestDeltaLedgerResult>> {
-  let users = await listEligibleDeltaLedgerUsers(prisma);
+  let accounts = await listEligibleDeltaLedgerAccounts(prisma);
   if (opts?.userId) {
-    users = users.filter((u) => u.userId === opts.userId);
+    accounts = accounts.filter((a) => a.userId === opts.userId);
   }
 
+  const userIds = new Set(accounts.map((a) => a.userId));
   const summary: DeltaLedgerCycleSummary = {
-    users: users.length,
+    users: userIds.size,
+    accounts: accounts.length,
     inserted: 0,
     skipped: 0,
     conflicts: 0,
@@ -545,15 +595,21 @@ export async function runDeltaLedgerSyncForUsers(
   };
 
   const results: Record<string, IngestDeltaLedgerResult> = {};
-  for (const user of users) {
+  for (const account of accounts) {
     try {
-      const result = await syncOneEligibleUser(prisma, user);
-      results[user.userId] = result;
+      const result = await syncOneEligibleAccount(prisma, account);
+      results[account.userId] = results[account.userId]
+        ? mergeUserResults(results[account.userId]!, result)
+        : result;
       mergeIntoCycleSummary(summary, result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[DeltaLedger] sync failed user=${user.userId}: ${msg}`);
-      results[user.userId] = emptyIngestResult();
+      console.warn(
+        `[DeltaLedger] sync failed user=${account.userId} account=${account.exchangeAccountId}: ${msg}`,
+      );
+      if (!results[account.userId]) {
+        results[account.userId] = emptyIngestResult();
+      }
     }
   }
 
@@ -561,15 +617,17 @@ export async function runDeltaLedgerSyncForUsers(
   return results;
 }
 
-/** Re-fetch last N days for all eligible users (idempotent via deltaUuid). */
+/** Re-fetch last N days for every eligible exchange account (idempotent via deltaUuid). */
 export async function runDeltaLedgerDeepSweep(
   prisma: PrismaClient,
 ): Promise<DeltaLedgerCycleSummary> {
-  const users = await listEligibleDeltaLedgerUsers(prisma);
+  const accounts = await listEligibleDeltaLedgerAccounts(prisma);
   const since = resolveDeltaLedgerDeepSweepSince();
+  const userIds = new Set(accounts.map((a) => a.userId));
 
   const summary: DeltaLedgerCycleSummary = {
-    users: users.length,
+    users: userIds.size,
+    accounts: accounts.length,
     inserted: 0,
     skipped: 0,
     conflicts: 0,
@@ -577,13 +635,13 @@ export async function runDeltaLedgerDeepSweep(
   };
 
   console.log(
-    `[DeltaLedger] deep sweep start users=${users.length} since=${since.toISOString()} ` +
-      `days=${deepSweepDays()}`,
+    `[DeltaLedger] deep sweep start users=${userIds.size} accounts=${accounts.length} ` +
+      `since=${since.toISOString()} days=${deepSweepDays()}`,
   );
 
-  for (const user of users) {
+  for (const account of accounts) {
     try {
-      const result = await syncOneEligibleUser(prisma, user, {
+      const result = await syncOneEligibleAccount(prisma, account, {
         since,
         deepSweep: true,
         advanceCursor: false,
@@ -591,7 +649,9 @@ export async function runDeltaLedgerDeepSweep(
       mergeIntoCycleSummary(summary, result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[DeltaLedger] deep sweep failed user=${user.userId}: ${msg}`);
+      console.warn(
+        `[DeltaLedger] deep sweep failed user=${account.userId} account=${account.exchangeAccountId}: ${msg}`,
+      );
     }
   }
 

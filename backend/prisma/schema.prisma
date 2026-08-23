@@ -397,9 +397,12 @@ model ExchangeAccount {
   apiKey    String
   apiSecret String
   createdAt DateTime @default(now())
+  /** High-water mark for this account's Delta wallet ledger ingestion (UTC). */
+  deltaLedgerSyncedUpTo DateTime?
 
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   subscriptions  UserStrategySubscription[]
+  deltaLedgerEntries DeltaLedgerEntry[]
 
   @@index([userId])
 }
@@ -408,6 +411,8 @@ model ExchangeAccount {
 model DeltaLedgerEntry {
   id              String   @id @default(cuid())
   userId          String
+  /** Which ExchangeAccount produced this row; null on legacy rows ingested before multi-account sync. */
+  exchangeAccountId String?
   deltaUuid       String
   productId       Int?
   productSymbol   String?
@@ -423,9 +428,12 @@ model DeltaLedgerEntry {
   isSimulated     Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exchangeAccount ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id], onDelete: SetNull)
 
+  // Delta wallet txn ids are exchange-wide ledger keys — unique per Tradeict user without account.
   @@unique([userId, deltaUuid])
   @@index([userId, productId, occurredAt])
+  @@index([exchangeAccountId])
   @@index([isSimulated])
 }
 
