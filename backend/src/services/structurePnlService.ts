@@ -274,21 +274,49 @@ async function fetchBotStructures(userId: string): Promise<BotStructure[]> {
   return structures;
 }
 
-/** Close grace applies only when no other leg on the same product opened before grace ends. */
-export function resolveLegWindowEnd(
+function isSameLeg(a: LegWindowSpec, b: LegWindowSpec): boolean {
+  return a.botStructureId === b.botStructureId && a.botLegId === b.botLegId;
+}
+
+/** Whether leg L's window contains txn at all (full grace — used to detect other legs open at txn). */
+export function isLegOpenAtTxn(
+  leg: LegWindowSpec,
+  txnOccurredAt: Date,
+): boolean {
+  if (txnOccurredAt < resolveLegAttributionWindowStart(leg)) return false;
+  if (!leg.closedAt) return true;
+  const endWithGrace = leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS;
+  return txnOccurredAt.getTime() <= endWithGrace;
+}
+
+/**
+ * Upper bound of leg L's attribution window for a specific txn.
+ * Grace is suppressed only when another leg on the same product is actually
+ * open at txn.occurredAt — not merely because another leg existed earlier.
+ */
+export function resolveLegWindowEndForTxn(
   leg: LegWindowSpec,
   productLegs: LegWindowSpec[],
+  txnOccurredAt: Date,
 ): Date | null {
   if (!leg.closedAt) return null;
-  const graceEndMs = leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS;
-  const anotherLegOnProduct = productLegs.some(
+  const anotherLegOpenAtTxn = productLegs.some(
     (other) =>
-      other.botLegId !== leg.botLegId &&
+      !isSameLeg(other, leg) &&
       other.productId === leg.productId &&
-      other.openedAt.getTime() <= graceEndMs,
+      isLegOpenAtTxn(other, txnOccurredAt),
   );
-  const graceMs = anotherLegOnProduct ? 0 : LEG_CLOSE_GRACE_MS;
+  const graceMs = anotherLegOpenAtTxn ? 0 : LEG_CLOSE_GRACE_MS;
   return new Date(leg.closedAt.getTime() + graceMs);
+}
+
+/** @deprecated Prefer resolveLegWindowEndForTxn — grace depends on txn time. */
+export function resolveLegWindowEnd(
+  leg: LegWindowSpec,
+  _productLegs: LegWindowSpec[],
+): Date | null {
+  if (!leg.closedAt) return null;
+  return new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
 }
 
 export function txnMatchesLegWindowSpec(
@@ -298,7 +326,7 @@ export function txnMatchesLegWindowSpec(
 ): boolean {
   if (txn.productId !== leg.productId) return false;
   if (txn.occurredAt < resolveLegAttributionWindowStart(leg)) return false;
-  const upper = resolveLegWindowEnd(leg, productLegs);
+  const upper = resolveLegWindowEndForTxn(leg, productLegs, txn.occurredAt);
   if (upper && txn.occurredAt > upper) return false;
   return true;
 }
