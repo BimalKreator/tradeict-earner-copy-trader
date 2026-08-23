@@ -48,6 +48,7 @@ import {
 } from "./services/masterOrderPolicy.js";
 import { initArbitrageEngine } from "./services/arbitrageEngine.js";
 import { initBillingCronJobs } from "./services/billingService.js";
+import { initDelayedInvoiceCronJobs } from "./services/billingCronService.js";
 import { initAffiliateCommissionCronJobs } from "./services/affiliateCommissionService.js";
 import { startTradeEngine } from "./services/tradeEngine.js";
 import {
@@ -131,6 +132,7 @@ void (async () => {
 })();
 
 initBillingCronJobs(prisma);
+initDelayedInvoiceCronJobs(prisma);
 initAffiliateCommissionCronJobs(prisma);
 initDeltaLedgerCronJobs(prisma);
 initStructureRevenueCronJobs(prisma);

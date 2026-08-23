@@ -540,7 +540,40 @@ export type RecomputeInvoiceChainResult = {
     periodMonth: number;
     fields: string[];
   }>;
+  frozenPeriodLateData: Array<{
+    periodYear: number;
+    periodMonth: number;
+    fields: string[];
+  }>;
 };
+
+function compareInvoiceMetricsDrift(
+  existing: {
+    realizedPnl: Prisma.Decimal;
+    cumulativeRealizedPnl: Prisma.Decimal | null;
+    hwmBefore: Prisma.Decimal;
+    hwmAfter: Prisma.Decimal;
+    billableProfit: Prisma.Decimal;
+    commissionAmount: Prisma.Decimal;
+  },
+  metrics: MonthlyInvoiceMetrics,
+): string[] {
+  const fields: string[] = [];
+  if (!existing.realizedPnl.eq(metrics.realizedPnl)) fields.push("realizedPnl");
+  const existingCum = existing.cumulativeRealizedPnl ?? zero();
+  if (!existingCum.eq(metrics.cumulativeRealizedPnl)) {
+    fields.push("cumulativeRealizedPnl");
+  }
+  if (!existing.hwmBefore.eq(metrics.hwmBefore)) fields.push("hwmBefore");
+  if (!existing.hwmAfter.eq(metrics.hwmAfter)) fields.push("hwmAfter");
+  if (!existing.billableProfit.eq(metrics.billableProfit)) {
+    fields.push("billableProfit");
+  }
+  if (!existing.commissionAmount.eq(metrics.commissionAmount)) {
+    fields.push("commissionAmount");
+  }
+  return fields;
+}
 
 /** Recompute all invoices chronologically — required after late-arriving structure data. */
 export async function recomputeInvoiceChain(
@@ -592,6 +625,8 @@ export async function recomputeInvoiceChain(
 
   let hwmCarry: Prisma.Decimal | undefined;
   const after: ReturnType<typeof invoiceToSummary>[] = [];
+  const frozenPeriodLateData: RecomputeInvoiceChainResult["frozenPeriodLateData"] =
+    [];
   const generatedAt = new Date();
 
   for (const period of periods) {
@@ -601,6 +636,39 @@ export async function recomputeInvoiceChain(
     );
 
     if (existing && isInvoiceFrozen(existing.status)) {
+      let metrics: MonthlyInvoiceMetrics;
+      try {
+        metrics = await computeMonthlyInvoiceMetrics(
+          prisma,
+          userId,
+          period.year,
+          period.month,
+          isSimulated,
+          existing.hwmBefore,
+        );
+      } catch (err) {
+        if (err instanceof MissingProfitShareError) {
+          after.push(invoiceToSummary(existing));
+          hwmCarry = maxDec(zero(), existing.hwmAfter);
+          continue;
+        }
+        throw err;
+      }
+
+      const driftFields = compareInvoiceMetricsDrift(existing, metrics);
+      if (driftFields.length > 0) {
+        frozenPeriodLateData.push({
+          periodYear: period.year,
+          periodMonth: period.month,
+          fields: driftFields,
+        });
+        console.error(
+          `[Revenue] frozen period ${period.year}-${String(period.month).padStart(2, "0")} ` +
+            `user=${userId} has late data -- manual credit note or void may be required ` +
+            `fields=${driftFields.join(",")}`,
+        );
+      }
+
       after.push(invoiceToSummary(existing));
       hwmCarry = maxDec(zero(), existing.hwmAfter);
       continue;
@@ -699,7 +767,15 @@ export async function recomputeInvoiceChain(
     }
   }
 
-  return { ok: true, userId, isSimulated, before, after, changed };
+  return {
+    ok: true,
+    userId,
+    isSimulated,
+    before,
+    after,
+    changed,
+    frozenPeriodLateData,
+  };
 }
 
 export async function computeMonthlyRevenueInvoiceForUser(

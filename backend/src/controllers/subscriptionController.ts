@@ -675,11 +675,32 @@ export function createSubscriptionController(prisma: PrismaClient) {
       } = await import("../services/cancellationBillingService.js");
 
       try {
-        await closeAndBillForBotSubscription(
+        const billingResult = await closeAndBillForBotSubscription(
           prisma,
           sub,
           "SUBSCRIPTION_CANCELLED",
         );
+
+        if (!billingResult) {
+          await prisma.userStrategySubscription.update({
+            where: { id: sub.id },
+            data: {
+              isActive: false,
+              status: SubscriptionStatus.CANCELLED,
+            },
+          });
+        }
+
+        void logUserActivity(prisma, {
+          userId,
+          kind: "SUBSCRIPTION_CANCELLED",
+          message: `Unsubscribed from strategy ${strategyId.trim()}`,
+        });
+
+        res.json({
+          ok: true,
+          finalInvoiceSchedule: billingResult?.finalInvoiceSchedule ?? null,
+        });
       } catch (billingErr) {
         const mapped = mapCancellationBillingError(billingErr);
         if (mapped) {
@@ -688,18 +709,6 @@ export function createSubscriptionController(prisma: PrismaClient) {
         }
         throw billingErr;
       }
-
-      await prisma.userStrategySubscription.delete({
-        where: { id: sub.id },
-      });
-
-      void logUserActivity(prisma, {
-        userId,
-        kind: "SUBSCRIPTION_CANCELLED",
-        message: `Unsubscribed from strategy ${strategyId.trim()}`,
-      });
-
-      res.status(204).send();
     } catch (err) {
       next(err);
     }

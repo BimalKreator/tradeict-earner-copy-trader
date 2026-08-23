@@ -43,15 +43,7 @@ export function createCancellationBillingController(prisma: PrismaClient) {
         ok: true,
         userId: userId.trim(),
         closeCounts: result.closeCounts,
-        invoice: {
-          id: result.invoice.id,
-          periodYear: result.invoice.periodYear,
-          periodMonth: result.invoice.periodMonth,
-          billableProfit: result.invoice.billableProfit.toNumber(),
-          commissionAmount: result.invoice.commissionAmount.toNumber(),
-          status: result.invoice.status,
-          isFinal: result.invoice.isFinal,
-        },
+        finalInvoiceSchedule: result.finalInvoiceSchedule,
       });
     } catch (err) {
       const mapped = mapCancellationBillingError(err);

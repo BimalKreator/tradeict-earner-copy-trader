@@ -207,6 +207,12 @@ model User {
   deltaLedgerSyncedUpTo DateTime?
   /** Set when a deep sweep inserts rows into an already-invoiced period — manual recompute needed. */
   deltaLedgerRecomputeRequired Boolean @default(false)
+  /** Cancellation: final ACCRUED invoice deferred until Delta ledger settles. */
+  pendingFinalInvoiceSince DateTime?
+  pendingFinalInvoicePeriodYear Int?
+  pendingFinalInvoicePeriodMonth Int?
+  /** Admin-visible alerts when late data would change a frozen invoice period. */
+  revenueFrozenPeriodAlerts Json?
 
   deltaApiKeys     DeltaApiKey[]
   exchangeAccounts ExchangeAccount[]

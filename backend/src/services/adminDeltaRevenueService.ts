@@ -17,6 +17,10 @@ import {
   resolveStoredOrComputedTradeRevenueShare,
 } from "./dashboardMetricsService.js";
 import {
+  computeFinalInvoiceScheduledAt,
+  finalInvoiceDelayHours,
+} from "./billingCronService.js";
+import {
   TRADE_SOURCE_BOT_SYNC_LEGACY,
   botStrategyWhere,
 } from "./tradeBillingFilters.js";
@@ -555,5 +559,75 @@ export async function getUnbilledRevenueUsers(prisma: PrismaClient) {
     ),
   }));
 
-  return { count: users.length, users };
+  const pendingFinalInvoiceUsers = await prisma.user.findMany({
+    where: { pendingFinalInvoiceSince: { not: null } },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      pendingFinalInvoiceSince: true,
+      pendingFinalInvoicePeriodYear: true,
+      pendingFinalInvoicePeriodMonth: true,
+    },
+    orderBy: { pendingFinalInvoiceSince: "asc" },
+  });
+
+  const frozenPeriodAlertUsers = await prisma.user.findMany({
+    where: {
+      revenueFrozenPeriodAlerts: { not: Prisma.DbNull },
+    },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      revenueFrozenPeriodAlerts: true,
+    },
+  });
+
+  type FrozenAlertRow = {
+    periodYear: number;
+    periodMonth: number;
+    fields: string[];
+    detectedAt: string;
+  };
+
+  const frozenPeriodLateData = frozenPeriodAlertUsers
+    .map((user) => {
+      const alerts = Array.isArray(user.revenueFrozenPeriodAlerts)
+        ? (user.revenueFrozenPeriodAlerts as FrozenAlertRow[])
+        : [];
+      if (alerts.length === 0) return null;
+      return {
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        alerts,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row != null);
+
+  return {
+    count: users.length,
+    users,
+    pendingFinalInvoices: {
+      count: pendingFinalInvoiceUsers.length,
+      users: pendingFinalInvoiceUsers.map((user) => ({
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        pendingFinalInvoiceSince:
+          user.pendingFinalInvoiceSince?.toISOString() ?? null,
+        finalInvoiceScheduledAt: user.pendingFinalInvoiceSince
+          ? computeFinalInvoiceScheduledAt(user.pendingFinalInvoiceSince).toISOString()
+          : null,
+        finalInvoiceDelayHours: finalInvoiceDelayHours(),
+        periodYear: user.pendingFinalInvoicePeriodYear,
+        periodMonth: user.pendingFinalInvoicePeriodMonth,
+      })),
+    },
+    frozenPeriodLateData: {
+      count: frozenPeriodLateData.length,
+      users: frozenPeriodLateData,
+    },
+  };
 }

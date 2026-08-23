@@ -1,15 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import {
-  calendarPartsInTimeZone,
-  DASHBOARD_PNL_DAY_TIMEZONE,
-} from "./dashboardMetricsService.js";
-import { runDeltaLedgerSyncForUsers } from "./deltaLedgerService.js";
-import {
   closeSlaveStructure,
   findBotSlaveId,
 } from "./botBridgeService.js";
-import { recomputeStructurePnlForUsers } from "./structurePnlService.js";
-import { computeMonthlyRevenueInvoiceForUser } from "./structureRevenueService.js";
+import {
+  schedulePendingFinalInvoice,
+  type FinalInvoiceScheduleInfo,
+} from "./billingCronService.js";
 
 export type CancellationBillingReason =
   | "SUBSCRIPTION_CANCELLED"
@@ -57,31 +54,6 @@ export async function resolveBotSlaveIdForSubscription(
   });
 }
 
-async function runPostCloseBillingPipeline(
-  prisma: PrismaClient,
-  userId: string,
-) {
-  await runDeltaLedgerSyncForUsers(prisma, { userId });
-  await recomputeStructurePnlForUsers(prisma, { userId });
-
-  const parts = calendarPartsInTimeZone(new Date(), DASHBOARD_PNL_DAY_TIMEZONE);
-  const invoice = await computeMonthlyRevenueInvoiceForUser(
-    prisma,
-    userId,
-    parts.year,
-    parts.month,
-  );
-
-  if (invoice.isFinal) {
-    return invoice;
-  }
-
-  return prisma.monthlyRevenueInvoice.update({
-    where: { id: invoice.id },
-    data: { isFinal: true },
-  });
-}
-
 async function assertBotCloseSucceeded(
   closeResult: Awaited<ReturnType<typeof closeSlaveStructure>>,
   userId: string,
@@ -112,18 +84,24 @@ async function assertBotCloseSucceeded(
   }
 }
 
+export type CloseStructureBillingResult = {
+  closeCounts: Record<string, unknown> | null;
+  finalInvoiceSchedule: FinalInvoiceScheduleInfo;
+};
+
 /**
- * Close the user's bot structure (when a slave exists), then ingest ledger,
- * recompute structure P&L, and issue a final ACCRUED invoice for the current IST month.
+ * Close the user's bot structure (when a slave exists), mark subscription cancelled,
+ * and defer the final ACCRUED invoice until Delta ledger rows have settled.
  */
 export async function closeStructureAndFinaliseBilling(
   prisma: PrismaClient,
   args: {
     userId: string;
+    subscriptionId: string;
     botSlaveId: number | null;
     reason: CancellationBillingReason;
   },
-) {
+): Promise<CloseStructureBillingResult> {
   let closeCounts: Record<string, unknown> | null = null;
 
   if (args.botSlaveId != null) {
@@ -136,9 +114,12 @@ export async function closeStructureAndFinaliseBilling(
     closeCounts = closeResult.counts ?? null;
   }
 
-  const invoice = await runPostCloseBillingPipeline(prisma, args.userId);
+  const finalInvoiceSchedule = await schedulePendingFinalInvoice(prisma, {
+    userId: args.userId,
+    subscriptionId: args.subscriptionId,
+  });
 
-  return { closeCounts, invoice };
+  return { closeCounts, finalInvoiceSchedule };
 }
 
 /** Resolve bot slave from the user's active bot-strategy subscription. */
@@ -146,7 +127,7 @@ export async function closeStructureAndFinaliseBillingForUser(
   prisma: PrismaClient,
   userId: string,
   reason: CancellationBillingReason,
-) {
+): Promise<CloseStructureBillingResult> {
   const sub = await prisma.userStrategySubscription.findFirst({
     where: {
       userId,
@@ -180,6 +161,7 @@ export async function closeStructureAndFinaliseBillingForUser(
 
   return closeStructureAndFinaliseBilling(prisma, {
     userId: sub.userId,
+    subscriptionId: sub.id,
     botSlaveId,
     reason,
   });
@@ -188,13 +170,14 @@ export async function closeStructureAndFinaliseBillingForUser(
 export async function closeAndBillForBotSubscription(
   prisma: PrismaClient,
   sub: {
+    id: string;
     userId: string;
     strategyId: string;
     botSlaveId: string | null | undefined;
     strategy: { botStrategyType: string | null };
   },
   reason: CancellationBillingReason,
-) {
+): Promise<CloseStructureBillingResult | null> {
   if (!isBotStrategyType(sub.strategy.botStrategyType)) {
     return null;
   }
@@ -207,6 +190,7 @@ export async function closeAndBillForBotSubscription(
 
   return closeStructureAndFinaliseBilling(prisma, {
     userId: sub.userId,
+    subscriptionId: sub.id,
     botSlaveId,
     reason,
   });
