@@ -106,6 +106,10 @@ type UserDetail = {
     profitSharePct: number;
     commissionAmount: number;
     status: string;
+    overlapTxnCount?: number | null;
+    suspectStructuresCount?: number | null;
+    suspectLossesCountedCount?: number | null;
+    suspectLossesCountedAmount?: number | null;
   }>;
 };
 
@@ -332,6 +336,7 @@ export function AdminDeltaRevenueDashboard() {
                     <th className="px-4 py-2">Billable</th>
                     <th className="px-4 py-2">Share</th>
                     <th className="px-4 py-2">Commission</th>
+                    <th className="px-4 py-2">Overlaps</th>
                     <th className="px-4 py-2">Status</th>
                   </tr>
                 </thead>
@@ -344,6 +349,15 @@ export function AdminDeltaRevenueDashboard() {
                       <td className="px-4 py-2 tabular-nums">{fmtUsd(inv.billableProfit)}</td>
                       <td className="px-4 py-2 tabular-nums">{inv.profitSharePct.toFixed(1)}%</td>
                       <td className="px-4 py-2 tabular-nums">{fmtUsd(inv.commissionAmount)}</td>
+                      <td
+                        className={`px-4 py-2 tabular-nums ${
+                          (inv.overlapTxnCount ?? 0) > 0
+                            ? "text-red-300 font-medium"
+                            : ""
+                        }`}
+                      >
+                        {inv.overlapTxnCount ?? 0}
+                      </td>
                       <td className="px-4 py-2">{inv.status}</td>
                     </tr>
                   ))}

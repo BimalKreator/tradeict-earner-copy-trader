@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
+import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
 
 const BOT_BASE_URL = "http://127.0.0.1:8000";
 const BOT_TIMEOUT_MS = 10_000;
@@ -56,13 +57,6 @@ type BotLeg = {
   closedAt: Date | null;
 };
 
-function legWindowStart(leg: {
-  openedAt: Date;
-  attributionFrom: Date | null;
-}): Date {
-  return leg.attributionFrom ?? leg.openedAt;
-}
-
 type BotStructure = {
   botStructureId: number;
   hedgePositionId: number;
@@ -82,7 +76,43 @@ type LedgerRow = {
   transactionType: string;
   amount: Prisma.Decimal;
   occurredAt: Date;
+  metaJson: unknown;
 };
+
+/** Per-leg attribution window inputs — shared by P&L recompute, health, and invoices. */
+export type LegWindowSpec = {
+  botStructureId: number;
+  botLegId: number;
+  productId: number;
+  openedAt: Date;
+  attributionFrom: Date | null;
+  closedAt: Date | null;
+};
+
+/**
+ * Delta wallet ledger metaJson keys observed in ingest (product_symbol via
+ * deltaLedgerService). Official API schema documents meta_data as an empty
+ * object for wallet transactions — no order_id / fill_id on ledger rows.
+ * Fills carry order_id in a separate API; bot legs do not expose order ids.
+ */
+export function extractOrderRefFromLedgerMeta(metaJson: unknown): string | null {
+  if (metaJson == null || typeof metaJson !== "object" || Array.isArray(metaJson)) {
+    return null;
+  }
+  const m = metaJson as Record<string, unknown>;
+  for (const key of [
+    "order_id",
+    "orderId",
+    "fill_id",
+    "fillId",
+    "client_order_id",
+    "clientOrderId",
+  ]) {
+    const v = m[key];
+    if (v != null && String(v).trim().length > 0) return String(v).trim();
+  }
+  return null;
+}
 
 type LegRef = {
   structure: BotStructure;
@@ -244,17 +274,54 @@ async function fetchBotStructures(userId: string): Promise<BotStructure[]> {
   return structures;
 }
 
-function legWindowUpper(leg: BotLeg): Date | null {
+/** Close grace applies only when no other leg on the same product opened before grace ends. */
+export function resolveLegWindowEnd(
+  leg: LegWindowSpec,
+  productLegs: LegWindowSpec[],
+): Date | null {
   if (!leg.closedAt) return null;
-  return new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
+  const graceEndMs = leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS;
+  const anotherLegOnProduct = productLegs.some(
+    (other) =>
+      other.botLegId !== leg.botLegId &&
+      other.productId === leg.productId &&
+      other.openedAt.getTime() <= graceEndMs,
+  );
+  const graceMs = anotherLegOnProduct ? 0 : LEG_CLOSE_GRACE_MS;
+  return new Date(leg.closedAt.getTime() + graceMs);
 }
 
-function txnMatchesLeg(txn: LedgerRow, leg: BotLeg): boolean {
+export function txnMatchesLegWindowSpec(
+  txn: { productId: number | null; occurredAt: Date },
+  leg: LegWindowSpec,
+  productLegs: LegWindowSpec[],
+): boolean {
   if (txn.productId !== leg.productId) return false;
-  if (txn.occurredAt < legWindowStart(leg)) return false;
-  const upper = legWindowUpper(leg);
+  if (txn.occurredAt < resolveLegAttributionWindowStart(leg)) return false;
+  const upper = resolveLegWindowEnd(leg, productLegs);
   if (upper && txn.occurredAt > upper) return false;
   return true;
+}
+
+/** All legs whose product + time window contains this txn (may be 0, 1, or many). */
+export function findMatchingLegWindows(
+  txn: { productId: number | null; occurredAt: Date },
+  legs: LegWindowSpec[],
+): LegWindowSpec[] {
+  if (txn.productId == null) return [];
+  const productLegs = legs.filter((l) => l.productId === txn.productId);
+  return legs.filter((l) => txnMatchesLegWindowSpec(txn, l, productLegs));
+}
+
+function legRefToWindowSpec(ref: LegRef): LegWindowSpec {
+  return {
+    botStructureId: ref.structure.botStructureId,
+    botLegId: ref.leg.botLegId,
+    productId: ref.leg.productId,
+    openedAt: ref.leg.openedAt,
+    attributionFrom: ref.leg.attributionFrom,
+    closedAt: ref.leg.closedAt,
+  };
 }
 
 function isBillingTxnType(transactionType: string): boolean {
@@ -272,6 +339,10 @@ type LegTotals = {
   cashflowHasNegative: boolean;
   /** True when at least one settlement row was attributed to this leg. */
   hasSettlement: boolean;
+  /** Overlap with another leg's window — txn was not guessed onto either leg. */
+  overlapConflict: boolean;
+  /** Max leg count from any overlap event affecting this leg. */
+  overlapLegCount: number;
 };
 
 function emptyLegTotals(): LegTotals {
@@ -285,6 +356,8 @@ function emptyLegTotals(): LegTotals {
     cashflowHasPositive: false,
     cashflowHasNegative: false,
     hasSettlement: false,
+    overlapConflict: false,
+    overlapLegCount: 0,
   };
 }
 
@@ -319,6 +392,7 @@ function legRealizedPnl(totals: LegTotals, leg: BotLeg): Prisma.Decimal | null {
 
 export type LegAttributionWindow = {
   productId: number;
+  botLegId?: number;
   /** Window start — use attributionFrom when set, else openedAt. */
   attributionFrom: Date;
   closedAt: Date | null;
@@ -328,13 +402,19 @@ export type LegAttributionWindow = {
 export function ledgerTxnMatchesLegWindow(
   txn: { productId: number | null; occurredAt: Date },
   leg: LegAttributionWindow,
+  allLegs?: LegWindowSpec[],
 ): boolean {
-  if (txn.productId !== leg.productId) return false;
-  if (txn.occurredAt < leg.attributionFrom) return false;
-  if (!leg.closedAt) return true;
-  const upper = new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
-  if (txn.occurredAt > upper) return false;
-  return true;
+  const spec: LegWindowSpec = {
+    botStructureId: 0,
+    botLegId: leg.botLegId ?? -1,
+    productId: leg.productId,
+    openedAt: leg.attributionFrom,
+    attributionFrom: leg.attributionFrom,
+    closedAt: leg.closedAt,
+  };
+  const productLegs =
+    allLegs?.filter((l) => l.productId === leg.productId) ?? [spec];
+  return txnMatchesLegWindowSpec(txn, spec, productLegs);
 }
 
 export function resolveLegAttributionWindowStart(leg: {
@@ -355,6 +435,14 @@ function evaluateClosedLegAttribution(
   leg: BotLeg,
 ): LegAttributionFailure | null {
   if (!leg.closedAt) return null;
+
+  if (totals.overlapConflict) {
+    return {
+      botLegId: leg.botLegId,
+      matchedTxnCount: totals.matchedTxnCount,
+      reason: `overlap: txn matched ${totals.overlapLegCount} legs`,
+    };
+  }
 
   // Settlement close (e.g. ITM expiry / expire-worthless): no entry+exit
   // cashflow pair is expected — skip the dual-sign check.
@@ -462,7 +550,57 @@ async function loadBillingLedgerRows(
     transactionType: row.transactionType,
     amount: row.amount,
     occurredAt: row.occurredAt,
+    metaJson: row.metaJson,
   }));
+}
+
+/** Count billing ledger rows in an IST window that match more than one leg window. */
+export async function countBillingOverlapTxnsInIstWindow(
+  prisma: PrismaClient,
+  userId: string,
+  windowStart: Date,
+  windowEndExclusive: Date,
+  isSimulated: boolean,
+): Promise<number> {
+  const simFilter = excludeSimulatedFilter(isSimulated);
+  const [legs, ledgerRows] = await Promise.all([
+    prisma.structureLegPnl.findMany({
+      where: { structure: { userId, ...simFilter }, ...simFilter },
+      select: {
+        botLegId: true,
+        productId: true,
+        openedAt: true,
+        attributionFrom: true,
+        closedAt: true,
+        structure: { select: { botStructureId: true } },
+      },
+    }),
+    prisma.deltaLedgerEntry.findMany({
+      where: {
+        userId,
+        transactionType: { in: [...BILLING_TXN_TYPES] },
+        productId: { not: null },
+        occurredAt: { gte: windowStart, lt: windowEndExclusive },
+        ...simFilter,
+      },
+      select: { productId: true, occurredAt: true },
+    }),
+  ]);
+
+  const specs: LegWindowSpec[] = legs.map((leg) => ({
+    botStructureId: leg.structure.botStructureId,
+    botLegId: leg.botLegId,
+    productId: leg.productId,
+    openedAt: leg.openedAt,
+    attributionFrom: leg.attributionFrom,
+    closedAt: leg.closedAt,
+  }));
+
+  let overlapTxnCount = 0;
+  for (const txn of ledgerRows) {
+    if (findMatchingLegWindows(txn, specs).length > 1) overlapTxnCount += 1;
+  }
+  return overlapTxnCount;
 }
 
 async function recomputeStructurePnlForUser(
@@ -487,28 +625,39 @@ async function recomputeStructurePnlForUser(
     );
   }
 
+  const legWindowSpecs = allLegRefs.map(legRefToWindowSpec);
   const unmatched: LedgerRow[] = [];
   let matchedTxnCount = 0;
 
   for (const txn of ledgerRows) {
     if (txn.productId == null) continue;
 
-    const matching = allLegRefs.filter((ref) => txnMatchesLeg(txn, ref.leg));
-    if (matching.length === 0) {
+    const matchingSpecs = findMatchingLegWindows(txn, legWindowSpecs);
+    if (matchingSpecs.length === 0) {
       unmatched.push(txn);
       continue;
     }
 
-    if (matching.length > 1) {
+    if (matchingSpecs.length > 1) {
+      const legIds = matchingSpecs.map((s) => s.botLegId);
       console.error(
-        `[StructurePnl] OVERLAP user=${userId} uuid=${txn.deltaUuid} ` +
-          `legs=[${matching.map((m) => m.leg.botLegId).join(",")}]`,
+        `[StructurePnl] OVERLAP user=${userId} uuid=${txn.deltaUuid} product=${txn.productId} ` +
+          `legs=[${legIds.join(",")}] -- txn NOT counted, legs marked SUSPECT`,
       );
+      for (const spec of matchingSpecs) {
+        const key = legKey(spec.botStructureId, spec.botLegId);
+        const totals = legTotals.get(key)!;
+        totals.overlapConflict = true;
+        totals.overlapLegCount = Math.max(
+          totals.overlapLegCount,
+          matchingSpecs.length,
+        );
+      }
+      continue;
     }
 
-    matching.sort((a, b) => a.leg.botLegId - b.leg.botLegId);
-    const chosen = matching[0]!;
-    const key = legKey(chosen.structure.botStructureId, chosen.leg.botLegId);
+    const spec = matchingSpecs[0]!;
+    const key = legKey(spec.botStructureId, spec.botLegId);
     const totals = legTotals.get(key)!;
     applyTxnToLegTotals(totals, txn);
     matchedTxnCount += 1;

@@ -2,8 +2,8 @@ import type { PrismaClient } from "@prisma/client";
 import {
   ATTRIBUTION_STATUS,
   BILLING_TXN_TYPES,
-  ledgerTxnMatchesLegWindow,
-  resolveLegAttributionWindowStart,
+  findMatchingLegWindows,
+  type LegWindowSpec,
 } from "./structurePnlService.js";
 
 export type AttributionHealthLeg = {
@@ -63,7 +63,19 @@ export async function getAttributionHealthForUser(
 
   return {
     userId,
-    structures: structures.map((structure) => ({
+    structures: structures.map((structure) => {
+      const allLegSpecs: LegWindowSpec[] = structures.flatMap((s) =>
+        s.legs.map((leg) => ({
+          botStructureId: s.botStructureId,
+          botLegId: leg.botLegId,
+          productId: leg.productId,
+          openedAt: leg.openedAt,
+          attributionFrom: leg.attributionFrom,
+          closedAt: leg.closedAt,
+        })),
+      );
+
+      return {
       id: structure.id,
       botStructureId: structure.botStructureId,
       status: structure.status,
@@ -73,13 +85,14 @@ export async function getAttributionHealthForUser(
       openedAt: structure.openedAt.toISOString(),
       closedAt: structure.closedAt?.toISOString() ?? null,
       legs: structure.legs.map((leg) => {
-        const matched = ledgerRows.filter((txn) =>
-          ledgerTxnMatchesLegWindow(txn, {
-            productId: leg.productId,
-            attributionFrom: resolveLegAttributionWindowStart(leg),
-            closedAt: leg.closedAt,
-          }),
-        );
+        const matched = ledgerRows.filter((txn) => {
+          const hits = findMatchingLegWindows(txn, allLegSpecs);
+          return (
+            hits.length === 1 &&
+            hits[0]!.botStructureId === structure.botStructureId &&
+            hits[0]!.botLegId === leg.botLegId
+          );
+        });
 
         let cashflowPositive = false;
         let cashflowNegative = false;
@@ -108,6 +121,7 @@ export async function getAttributionHealthForUser(
           },
         };
       }),
-    })),
+    };
+    }),
   };
 }

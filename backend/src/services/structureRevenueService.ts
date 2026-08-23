@@ -9,8 +9,11 @@ import {
   startOfDayInTimeZone,
   startOfMonthInTimeZone,
 } from "./dashboardMetricsService.js";
-import { listEligibleStructurePnlUserIds } from "./structurePnlService.js";
-import { ATTRIBUTION_STATUS } from "./structurePnlService.js";
+import {
+  ATTRIBUTION_STATUS,
+  countBillingOverlapTxnsInIstWindow,
+  listEligibleStructurePnlUserIds,
+} from "./structurePnlService.js";
 import { scopedSimulatedFilter } from "./simulatedDataFilters.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
@@ -289,6 +292,7 @@ export type MonthlyInvoiceMetrics = {
   suspectStructuresCount: number;
   suspectLossesCountedCount: number;
   suspectLossesCountedAmount: Prisma.Decimal;
+  overlapTxnCount: number;
   realizedPnl: Prisma.Decimal;
   cumulativeRealizedPnl: Prisma.Decimal;
   hwmBefore: Prisma.Decimal;
@@ -327,6 +331,13 @@ export async function computeMonthlyInvoiceMetrics(
   // Month realizedPnl is billable-only (suspect losses omitted on purpose —
   // they still affect cumulative / HWM via cumulativeStructuresFilter).
   const realizedPnl = sumStructureRealized(billable);
+  const overlapTxnCount = await countBillingOverlapTxnsInIstWindow(
+    prisma,
+    userId,
+    monthStart,
+    monthEndExclusive,
+    isSimulated,
+  );
   const cumulativeRealizedPnl = await lifetimeCumulativeRealizedToDate(
     prisma,
     userId,
@@ -356,6 +367,7 @@ export async function computeMonthlyInvoiceMetrics(
     suspectStructuresCount: suspectCount,
     suspectLossesCountedCount,
     suspectLossesCountedAmount,
+    overlapTxnCount,
     realizedPnl,
     cumulativeRealizedPnl,
     hwmBefore,
@@ -495,6 +507,7 @@ export async function recomputeInvoiceChain(
       suspectStructuresCount: metrics.suspectStructuresCount,
       suspectLossesCountedCount: metrics.suspectLossesCountedCount,
       suspectLossesCountedAmount: metrics.suspectLossesCountedAmount,
+      overlapTxnCount: metrics.overlapTxnCount,
       realizedPnl: metrics.realizedPnl,
       cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
       hwmBefore: metrics.hwmBefore,
@@ -597,6 +610,7 @@ export async function computeMonthlyRevenueInvoiceForUser(
     suspectStructuresCount: metrics.suspectStructuresCount,
     suspectLossesCountedCount: metrics.suspectLossesCountedCount,
     suspectLossesCountedAmount: metrics.suspectLossesCountedAmount,
+    overlapTxnCount: metrics.overlapTxnCount,
     realizedPnl: metrics.realizedPnl,
     cumulativeRealizedPnl: metrics.cumulativeRealizedPnl,
     hwmBefore: metrics.hwmBefore,

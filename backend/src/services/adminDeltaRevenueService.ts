@@ -1,9 +1,9 @@
 import { Prisma, TradeStatus, type PrismaClient } from "@prisma/client";
 import {
   BILLING_TXN_TYPES,
-  LEG_CLOSE_GRACE_MS,
+  findMatchingLegWindows,
   listEligibleStructurePnlUserIds,
-  resolveLegAttributionWindowStart,
+  type LegWindowSpec,
 } from "./structurePnlService.js";
 import {
   countLegacyBotSyncTrades,
@@ -20,30 +20,22 @@ import {
 } from "./tradeBillingFilters.js";
 import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
 
-type DbLeg = {
-  botStructureId: number;
+function dbLegToSpec(leg: {
   botLegId: number;
   productId: number;
   openedAt: Date;
   attributionFrom: Date | null;
   closedAt: Date | null;
-};
-
-function legWindowUpper(leg: DbLeg): Date | null {
-  if (!leg.closedAt) return null;
-  return new Date(leg.closedAt.getTime() + LEG_CLOSE_GRACE_MS);
-}
-
-function txnMatchesLeg(
-  productId: number,
-  occurredAt: Date,
-  leg: DbLeg,
-): boolean {
-  if (productId !== leg.productId) return false;
-  if (occurredAt < resolveLegAttributionWindowStart(leg)) return false;
-  const upper = legWindowUpper(leg);
-  if (upper && occurredAt > upper) return false;
-  return true;
+  structure: { botStructureId: number };
+}): LegWindowSpec {
+  return {
+    botStructureId: leg.structure.botStructureId,
+    botLegId: leg.botLegId,
+    productId: leg.productId,
+    openedAt: leg.openedAt,
+    attributionFrom: leg.attributionFrom,
+    closedAt: leg.closedAt,
+  };
 }
 
 export type UserLedgerHealth = {
@@ -99,14 +91,7 @@ export async function computeUserLedgerHealth(
     }),
   ]);
 
-  const dbLegs: DbLeg[] = legs.map((leg) => ({
-    botStructureId: leg.structure.botStructureId,
-    botLegId: leg.botLegId,
-    productId: leg.productId,
-    openedAt: leg.openedAt,
-    attributionFrom: leg.attributionFrom,
-    closedAt: leg.closedAt,
-  }));
+  const dbLegs: LegWindowSpec[] = legs.map(dbLegToSpec);
 
   const ledgerRows = await prisma.deltaLedgerEntry.findMany({
     where: {
@@ -129,8 +114,9 @@ export async function computeUserLedgerHealth(
   for (const txn of ledgerRows) {
     const pid = txn.productId;
     if (pid == null) continue;
-    const matching = dbLegs.filter((leg) =>
-      txnMatchesLeg(pid, txn.occurredAt, leg),
+    const matching = findMatchingLegWindows(
+      { productId: pid, occurredAt: txn.occurredAt },
+      dbLegs,
     );
     if (matching.length === 0) {
       unmatchedTxnCount += 1;
@@ -366,6 +352,7 @@ export async function getAdminRevenueUserDetail(
         inv.suspectLossesCountedAmount != null
           ? dec(inv.suspectLossesCountedAmount)
           : null,
+      overlapTxnCount: inv.overlapTxnCount ?? null,
       realizedPnl: dec(inv.realizedPnl),
       cumulativeRealizedPnl: inv.cumulativeRealizedPnl
         ? dec(inv.cumulativeRealizedPnl)
