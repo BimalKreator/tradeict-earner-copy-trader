@@ -5,7 +5,6 @@ import {
   calendarPartsInTimeZone,
   endOfDayInTimeZone,
   endOfMonthInTimeZone,
-  floorRevenueShareDue,
   startOfDayInTimeZone,
   startOfMonthInTimeZone,
 } from "./dashboardMetricsService.js";
@@ -36,6 +35,26 @@ function dec(n: number | Prisma.Decimal): Prisma.Decimal {
 
 function maxDec(a: Prisma.Decimal, b: Prisma.Decimal): Prisma.Decimal {
   return a.greaterThan(b) ? a : b;
+}
+
+/** Money to 2 decimal places — banker's rounding (ROUND_HALF_EVEN). */
+export function roundMoneyHalfEven(
+  value: Prisma.Decimal,
+  decimalPlaces = 2,
+): Prisma.Decimal {
+  return value.toDecimalPlaces(decimalPlaces, Prisma.Decimal.ROUND_HALF_EVEN);
+}
+
+/**
+ * Commission from billable profit × profit-share % — Decimal only, then
+ * ROUND_HALF_EVEN to cents once. Never use IEEE-754 float on this path.
+ */
+export function computeCommissionAmount(
+  billableProfit: Prisma.Decimal,
+  profitSharePct: Prisma.Decimal,
+): Prisma.Decimal {
+  const raw = billableProfit.mul(profitSharePct).div(100);
+  return roundMoneyHalfEven(maxDec(zero(), raw));
 }
 
 function sumStructureRealized(
@@ -169,7 +188,7 @@ export function resolveIstSnapshotDate(dateInput?: string): Date {
 async function resolveUserProfitSharePct(
   prisma: PrismaClient,
   userId: string,
-): Promise<number> {
+): Promise<Prisma.Decimal> {
   const sub = await prisma.userStrategySubscription.findFirst({
     where: {
       userId,
@@ -185,9 +204,9 @@ async function resolveUserProfitSharePct(
     include: { strategy: { select: { profitShare: true } } },
   });
   if (sub?.profitShareOverride != null) {
-    return sub.profitShareOverride.toNumber();
+    return sub.profitShareOverride;
   }
-  return sub?.strategy.profitShare ?? 0;
+  return new Prisma.Decimal(sub?.strategy.profitShare ?? 0);
 }
 
 function previousCalendarMonth(
@@ -298,7 +317,7 @@ export type MonthlyInvoiceMetrics = {
   hwmBefore: Prisma.Decimal;
   hwmAfter: Prisma.Decimal;
   billableProfit: Prisma.Decimal;
-  profitSharePct: number;
+  profitSharePct: Prisma.Decimal;
   commissionAmount: Prisma.Decimal;
 };
 
@@ -358,8 +377,9 @@ export async function computeMonthlyInvoiceMetrics(
   const billableProfit = maxDec(zero(), hwmAfter.sub(hwmBefore));
 
   const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
-  const commissionAmount = dec(
-    billableProfit.toNumber() * (profitSharePct / 100),
+  const commissionAmount = computeCommissionAmount(
+    billableProfit,
+    profitSharePct,
   );
 
   return {
@@ -513,7 +533,7 @@ export async function recomputeInvoiceChain(
       hwmBefore: metrics.hwmBefore,
       hwmAfter: metrics.hwmAfter,
       billableProfit: metrics.billableProfit,
-      profitSharePct: dec(metrics.profitSharePct),
+      profitSharePct: metrics.profitSharePct,
       commissionAmount: metrics.commissionAmount,
       status: INVOICE_STATUS.ACCRUED,
       isSimulated,
@@ -616,7 +636,7 @@ export async function computeMonthlyRevenueInvoiceForUser(
     hwmBefore: metrics.hwmBefore,
     hwmAfter: metrics.hwmAfter,
     billableProfit: metrics.billableProfit,
-    profitSharePct: dec(metrics.profitSharePct),
+    profitSharePct: metrics.profitSharePct,
     commissionAmount: metrics.commissionAmount,
     status: INVOICE_STATUS.ACCRUED,
     isSimulated,
@@ -690,11 +710,7 @@ export async function computeDailyPnlSnapshotForUser(
 
   const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
   const hwmIncrease = highWaterMark.sub(prevHwm);
-  const commissionAccrued = dec(
-    floorRevenueShareDue(
-      hwmIncrease.toNumber() * (profitSharePct / 100),
-    ),
-  );
+  const commissionAccrued = computeCommissionAmount(hwmIncrease, profitSharePct);
   const commissionCumulative = prevCommissionCumulative.add(commissionAccrued);
   const openStructureCount = await countOpenStructures(prisma, userId);
   const computedAt = new Date();

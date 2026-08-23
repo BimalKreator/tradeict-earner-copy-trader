@@ -19,6 +19,7 @@ import {
   calculateFeeBreakdown,
   inrToUsd,
   roundInr,
+  usdToInr,
   type PaymentMethodKind,
 } from "../services/paymentFeeService.js";
 import { getPgFeePercent, getUsdInrRate } from "../services/settingsService.js";
@@ -262,7 +263,8 @@ export function createPaymentController(prisma: PrismaClient) {
           res.status(409).json({ error: "Invoice already paid" });
           return;
         }
-        const baseInr = Math.ceil(invoice.amountDue * usdInrRate);
+        // USD → INR once with ROUND_HALF_EVEN to paise (no Math.ceil against customer).
+        const baseInr = roundInr(usdToInr(invoice.amountDue, usdInrRate));
         breakdown = calculateFeeBreakdown(baseInr, pgFeePercent, "RAZORPAY");
         notes = {
           userId,
@@ -297,7 +299,8 @@ export function createPaymentController(prisma: PrismaClient) {
         };
       }
 
-      const totalInr = Math.ceil(breakdown.totalAmountInr);
+      // Fee breakdown already ROUND_HALF_EVEN to paise — do not ceil again.
+      const totalInr = breakdown.totalAmountInr;
       if (totalInr < 1) {
         res.status(400).json({ error: "Order amount must be at least ₹1" });
         return;
@@ -305,8 +308,10 @@ export function createPaymentController(prisma: PrismaClient) {
 
       const razorpay = getRazorpay();
       const receipt = `tict_${purpose}_${userId.slice(0, 8)}_${Date.now()}`;
+      // Razorpay requires integer paise; totalInr is already 2-dp so *100 is exact.
+      const amountPaise = Math.round(totalInr * 100);
       const order = await razorpay.orders.create({
-        amount: totalInr * 100,
+        amount: amountPaise,
         currency,
         receipt,
         notes,

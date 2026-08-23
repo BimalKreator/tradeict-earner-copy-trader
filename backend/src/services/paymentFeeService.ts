@@ -1,3 +1,16 @@
+import { Prisma } from "@prisma/client";
+
+/**
+ * INR amounts to 2 decimal places (paise) using banker's rounding.
+ * Prefer this over Math.ceil / Math.round when converting money to INR.
+ */
+export function roundInr(n: number): number {
+  const d = new Prisma.Decimal(Number.isFinite(n) ? n : 0);
+  return d
+    .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_EVEN)
+    .toNumber();
+}
+
 export type PaymentMethodKind = "RAZORPAY" | "UPI" | "BANK";
 
 export type FeeBreakdown = {
@@ -17,14 +30,12 @@ export function usdToInr(usd: number, usdInrRate: number): number {
   return usd * rate;
 }
 
-export function roundInr(n: number): number {
-  return Math.round(n * 100) / 100;
-}
-
 /**
  * RAZORPAY: user pays base + fee; wallet credits base (INR → USD).
  * UPI manual: fee deducted from base before wallet credit.
  * BANK: no fee; full base credited.
+ *
+ * Fee is computed on the true (ROUND_HALF_EVEN) base — never on a ceil'd base.
  */
 export function calculateFeeBreakdown(
   baseAmountInr: number,
