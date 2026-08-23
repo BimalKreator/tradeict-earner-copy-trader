@@ -6,7 +6,7 @@ import {
   startOfDayInTimeZone,
 } from "./dashboardMetricsService.js";
 import { distributeRevenueShareCommissions } from "./affiliateCommissionService.js";
-import { recomputeStructurePnlForUsers } from "./structurePnlService.js";
+import { recomputeStructurePnlForUsers, ATTRIBUTION_STATUS } from "./structurePnlService.js";
 import {
   computeMonthlyRevenueInvoiceForUser,
   runDailyPnlSnapshots,
@@ -284,6 +284,8 @@ async function writeSimulatedStructure(
       closedLegCount: legSpecs.length,
       matchedTxnCount: ledgerRows.length,
       computedAt: new Date(),
+      attributionStatus: ATTRIBUTION_STATUS.OK,
+      attributionNote: null,
       isSimulated: true,
     },
   });

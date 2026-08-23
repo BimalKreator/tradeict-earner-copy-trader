@@ -70,25 +70,42 @@ function sumStructureRealized(
 // loss still lowers the high-water mark. Resolving doubt in the
 // customer's favour is the rule; symmetric exclusion charges a
 // losing customer.
+//
+// NULL attributionStatus means "not checked / no problem found" — treat
+// as OK. Only an explicit SUSPECT_INCOMPLETE is excluded from billable.
 function isSuspectAttribution(status: string | null): boolean {
   return status === ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE;
 }
 
-/** Structures that may contribute to this month's billable realized P&L (OK only). */
+/**
+ * Billable = not explicitly SUSPECT.
+ * Prisma `NOT status = X` excludes NULLs in SQL — so include NULL explicitly.
+ */
 function billableStructuresFilter(): Prisma.StructurePnlWhereInput {
   return {
-    NOT: { attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE },
+    OR: [
+      { attributionStatus: null },
+      {
+        attributionStatus: {
+          not: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+        },
+      },
+    ],
   };
 }
 
 /**
- * Structures that feed lifetime cumulative / HWM:
- * OK rows, plus SUSPECT_INCOMPLETE rows with realizedPnl < 0.
+ * Cumulative / HWM = billable rows, plus SUSPECT losses (asymmetric rule).
  */
 function cumulativeStructuresFilter(): Prisma.StructurePnlWhereInput {
   return {
     OR: [
-      { NOT: { attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE } },
+      { attributionStatus: null },
+      {
+        attributionStatus: {
+          not: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+        },
+      },
       {
         attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
         realizedPnl: { lt: 0 },
@@ -98,6 +115,8 @@ function cumulativeStructuresFilter(): Prisma.StructurePnlWhereInput {
 }
 
 type ClosedStructureRow = {
+  id: string;
+  botStructureId: number;
   realizedPnl: Prisma.Decimal | null;
   attributionStatus: string | null;
 };
@@ -118,7 +137,12 @@ async function structuresClosedInIstWindow(
       closedAt: { gte: windowStart, lt: windowEndExclusive },
       realizedPnl: { not: null },
     },
-    select: { realizedPnl: true, attributionStatus: true },
+    select: {
+      id: true,
+      botStructureId: true,
+      realizedPnl: true,
+      attributionStatus: true,
+    },
   });
 }
 
@@ -136,6 +160,13 @@ function partitionStructures(rows: ClosedStructureRow[]): {
   let suspectLossesCountedAmount = zero();
 
   for (const row of rows) {
+    if (row.attributionStatus == null) {
+      console.error(
+        `[StructureRevenue] closed structure ${row.botStructureId} (id=${row.id}) ` +
+          `has NULL attributionStatus -- treated as OK, but this should never happen`,
+      );
+    }
+
     const suspect = isSuspectAttribution(row.attributionStatus);
     const pnl = row.realizedPnl;
     const isLoss = pnl != null && pnl.lessThan(0);

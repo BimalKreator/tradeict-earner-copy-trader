@@ -842,6 +842,12 @@ async function recomputeStructurePnlForUser(
       };
     }
 
+    // Closed structures must always persist OK or SUSPECT — never NULL.
+    const isClosedStructure = structure.status === "closed";
+    const attributionStatus = isClosedStructure
+      ? (attribution.status ?? ATTRIBUTION_STATUS.OK)
+      : attribution.status;
+
     await prisma.structurePnl.update({
       where: { id: structureRow.id },
       data: {
@@ -851,7 +857,7 @@ async function recomputeStructurePnlForUser(
         closedLegCount,
         matchedTxnCount: structMatched,
         computedAt,
-        attributionStatus: attribution.status,
+        attributionStatus,
         attributionNote: attribution.note,
       },
     });
