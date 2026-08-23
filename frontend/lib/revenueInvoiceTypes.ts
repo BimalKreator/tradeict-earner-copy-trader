@@ -4,6 +4,9 @@ export type RevenueInvoiceRow = {
   periodMonth: number;
   structuresClosed: number;
   realizedPnl: number;
+  cumulativeRealizedPnl?: number;
+  hwmBefore: number;
+  hwmAfter: number;
   billableProfit: number;
   profitSharePct: number;
   commissionAmount: number;

@@ -20,6 +20,7 @@ import {
 } from "@/lib/authFetch";
 import { RevenueInvoiceTable } from "@/components/billing/RevenueInvoiceTable";
 import { StrategySubscriptionFees } from "@/components/billing/StrategySubscriptionFees";
+import { HighWaterMarkCard } from "@/components/money/HighWaterMarkCard";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd, formatINRApprox } from "@/lib/currency";
 import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
@@ -226,6 +227,11 @@ export function PerformanceDashboard() {
     closedStructures.length > 0 ||
     snapshots.some((s) => s.cumulativeRealized !== 0 || s.realizedDelta !== 0);
 
+  const profitSharePct = useMemo(() => {
+    const withShare = invoices.find((inv) => inv.profitSharePct > 0);
+    return withShare?.profitSharePct ?? invoices[0]?.profitSharePct ?? null;
+  }, [invoices]);
+
   return (
     <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -256,6 +262,14 @@ export function PerformanceDashboard() {
           {error}
         </div>
       ) : null}
+
+      <HighWaterMarkCard
+        loading={loading}
+        hasData={hasClosedHistory}
+        cumulativeRealized={latest?.cumulativeRealized ?? null}
+        highWaterMark={latest?.highWaterMark ?? null}
+        profitSharePct={profitSharePct}
+      />
 
       <section className="space-y-3">
         <h2 className="text-lg font-medium text-white">Summary</h2>

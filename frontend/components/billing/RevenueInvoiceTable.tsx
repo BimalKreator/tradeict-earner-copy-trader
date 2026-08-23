@@ -1,15 +1,15 @@
 "use client";
 
-import { CreditCard, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { BillingDisclosure } from "@/components/billing/BillingDisclosure";
-import { fmtInr, fmtUsd, formatINRApprox } from "@/lib/currency";
-import { formatIstCalendarDate, formatIstMonthYear } from "@/lib/istDates";
+import { HwmInvoiceExplainer } from "@/components/money/HwmInvoiceExplainer";
+import { fmtUsd } from "@/lib/currency";
+import { formatIstMonthYear } from "@/lib/istDates";
 import {
   isRevenueInvoicePayable,
   payRevenueInvoiceFromWallet,
   payRevenueInvoiceWithRazorpay,
-  revenueInvoiceCollectibleInr,
 } from "@/lib/revenueInvoicePayment";
 import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 
@@ -24,28 +24,6 @@ type RevenueInvoiceTableProps = {
   onPaid?: () => void;
   className?: string;
 };
-
-function MoneyCell({ usd, muted = false }: { usd: number; muted?: boolean }) {
-  return (
-    <div className={muted ? "text-white/70" : ""}>
-      <div className="font-medium tabular-nums">{fmtUsd(usd)}</div>
-      <div className="text-xs tabular-nums text-white/45">{formatINRApprox(usd)}</div>
-    </div>
-  );
-}
-
-function statusBadge(status: string): string {
-  switch (status) {
-    case "PAID":
-      return "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30";
-    case "INVOICED":
-      return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30";
-    case "VOID":
-      return "bg-red-500/15 text-red-300 ring-1 ring-red-500/30";
-    default:
-      return "bg-white/10 text-white/70";
-  }
-}
 
 export function RevenueInvoiceTable({
   invoices,
@@ -148,110 +126,27 @@ export function RevenueInvoiceTable({
             IST calendar month.
           </p>
         ) : (
-          <table className="w-full min-w-[880px] text-left text-sm">
-            <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase text-white/40">
-              <tr>
-                <th className="px-4 py-3">Period</th>
-                <th className="px-4 py-3">Closed</th>
-                <th className="px-4 py-3">Realized P&L</th>
-                <th className="px-4 py-3">Billable profit</th>
-                <th className="px-4 py-3">Share %</th>
-                <th className="px-4 py-3">Commission</th>
-                <th className="px-4 py-3">Due</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {invoices.map((inv) => {
-                const payable = isRevenueInvoicePayable(inv);
-                const collectibleInr = revenueInvoiceCollectibleInr(inv);
-                const isPaying = payingId === inv.id;
-                const isRazorpayPaying = razorpayPayingId === inv.id;
-                const insufficient =
-                  walletBalance != null &&
-                  walletBalance + 1e-9 < inv.collectibleAmount;
-                return (
-                  <tr key={inv.id} className="text-white/85">
-                    <td className="px-4 py-3">
-                      {formatIstMonthYear(inv.periodMonth, inv.periodYear)}
-                    </td>
-                    <td className="px-4 py-3 tabular-nums">{inv.structuresClosed}</td>
-                    <td className="px-4 py-3">
-                      <MoneyCell usd={inv.realizedPnl} muted />
-                    </td>
-                    <td className="px-4 py-3">
-                      <MoneyCell usd={inv.billableProfit} muted />
-                    </td>
-                    <td className="px-4 py-3 tabular-nums">{inv.profitSharePct.toFixed(1)}%</td>
-                    <td className="px-4 py-3">
-                      <div>
-                        <MoneyCell usd={inv.collectibleAmount} muted />
-                        {inv.creditNoteAmount != null && inv.creditNoteAmount > 0 ? (
-                          <p className="mt-0.5 text-xs text-white/40">
-                            Credit −{fmtUsd(inv.creditNoteAmount)}
-                          </p>
-                        ) : null}
-                        {collectibleInr > 0 ? (
-                          <p className="mt-0.5 text-xs tabular-nums text-white/45">
-                            {fmtInr(collectibleInr)} (pinned rate)
-                          </p>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 tabular-nums text-white/65">
-                      {inv.dueDate ? formatIstCalendarDate(inv.dueDate) : "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${statusBadge(inv.status)}`}
-                      >
-                        {inv.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {payable ? (
-                        <div className="flex flex-col items-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void handleRazorpayPay(inv)}
-                            disabled={isRazorpayPaying || isPaying}
-                            className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-white hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {isRazorpayPaying ? (
-                              <>
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                                Processing…
-                              </>
-                            ) : (
-                              <>
-                                <CreditCard className="h-3.5 w-3.5" aria-hidden />
-                                Pay Now
-                              </>
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleWalletPay(inv)}
-                            disabled={isPaying || isRazorpayPaying || insufficient}
-                            className={`text-[10px] font-medium uppercase tracking-wide ${
-                              insufficient
-                                ? "text-white/35"
-                                : "text-white/55 hover:text-white/80"
-                            }`}
-                          >
-                            {isPaying ? "Wallet…" : "Use wallet"}
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-white/35">—</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="divide-y divide-white/5">
+            {invoices.map((inv) => {
+              const payable = isRevenueInvoicePayable(inv);
+              const isPaying = payingId === inv.id;
+              const isRazorpayPaying = razorpayPayingId === inv.id;
+              const insufficient =
+                walletBalance != null && walletBalance + 1e-9 < inv.collectibleAmount;
+              return (
+                <HwmInvoiceExplainer
+                  key={inv.id}
+                  invoice={inv}
+                  payable={payable}
+                  isWalletPaying={isPaying}
+                  isRazorpayPaying={isRazorpayPaying}
+                  walletInsufficient={insufficient}
+                  onPayRazorpay={() => void handleRazorpayPay(inv)}
+                  onPayWallet={() => void handleWalletPay(inv)}
+                />
+              );
+            })}
+          </div>
         )}
       </div>
     </section>
