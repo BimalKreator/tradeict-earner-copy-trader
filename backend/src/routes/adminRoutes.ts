@@ -423,6 +423,9 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
 
   router.get("/users", adminController.listUsersForAdmin);
 
+  router.get("/users/:id/onboarding", adminController.getUserOnboardingStatus);
+  router.post("/users/:id/subscribe", adminController.adminSubscribeUser);
+
   router.get("/users/:id/management", async (req, res, next) => {
     try {
       const { id } = req.params;

@@ -37,7 +37,10 @@ import {
 import { reconcileStaleOpenTradesForUser } from "../services/tradeSettlementService.js";
 import {
   invalidateCopySubscriberCache,
+  parseConnectionChecklistHints,
+  parseStrategyPaymentMode,
   resolveUserExchangeCreds,
+  subscribeUserToStrategy,
 } from "../services/strategySubscriptionService.js";
 import {
   EXIT_REASON,
@@ -53,6 +56,7 @@ import bcrypt from "bcrypt";
 import {
   executeTrade,
   fetchDeltaTotalBalanceUsd,
+  testDeltaIndiaConnection,
   type TradeSide,
 } from "../services/exchangeService.js";
 import { sendPasswordResetLinkEmail } from "../utils/emailService.js";
@@ -130,6 +134,10 @@ import {
 } from "../services/walletWithdrawalService.js";
 import { auditFromRequest, getRequestIp } from "../utils/auditLogger.js";
 import { ReferralRequestStatus, SalesTier } from "@prisma/client";
+import {
+  STRATEGY_PAYMENT_MODE,
+  MANAGED_SUBSCRIPTION_STATUSES,
+} from "../constants/subscription.js";
 
 const BCRYPT_ROUNDS = 12;
 
@@ -3465,6 +3473,320 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  /** Live onboarding checklist for admin user detail (runs Delta connection test). */
+  async function getUserOnboardingStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          status: true,
+          copyTradingPaused: true,
+        },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const exchangeAccount = await prisma.exchangeAccount.findFirst({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, nickname: true, exchange: true, apiKey: true, apiSecret: true },
+      });
+
+      let connectionTest: Awaited<ReturnType<typeof testDeltaIndiaConnection>> | null =
+        null;
+      if (exchangeAccount) {
+        connectionTest = await testDeltaIndiaConnection(
+          exchangeAccount.apiKey,
+          exchangeAccount.apiSecret,
+        );
+      }
+
+      const hints = parseConnectionChecklistHints(connectionTest?.error ?? null);
+      const keysConnected =
+        exchangeAccount != null && connectionTest?.success === true;
+
+      const managedStatuses =
+        MANAGED_SUBSCRIPTION_STATUSES as unknown as SubscriptionStatus[];
+      const botSubscription = await prisma.userStrategySubscription.findFirst({
+        where: {
+          userId,
+          status: { in: managedStatuses },
+          strategy: { botStrategyType: { not: null } },
+        },
+        orderBy: { joinedDate: "desc" },
+        select: {
+          id: true,
+          strategyId: true,
+          multiplier: true,
+          isActive: true,
+          status: true,
+          profitShareOverride: true,
+          profitSharePctSnapshot: true,
+          strategy: {
+            select: {
+              id: true,
+              title: true,
+              profitShare: true,
+              baseCapital: true,
+              botStrategyType: true,
+            },
+          },
+        },
+      });
+
+      const baseCapital = botSubscription
+        ? resolveStrategyBaseCapital(botSubscription.strategy)
+        : null;
+      const deployedCapital =
+        botSubscription && baseCapital != null
+          ? deployedCapitalFromMultiplier(botSubscription.multiplier, baseCapital)
+          : null;
+
+      const profitShareOverride =
+        botSubscription?.profitShareOverride?.toNumber() ?? null;
+      const profitShareSnapshot =
+        botSubscription?.profitSharePctSnapshot?.toNumber() ?? null;
+      const strategyDefaultProfitShare =
+        botSubscription?.strategy.profitShare ?? null;
+      const effectiveProfitSharePct =
+        profitShareOverride ?? profitShareSnapshot ?? strategyDefaultProfitShare;
+
+      const strategies = await prisma.strategy.findMany({
+        where: { botStrategyType: { not: null }, isActive: true },
+        orderBy: { title: "asc" },
+        select: {
+          id: true,
+          title: true,
+          monthlyFee: true,
+          profitShare: true,
+          baseCapital: true,
+        },
+      });
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          status: user.status,
+          copyTradingPaused: user.copyTradingPaused,
+        },
+        exchangeAccount: exchangeAccount
+          ? {
+              id: exchangeAccount.id,
+              nickname: exchangeAccount.nickname,
+              exchange: exchangeAccount.exchange,
+            }
+          : null,
+        connectionTest: connectionTest
+          ? {
+              success: connectionTest.success,
+              error: connectionTest.error ?? null,
+              openPositionCount: connectionTest.openPositionCount ?? null,
+              availableBalanceUsd: connectionTest.availableBalanceUsd ?? null,
+              apiKeyPrefix: connectionTest.apiKeyPrefix ?? null,
+            }
+          : null,
+        subscription: botSubscription
+          ? {
+              id: botSubscription.id,
+              strategyId: botSubscription.strategyId,
+              strategyTitle: botSubscription.strategy.title,
+              multiplier: botSubscription.multiplier,
+              baseCapital,
+              deployedCapital,
+              isActive: botSubscription.isActive,
+              status: botSubscription.status,
+              profitShareOverride,
+              profitSharePctSnapshot: profitShareSnapshot,
+              strategyDefaultProfitShare,
+              effectiveProfitSharePct,
+            }
+          : null,
+        availableStrategies: strategies,
+        checklist: {
+          accountActive: user.status === UserStatus.ACTIVE,
+          deltaKeysConnected: keysConnected,
+          tradingPermissionOk: keysConnected
+            ? true
+            : hints.tradingPermissionOk === false
+              ? false
+              : null,
+          withdrawalDisabled: keysConnected ? true : null,
+          ipWhitelisted: keysConnected
+            ? true
+            : hints.ipWhitelisted === false
+              ? false
+              : null,
+          subscribedToBotStrategy: botSubscription != null,
+          capitalAllocated:
+            botSubscription != null &&
+            Number.isFinite(botSubscription.multiplier) &&
+            botSubscription.multiplier > 0,
+          profitShareConfigured:
+            botSubscription != null && effectiveProfitSharePct != null,
+          copyTradingEnabled:
+            !user.copyTradingPaused && botSubscription?.isActive === true,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** Admin-led strategy subscribe (same service path as customer subscribe). */
+  async function adminSubscribeUser(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      const body = req.body as {
+        strategyId?: unknown;
+        paymentMode?: unknown;
+        multiplier?: unknown;
+        deployedCapital?: unknown;
+        profitSharePct?: unknown;
+        couponCode?: unknown;
+      };
+
+      const rawStrategyId =
+        typeof body.strategyId === "string" ? body.strategyId.trim() : "";
+      if (!userId || !rawStrategyId) {
+        res.status(400).json({ error: "userId and strategyId are required" });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true },
+      });
+      if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const paymentMode =
+        parseStrategyPaymentMode(body.paymentMode) ??
+        STRATEGY_PAYMENT_MODE.PAY_LATER;
+      const couponCode =
+        typeof body.couponCode === "string" ? body.couponCode : undefined;
+
+      const result = await subscribeUserToStrategy(prisma, {
+        userId,
+        rawStrategyId,
+        paymentMode,
+        ...(couponCode !== undefined ? { couponCode } : {}),
+      });
+
+      if (!result.ok) {
+        if (result.requiresPayment) {
+          res.status(result.status).json({
+            error: result.error,
+            requiresPayment: true,
+            paymentMode: result.paymentMode,
+            originalFeeInr: result.originalFeeInr,
+            finalFeeInr: result.finalFeeInr,
+          });
+          return;
+        }
+        res.status(result.status).json({ error: result.error });
+        return;
+      }
+
+      const strategyId = result.subscription.strategyId;
+      let subscription = result.subscription;
+
+      const strategyRow = await prisma.strategy.findUnique({
+        where: { id: strategyId },
+        select: { baseCapital: true, minCapital: true, profitShare: true, title: true },
+      });
+      if (!strategyRow) {
+        res.status(404).json({ error: "Strategy not found after subscribe" });
+        return;
+      }
+      const baseCapital = resolveStrategyBaseCapital(strategyRow);
+
+      const updateData: {
+        multiplier?: number;
+        profitShareOverride?: Prisma.Decimal | null;
+      } = {};
+
+      if (body.multiplier !== undefined || body.deployedCapital !== undefined) {
+        const multiplier = parseMultiplierFromBody(body, baseCapital);
+        if (multiplier == null) {
+          res.status(400).json({ error: deployedCapitalRangeError(baseCapital) });
+          return;
+        }
+        updateData.multiplier = multiplier;
+      }
+
+      if (body.profitSharePct !== undefined) {
+        if (body.profitSharePct === null) {
+          updateData.profitShareOverride = null;
+        } else if (typeof body.profitSharePct === "number") {
+          if (!Number.isFinite(body.profitSharePct) || body.profitSharePct < 0) {
+            res.status(400).json({ error: "profitSharePct must be >= 0 or null" });
+            return;
+          }
+          updateData.profitShareOverride = new Prisma.Decimal(body.profitSharePct);
+        } else {
+          res.status(400).json({ error: "profitSharePct must be a number or null" });
+          return;
+        }
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        subscription = await prisma.userStrategySubscription.update({
+          where: { id: subscription.id },
+          data: updateData,
+        });
+        if (updateData.multiplier !== undefined) {
+          invalidateCopySubscriberCache();
+        }
+      }
+
+      const deployedCapital = deployedCapitalFromMultiplier(
+        subscription.multiplier,
+        baseCapital,
+      );
+
+      res.status(201).json({
+        ok: true,
+        subscriptionId: subscription.id,
+        userId,
+        strategyId,
+        strategyTitle: result.strategyTitle,
+        paymentMode: result.paymentMode,
+        strategyFeeInvoiceId: result.strategyFeeInvoiceId,
+        multiplier: subscription.multiplier,
+        baseCapital,
+        deployedCapital,
+        profitShareOverride: subscription.profitShareOverride?.toNumber() ?? null,
+        profitSharePctSnapshot: subscription.profitSharePctSnapshot?.toNumber() ?? null,
+        isActive: subscription.isActive,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   /** Update per-user multiplier and/or copy-trading isActive for one strategy. */
   async function updateStrategySubscriber(
     req: Request,
@@ -4746,6 +5068,8 @@ export function createAdminController(prisma: PrismaClient) {
     bulkAdjustMasterLiveTrades,
     updateStrategySubscriber,
     getGroupedLiveTrades,
+    getUserOnboardingStatus,
+    adminSubscribeUser,
   };
 }
 

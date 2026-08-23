@@ -8,9 +8,18 @@ import {
 } from "@prisma/client";
 import {
   STRATEGY_FEE_CYCLE_DAYS,
+  MANAGED_SUBSCRIPTION_STATUSES,
   STRATEGY_PAYMENT_MODE,
   type StrategyPaymentMode,
 } from "../constants/subscription.js";
+import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
+import { validateCouponForFee } from "./couponService.js";
+import { logUserActivity } from "./userActivityService.js";
+import {
+  resolveEmailRecipientName,
+  sendTemplateEmailAsync,
+} from "./emailService.js";
+import { normalizeFutureHedgeStrategyId } from "./futureHedgeService.js";
 import { getUsdInrRate } from "./settingsService.js";
 import { resolveCanonicalFutureHedgeStrategyId } from "./futureHedgeService.js";
 
@@ -470,4 +479,286 @@ export async function markStrategyFeePaidForSubscription(
     },
   });
   invalidateCopySubscriberCache();
+}
+
+export type StrategyFeeQuote =
+  | {
+      ok: true;
+      originalFeeInr: number;
+      discountAmountInr: number;
+      finalFeeInr: number;
+      discountPercentage: number | null;
+      couponId: string | null;
+      couponCode: string | null;
+    }
+  | { ok: false; error: string };
+
+export async function resolveStrategyFeeQuote(
+  prisma: PrismaClient,
+  strategyId: string,
+  couponCode?: string,
+): Promise<StrategyFeeQuote> {
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { monthlyFee: true },
+  });
+  if (!strategy) return { ok: false, error: "Strategy not found" };
+
+  const originalFeeInr = Math.max(0, strategy.monthlyFee);
+  if (!couponCode?.trim()) {
+    return {
+      ok: true,
+      originalFeeInr,
+      discountAmountInr: 0,
+      finalFeeInr: originalFeeInr,
+      discountPercentage: null,
+      couponId: null,
+      couponCode: null,
+    };
+  }
+
+  const validated = await validateCouponForFee(prisma, couponCode, originalFeeInr);
+  if (!validated.ok) return validated;
+
+  return {
+    ok: true,
+    originalFeeInr: validated.originalFeeInr,
+    discountAmountInr: validated.discountAmountInr,
+    finalFeeInr: validated.finalFeeInr,
+    discountPercentage: validated.discountPercentage,
+    couponId: validated.coupon.id,
+    couponCode: validated.coupon.code,
+  };
+}
+
+export type SubscribeUserToStrategyResult =
+  | {
+      ok: true;
+      subscription: Prisma.UserStrategySubscriptionGetPayload<Record<string, never>>;
+      paymentMode: StrategyPaymentMode;
+      strategyFeeInvoiceId: string | null;
+      strategyTitle: string;
+    }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      requiresPayment?: boolean;
+      paymentMode?: StrategyPaymentMode;
+      originalFeeInr?: number;
+      finalFeeInr?: number;
+    };
+
+async function registerBotBridgeForSubscription(
+  prisma: PrismaClient,
+  args: { userId: string; strategyId: string },
+): Promise<void> {
+  try {
+    const strategy = await prisma.strategy.findUnique({
+      where: { id: args.strategyId },
+      select: {
+        botStrategyType: true,
+        botUrl: true,
+        baseCapital: true,
+      },
+    });
+
+    if (!strategy?.botStrategyType || !strategy?.botUrl) return;
+
+    const subRow = await prisma.userStrategySubscription.findFirst({
+      where: { userId: args.userId, strategyId: args.strategyId },
+      include: { exchangeAccount: true },
+    });
+    if (!subRow) return;
+
+    let account = subRow.exchangeAccount;
+    if (!account) {
+      account = await prisma.exchangeAccount.findFirst({
+        where: { userId: args.userId },
+        orderBy: { createdAt: "desc" },
+      });
+    }
+    if (!account) return;
+
+    const { decryptDeltaSecretOrPlain } = await import("../utils/encryption.js");
+    const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
+    const apiSecret = decryptDeltaSecretOrPlain(account.apiSecret);
+    if (!apiKey || !apiSecret) return;
+
+    const deployedCapital = subRow.multiplier * (strategy.baseCapital ?? 300);
+    const { ensureBotSlaveForSubscription } = await import("./botBridgeService.js");
+    const botSlaveId = await ensureBotSlaveForSubscription({
+      userId: args.userId,
+      strategyId: args.strategyId,
+      subscriptionId: subRow.id,
+      apiKey,
+      apiSecret,
+      userAllocatedCapitalUsd: deployedCapital,
+    });
+
+    if (botSlaveId != null) {
+      await prisma.$executeRaw`
+        UPDATE "UserSubscription"
+        SET "botSlaveId" = ${String(botSlaveId)}
+        WHERE id = ${subRow.id}
+      `;
+    }
+  } catch (botErr) {
+    console.error("[subscribeUserToStrategy] Bot bridge error (non-fatal):", botErr);
+  }
+}
+
+/** Shared subscribe path for customer API and admin onboarding. */
+export async function subscribeUserToStrategy(
+  prisma: PrismaClient,
+  args: {
+    userId: string;
+    rawStrategyId: string;
+    paymentMode: StrategyPaymentMode;
+    couponCode?: string;
+    sendWelcomeEmail?: boolean;
+    activityKind?: "SUBSCRIPTION_CREATED";
+  },
+): Promise<SubscribeUserToStrategyResult> {
+  const strategyId = await normalizeFutureHedgeStrategyId(prisma, args.rawStrategyId);
+
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: strategyId },
+    select: { ...STRATEGY_SELECT_SUBSCRIBE_GATE, title: true },
+  });
+  if (!strategy) {
+    return { ok: false, status: 404, error: "Strategy not found" };
+  }
+
+  const feeQuote = await resolveStrategyFeeQuote(prisma, strategyId, args.couponCode);
+  if (!feeQuote.ok) {
+    return { ok: false, status: 400, error: feeQuote.error };
+  }
+
+  if (
+    feeQuote.finalFeeInr > 0 &&
+    args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_NOW
+  ) {
+    return {
+      ok: false,
+      status: 402,
+      error:
+        "This strategy requires payment. Use checkout (Razorpay) or choose pay-later.",
+      requiresPayment: true,
+      paymentMode: STRATEGY_PAYMENT_MODE.PAY_NOW,
+      originalFeeInr: feeQuote.originalFeeInr,
+      finalFeeInr: feeQuote.finalFeeInr,
+    };
+  }
+
+  const managedStatuses = MANAGED_SUBSCRIPTION_STATUSES as unknown as SubscriptionStatus[];
+  const existing = await prisma.userStrategySubscription.findFirst({
+    where: {
+      userId: args.userId,
+      strategyId,
+      status: { in: managedStatuses },
+    },
+  });
+  if (existing) {
+    return {
+      ok: false,
+      status: 409,
+      error: "User already subscribed to this strategy",
+    };
+  }
+
+  let subscription: Prisma.UserStrategySubscriptionGetPayload<Record<string, never>>;
+  let strategyFeeInvoiceId: string | null = null;
+
+  if (
+    feeQuote.finalFeeInr > 0 &&
+    args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER
+  ) {
+    const created = await createStrategySubscriptionWithPaymentMode(prisma, {
+      userId: args.userId,
+      strategyId,
+      paymentMode: STRATEGY_PAYMENT_MODE.PAY_LATER,
+      finalFeeInr: feeQuote.finalFeeInr,
+      couponId: feeQuote.couponId,
+    });
+    subscription = created.subscription;
+    strategyFeeInvoiceId = created.strategyFeeInvoiceId;
+  } else {
+    const stratShare = await prisma.strategy.findUnique({
+      where: { id: strategyId },
+      select: { profitShare: true },
+    });
+    subscription = await prisma.userStrategySubscription.create({
+      data: {
+        userId: args.userId,
+        strategyId,
+        multiplier: 1,
+        isActive: false,
+        status: SubscriptionStatus.ACTIVE,
+        isStrategyFeePaid: true,
+        profitSharePctSnapshot: new Prisma.Decimal(stratShare?.profitShare ?? 20),
+      },
+    });
+    invalidateCopySubscriberCache();
+  }
+
+  await registerBotBridgeForSubscription(prisma, {
+    userId: args.userId,
+    strategyId,
+  });
+
+  void logUserActivity(prisma, {
+    userId: args.userId,
+    kind: args.activityKind ?? "SUBSCRIPTION_CREATED",
+    message:
+      args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER
+        ? `Subscribed with pay-later (${strategy.title})`
+        : `Added strategy to My Strategies (inactive)`,
+  });
+
+  if (args.sendWelcomeEmail !== false) {
+    const subscriber = await prisma.user.findUnique({
+      where: { id: args.userId },
+      select: { email: true, name: true },
+    });
+    if (subscriber?.email) {
+      sendTemplateEmailAsync(subscriber.email, "member_registration", {
+        userName: resolveEmailRecipientName(subscriber.name, subscriber.email),
+        strategyName: strategy.title,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    subscription,
+    paymentMode: args.paymentMode,
+    strategyFeeInvoiceId,
+    strategyTitle: strategy.title,
+  };
+}
+
+export function parseConnectionChecklistHints(connectionError?: string | null): {
+  ipWhitelisted: boolean | null;
+  tradingPermissionOk: boolean | null;
+} {
+  if (!connectionError) {
+    return { ipWhitelisted: true, tradingPermissionOk: true };
+  }
+  const lower = connectionError.toLowerCase();
+  if (
+    lower.includes("ip_not_whitelisted") ||
+    lower.includes("ip_blocked") ||
+    lower.includes("ip whitelist")
+  ) {
+    return { ipWhitelisted: false, tradingPermissionOk: null };
+  }
+  if (
+    lower.includes("permission") ||
+    lower.includes("not authorized") ||
+    lower.includes("unauthorized")
+  ) {
+    return { ipWhitelisted: null, tradingPermissionOk: false };
+  }
+  return { ipWhitelisted: null, tradingPermissionOk: null };
 }

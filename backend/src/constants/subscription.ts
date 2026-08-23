@@ -12,3 +12,10 @@ export type StrategyPaymentMode =
 
 /** Pay-later grace period before strategy fee must be settled. */
 export const STRATEGY_FEE_CYCLE_DAYS = 30;
+
+/** Subscription rows the customer can manage (not cancelled). */
+export const MANAGED_SUBSCRIPTION_STATUSES = [
+  "ACTIVE",
+  "PAUSED_BY_USER",
+  "PAUSED_DUE_TO_FUNDS",
+] as const;

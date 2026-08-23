@@ -42,6 +42,7 @@ export const MONEY_CRITICAL_PATHS: readonly string[] = [
   "/debug/clear-dummy-trades",
   "/simulate/purge",
   "/users/:id/api-keys",
+  "/users/:id/subscribe",
   "/live-trades/close-all",
 ] as const;
 

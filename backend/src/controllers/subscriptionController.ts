@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import {
   STRATEGY_PAYMENT_MODE,
+  MANAGED_SUBSCRIPTION_STATUSES,
 } from "../constants/subscription.js";
 import { STRATEGY_SELECT_SUBSCRIBE_GATE } from "../prisma/strategySelect.js";
 import { validateCouponForFee } from "../services/couponService.js";
@@ -23,15 +24,16 @@ import {
   parseMultiplierFromBody,
   resolveStrategyBaseCapital,
 } from "../utils/subscriptionCapital.js";
+import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
+import { resolveCanonicalFutureHedgeStrategyId } from "../services/futureHedgeService.js";
 import {
-  createStrategySubscriptionWithPaymentMode,
   hasBlockingUnpaidInvoicesForStrategy,
   invalidateCopySubscriberCache,
   normalizeFutureHedgeStrategyId,
   parseStrategyPaymentMode,
+  resolveStrategyFeeQuote,
+  subscribeUserToStrategy,
 } from "../services/strategySubscriptionService.js";
-import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
-import { resolveCanonicalFutureHedgeStrategyId } from "../services/futureHedgeService.js";
 
 export type RecordTradePnlResult = {
   pnlRecordId: string;
@@ -159,56 +161,8 @@ export function createSubscriptionController(prisma: PrismaClient) {
     return { ok: true, id: trimmed };
   }
 
-  async function resolveStrategyFeeQuote(
-    strategyId: string,
-    couponCode?: string,
-  ): Promise<
-    | {
-        ok: true;
-        originalFeeInr: number;
-        discountAmountInr: number;
-        finalFeeInr: number;
-        discountPercentage: number | null;
-        couponId: string | null;
-        couponCode: string | null;
-      }
-    | { ok: false; error: string }
-  > {
-    const strategy = await prisma.strategy.findUnique({
-      where: { id: strategyId },
-      select: { monthlyFee: true },
-    });
-    if (!strategy) return { ok: false, error: "Strategy not found" };
-
-    const originalFeeInr = Math.max(0, strategy.monthlyFee);
-    if (!couponCode?.trim()) {
-      return {
-        ok: true,
-        originalFeeInr,
-        discountAmountInr: 0,
-        finalFeeInr: originalFeeInr,
-        discountPercentage: null,
-        couponId: null,
-        couponCode: null,
-      };
-    }
-
-    const validated = await validateCouponForFee(
-      prisma,
-      couponCode,
-      originalFeeInr,
-    );
-    if (!validated.ok) return validated;
-
-    return {
-      ok: true,
-      originalFeeInr: validated.originalFeeInr,
-      discountAmountInr: validated.discountAmountInr,
-      finalFeeInr: validated.finalFeeInr,
-      discountPercentage: validated.discountPercentage,
-      couponId: validated.coupon.id,
-      couponCode: validated.coupon.code,
-    };
+  async function feeQuoteForStrategy(strategyId: string, couponCode?: string) {
+    return resolveStrategyFeeQuote(prisma, strategyId, couponCode);
   }
 
   async function validateCoupon(
@@ -238,7 +192,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const quote = await resolveStrategyFeeQuote(strategyId, couponCode);
+      const quote = await feeQuoteForStrategy(strategyId, couponCode);
       if (!quote.ok) {
         res.status(400).json({ error: quote.error });
         return;
@@ -281,7 +235,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const quote = await resolveStrategyFeeQuote(strategyId, couponCode);
+      const quote = await feeQuoteForStrategy(strategyId, couponCode);
       if (!quote.ok) {
         res.status(400).json({ error: quote.error });
         return;
@@ -324,197 +278,36 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return;
       }
 
-      const strategyId = await normalizeFutureHedgeStrategyId(
-        prisma,
+      const result = await subscribeUserToStrategy(prisma, {
+        userId,
         rawStrategyId,
-      );
-
-      const strategy = await prisma.strategy.findUnique({
-        where: { id: strategyId },
-        select: { ...STRATEGY_SELECT_SUBSCRIBE_GATE, title: true },
-      });
-      if (!strategy) {
-        res.status(404).json({ error: "Strategy not found" });
-        return;
-      }
-
-      const feeQuote = await resolveStrategyFeeQuote(strategyId, couponCode);
-      if (!feeQuote.ok) {
-        res.status(400).json({ error: feeQuote.error });
-        return;
-      }
-
-      if (feeQuote.finalFeeInr > 0 && paymentMode === STRATEGY_PAYMENT_MODE.PAY_NOW) {
-        res.status(402).json({
-          error:
-            "This strategy requires payment. Use checkout (Razorpay) or choose pay-later.",
-          requiresPayment: true,
-          paymentMode: STRATEGY_PAYMENT_MODE.PAY_NOW,
-          originalFeeInr: feeQuote.originalFeeInr,
-          finalFeeInr: feeQuote.finalFeeInr,
-        });
-        return;
-      }
-
-      const existing = await prisma.userStrategySubscription.findFirst({
-        where: {
-          userId,
-          strategyId,
-          status: {
-            in: [...MANAGED_SUBSCRIPTION_STATUSES],
-          },
-        },
+        paymentMode,
+        ...(couponCode !== undefined ? { couponCode } : {}),
       });
 
-      if (existing) {
-        res.status(409).json({
-          error: "You already have this strategy in My Strategies",
-        });
+      if (!result.ok) {
+        if (result.requiresPayment) {
+          res.status(result.status).json({
+            error: result.error,
+            requiresPayment: true,
+            paymentMode: result.paymentMode,
+            originalFeeInr: result.originalFeeInr,
+            finalFeeInr: result.finalFeeInr,
+          });
+          return;
+        }
+        res.status(result.status).json({ error: result.error });
         return;
-      }
-
-      let subscription;
-      let strategyFeeInvoiceId: string | null = null;
-
-      if (feeQuote.finalFeeInr > 0 && paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER) {
-        const created = await createStrategySubscriptionWithPaymentMode(prisma, {
-          userId,
-          strategyId,
-          paymentMode: STRATEGY_PAYMENT_MODE.PAY_LATER,
-          finalFeeInr: feeQuote.finalFeeInr,
-          couponId: feeQuote.couponId,
-        });
-        subscription = created.subscription;
-        strategyFeeInvoiceId = created.strategyFeeInvoiceId;
-      } else {
-        const strategy = await prisma.strategy.findUnique({
-          where: { id: strategyId },
-          select: { profitShare: true },
-        });
-        subscription = await prisma.userStrategySubscription.create({
-          data: {
-            userId,
-            strategyId,
-            multiplier: 1,
-            isActive: false,
-            status: SubscriptionStatus.ACTIVE,
-            isStrategyFeePaid: true,
-            profitSharePctSnapshot: new Prisma.Decimal(
-              strategy?.profitShare ?? 20,
-            ),
-          },
-        });
-        invalidateCopySubscriberCache();
       }
 
       console.log(
-        `[subscription] Strategy added id=${subscription.id} userId=${userId} strategyId=${strategyId} paymentMode=${paymentMode}`,
+        `[subscription] Strategy added id=${result.subscription.id} userId=${userId} strategyId=${result.subscription.strategyId} paymentMode=${result.paymentMode}`,
       );
 
-      // Bot bridge: register user on Delta Bot if this is a bot-type strategy
-      try {
-        const strategy = await prisma.strategy.findUnique({
-          where: { id: strategyId },
-          select: {
-            botStrategyType: true,
-            botUrl: true,
-            baseCapital: true,
-          },
-        });
-
-        if (strategy?.botStrategyType && strategy?.botUrl) {
-          const subRow = await prisma.userStrategySubscription.findFirst({
-            where: { userId, strategyId },
-            include: { exchangeAccount: true },
-          });
-
-          if (subRow) {
-            // Prefer linked exchange account; fall back to user's latest account
-            let account = subRow.exchangeAccount;
-            if (!account) {
-              account = await prisma.exchangeAccount.findFirst({
-                where: { userId },
-                orderBy: { createdAt: "desc" },
-              });
-            }
-
-            if (account) {
-              const { decryptDeltaSecretOrPlain } = await import(
-                "../utils/encryption.js"
-              );
-              const apiKey = decryptDeltaSecretOrPlain(account.apiKey);
-              const apiSecret = decryptDeltaSecretOrPlain(account.apiSecret);
-
-              if (apiKey && apiSecret) {
-                const deployedCapital =
-                  subRow.multiplier * (strategy.baseCapital ?? 300);
-
-                const { ensureBotSlaveForSubscription } = await import(
-                  "../services/botBridgeService.js"
-                );
-                const botSlaveId = await ensureBotSlaveForSubscription({
-                  userId,
-                  strategyId,
-                  subscriptionId: subRow.id,
-                  apiKey,
-                  apiSecret,
-                  userAllocatedCapitalUsd: deployedCapital,
-                });
-
-                if (botSlaveId != null) {
-                  await prisma.$executeRaw`
-                    UPDATE "UserSubscription"
-                    SET "botSlaveId" = ${String(botSlaveId)}
-                    WHERE id = ${subRow.id}
-                  `;
-                  console.log(
-                    `[Subscription] botSlaveId saved: ${subRow.id} → ${botSlaveId}`,
-                  );
-                  console.log(
-                    `[Subscription] Bot slave registered: userId=${userId} botSlaveId=${botSlaveId}`,
-                  );
-                }
-              } else {
-                console.log(
-                  `[Subscription] Bot registration skipped — could not decrypt API keys for userId=${userId}`,
-                );
-              }
-            } else {
-              console.log(
-                `[Subscription] Bot registration deferred — no exchange account yet for userId=${userId}`,
-              );
-            }
-          }
-        }
-      } catch (botErr) {
-        // Non-fatal: subscription already created, bot registration failed
-        console.error("[Subscription] Bot bridge error (non-fatal):", botErr);
-      }
-
-      void logUserActivity(prisma, {
-        userId,
-        kind: "SUBSCRIPTION_CREATED",
-        message:
-          paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER
-            ? `Subscribed with pay-later (${strategy.title})`
-            : `Added strategy to My Strategies (inactive)`,
-      });
-
-      const subscriber = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { email: true, name: true },
-      });
-      if (subscriber?.email) {
-        sendTemplateEmailAsync(subscriber.email, "member_registration", {
-          userName: resolveEmailRecipientName(subscriber.name, subscriber.email),
-          strategyName: strategy.title,
-        });
-      }
-
       res.status(201).json({
-        ...subscription,
-        paymentMode,
-        strategyFeeInvoiceId,
+        ...result.subscription,
+        paymentMode: result.paymentMode,
+        strategyFeeInvoiceId: result.strategyFeeInvoiceId,
       });
     } catch (err) {
       next(err);

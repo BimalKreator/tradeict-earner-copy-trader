@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { AdminUserStructureBillingPanel } from "@/components/admin/AdminUserStructureBillingPanel";
+import { AdminUserOnboardingPanel } from "@/components/admin/AdminUserOnboardingPanel";
 import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { AdminUserSimulationPanel } from "@/components/admin/AdminUserSimulationPanel";
 import { Loader2, Pencil, X } from "lucide-react";
@@ -1319,6 +1320,13 @@ export default function AdminUserDetails({
 
           {tab === "management" && (
             <div className="space-y-4">
+            <AdminUserOnboardingPanel
+              userId={userId}
+              onNotice={(message) => setNotice(message)}
+              onError={(message) => setError(message)}
+              onReloadUser={() => loadAll()}
+            />
+
             <div className="space-y-4 rounded-xl border border-glassBorder bg-white/[0.02] p-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="text-sm text-white/70">
