@@ -3,14 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { LayoutGrid, LogOut, Menu, User, X } from "lucide-react";
+import { LogOut, Menu, User, X } from "lucide-react";
 import { NotificationBell } from "@/components/common/NotificationBell";
 import { useAuth } from "@/context/AuthContext";
-
-type DashboardHeaderProps = {
-  onMenuClick: () => void;
-  mobileNavOpen: boolean;
-};
 
 function displayNameFromUser(user: { name: string | null; email: string } | null): string {
   if (!user) return "User";
@@ -20,7 +15,7 @@ function displayNameFromUser(user: { name: string | null; email: string } | null
   return local || "User";
 }
 
-export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderProps) {
+export function DashboardHeader() {
   const router = useRouter();
   const menuRef = useRef<HTMLDivElement>(null);
   const { user, logout } = useAuth();
@@ -52,14 +47,12 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
     router.push("/login");
   }
 
-  function openSidebarFromMenu() {
-    setAccountMenuOpen(false);
-    onMenuClick();
-  }
-
   return (
-    <header className="sticky top-0 z-40 border-b border-white/10 bg-gray-950/95 px-4 py-3 shadow-sm backdrop-blur-md md:px-8 lg:px-10">
-      <div className="flex items-center justify-between gap-3">
+    <header
+      className="sticky top-0 z-40 border-b border-white/10 bg-gray-950/95 px-4 shadow-sm backdrop-blur-md max-md:pl-[max(1rem,env(safe-area-inset-left))] max-md:pr-[max(1rem,env(safe-area-inset-right))] md:px-8 lg:px-10"
+      style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
+    >
+      <div className="flex items-center justify-between gap-3 pb-3">
         <div className="min-w-0 flex-1 pr-2">
           <p className="truncate text-base font-semibold tracking-tight text-white sm:text-lg">
             Hello{" "}
@@ -82,7 +75,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
           </Link>
           <button
             type="button"
-            onClick={handleLogout}
+            onClick={() => void handleLogout()}
             className="rounded-lg border border-glassBorder bg-white/[0.04] px-4 py-2 text-sm font-medium text-white/90 transition hover:bg-white/10 hover:text-white"
           >
             Logout
@@ -115,16 +108,6 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
               </div>
 
               <div className="flex flex-col gap-1 p-2">
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={openSidebarFromMenu}
-                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-white/90 transition hover:bg-white/10"
-                >
-                  <LayoutGrid className="h-4 w-4 shrink-0 text-primary" aria-hidden />
-                  Navigation
-                </button>
-
                 <div
                   role="menuitem"
                   className="flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 hover:bg-white/10"
@@ -146,7 +129,7 @@ export function DashboardHeader({ onMenuClick, mobileNavOpen }: DashboardHeaderP
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={handleLogout}
+                  onClick={() => void handleLogout()}
                   className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-red-300 transition hover:bg-red-500/10"
                 >
                   <LogOut className="h-4 w-4 shrink-0" aria-hidden />

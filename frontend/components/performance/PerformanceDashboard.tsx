@@ -201,6 +201,15 @@ export function PerformanceDashboard() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (loading || typeof window === "undefined") return;
+    if (window.location.hash !== "#invoices") return;
+    const el = document.getElementById("invoices");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [loading]);
+
   const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
   const closedStructures = structures.filter((s) => s.status === "closed");
   const openStructures = structures.filter((s) => s.status !== "closed");
@@ -512,12 +521,14 @@ export function PerformanceDashboard() {
         )}
       </section>
 
-      <RevenueInvoiceTable
-        invoices={invoices}
-        loading={loading}
-        walletBalance={walletBalance}
-        onPaid={() => void load()}
-      />
+      <div id="invoices">
+        <RevenueInvoiceTable
+          invoices={invoices}
+          loading={loading}
+          walletBalance={walletBalance}
+          onPaid={() => void load()}
+        />
+      </div>
 
       <StrategySubscriptionFees />
     </div>
