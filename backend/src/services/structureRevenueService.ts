@@ -20,9 +20,30 @@ import {
   transitionMonthlyRevenueInvoiceStatus,
 } from "./monthlyRevenueInvoiceLifecycleService.js";
 import { getUsdInrRate } from "./settingsService.js";
+import { raiseAlert } from "../utils/systemAlert.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
 const MS_PER_DAY = 86_400_000;
+const SYSTEM_SETTINGS_ID = "global";
+
+async function alertIfConfiguredUsdInrRateMissing(
+  prisma: PrismaClient,
+): Promise<void> {
+  const settings = await prisma.systemSettings.findUnique({
+    where: { id: SYSTEM_SETTINGS_ID },
+    select: { usdInrRate: true },
+  });
+  const stored = settings?.usdInrRate;
+  if (stored != null && Number.isFinite(stored) && stored > 0) return;
+  void raiseAlert({
+    key: "fx-rate-missing",
+    severity: "CRITICAL",
+    source: "structureRevenue",
+    message:
+      "USD/INR rate missing or invalid in SystemSettings — billing will use fallback rate",
+    detail: { storedRate: stored ?? null },
+  });
+}
 
 function zero(): Prisma.Decimal {
   return new Prisma.Decimal(0);
@@ -583,6 +604,8 @@ export async function recomputeInvoiceChain(
 ): Promise<RecomputeInvoiceChainResult> {
   const simFilter = scopedSimulatedFilter(isSimulated);
 
+  await alertIfConfiguredUsdInrRateMissing(prisma);
+
   const [existingInvoices, structureCloses] = await Promise.all([
     prisma.monthlyRevenueInvoice.findMany({
       where: { userId, ...simFilter },
@@ -995,6 +1018,9 @@ export async function runMonthlyRevenueInvoices(
       : previousIstCalendarMonth();
 
   const shouldIssue = isPastIstCalendarMonth(period.year, period.month);
+  if (shouldIssue) {
+    await alertIfConfiguredUsdInrRateMissing(prisma);
+  }
   const usdInrRate = shouldIssue ? await getUsdInrRate(prisma) : null;
 
   const results: Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>> =

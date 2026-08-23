@@ -1,33 +1,7 @@
 /**
- * Terminal log filter — show trade lifecycle + errors only (suppress exchange noise).
+ * Terminal log filter — suppress known noisy lines; print everything else.
  * Import this module once at process boot before other services load.
  */
-
-const TRADE_LOG_MARKERS = [
-  "[copy]",
-  "[FORCE-SYNC]",
-  "[MASTER-REST-SYNC]",
-  "[MASTER-WS]",
-  "[RETRY_LOOP]",
-  "[RECONCILE]",
-  "[EXECUTION]",
-  "[trade-settlement]",
-  "[tradePosition]",
-  "[copy-deficit]",
-  "[copy-exec]",
-  "[admin-qty-adjust]",
-  "[admin-master-qty-adjust]",
-  "[late-join]",
-  "[manual-sync]",
-  "[granular-sync]",
-  "[live-trades]",
-  "[SYNC-MONITOR]",
-  "[COPY-SYNC]",
-  "[BOOT]",
-  "[BotSync]",
-  "[tradeEngine]",
-  "[affiliateCommission]",
-];
 
 const SUPPRESS_PATTERNS: RegExp[] = [
   /\[DEBUG_AUTH\]/i,
@@ -36,6 +10,7 @@ const SUPPRESS_PATTERNS: RegExp[] = [
   /\[exchangeService\] fetchDeltaOpenPositions: market fallback/i,
   /\[exchangeService\] option hydrate/i,
   /\[exchangeService\] option product .* not found in CCXT/i,
+  /\[exchangeService\] .*(hydrate|overlay|fallback)/i,
   /\[PNL_TRACKER\]/i,
   /\[tradeEngine WS\] type=/i,
   /\[tradeEngine WS\] tracked /i,
@@ -43,15 +18,24 @@ const SUPPRESS_PATTERNS: RegExp[] = [
   /Initializing CCXT for API Key/i,
 ];
 
-const ERROR_MARKERS = [
-  /FATAL/i,
-  /\bfailed\b/i,
-  /\berror\b/i,
-  /Hard error/i,
-  /Confirm window exhausted/i,
-  /unhandled rejection/i,
-  /heartbeat missed/i,
-];
+function buildSuppressPatterns(): RegExp[] {
+  const extra = process.env.LOG_SUPPRESS_EXTRA?.trim();
+  if (!extra) return SUPPRESS_PATTERNS;
+  const substrings = extra
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (substrings.length === 0) return SUPPRESS_PATTERNS;
+  const escaped = substrings.map((s) =>
+    s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  );
+  return [
+    ...SUPPRESS_PATTERNS,
+    ...escaped.map((s) => new RegExp(s, "i")),
+  ];
+}
+
+let activeSuppressPatterns = SUPPRESS_PATTERNS;
 
 function messageText(args: unknown[]): string {
   return args
@@ -67,29 +51,21 @@ function messageText(args: unknown[]): string {
     .join(" ");
 }
 
-function isTradeRelated(msg: string): boolean {
-  if (ERROR_MARKERS.some((re) => re.test(msg))) return true;
-  if (SUPPRESS_PATTERNS.some((re) => re.test(msg))) return false;
-  return TRADE_LOG_MARKERS.some((m) => msg.includes(m));
+function isSuppressed(msg: string): boolean {
+  return activeSuppressPatterns.some((re) => re.test(msg));
 }
 
 function wrapConsole(
-  level: "log" | "warn" | "error",
+  level: "log" | "warn",
   original: (...args: unknown[]) => void,
 ): (...args: unknown[]) => void {
   return (...args: unknown[]) => {
-    const msg = messageText(args);
-    if (level === "error") {
+    if (level === "warn") {
       original(...args);
       return;
     }
-    if (level === "warn") {
-      if (isTradeRelated(msg) || ERROR_MARKERS.some((re) => re.test(msg))) {
-        original(...args);
-      }
-      return;
-    }
-    if (isTradeRelated(msg)) {
+    const msg = messageText(args);
+    if (!isSuppressed(msg)) {
       original(...args);
     }
   };
@@ -97,6 +73,8 @@ function wrapConsole(
 
 export function installTradeLogFilter(): void {
   if (process.env.TRADE_LOG_FILTER === "0") return;
+
+  activeSuppressPatterns = buildSuppressPatterns();
 
   const origLog = console.log.bind(console);
   const origWarn = console.warn.bind(console);

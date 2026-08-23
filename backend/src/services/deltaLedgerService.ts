@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { guardedCron } from "../utils/cronGuard.js";
+import { raiseAlert } from "../utils/systemAlert.js";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { fetchDeltaWalletTransactionsPage } from "./exchangeService.js";
 import {
@@ -499,6 +500,13 @@ function logDeltaLedgerCycleSummary(summary: DeltaLedgerCycleSummary): void {
     console.error(
       `[DeltaLedger] cycle ALERT conflicts=${summary.conflicts} lateRows=${summary.lateRows} -- review required`,
     );
+    void raiseAlert({
+      key: "ledger-reconcile",
+      severity: "WARN",
+      source: "deltaLedgerSync",
+      message: `Ledger sync cycle found ${summary.conflicts} conflict(s) and ${summary.lateRows} late row(s)`,
+      detail: summary,
+    });
   }
 }
 
@@ -607,6 +615,16 @@ export async function runDeltaLedgerSyncForUsers(
       console.warn(
         `[DeltaLedger] sync failed user=${account.userId} account=${account.exchangeAccountId}: ${msg}`,
       );
+      void raiseAlert({
+        key: `delta-ledger-sync:${account.exchangeAccountId}`,
+        severity: "CRITICAL",
+        source: "deltaLedgerSync",
+        message: `Delta ledger sync failed for account ${account.exchangeAccountId}: ${msg}`,
+        detail: {
+          userId: account.userId,
+          exchangeAccountId: account.exchangeAccountId,
+        },
+      });
       if (!results[account.userId]) {
         results[account.userId] = emptyIngestResult();
       }

@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import { raiseAlert } from "./systemAlert.js";
 
 export type CronGuardOptions = {
   timezone?: string;
@@ -180,6 +181,13 @@ export function guardedCron(
           entry.lastSuccess = false;
           entry.lastError = formatError(err);
           console.error(`[Cron] ${name} failed:`, err);
+          void raiseAlert({
+            key: `cron:${name}`,
+            severity: "CRITICAL",
+            source: "cronGuard",
+            message: `Scheduled job "${name}" threw: ${formatError(err)}`,
+            detail: { schedule, timezone },
+          });
         } finally {
           const finishedAt = Date.now();
           const durationMs =

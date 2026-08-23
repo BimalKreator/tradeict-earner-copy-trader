@@ -1145,3 +1145,22 @@ model AdminAuditLog {
   @@index([action, createdAt])
   @@index([createdAt])
 }
+
+/** Deduplicated operational alerts for admin (persists across log rotation). */
+model SystemAlert {
+  id               String    @id @default(uuid())
+  key              String
+  severity         String
+  source           String
+  message          String
+  detail           Json?
+  count            Int       @default(1)
+  firstSeenAt      DateTime  @default(now())
+  lastSeenAt       DateTime  @default(now())
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  resolved         Boolean   @default(false)
+
+  @@unique([key, resolved])
+  @@index([severity, acknowledgedAt])
+}

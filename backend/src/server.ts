@@ -1,6 +1,7 @@
 import "./utils/forceIpv4.js";
 import "dotenv/config";
 import { installTradeLogFilter } from "./utils/tradeLogger.js";
+import { bindSystemAlertPrisma } from "./utils/systemAlert.js";
 
 installTradeLogFilter();
 
@@ -101,6 +102,7 @@ if (!connectionString) {
 const pool = new pg.Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+bindSystemAlertPrisma(prisma);
 
 void (async () => {
   try {
