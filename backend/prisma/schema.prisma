@@ -546,6 +546,17 @@ model MonthlyRevenueInvoice {
   profitSharePct   Decimal  @db.Decimal(6, 3)
   commissionAmount Decimal  @db.Decimal(24, 10)
   status           String
+  /** When ACCRUED → INVOICED (IST month-end billing). */
+  invoicedAt       DateTime?
+  dueDate          DateTime?
+  paidAt           DateTime?
+  voidedAt         DateTime?
+  voidReason       String?
+  /** INR amount pinned at invoicing (commissionAmount × usdInrRate). */
+  amountInr        Decimal? @db.Decimal(24, 10)
+  /** USD/INR rate pinned at invoicing. */
+  usdInrRate       Decimal? @db.Decimal(24, 10)
+  paymentReference String?
   isFinal          Boolean  @default(false)
   isSimulated      Boolean  @default(false)
   generatedAt      DateTime

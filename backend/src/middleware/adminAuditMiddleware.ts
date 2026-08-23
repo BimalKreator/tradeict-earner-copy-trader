@@ -27,6 +27,7 @@ const REDACT_KEYS = new Set([
 export const MONEY_CRITICAL_PATHS: readonly string[] = [
   "/payouts/:id/complete",
   "/revenue/user/:id/profit-share",
+  "/revenue/invoice/:id/status",
   "/users/:id/close-structure-and-finalise-billing",
   "/trades/flush-all",
   "/users/flush-trades",

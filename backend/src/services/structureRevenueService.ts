@@ -14,16 +14,15 @@ import {
   listEligibleStructurePnlUserIds,
 } from "./structurePnlService.js";
 import { scopedSimulatedFilter } from "./simulatedDataFilters.js";
+import {
+  INVOICE_STATUS,
+  isInvoiceFrozen,
+  transitionMonthlyRevenueInvoiceStatus,
+} from "./monthlyRevenueInvoiceLifecycleService.js";
+import { getUsdInrRate } from "./settingsService.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
 const MS_PER_DAY = 86_400_000;
-
-const INVOICE_STATUS = {
-  ACCRUED: "ACCRUED",
-  INVOICED: "INVOICED",
-  PAID: "PAID",
-  VOID: "VOID",
-} as const;
 
 function zero(): Prisma.Decimal {
   return new Prisma.Decimal(0);
@@ -533,11 +532,7 @@ export async function recomputeInvoiceChain(
         inv.periodYear === period.year && inv.periodMonth === period.month,
     );
 
-    if (
-      existing &&
-      (existing.status === INVOICE_STATUS.INVOICED ||
-        existing.status === INVOICE_STATUS.PAID)
-    ) {
+    if (existing && isInvoiceFrozen(existing.status)) {
       after.push(invoiceToSummary(existing));
       hwmCarry = maxDec(zero(), existing.hwmAfter);
       continue;
@@ -638,11 +633,7 @@ export async function computeMonthlyRevenueInvoiceForUser(
       userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
     },
   });
-  if (
-    existing &&
-    (existing.status === INVOICE_STATUS.INVOICED ||
-      existing.status === INVOICE_STATUS.PAID)
-  ) {
+  if (existing && isInvoiceFrozen(existing.status)) {
     return existing;
   }
 
@@ -804,6 +795,19 @@ export function previousIstCalendarMonth(ref = new Date()): {
   return { year: parts.year, month: parts.month };
 }
 
+/** True when the period is strictly before the current IST calendar month. */
+export function isPastIstCalendarMonth(
+  periodYear: number,
+  periodMonth: number,
+  ref = new Date(),
+): boolean {
+  const current = calendarPartsInTimeZone(ref, BILLING_TIMEZONE);
+  return (
+    periodYear < current.year ||
+    (periodYear === current.year && periodMonth < current.month)
+  );
+}
+
 export async function runMonthlyRevenueInvoices(
   prisma: PrismaClient,
   opts?: { userId?: string; year?: number; month?: number },
@@ -816,17 +820,36 @@ export async function runMonthlyRevenueInvoices(
       ? { year: opts.year, month: opts.month }
       : previousIstCalendarMonth();
 
+  const shouldIssue = isPastIstCalendarMonth(period.year, period.month);
+  const usdInrRate = shouldIssue ? await getUsdInrRate(prisma) : null;
+
   const results: Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>> =
     {};
 
   for (const userId of userIds) {
     try {
-      results[userId] = await computeMonthlyRevenueInvoiceForUser(
+      let invoice = await computeMonthlyRevenueInvoiceForUser(
         prisma,
         userId,
         period.year,
         period.month,
       );
+
+      if (
+        shouldIssue &&
+        invoice.status === INVOICE_STATUS.ACCRUED &&
+        !invoice.isSimulated &&
+        usdInrRate != null
+      ) {
+        invoice = await transitionMonthlyRevenueInvoiceStatus(
+          prisma,
+          invoice.id,
+          INVOICE_STATUS.INVOICED,
+          { usdInrRate },
+        );
+      }
+
+      results[userId] = invoice;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(
@@ -836,7 +859,7 @@ export async function runMonthlyRevenueInvoices(
   }
 
   console.log(
-    `[StructureRevenue] monthly invoice ${period.year}-${String(period.month).padStart(2, "0")} users=${userIds.length}`,
+    `[StructureRevenue] monthly invoice ${period.year}-${String(period.month).padStart(2, "0")} users=${userIds.length} issued=${shouldIssue}`,
   );
   return results;
 }

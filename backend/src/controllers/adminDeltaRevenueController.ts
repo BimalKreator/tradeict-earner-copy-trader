@@ -13,6 +13,12 @@ import {
   previousIstCalendarMonth,
   recomputeInvoiceChain,
 } from "../services/structureRevenueService.js";
+import {
+  InvoiceNotFoundError,
+  InvoiceTransitionError,
+  parseMonthlyRevenueInvoiceStatus,
+  transitionMonthlyRevenueInvoiceStatus,
+} from "../services/monthlyRevenueInvoiceLifecycleService.js";
 import { parseIncludeSimulated } from "../services/simulatedDataFilters.js";
 
 function parsePeriod(
@@ -257,6 +263,71 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function postInvoiceStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const invoiceId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof invoiceId !== "string" || !invoiceId.trim()) {
+        res.status(400).json({ error: "invoice id required" });
+        return;
+      }
+
+      const body = (req.body ?? {}) as {
+        status?: unknown;
+        reason?: unknown;
+        paymentReference?: unknown;
+      };
+
+      let targetStatus;
+      try {
+        targetStatus = parseMonthlyRevenueInvoiceStatus(body.status);
+      } catch (err) {
+        if (err instanceof InvoiceTransitionError) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        throw err;
+      }
+
+      const transitionOpts: {
+        reason?: string;
+        paymentReference?: string;
+      } = {};
+      if (typeof body.reason === "string" && body.reason.trim()) {
+        transitionOpts.reason = body.reason.trim();
+      }
+      if (
+        typeof body.paymentReference === "string" &&
+        body.paymentReference.trim()
+      ) {
+        transitionOpts.paymentReference = body.paymentReference.trim();
+      }
+
+      const invoice = await transitionMonthlyRevenueInvoiceStatus(
+        prisma,
+        invoiceId.trim(),
+        targetStatus,
+        transitionOpts,
+      );
+
+      res.json({ ok: true, invoice });
+    } catch (err) {
+      if (err instanceof InvoiceNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      if (err instanceof InvoiceTransitionError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      next(err);
+    }
+  }
+
   return {
     getOverview,
     getUserDetail,
@@ -265,5 +336,6 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     getAttributionHealth,
     patchProfitShareOverride,
     postRecomputeChain,
+    postInvoiceStatus,
   };
 }
