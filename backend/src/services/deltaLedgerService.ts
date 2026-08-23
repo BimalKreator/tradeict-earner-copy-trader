@@ -404,31 +404,31 @@ type EligibleLedgerAccount = {
  * Sync target = every ExchangeAccount for those users that has credentials
  * (not just the first / subscription-linked account).
  */
+/**
+ * Ledger sync eligibility: any user with structure P&L rows (open or closed).
+ * Ingest must not stop on pause — missing ledger rows are permanent data loss.
+ */
+async function listEligibleDeltaLedgerUserIds(
+  prisma: PrismaClient,
+): Promise<string[]> {
+  const rows = await prisma.structurePnl.findMany({
+    select: { userId: true },
+    distinct: ["userId"],
+  });
+  return rows.map((r) => r.userId);
+}
+
 async function listEligibleDeltaLedgerAccounts(
   prisma: PrismaClient,
 ): Promise<EligibleLedgerAccount[]> {
-  const subs = await prisma.userStrategySubscription.findMany({
-    where: {
-      OR: [{ isActive: true }, { status: "ACTIVE" }],
-      strategy: {
-        AND: [
-          { botStrategyType: { not: null } },
-          { NOT: { botStrategyType: "" } },
-        ],
-      },
-    },
-    select: {
-      userId: true,
-      user: { select: { email: true } },
-    },
-  });
-
-  const eligibleUserIds = [...new Set(subs.map((s) => s.userId))];
-  const emailByUser = new Map(
-    subs.map((s) => [s.userId, s.user.email ?? null] as const),
-  );
-
+  const eligibleUserIds = await listEligibleDeltaLedgerUserIds(prisma);
   if (eligibleUserIds.length === 0) return [];
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: eligibleUserIds } },
+    select: { id: true, email: true },
+  });
+  const emailByUser = new Map(users.map((u) => [u.id, u.email ?? null] as const));
 
   const accounts = await prisma.exchangeAccount.findMany({
     where: { userId: { in: eligibleUserIds } },

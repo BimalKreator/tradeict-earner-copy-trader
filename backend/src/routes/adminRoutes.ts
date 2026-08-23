@@ -1433,6 +1433,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/revenue", adminController.getRevenueAnalytics);
 
   /** Delta-derived revenue (StructurePnl / DailyPnlSnapshot / MonthlyRevenueInvoice). */
+  router.get("/revenue/unbilled-users", deltaRevenue.getUnbilledUsers);
   router.get("/revenue/overview", deltaRevenue.getOverview);
   router.get("/revenue/reconcile", deltaRevenue.getReconcile);
   router.post("/revenue/recompute-chain", deltaRevenue.postRecomputeChain);

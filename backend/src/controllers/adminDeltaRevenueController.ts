@@ -6,6 +6,7 @@ import {
   getAdminRevenueOverview,
   getAdminRevenueReconcile,
   getAdminRevenueUserDetail,
+  getUnbilledRevenueUsers,
 } from "../services/adminDeltaRevenueService.js";
 import { getAttributionHealthForUser } from "../services/structureAttributionHealthService.js";
 import { listEligibleStructurePnlUserIds } from "../services/structurePnlService.js";
@@ -398,6 +399,19 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function getUnbilledUsers(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const data = await getUnbilledRevenueUsers(prisma);
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   return {
     getOverview,
     getUserDetail,
@@ -408,5 +422,6 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     postRecomputeChain,
     postInvoiceStatus,
     getInvoiceCommissions,
+    getUnbilledUsers,
   };
 }

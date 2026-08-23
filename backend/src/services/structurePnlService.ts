@@ -544,20 +544,15 @@ function evaluateStructureAttribution(
 export async function listEligibleStructurePnlUserIds(
   prisma: PrismaClient,
 ): Promise<string[]> {
-  const subs = await prisma.userStrategySubscription.findMany({
+  const rows = await prisma.structurePnl.findMany({
     where: {
-      OR: [{ isActive: true }, { status: "ACTIVE" }],
-      strategy: {
-        AND: [
-          { botStrategyType: { not: null } },
-          { NOT: { botStrategyType: "" } },
-        ],
-      },
+      status: "closed",
+      closedAt: { not: null },
     },
     select: { userId: true },
     distinct: ["userId"],
   });
-  return subs.map((s) => s.userId);
+  return rows.map((r) => r.userId);
 }
 
 async function loadBillingLedgerRows(

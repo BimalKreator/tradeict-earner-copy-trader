@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import {
+  Prisma,
   SubscriptionStatus,
   TransactionStatus,
   type PrismaClient,
@@ -425,6 +426,7 @@ export function createPaymentController(prisma: PrismaClient) {
             status: {
               in: [
                 SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.PAUSED_BY_USER,
                 SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
               ],
             },
@@ -432,6 +434,10 @@ export function createPaymentController(prisma: PrismaClient) {
         });
 
         if (!existing) {
+          const strategy = await prisma.strategy.findUnique({
+            where: { id: sid },
+            select: { profitShare: true },
+          });
           await prisma.$transaction(async (tx) => {
             await tx.userStrategySubscription.create({
               data: {
@@ -441,6 +447,9 @@ export function createPaymentController(prisma: PrismaClient) {
                 isActive: false,
                 status: SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
                 isStrategyFeePaid: true,
+                profitSharePctSnapshot: new Prisma.Decimal(
+                  strategy?.profitShare ?? 20,
+                ),
               },
             });
 

@@ -10,6 +10,8 @@ import {
   istMonthWindow,
 } from "./deltaPipelineBillingService.js";
 import {
+  calendarPartsInTimeZone,
+  DASHBOARD_PNL_DAY_TIMEZONE,
   floorRevenueShareDue,
   realizedTradePnl,
   resolveStoredOrComputedTradeRevenueShare,
@@ -482,4 +484,76 @@ export async function getAdminRevenueReconcile(
       difference: totalDelta - totalLegacy,
     },
   };
+}
+
+/** Users with closed (real) structures in an IST month but no real invoice row. */
+export async function getUnbilledRevenueUsers(prisma: PrismaClient) {
+  const closedStructures = await prisma.structurePnl.findMany({
+    where: {
+      status: "closed",
+      closedAt: { not: null },
+      isSimulated: false,
+    },
+    select: { userId: true, closedAt: true },
+  });
+
+  const periodsByUser = new Map<string, Set<string>>();
+  for (const row of closedStructures) {
+    if (!row.closedAt) continue;
+    const parts = calendarPartsInTimeZone(row.closedAt, DASHBOARD_PNL_DAY_TIMEZONE);
+    const periodKey = `${parts.year}-${parts.month}`;
+    const set = periodsByUser.get(row.userId) ?? new Set<string>();
+    set.add(periodKey);
+    periodsByUser.set(row.userId, set);
+  }
+
+  const gapRows: Array<{
+    userId: string;
+    missingPeriods: Array<{ periodYear: number; periodMonth: number }>;
+  }> = [];
+
+  for (const [userId, periodKeys] of periodsByUser) {
+    const missingPeriods: Array<{ periodYear: number; periodMonth: number }> =
+      [];
+    for (const periodKey of periodKeys) {
+      const [yearRaw, monthRaw] = periodKey.split("-");
+      const periodYear = Number.parseInt(yearRaw ?? "", 10);
+      const periodMonth = Number.parseInt(monthRaw ?? "", 10);
+      if (!Number.isFinite(periodYear) || !Number.isFinite(periodMonth)) {
+        continue;
+      }
+      const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+        where: {
+          userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
+        },
+        select: { id: true, isSimulated: true },
+      });
+      if (!invoice || invoice.isSimulated) {
+        missingPeriods.push({ periodYear, periodMonth });
+      }
+    }
+    if (missingPeriods.length > 0) {
+      gapRows.push({ userId, missingPeriods });
+    }
+  }
+
+  const usersMeta = await prisma.user.findMany({
+    where: { id: { in: gapRows.map((row) => row.userId) } },
+    select: { id: true, email: true, name: true },
+  });
+  const metaById = new Map(usersMeta.map((u) => [u.id, u]));
+
+  const users = gapRows.map((row) => ({
+    userId: row.userId,
+    email: metaById.get(row.userId)?.email ?? null,
+    name: metaById.get(row.userId)?.name ?? null,
+    missingPeriods: row.missingPeriods.sort(
+      (a, b) =>
+        a.periodYear !== b.periodYear
+          ? a.periodYear - b.periodYear
+          : a.periodMonth - b.periodMonth,
+    ),
+  }));
+
+  return { count: users.length, users };
 }

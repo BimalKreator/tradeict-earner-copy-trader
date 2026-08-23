@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import {
+  Prisma,
   type PrismaClient,
   SubscriptionStatus,
 } from "@prisma/client";
@@ -117,7 +118,12 @@ export async function recordTradePnl(
 }
 
 export function createSubscriptionController(prisma: PrismaClient) {
-  const USER_PAUSED_STATUS = SubscriptionStatus.PAUSED_DUE_TO_FUNDS;
+  const VOLUNTARY_PAUSED_STATUS = SubscriptionStatus.PAUSED_BY_USER;
+  const MANAGED_SUBSCRIPTION_STATUSES = [
+    SubscriptionStatus.ACTIVE,
+    SubscriptionStatus.PAUSED_BY_USER,
+    SubscriptionStatus.PAUSED_DUE_TO_FUNDS,
+  ] as const;
 
   const UNPAID_INVOICE_BLOCK_MESSAGE =
     "Cannot resume or deploy subscription with outstanding unpaid invoices.";
@@ -355,7 +361,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
           userId,
           strategyId,
           status: {
-            in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
+            in: [...MANAGED_SUBSCRIPTION_STATUSES],
           },
         },
       });
@@ -381,6 +387,10 @@ export function createSubscriptionController(prisma: PrismaClient) {
         subscription = created.subscription;
         strategyFeeInvoiceId = created.strategyFeeInvoiceId;
       } else {
+        const strategy = await prisma.strategy.findUnique({
+          where: { id: strategyId },
+          select: { profitShare: true },
+        });
         subscription = await prisma.userStrategySubscription.create({
           data: {
             userId,
@@ -389,6 +399,9 @@ export function createSubscriptionController(prisma: PrismaClient) {
             isActive: false,
             status: SubscriptionStatus.ACTIVE,
             isStrategyFeePaid: true,
+            profitSharePctSnapshot: new Prisma.Decimal(
+              strategy?.profitShare ?? 20,
+            ),
           },
         });
         invalidateCopySubscriberCache();
@@ -639,7 +652,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
           userId,
           strategyId,
           status: {
-            in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS],
+            in: [...MANAGED_SUBSCRIPTION_STATUSES],
           },
         },
         select: {
@@ -716,7 +729,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
       };
 
       const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
+        where: { userId, strategyId, status: { in: [...MANAGED_SUBSCRIPTION_STATUSES] } },
         include: {
           strategy: {
             select: {
@@ -805,7 +818,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
       );
       const body = req.body as { deployedCapital?: unknown; multiplier?: unknown };
       const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: { in: [SubscriptionStatus.ACTIVE, USER_PAUSED_STATUS] } },
+        where: { userId, strategyId, status: { in: [...MANAGED_SUBSCRIPTION_STATUSES] } },
         select: {
           id: true,
           botSlaveId: true,
@@ -895,7 +908,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
       if (!sub) return void res.status(404).json({ error: "Active subscription not found" });
       const updated = await prisma.userStrategySubscription.update({
         where: { id: sub.id },
-        data: { isActive: false, status: USER_PAUSED_STATUS },
+        data: { isActive: false, status: VOLUNTARY_PAUSED_STATUS },
         include: {
           strategy: { select: strategySelectPublic },
           exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
@@ -918,7 +931,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
         rawStrategyId,
       );
       const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: USER_PAUSED_STATUS },
+        where: { userId, strategyId, status: VOLUNTARY_PAUSED_STATUS },
         include: { strategy: { select: STRATEGY_SELECT_SUBSCRIBE_GATE } },
       });
       if (!sub) return void res.status(404).json({ error: "Paused subscription not found" });

@@ -1,5 +1,5 @@
 import {
-  type Prisma,
+  Prisma,
   type PrismaClient,
   InvoiceKind,
   InvoiceStatus,
@@ -356,6 +356,11 @@ export async function createStrategySubscriptionWithPaymentMode(
   },
 ): Promise<CreateStrategySubscriptionResult> {
   const joinedDate = new Date();
+  const strategy = await prisma.strategy.findUnique({
+    where: { id: args.strategyId },
+    select: { profitShare: true },
+  });
+  const profitSharePctSnapshot = new Prisma.Decimal(strategy?.profitShare ?? 20);
   const feePaid = args.finalFeeInr <= 0;
   const payLater =
     !feePaid && args.paymentMode === STRATEGY_PAYMENT_MODE.PAY_LATER;
@@ -382,6 +387,7 @@ export async function createStrategySubscriptionWithPaymentMode(
         isStrategyFeePaid: feePaid,
         strategyFeeCycleEndsAt: cycleEndsAt,
         joinedDate,
+        profitSharePctSnapshot,
       },
     });
 

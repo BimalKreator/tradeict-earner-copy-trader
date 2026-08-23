@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, SubscriptionStatus, type PrismaClient } from "@prisma/client";
 import cron from "node-cron";
 import {
   DASHBOARD_PNL_DAY_TIMEZONE,
@@ -215,28 +215,87 @@ export function resolveIstSnapshotDate(dateInput?: string): Date {
   return istSnapshotDateForDayJustEnded();
 }
 
+export class MissingProfitShareError extends Error {
+  readonly userId: string;
+  readonly periodYear: number;
+  readonly periodMonth: number;
+
+  constructor(userId: string, periodYear: number, periodMonth: number) {
+    super(
+      `Cannot resolve profitSharePct for user=${userId} period=${periodYear}-${String(periodMonth).padStart(2, "0")} — refusing zero-commission billing`,
+    );
+    this.name = "MissingProfitShareError";
+    this.userId = userId;
+    this.periodYear = periodYear;
+    this.periodMonth = periodMonth;
+  }
+}
+
+const botStrategySubscriptionFilter = {
+  AND: [
+    { botStrategyType: { not: null } },
+    { NOT: { botStrategyType: "" } },
+  ],
+};
+
+/** Lock profit-share % at subscribe time for billing when subscription is paused. */
+export function profitSharePctSnapshotFromStrategy(
+  strategyProfitShare: number,
+  override?: Prisma.Decimal | null,
+): Prisma.Decimal {
+  if (override != null) return override;
+  return new Prisma.Decimal(strategyProfitShare);
+}
+
 async function resolveUserProfitSharePct(
   prisma: PrismaClient,
   userId: string,
+  periodYear: number,
+  periodMonth: number,
+  opts?: { requirePositive?: boolean },
 ): Promise<Prisma.Decimal> {
-  const sub = await prisma.userStrategySubscription.findFirst({
+  const { monthEndExclusive } = istMonthBounds(periodYear, periodMonth);
+
+  let sub = await prisma.userStrategySubscription.findFirst({
     where: {
       userId,
-      OR: [{ isActive: true }, { status: "ACTIVE" }],
-      strategy: {
-        AND: [
-          { botStrategyType: { not: null } },
-          { NOT: { botStrategyType: "" } },
-        ],
-      },
+      joinedDate: { lt: monthEndExclusive },
+      status: { not: SubscriptionStatus.CANCELLED },
+      strategy: botStrategySubscriptionFilter,
     },
     orderBy: { joinedDate: "desc" },
     include: { strategy: { select: { profitShare: true } } },
   });
-  if (sub?.profitShareOverride != null) {
-    return sub.profitShareOverride;
+
+  if (!sub) {
+    sub = await prisma.userStrategySubscription.findFirst({
+      where: {
+        userId,
+        status: { not: SubscriptionStatus.CANCELLED },
+        strategy: botStrategySubscriptionFilter,
+      },
+      orderBy: { joinedDate: "desc" },
+      include: { strategy: { select: { profitShare: true } } },
+    });
   }
-  return new Prisma.Decimal(sub?.strategy.profitShare ?? 0);
+
+  if (!sub) {
+    if (opts?.requirePositive) {
+      throw new MissingProfitShareError(userId, periodYear, periodMonth);
+    }
+    return zero();
+  }
+
+  const pct =
+    sub.profitShareOverride ??
+    sub.profitSharePctSnapshot ??
+    new Prisma.Decimal(sub.strategy.profitShare);
+
+  if (opts?.requirePositive && pct.lte(0)) {
+    throw new MissingProfitShareError(userId, periodYear, periodMonth);
+  }
+
+  return pct;
 }
 
 function previousCalendarMonth(
@@ -406,7 +465,16 @@ export async function computeMonthlyInvoiceMetrics(
   const hwmAfter = maxDec(hwmBefore, cumulativeRealizedPnl);
   const billableProfit = maxDec(zero(), hwmAfter.sub(hwmBefore));
 
-  const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
+  const profitSharePct = await resolveUserProfitSharePct(
+    prisma,
+    userId,
+    periodYear,
+    periodMonth,
+    {
+      requirePositive:
+        billable.length > 0 || billableProfit.gt(0) || realizedPnl.gt(0),
+    },
+  );
   const commissionAmount = computeCommissionAmount(
     billableProfit,
     profitSharePct,
@@ -538,14 +606,27 @@ export async function recomputeInvoiceChain(
       continue;
     }
 
-    const metrics = await computeMonthlyInvoiceMetrics(
-      prisma,
-      userId,
-      period.year,
-      period.month,
-      isSimulated,
-      hwmCarry,
-    );
+    let metrics: MonthlyInvoiceMetrics;
+    try {
+      metrics = await computeMonthlyInvoiceMetrics(
+        prisma,
+        userId,
+        period.year,
+        period.month,
+        isSimulated,
+        hwmCarry,
+      );
+    } catch (err) {
+      if (err instanceof MissingProfitShareError) {
+        console.error(`[StructureRevenue] recompute skip: ${err.message}`);
+        if (existing) {
+          after.push(invoiceToSummary(existing));
+          hwmCarry = maxDec(zero(), existing.hwmAfter);
+        }
+        continue;
+      }
+      throw err;
+    }
     hwmCarry = metrics.hwmAfter;
 
     const data = {
@@ -638,13 +719,23 @@ export async function computeMonthlyRevenueInvoiceForUser(
   }
 
   const isSimulated = opts?.isSimulated ?? existing?.isSimulated ?? false;
-  const metrics = await computeMonthlyInvoiceMetrics(
-    prisma,
-    userId,
-    periodYear,
-    periodMonth,
-    isSimulated,
-  );
+  let metrics: MonthlyInvoiceMetrics;
+  try {
+    metrics = await computeMonthlyInvoiceMetrics(
+      prisma,
+      userId,
+      periodYear,
+      periodMonth,
+      isSimulated,
+    );
+  } catch (err) {
+    if (err instanceof MissingProfitShareError) {
+      console.error(`[StructureRevenue] ${err.message}`);
+      if (existing) return existing;
+      throw err;
+    }
+    throw err;
+  }
   const generatedAt = new Date();
 
   const data = {
@@ -730,7 +821,14 @@ export async function computeDailyPnlSnapshotForUser(
   const cumulativeRealized = prevCumulative.add(realizedDelta);
   const highWaterMark = maxDec(prevHwm, cumulativeRealized);
 
-  const profitSharePct = await resolveUserProfitSharePct(prisma, userId);
+  const istParts = calendarPartsInTimeZone(snapshotDate, BILLING_TIMEZONE);
+  const profitSharePct = await resolveUserProfitSharePct(
+    prisma,
+    userId,
+    istParts.year,
+    istParts.month,
+    { requirePositive: realizedDelta.gt(0) },
+  );
   const hwmIncrease = highWaterMark.sub(prevHwm);
   const commissionAccrued = computeCommissionAmount(hwmIncrease, profitSharePct);
   const commissionCumulative = prevCommissionCumulative.add(commissionAccrued);

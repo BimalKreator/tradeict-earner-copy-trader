@@ -79,6 +79,8 @@ enum UserStatus {
 enum SubscriptionStatus {
   ACTIVE
   PAUSED_DUE_TO_FUNDS
+  /** User voluntarily paused — billing continues for closed structures. */
+  PAUSED_BY_USER
   CANCELLED
 }
 
@@ -379,6 +381,8 @@ model UserStrategySubscription {
   botSlaveId         String?
   /** Admin override for revenue share % on this subscription (null = use strategy default). */
   profitShareOverride Decimal? @db.Decimal(6, 3)
+  /** profitShare % locked at subscribe time — used for billing when subscription is paused. */
+  profitSharePctSnapshot Decimal? @db.Decimal(6, 3)
   joinedDate         DateTime            @default(now())
 
   user             User             @relation(fields: [userId], references: [id])
