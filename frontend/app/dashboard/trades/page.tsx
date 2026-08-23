@@ -58,36 +58,12 @@ function fmtPrice(n: number | null | undefined): string {
   return usdPriceFmt.format(n);
 }
 
-function fmtPnl(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return usdPnlFmt.format(n);
-}
-
-function fmtFee(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return usdFeeFmt.format(n);
-}
-
 function fmtDate(iso: string): string {
   try {
     return dateFmt.format(new Date(iso));
   } catch {
     return iso;
   }
-}
-
-/** Prefer the engine's `tradePnl`; fall back to legacy `pnl` for older rows. */
-function realizedPnl(row: TradeRow): number | null {
-  if (Number.isFinite(row.tradePnl) && row.tradePnl !== 0) return row.tradePnl;
-  if (row.pnl !== null && Number.isFinite(row.pnl)) return row.pnl;
-  return null;
-}
-
-function pnlToneClass(n: number | null): string {
-  if (n === null) return "text-white/60";
-  if (n > 0) return "text-emerald-400";
-  if (n < 0) return "text-red-300";
-  return "text-white/60";
 }
 
 function sideToneClass(side: string): string {
@@ -97,17 +73,8 @@ function sideToneClass(side: string): string {
   return "bg-white/10 text-white/70";
 }
 
-type TradeSummary = {
-  grossPnl: number;
-  appRevenue: number;
-  netEarnedPnl: number;
-  /** @deprecated use netEarnedPnl */
-  netPnl?: number;
-};
-
 export default function DashboardTradesPage() {
   const [rows, setRows] = useState<TradeRow[]>([]);
-  const [summary, setSummary] = useState<TradeSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -145,16 +112,7 @@ export default function DashboardTradesPage() {
         Array.isArray((data as { trades: unknown }).trades)
           ? ((data as { trades: TradeRow[] }).trades)
           : [];
-      const apiSummary =
-        typeof data === "object" &&
-        data !== null &&
-        "summary" in data &&
-        typeof (data as { summary: unknown }).summary === "object" &&
-        (data as { summary: TradeSummary | null }).summary !== null
-          ? (data as { summary: TradeSummary }).summary
-          : null;
       setRows(list);
-      setSummary(apiSummary);
       if (!silent) {
         setError(null);
         setUnauthorized(false);
@@ -219,37 +177,6 @@ export default function DashboardTradesPage() {
     }
   }, [fromDate, toDate]);
 
-  const closedRows = rows.filter((r) => r.status === "CLOSED");
-  const fallbackGrossPnl = closedRows.reduce((acc, r) => {
-    const v = realizedPnl(r);
-    return acc + (v ?? 0);
-  }, 0);
-  const fallbackAppRevenue = closedRows.reduce(
-    (acc, r) =>
-      acc + (Number.isFinite(r.revenueShareAmt) ? r.revenueShareAmt : 0),
-    0,
-  );
-  const grossPnl =
-    summary != null && Number.isFinite(summary.grossPnl)
-      ? summary.grossPnl
-      : fallbackGrossPnl;
-  const appRevenue =
-    summary != null && Number.isFinite(summary.appRevenue)
-      ? summary.appRevenue
-      : fallbackAppRevenue;
-  const netEarnedPnl =
-    summary != null && Number.isFinite(summary.netEarnedPnl)
-      ? summary.netEarnedPnl
-      : summary != null &&
-          summary.netPnl != null &&
-          Number.isFinite(summary.netPnl)
-        ? summary.netPnl
-        : grossPnl - appRevenue;
-  const totalTradingFee = rows.reduce(
-    (acc, r) => acc + (Number.isFinite(r.tradingFee) ? r.tradingFee : 0),
-    0,
-  );
-
   if (unauthorized) {
     return (
       <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-6 py-10 text-center">
@@ -276,8 +203,8 @@ export default function DashboardTradesPage() {
               Trade history
             </h1>
             <p className="mt-1 text-sm text-white/55">
-              Every position the trade engine has copied to your account, with
-              realized PnL and the per-trade revenue-share fee.
+              Every position the trade engine has copied to your account — execution
+              details only. P&amp;L and billing live on Performance.
             </p>
           </div>
         </div>
@@ -324,7 +251,7 @@ export default function DashboardTradesPage() {
       </header>
 
       {!loading && rows.length > 0 ? (
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <div className="glass-card border border-glassBorder p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
               Trades
@@ -333,49 +260,16 @@ export default function DashboardTradesPage() {
               {rows.length}
             </p>
           </div>
-          <div className="glass-card border border-glassBorder p-5">
+          <div className="glass-card border border-glassBorder p-5 sm:col-span-2">
             <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Gross PnL
+              P&amp;L &amp; billing
             </p>
-            <p
-              className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(grossPnl)}`}
-            >
-              {fmtPnl(grossPnl)}
-            </p>
-            <p className="mt-1 text-xs text-white/40">
-              Before app revenue share
-            </p>
-          </div>
-          <div className="glass-card border border-glassBorder p-5">
-            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              App Revenue
-            </p>
-            <p className="mt-2 text-2xl font-semibold text-amber-200/90 tabular-nums">
-              {fmtFee(appRevenue)}
-            </p>
-            <p className="mt-1 text-xs text-white/40">
-              Profit share retained by platform
-            </p>
-          </div>
-          <div className="glass-card border border-glassBorder p-5">
-            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Net Earned PnL
-            </p>
-            <p
-              className={`mt-2 text-2xl font-semibold tabular-nums ${pnlToneClass(netEarnedPnl)}`}
-            >
-              {fmtPnl(netEarnedPnl)}
-            </p>
-            <p className="mt-1 text-xs text-white/40">
-              Gross − app revenue
-            </p>
-          </div>
-          <div className="glass-card border border-glassBorder p-5">
-            <p className="text-xs font-medium uppercase tracking-wider text-white/50">
-              Total Trading Fees
-            </p>
-            <p className="mt-2 text-2xl font-semibold text-white/90 tabular-nums">
-              {fmtFee(totalTradingFee)}
+            <p className="mt-2 text-sm text-white/70">
+              Realized P&amp;L and profit-share invoices come from your Delta account on{" "}
+              <Link href="/dashboard/performance" className="text-primary hover:underline">
+                Performance
+              </Link>
+              .
             </p>
           </div>
         </section>
@@ -394,7 +288,7 @@ export default function DashboardTradesPage() {
 
       <section className="glass-card border border-glassBorder overflow-hidden">
         <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[1180px] text-left text-sm">
+          <table className="w-full min-w-[900px] text-left text-sm">
             <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
                 <th className="px-4 py-3 font-medium text-white/70">Date</th>
@@ -409,29 +303,21 @@ export default function DashboardTradesPage() {
                 <th className="px-4 py-3 font-medium text-white/70">
                   Exit price
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-white/70">
-                  Net PnL
-                </th>
-                <th className="px-4 py-3 text-right font-medium text-white/70">
-                  Trading Fee
-                </th>
-                <th className="px-4 py-3 text-right font-medium text-white/70">
-                  Revenue Share
-                </th>
+                <th className="px-4 py-3 font-medium text-white/70">Size</th>
                 <th className="px-4 py-3 font-medium text-white/70">Close Reason</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-14 text-center">
+                  <td colSpan={8} className="px-4 py-14 text-center">
                     <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={8}
                     className="px-4 py-16 text-center text-white/55"
                   >
                     <p className="text-sm">No trades executed yet.</p>
@@ -449,7 +335,6 @@ export default function DashboardTradesPage() {
                 </tr>
               ) : (
                 rows.map((r) => {
-                  const realized = realizedPnl(r);
                   const isOpen = r.status === "OPEN";
                   return (
                     <tr
@@ -482,20 +367,8 @@ export default function DashboardTradesPage() {
                           fmtPrice(r.exitPrice)
                         )}
                       </td>
-                      <td
-                        className={`px-4 py-3 text-right tabular-nums font-semibold ${pnlToneClass(realized)}`}
-                      >
-                        {isOpen && realized === null ? (
-                          <span className="text-white/40">—</span>
-                        ) : (
-                          fmtPnl(realized)
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-white/85">
-                        {fmtFee(r.tradingFee)}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-white/85">
-                        {fmtFee(r.revenueShareAmt)}
+                      <td className="px-4 py-3 tabular-nums text-white/80">
+                        {r.size}
                       </td>
                       <td className="px-4 py-3">
                         <ExitReasonBadge reason={r.exitReason} />

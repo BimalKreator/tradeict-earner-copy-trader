@@ -178,21 +178,32 @@ export function createMePerformanceController(prisma: PrismaClient) {
       });
 
       res.json({
-        invoices: rows.map((row) => ({
-          id: row.id,
-          periodYear: row.periodYear,
-          periodMonth: row.periodMonth,
-          structuresClosed: row.structuresClosed,
-          realizedPnl: dec(row.realizedPnl) ?? 0,
-          cumulativeRealizedPnl: dec(row.cumulativeRealizedPnl) ?? 0,
-          hwmBefore: dec(row.hwmBefore) ?? 0,
-          hwmAfter: dec(row.hwmAfter) ?? 0,
-          billableProfit: dec(row.billableProfit) ?? 0,
-          profitSharePct: dec(row.profitSharePct) ?? 0,
-          commissionAmount: dec(row.commissionAmount) ?? 0,
-          status: row.status,
-          generatedAt: row.generatedAt.toISOString(),
-        })),
+        invoices: rows.map((row) => {
+          const creditNote = dec(row.creditNoteAmount) ?? 0;
+          const commission = dec(row.commissionAmount) ?? 0;
+          return {
+            id: row.id,
+            periodYear: row.periodYear,
+            periodMonth: row.periodMonth,
+            structuresClosed: row.structuresClosed,
+            realizedPnl: dec(row.realizedPnl) ?? 0,
+            cumulativeRealizedPnl: dec(row.cumulativeRealizedPnl) ?? 0,
+            hwmBefore: dec(row.hwmBefore) ?? 0,
+            hwmAfter: dec(row.hwmAfter) ?? 0,
+            billableProfit: dec(row.billableProfit) ?? 0,
+            profitSharePct: dec(row.profitSharePct) ?? 0,
+            commissionAmount: commission,
+            creditNoteAmount: creditNote > 0 ? creditNote : null,
+            collectibleAmount: Math.max(0, commission - creditNote),
+            amountInr: dec(row.amountInr),
+            usdInrRate: dec(row.usdInrRate),
+            dueDate: row.dueDate?.toISOString() ?? null,
+            invoicedAt: row.invoicedAt?.toISOString() ?? null,
+            paidAt: row.paidAt?.toISOString() ?? null,
+            status: row.status,
+            generatedAt: row.generatedAt.toISOString(),
+          };
+        }),
       });
     } catch (err) {
       next(err);

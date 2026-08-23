@@ -5,6 +5,7 @@ import {
   getCurrentMonthBilling,
   getCurrentMonthBillingForUser,
   payInvoiceFromWallet,
+  payMonthlyRevenueInvoiceFromWallet,
 } from "../services/billingService.js";
 import { triggerMarkCommissionsAsPayable } from "../services/affiliateCommissionService.js";
 
@@ -119,6 +120,48 @@ export function createBillingRoutes(prisma: PrismaClient): Router {
       }
 
       void triggerMarkCommissionsAsPayable(prisma, outcome.invoiceId, null);
+
+      res.json({
+        ok: true,
+        invoiceId: outcome.invoiceId,
+        amountPaid: outcome.amountDue,
+        walletBalance: outcome.walletBalance,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/billing/pay-revenue-invoice/:id
+   *
+   * Settle an INVOICED MonthlyRevenueInvoice from wallet balance.
+   * Status change goes through transitionMonthlyRevenueInvoiceStatus.
+   */
+  router.post("/pay-revenue-invoice/:id", jwtAuth, async (req, res, next) => {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const rawId = req.params.id;
+      const invoiceId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof invoiceId !== "string" || !invoiceId.trim()) {
+        res.status(400).json({ error: "invoice id is required" });
+        return;
+      }
+
+      const outcome = await payMonthlyRevenueInvoiceFromWallet(prisma, {
+        userId,
+        invoiceId: invoiceId.trim(),
+      });
+
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
 
       res.json({
         ok: true,

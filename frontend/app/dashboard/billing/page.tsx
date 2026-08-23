@@ -1,5 +1,5 @@
-import { BillingDashboard } from "@/components/billing/BillingDashboard";
+import { redirect } from "next/navigation";
 
 export default function BillingPage() {
-  return <BillingDashboard />;
+  redirect("/dashboard/performance");
 }

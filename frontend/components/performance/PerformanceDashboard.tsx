@@ -18,11 +18,13 @@ import {
   buildApiUrl,
   formatFetchErrors,
 } from "@/lib/authFetch";
+import { RevenueInvoiceTable } from "@/components/billing/RevenueInvoiceTable";
+import { StrategySubscriptionFees } from "@/components/billing/StrategySubscriptionFees";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd, formatINRApprox } from "@/lib/currency";
+import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 import {
   formatIstCalendarDate,
-  formatIstMonthYear,
   formatIstSnapshotDay,
   currentIstYearMonth,
   isUtcInstantInIstMonth,
@@ -72,25 +74,11 @@ type DailySnapshot = {
   openStructureCount: number;
 };
 
-type RevenueInvoice = {
-  id: string;
-  periodYear: number;
-  periodMonth: number;
-  structuresClosed: number;
-  realizedPnl: number;
-  billableProfit: number;
-  profitSharePct: number;
-  commissionAmount: number;
-  status: string;
-};
+type RevenueInvoice = RevenueInvoiceRow;
 
 
 function fmtDay(iso: string): string {
   return formatIstCalendarDate(iso);
-}
-
-function fmtPeriod(month: number, year: number): string {
-  return formatIstMonthYear(month, year);
 }
 
 function fmtSnapshotDay(iso: string): string {
@@ -143,6 +131,7 @@ export function PerformanceDashboard() {
   const [structures, setStructures] = useState<StructureRow[]>([]);
   const [snapshots, setSnapshots] = useState<DailySnapshot[]>([]);
   const [invoices, setInvoices] = useState<RevenueInvoice[]>([]);
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -157,10 +146,11 @@ export function PerformanceDashboard() {
       const structuresPath = "/me/structures?limit=100";
       const dailyPath = "/me/pnl/daily";
       const invoicesPath = "/me/revenue/invoices";
-      const [sRes, pRes, iRes] = await Promise.all([
+      const [sRes, pRes, iRes, wRes] = await Promise.all([
         authFetch(structuresPath),
         authFetch(dailyPath),
         authFetch(invoicesPath),
+        authFetch("/wallet/me"),
       ]);
       const failures: Array<{ label: string; res: Response; url: string }> = [];
       if (!sRes.ok) {
@@ -193,6 +183,12 @@ export function PerformanceDashboard() {
       setStructures(sJson.structures ?? []);
       setSnapshots(pJson.snapshots ?? []);
       setInvoices(iJson.invoices ?? []);
+      if (wRes.ok) {
+        const wJson = (await wRes.json()) as { balance?: number; balanceUsd?: number };
+        setWalletBalance(wJson.balanceUsd ?? wJson.balance ?? 0);
+      } else {
+        setWalletBalance(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
@@ -502,62 +498,14 @@ export function PerformanceDashboard() {
         )}
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium text-white">Billing</h2>
-        <p className="text-sm text-white/55">
-          You are charged only on profit above your previous best. A losing month reduces what is
-          billable later — you never pay twice on the same profit.
-        </p>
-        <div className="overflow-x-auto rounded-xl border border-white/10">
-          {loading ? (
-            <div className="flex justify-center py-12">
-              <Loader2 className="h-8 w-8 animate-spin text-white/30" />
-            </div>
-          ) : invoices.length === 0 ? (
-            <p className="px-6 py-10 text-center text-sm text-white/45">
-              No monthly revenue invoices yet. Invoices are generated for closed structures each
-              IST calendar month.
-            </p>
-          ) : (
-            <table className="w-full min-w-[720px] text-left text-sm">
-              <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase text-white/40">
-                <tr>
-                  <th className="px-4 py-3">Period</th>
-                  <th className="px-4 py-3">Closed</th>
-                  <th className="px-4 py-3">Realized P&L</th>
-                  <th className="px-4 py-3">Billable profit</th>
-                  <th className="px-4 py-3">Share %</th>
-                  <th className="px-4 py-3">Commission</th>
-                  <th className="px-4 py-3">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {invoices.map((inv) => (
-                  <tr key={inv.id} className="text-white/85">
-                    <td className="px-4 py-3">{fmtPeriod(inv.periodMonth, inv.periodYear)}</td>
-                    <td className="px-4 py-3 tabular-nums">{inv.structuresClosed}</td>
-                    <td className="px-4 py-3">
-                      <MoneyCell usd={inv.realizedPnl} muted />
-                    </td>
-                    <td className="px-4 py-3">
-                      <MoneyCell usd={inv.billableProfit} muted />
-                    </td>
-                    <td className="px-4 py-3 tabular-nums">{inv.profitSharePct.toFixed(1)}%</td>
-                    <td className="px-4 py-3">
-                      <MoneyCell usd={inv.commissionAmount} muted />
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs">
-                        {inv.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </section>
+      <RevenueInvoiceTable
+        invoices={invoices}
+        loading={loading}
+        walletBalance={walletBalance}
+        onPaid={() => void load()}
+      />
+
+      <StrategySubscriptionFees />
     </div>
   );
 }

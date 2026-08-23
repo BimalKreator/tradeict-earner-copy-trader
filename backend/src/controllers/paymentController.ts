@@ -9,7 +9,9 @@ import {
 import Razorpay from "razorpay";
 import {
   creditWalletAfterGateway,
+  revenueInvoiceCollectibleInr,
   settleInvoiceAfterGateway,
+  settleRevenueInvoiceAfterGateway,
 } from "../services/billingService.js";
 import {
   consumeCouponUse,
@@ -156,6 +158,7 @@ export function createPaymentController(prisma: PrismaClient) {
         typeof body.couponCode === "string" ? body.couponCode : "";
       const purpose =
         purposeRaw === "invoice" ||
+        purposeRaw === "revenue_invoice" ||
         purposeRaw === "wallet" ||
         purposeRaw === "strategy_subscription"
           ? purposeRaw
@@ -247,6 +250,53 @@ export function createPaymentController(prisma: PrismaClient) {
           ...(discountPct != null
             ? { discountPercentage: String(discountPct) }
             : {}),
+        };
+      } else if (purpose === "revenue_invoice") {
+        const revenueInvoiceId =
+          typeof body.revenueInvoiceId === "string"
+            ? body.revenueInvoiceId.trim()
+            : invoiceId;
+        if (!revenueInvoiceId) {
+          res.status(400).json({
+            error: "revenueInvoiceId is required for revenue invoice payments",
+          });
+          return;
+        }
+        const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+          where: { id: revenueInvoiceId },
+        });
+        if (!invoice || invoice.userId !== userId) {
+          res.status(404).json({ error: "Invoice not found" });
+          return;
+        }
+        if (invoice.status === "PAID") {
+          res.status(409).json({ error: "Invoice already paid" });
+          return;
+        }
+        if (invoice.status !== "INVOICED") {
+          res.status(400).json({
+            error: `Invoice in unexpected status ${invoice.status}`,
+          });
+          return;
+        }
+        const baseInr = revenueInvoiceCollectibleInr(invoice);
+        if (baseInr < 1) {
+          res.status(400).json({ error: "No payment required for this invoice" });
+          return;
+        }
+        breakdown = calculateFeeBreakdown(baseInr, pgFeePercent, "RAZORPAY");
+        notes = {
+          userId,
+          purpose: "revenue_invoice",
+          revenueInvoiceId,
+          amountUsd: String(
+            invoice.commissionAmount
+              .sub(invoice.creditNoteAmount ?? new Prisma.Decimal(0))
+              .toNumber(),
+          ),
+          baseAmountInr: String(breakdown.baseAmountInr),
+          feeAmountInr: String(breakdown.feeAmountInr),
+          totalAmountInr: String(breakdown.totalAmountInr),
         };
       } else if (purpose === "invoice") {
         if (!invoiceId) {
@@ -503,6 +553,59 @@ export function createPaymentController(prisma: PrismaClient) {
           purpose: "strategy_subscription",
           strategyId: sid,
           subscribed: true,
+        });
+        return;
+      }
+
+      if (purpose === "revenue_invoice") {
+        const revenueInvoiceId = notes.revenueInvoiceId?.trim();
+        if (!revenueInvoiceId) {
+          res.status(400).json({ error: "Invoice reference missing on order" });
+          return;
+        }
+        const outcome = await settleRevenueInvoiceAfterGateway(prisma, {
+          userId,
+          invoiceId: revenueInvoiceId,
+          paymentReference: paymentId,
+        });
+        if (!outcome.ok) {
+          res.status(outcome.status).json({ error: outcome.message });
+          return;
+        }
+
+        const paymentRow = await prisma.paymentTransaction.create({
+          data: {
+            userId,
+            method: "RAZORPAY",
+            baseAmountInr,
+            feeAmountInr,
+            totalAmountInr,
+            netCreditUsd: outcome.amountDue,
+            referenceId: paymentId,
+            razorpayOrderId: orderId,
+            razorpayPaymentId: paymentId,
+            status: TransactionStatus.APPROVED,
+          },
+          select: { id: true },
+        });
+
+        void sendPaymentReceiptEmails({
+          userName: user.name ?? user.email,
+          userEmail: user.email,
+          method: "RAZORPAY (Revenue share invoice)",
+          baseAmountInr,
+          feeAmountInr,
+          totalAmountInr,
+          netCreditUsd: outcome.amountDue,
+          referenceId: paymentId,
+        }).catch(() => {});
+
+        res.status(200).json({
+          ok: true,
+          purpose: "revenue_invoice",
+          revenueInvoiceId: outcome.invoiceId,
+          amountPaid: outcome.amountDue,
+          paymentTransactionId: paymentRow.id,
         });
         return;
       }

@@ -10,6 +10,12 @@ import { guardedCron } from "../utils/cronGuard.js";
 import { triggerMarkCommissionsAsPayable } from "./affiliateCommissionService.js";
 import { SUBSCRIPTION_SYNC_STATUS } from "./subscriptionSyncService.js";
 import {
+  INVOICE_STATUS,
+  revenueInvoiceCollectibleInr,
+  revenueInvoiceCollectibleUsd,
+  transitionMonthlyRevenueInvoiceStatus,
+} from "./monthlyRevenueInvoiceLifecycleService.js";
+import {
   getBotStrategyMtdFromSnapshots,
   sumDeltaPipelineCommissionForIstMonth,
   currentIstCalendarParts,
@@ -780,6 +786,185 @@ export async function payInvoiceFromWallet(
     } as const;
   });
 }
+
+/**
+ * Pay an INVOICED monthly revenue invoice from the user's wallet.
+ * Uses transitionMonthlyRevenueInvoiceStatus(INVOICED → PAID) — never direct DB status writes.
+ */
+export async function payMonthlyRevenueInvoiceFromWallet(
+  prisma: PrismaClient,
+  args: { userId: string; invoiceId: string },
+): Promise<PayInvoiceOutcome> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const invoice = await tx.monthlyRevenueInvoice.findUnique({
+        where: { id: args.invoiceId },
+      });
+      if (!invoice) {
+        return {
+          ok: false,
+          status: 404,
+          message: "Invoice not found",
+        } as const;
+      }
+      if (invoice.userId !== args.userId) {
+        return {
+          ok: false,
+          status: 403,
+          message: "You do not own this invoice",
+        } as const;
+      }
+      if (invoice.status === INVOICE_STATUS.PAID) {
+        return {
+          ok: false,
+          status: 409,
+          message: "Invoice already paid",
+        } as const;
+      }
+      if (invoice.status !== INVOICE_STATUS.INVOICED) {
+        return {
+          ok: false,
+          status: 400,
+          message: `Invoice in unexpected status ${invoice.status}`,
+        } as const;
+      }
+
+      const amountDue = revenueInvoiceCollectibleUsd(invoice);
+      let walletBalance = 0;
+
+      if (amountDue > 0) {
+        const wallet = await tx.wallet.findUnique({
+          where: { userId: args.userId },
+          select: { id: true },
+        });
+        if (!wallet) {
+          return {
+            ok: false,
+            status: 400,
+            message: "Wallet not found. Top up first.",
+          } as const;
+        }
+
+        const deduct = await tx.wallet.updateMany({
+          where: { id: wallet.id, balance: { gte: amountDue } },
+          data: { balance: { decrement: amountDue } },
+        });
+        if (deduct.count !== 1) {
+          return {
+            ok: false,
+            status: 400,
+            message: "Insufficient wallet balance",
+          } as const;
+        }
+
+        await tx.walletTransaction.create({
+          data: {
+            walletId: wallet.id,
+            amount: amountDue,
+            type: WALLET_TXN_TYPE_INVOICE_PAYMENT,
+            status: WALLET_TXN_STATUS_COMPLETED,
+          },
+        });
+
+        const updatedWallet = await tx.wallet.findUnique({
+          where: { id: wallet.id },
+        });
+        walletBalance = updatedWallet?.balance ?? 0;
+      } else {
+        const wallet = await tx.wallet.findUnique({
+          where: { userId: args.userId },
+        });
+        walletBalance = wallet?.balance ?? 0;
+      }
+
+      await transitionMonthlyRevenueInvoiceStatus(
+        prisma,
+        invoice.id,
+        INVOICE_STATUS.PAID,
+        {
+          paymentReference: `wallet:${invoice.id}`,
+          tx,
+        },
+      );
+
+      return {
+        ok: true,
+        invoiceId: invoice.id,
+        amountDue,
+        walletBalance,
+      } as const;
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 400, message: msg } as const;
+  }
+}
+
+/** Marks a monthly revenue invoice paid after Razorpay — no wallet debit. */
+export async function settleRevenueInvoiceAfterGateway(
+  prisma: PrismaClient,
+  args: { userId: string; invoiceId: string; paymentReference?: string },
+): Promise<PayInvoiceOutcome> {
+  try {
+    const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+      where: { id: args.invoiceId },
+    });
+    if (!invoice) {
+      return { ok: false, status: 404, message: "Invoice not found" } as const;
+    }
+    if (invoice.userId !== args.userId) {
+      return {
+        ok: false,
+        status: 403,
+        message: "You do not own this invoice",
+      } as const;
+    }
+    if (invoice.status === INVOICE_STATUS.PAID) {
+      const wallet = await prisma.wallet.findUnique({
+        where: { userId: args.userId },
+      });
+      return {
+        ok: true,
+        invoiceId: invoice.id,
+        amountDue: revenueInvoiceCollectibleUsd(invoice),
+        walletBalance: wallet?.balance ?? 0,
+      } as const;
+    }
+    if (invoice.status !== INVOICE_STATUS.INVOICED) {
+      return {
+        ok: false,
+        status: 400,
+        message: `Invoice in unexpected status ${invoice.status}`,
+      } as const;
+    }
+
+    await transitionMonthlyRevenueInvoiceStatus(
+      prisma,
+      invoice.id,
+      INVOICE_STATUS.PAID,
+      {
+        paymentReference:
+          args.paymentReference?.trim() ?? `razorpay:${invoice.id}`,
+      },
+    );
+
+    const wallet = await prisma.wallet.findUnique({
+      where: { userId: args.userId },
+    });
+
+    return {
+      ok: true,
+      invoiceId: invoice.id,
+      amountDue: revenueInvoiceCollectibleUsd(invoice),
+      walletBalance: wallet?.balance ?? 0,
+    } as const;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 400, message: msg } as const;
+  }
+}
+
+export { revenueInvoiceCollectibleInr, revenueInvoiceCollectibleUsd };
 
 async function pauseSubscriptionForOverdueInvoice(
   prisma: PrismaClient,

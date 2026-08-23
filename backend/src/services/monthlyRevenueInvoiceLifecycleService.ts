@@ -115,11 +115,38 @@ function pinInrAmount(
   };
 }
 
-/**
- * Single entry point for MonthlyRevenueInvoice status changes.
- * ACCRUED → INVOICED pins amountInr + usdInrRate at transition time.
- */
-export async function transitionMonthlyRevenueInvoiceStatus(
+type RevenueInvoiceAmountRow = {
+  commissionAmount: Prisma.Decimal;
+  creditNoteAmount: Prisma.Decimal | null;
+  amountInr: Prisma.Decimal | null;
+  usdInrRate: Prisma.Decimal | null;
+};
+
+/** Collectible USD after credit note — used for wallet debits. */
+export function revenueInvoiceCollectibleUsd(row: RevenueInvoiceAmountRow): number {
+  return row.commissionAmount
+    .sub(row.creditNoteAmount ?? new Prisma.Decimal(0))
+    .toNumber();
+}
+
+/** Collectible INR using pinned rate from invoicing — not live FX. */
+export function revenueInvoiceCollectibleInr(row: RevenueInvoiceAmountRow): number {
+  const collectibleUsd = revenueInvoiceCollectibleUsd(row);
+  if (collectibleUsd <= 0) return 0;
+  if (row.amountInr != null && row.usdInrRate != null) {
+    const fullUsd = row.commissionAmount.toNumber();
+    if (fullUsd <= 0) return 0;
+    return roundInr(row.amountInr.toNumber() * (collectibleUsd / fullUsd));
+  }
+  const rate = row.usdInrRate?.toNumber();
+  if (rate != null && rate > 0) {
+    return roundInr(usdToInr(collectibleUsd, rate));
+  }
+  return roundInr(usdToInr(collectibleUsd, 83));
+}
+
+async function applyMonthlyRevenueInvoiceStatusTransition(
+  tx: Prisma.TransactionClient,
   prisma: PrismaClient,
   invoiceId: string,
   targetStatus: MonthlyRevenueInvoiceStatus,
@@ -129,7 +156,7 @@ export async function transitionMonthlyRevenueInvoiceStatus(
     usdInrRate?: number;
   },
 ): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
-  const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+  const invoice = await tx.monthlyRevenueInvoice.findUnique({
     where: { id: invoiceId },
   });
   if (!invoice) {
@@ -184,46 +211,80 @@ export async function transitionMonthlyRevenueInvoiceStatus(
     data.voidReason = reason;
   }
 
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.monthlyRevenueInvoice.update({
-      where: { id: invoiceId },
-      data,
-    });
+  const updated = await tx.monthlyRevenueInvoice.update({
+    where: { id: invoiceId },
+    data,
+  });
 
-    if (
-      invoice.status === INVOICE_STATUS.ACCRUED &&
-      targetStatus === INVOICE_STATUS.INVOICED
-    ) {
-      await distributeMonthlyRevenueInvoiceCommissions(
-        tx,
-        {
-          id: updated.id,
-          userId: updated.userId,
-          commissionAmount: updated.commissionAmount,
-          isSimulated: updated.isSimulated,
-          invoicedAt: now,
-        },
-        commissionChain,
-      );
-    }
-
-    if (
-      invoice.status === INVOICE_STATUS.INVOICED &&
-      targetStatus === INVOICE_STATUS.PAID
-    ) {
-      await markMonthlyRevenueInvoiceCommissionsAsPayable(tx, updated.id);
-    }
-
-    if (targetStatus === INVOICE_STATUS.VOID) {
-      await reverseMonthlyRevenueInvoiceCommissionsOnVoid(tx, {
+  if (
+    invoice.status === INVOICE_STATUS.ACCRUED &&
+    targetStatus === INVOICE_STATUS.INVOICED
+  ) {
+    await distributeMonthlyRevenueInvoiceCommissions(
+      tx,
+      {
         id: updated.id,
         userId: updated.userId,
-        invoicedAt: updated.invoicedAt,
-      });
-    }
+        commissionAmount: updated.commissionAmount,
+        isSimulated: updated.isSimulated,
+        invoicedAt: now,
+      },
+      commissionChain,
+    );
+  }
 
-    return updated;
-  });
+  if (
+    invoice.status === INVOICE_STATUS.INVOICED &&
+    targetStatus === INVOICE_STATUS.PAID
+  ) {
+    await markMonthlyRevenueInvoiceCommissionsAsPayable(tx, updated.id);
+  }
+
+  if (targetStatus === INVOICE_STATUS.VOID) {
+    await reverseMonthlyRevenueInvoiceCommissionsOnVoid(tx, {
+      id: updated.id,
+      userId: updated.userId,
+      invoicedAt: updated.invoicedAt,
+    });
+  }
+
+  return updated;
+}
+
+/**
+ * Single entry point for MonthlyRevenueInvoice status changes.
+ * ACCRUED → INVOICED pins amountInr + usdInrRate at transition time.
+ */
+export async function transitionMonthlyRevenueInvoiceStatus(
+  prisma: PrismaClient,
+  invoiceId: string,
+  targetStatus: MonthlyRevenueInvoiceStatus,
+  opts?: {
+    reason?: string;
+    paymentReference?: string;
+    usdInrRate?: number;
+    tx?: Prisma.TransactionClient;
+  },
+): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
+  if (opts?.tx) {
+    return applyMonthlyRevenueInvoiceStatusTransition(
+      opts.tx,
+      prisma,
+      invoiceId,
+      targetStatus,
+      opts,
+    );
+  }
+
+  return prisma.$transaction((tx) =>
+    applyMonthlyRevenueInvoiceStatusTransition(
+      tx,
+      prisma,
+      invoiceId,
+      targetStatus,
+      opts,
+    ),
+  );
 }
 
 export class CreditNoteError extends Error {

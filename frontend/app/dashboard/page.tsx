@@ -35,6 +35,8 @@ import {
 } from "@/lib/safeJson";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fetchWithTimeout, isFetchTimeoutError } from "@/lib/fetchTimeout";
+import { currentIstYearMonth, isUtcInstantInIstMonth } from "@/lib/istDates";
+import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 
 type DashboardOverview = {
   earnedPnl: number;
@@ -74,6 +76,13 @@ type WalletSummary = {
   balance: number;
   availableBalance?: number;
   lockedBalance?: number;
+};
+
+type DeltaMoneySummary = {
+  cumulativeRealized: number | null;
+  highWaterMark: number | null;
+  thisMonthRealized: number | null;
+  unpaidRevenueShare: number;
 };
 
 type Toast = { kind: "success" | "error"; text: string } | null;
@@ -168,6 +177,7 @@ function DualCurrencyValue({
 
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardOverview | null>(null);
+  const [deltaMoney, setDeltaMoney] = useState<DeltaMoneySummary | null>(null);
   const [wallet, setWallet] = useState<WalletSummary | null>(null);
   const [walletLoading, setWalletLoading] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -186,6 +196,43 @@ export default function DashboardPage() {
     if (!res.ok) throw new Error(`Failed to load wallet (${res.status})`);
     const parsed = parseWalletSummary(await res.json());
     setWallet(parsed);
+  }, [token, apiBase]);
+
+  const loadDeltaMoney = useCallback(async () => {
+    const headers = { Authorization: `Bearer ${token ?? ""}` };
+    const [pnlRes, invRes] = await Promise.all([
+      fetchWithTimeout(`${apiBase}/me/pnl/daily`, { headers, cache: "no-store" }),
+      fetchWithTimeout(`${apiBase}/me/revenue/invoices`, { headers, cache: "no-store" }),
+    ]);
+    if (!pnlRes.ok || !invRes.ok) {
+      setDeltaMoney(null);
+      return;
+    }
+    const pnlBody = (await pnlRes.json()) as {
+      snapshots?: Array<{
+        snapshotDate: string;
+        realizedDelta: number;
+        cumulativeRealized: number;
+        highWaterMark: number;
+      }>;
+    };
+    const invBody = (await invRes.json()) as { invoices?: RevenueInvoiceRow[] };
+    const snapshots = pnlBody.snapshots ?? [];
+    const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+    const { year, month } = currentIstYearMonth();
+    const thisMonthRealized = snapshots
+      .filter((s) => isUtcInstantInIstMonth(s.snapshotDate, year, month))
+      .reduce((sum, s) => sum + s.realizedDelta, 0);
+    const unpaidRevenueShare = (invBody.invoices ?? [])
+      .filter((inv) => inv.status === "INVOICED")
+      .reduce((sum, inv) => sum + inv.collectibleAmount, 0);
+    setDeltaMoney({
+      cumulativeRealized: latest?.cumulativeRealized ?? null,
+      highWaterMark: latest?.highWaterMark ?? null,
+      thisMonthRealized:
+        snapshots.length > 0 || thisMonthRealized !== 0 ? thisMonthRealized : null,
+      unpaidRevenueShare,
+    });
   }, [token, apiBase]);
 
   const loadOverview = useCallback(async () => {
@@ -226,7 +273,7 @@ export default function DashboardPage() {
   useEffect(() => {
     void (async () => {
       try {
-        await Promise.all([loadOverview(), loadWallet()]);
+        await Promise.all([loadOverview(), loadWallet(), loadDeltaMoney()]);
         void refreshApiStatus();
       } catch (e) {
         setError(
@@ -241,7 +288,7 @@ export default function DashboardPage() {
         setWalletLoading(false);
       }
     })();
-  }, [loadOverview, loadWallet, refreshApiStatus]);
+  }, [loadOverview, loadWallet, loadDeltaMoney, refreshApiStatus]);
 
   useEffect(() => {
     if (!toast) return;
@@ -422,51 +469,65 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
               icon={<TrendingUp className="h-5 w-5 text-emerald-400" />}
-              label="Earned PnL"
-              currencyUsd={data.earnedPnl}
+              label="Cumulative realized P&L"
+              currencyUsd={deltaMoney?.cumulativeRealized ?? 0}
               sub={
-                <span className="text-slate-500">
-                  Net take-home after revenue sharing
-                </span>
+                <Link
+                  href="/dashboard/performance"
+                  className="text-xs text-cyan-400/90 hover:text-cyan-300"
+                >
+                  View full performance →
+                </Link>
               }
-              valueClass={pnlTone(data.earnedPnl)}
-            />
-
-            <MetricCard
-              icon={<Activity className="h-5 w-5 text-cyan-400" />}
-              label="Today's PnL"
-              currencyUsd={data.todayPnl}
-              sub={
-                <span className={pnlTone(data.todayPnlPercent)}>
-                  {fmtPct(data.todayPnlPercent)} of capital
-                </span>
-              }
-              valueClass={pnlTone(data.todayPnl)}
+              valueClass={pnlTone(deltaMoney?.cumulativeRealized ?? 0)}
             />
 
             <MetricCard
               icon={<Calendar className="h-5 w-5 text-violet-400" />}
-              label="Monthly PnL"
-              currencyUsd={data.monthlyPnl}
+              label="This month's realized"
+              currencyUsd={deltaMoney?.thisMonthRealized ?? 0}
               sub={
-                <div className="space-y-0.5">
-                  <span className={pnlTone(data.monthlyPnlPercent)}>
-                    {fmtPct(data.monthlyPnlPercent)} of capital
-                  </span>
-                  {typeof (data.grossPnlMonth ?? data.grossBookedPnlMonth) ===
-                    "number" &&
-                  (data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0) !==
-                    data.monthlyPnl ? (
-                    <p className="text-xs text-slate-500">
-                      Gross {formatINR(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}{" "}
-                      ({usdSecondaryLabel(data.grossPnlMonth ?? data.grossBookedPnlMonth ?? 0)}) −
-                      app revenue {formatINR(data.revenueSharingDue)} (
-                      {usdSecondaryLabel(data.revenueSharingDue)})
-                    </p>
-                  ) : null}
-                </div>
+                <span className="text-slate-500">
+                  From your Delta account (IST month)
+                </span>
               }
-              valueClass={pnlTone(data.monthlyPnl)}
+              valueClass={pnlTone(deltaMoney?.thisMonthRealized ?? 0)}
+            />
+
+            <MetricCard
+              icon={<Activity className="h-5 w-5 text-cyan-400" />}
+              label="High-water mark"
+              currencyUsd={deltaMoney?.highWaterMark ?? 0}
+              sub={
+                <span className="text-slate-500">
+                  Lifetime best cumulative realized P&L
+                </span>
+              }
+              valueClass="text-white"
+            />
+
+            <MetricCard
+              icon={<CreditCard className="h-5 w-5 text-amber-400" />}
+              label="Unpaid profit share"
+              currencyUsd={deltaMoney?.unpaidRevenueShare ?? 0}
+              sub={
+                (deltaMoney?.unpaidRevenueShare ?? 0) > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs text-slate-500">
+                      Monthly invoices from Delta pipeline
+                    </span>
+                    <Link
+                      href="/dashboard/performance"
+                      className="inline-flex w-fit items-center rounded-md bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-500/40 transition hover:bg-amber-500/30"
+                    >
+                      Pay on Performance
+                    </Link>
+                  </div>
+                ) : (
+                  <span className="text-slate-500">No unpaid profit-share invoices</span>
+                )
+              }
+              valueClass="text-amber-300"
             />
 
             <MetricCard
@@ -487,30 +548,6 @@ export default function DashboardPage() {
                 </div>
               }
               valueClass="text-white"
-            />
-
-            <MetricCard
-              icon={<CreditCard className="h-5 w-5 text-amber-400" />}
-              label="Revenue Sharing Due"
-              currencyUsd={data.revenueSharingDue}
-              sub={
-                data.revenueSharingDue > 0 ? (
-                  <div className="flex flex-col gap-2">
-                    <span className="text-xs text-slate-500">
-                      App revenue share on gross booked PnL this month
-                    </span>
-                    <Link
-                      href="/dashboard/billing"
-                      className="inline-flex w-fit items-center rounded-md bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-500/40 transition hover:bg-amber-500/30"
-                    >
-                      Pay Now
-                    </Link>
-                  </div>
-                ) : (
-                  <span className="text-slate-500">No revenue share due this month</span>
-                )
-              }
-              valueClass="text-amber-300"
             />
 
             <MetricCard
