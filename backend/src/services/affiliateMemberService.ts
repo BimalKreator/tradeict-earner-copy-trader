@@ -821,7 +821,12 @@ export async function assertUserSafeToDelete(
       where: { sourceUserId: userId, isSimulated: false },
     }),
     prisma.payoutRequest.count({
-      where: { userId, status: PayoutRequestStatus.PENDING },
+      where: {
+        userId,
+        status: {
+          in: [PayoutRequestStatus.PENDING, PayoutRequestStatus.APPROVED],
+        },
+      },
     }),
     prisma.user.count({
       where: {
@@ -865,7 +870,7 @@ export async function assertUserSafeToDelete(
     return {
       ok: false,
       status: 409,
-      message: "User has a pending partner payout request.",
+      message: "User has an active partner payout request.",
     };
   }
 

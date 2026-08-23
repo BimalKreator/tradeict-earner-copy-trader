@@ -6,6 +6,7 @@ import {
   Loader2,
   RefreshCw,
   UserRound,
+  XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SALES_TEAM_ROLE_LABELS, isSalesTeamMember } from "@/lib/roles";
@@ -21,11 +22,28 @@ function resolveApiBase(): string {
   return "";
 }
 
+type PayoutStatus = "PENDING" | "APPROVED" | "COMPLETED" | "REJECTED";
+
+type ActorSummary = {
+  id: string;
+  name: string | null;
+  email: string;
+} | null;
+
 type PayoutRow = {
   id: string;
   amount: number;
-  status: "PENDING" | "COMPLETED";
+  status: PayoutStatus;
   requestedAt: string;
+  approvedAt: string | null;
+  approvedBy: ActorSummary;
+  approvalReason: string | null;
+  rejectedAt: string | null;
+  rejectedBy: ActorSummary;
+  rejectionReason: string | null;
+  completedAt: string | null;
+  completedBy: ActorSummary;
+  paymentReference: string | null;
   user: {
     id: string;
     name: string | null;
@@ -48,7 +66,8 @@ function fmtUsd(n: number): string {
   return usdFmt.format(n);
 }
 
-function fmtDate(iso: string): string {
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString(undefined, {
@@ -58,6 +77,26 @@ function fmtDate(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function statusBadgeClass(status: PayoutStatus): string {
+  switch (status) {
+    case "PENDING":
+      return "bg-amber-500/15 text-amber-200 ring-amber-500/35";
+    case "APPROVED":
+      return "bg-sky-500/15 text-sky-200 ring-sky-500/35";
+    case "COMPLETED":
+      return "bg-emerald-500/15 text-emerald-200 ring-emerald-500/35";
+    case "REJECTED":
+      return "bg-red-500/15 text-red-200 ring-red-500/35";
+    default:
+      return "bg-white/10 text-white/60 ring-white/20";
+  }
+}
+
+function actorLabel(actor: ActorSummary): string {
+  if (!actor) return "—";
+  return actor.name?.trim() || actor.email;
 }
 
 export default function AdminPayoutsPage() {
@@ -71,6 +110,8 @@ export default function AdminPayoutsPage() {
   const [error, setError] = useState<string | null>(null);
   const [rowBusy, setRowBusy] = useState<Record<string, boolean>>({});
   const [paymentRefs, setPaymentRefs] = useState<Record<string, string>>({});
+  const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
+  const [confirmEmails, setConfirmEmails] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -126,44 +167,54 @@ export default function AdminPayoutsPage() {
     }
   }
 
-  async function markPaid(id: string) {
+  async function postAction(
+    id: string,
+    path: "approve" | "reject" | "complete",
+    body: Record<string, string>,
+    successMsg: string,
+  ) {
     if (!token || rowBusy[id]) return;
-    const paymentReference = (paymentRefs[id] ?? "").trim();
-    if (!paymentReference) {
-      setError("Enter UTR / bank transaction id before marking paid.");
-      return;
-    }
     setRowBusy((prev) => ({ ...prev, [id]: true }));
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/admin/payouts/${id}/complete`, {
+      const res = await fetch(`${apiBase}/admin/payouts/${id}/${path}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ paymentReference }),
+        body: JSON.stringify(body),
       });
-      const body: unknown = await res.json().catch(() => ({}));
+      const data: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {
         const msg =
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
-            ? (body as { error: string }).error
-            : `Could not complete payout (${res.status})`;
+          typeof data === "object" &&
+          data !== null &&
+          "error" in data &&
+          typeof (data as { error?: unknown }).error === "string"
+            ? (data as { error: string }).error
+            : `Action failed (${res.status})`;
         throw new Error(msg);
       }
-      setToast("Payout marked as paid.");
+      setToast(successMsg);
       setPaymentRefs((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setRejectReasons((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setConfirmEmails((prev) => {
         const next = { ...prev };
         delete next[id];
         return next;
       });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to mark payout paid");
+      setError(e instanceof Error ? e.message : "Action failed");
     } finally {
       setRowBusy((prev) => ({ ...prev, [id]: false }));
     }
@@ -183,7 +234,7 @@ export default function AdminPayoutsPage() {
               Partner Payouts
             </h1>
             <p className="mt-1 text-sm text-white/50">
-              Pending commission withdrawal requests from sales team members
+              Review, approve, reject, or complete partner commission withdrawals
             </p>
           </div>
         </div>
@@ -216,7 +267,7 @@ export default function AdminPayoutsPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="glass-card border border-glassBorder p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-white/45">
-            Pending requests
+            Actionable requests
           </p>
           <p className="mt-2 text-3xl font-semibold tabular-nums text-white">
             {payouts.length}
@@ -224,7 +275,7 @@ export default function AdminPayoutsPage() {
         </div>
         <div className="glass-card border border-glassBorder p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-white/45">
-            Total pending amount
+            Total in queue
           </p>
           <p className="mt-2 text-3xl font-semibold tabular-nums text-emerald-200">
             {fmtUsd(totalPending)}
@@ -239,18 +290,19 @@ export default function AdminPayoutsPage() {
           </div>
         ) : payouts.length === 0 ? (
           <div className="px-6 py-16 text-center text-sm text-white/45">
-            No pending partner payout requests.
+            No pending or approved payout requests.
           </div>
         ) : (
           <div className="scroll-table w-full overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
+            <table className="w-full min-w-[960px] text-left text-sm">
               <thead className="border-b border-glassBorder bg-white/[0.03] text-xs uppercase tracking-wider text-white/40">
                 <tr>
                   <th className="px-5 py-3 font-medium sm:px-6">Partner</th>
                   <th className="px-5 py-3 font-medium sm:px-6">Amount</th>
-                  <th className="px-5 py-3 font-medium sm:px-6">Requested</th>
+                  <th className="px-5 py-3 font-medium sm:px-6">Status</th>
+                  <th className="px-5 py-3 font-medium sm:px-6">Timeline</th>
                   <th className="px-5 py-3 font-medium sm:px-6">KYC / contact</th>
-                  <th className="px-5 py-3 font-medium text-right sm:px-6">Action</th>
+                  <th className="px-5 py-3 font-medium text-right sm:px-6">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-glassBorder/80">
@@ -258,6 +310,11 @@ export default function AdminPayoutsPage() {
                   const roleLabel = isSalesTeamMember(row.user.role)
                     ? SALES_TEAM_ROLE_LABELS[row.user.role]
                     : row.user.role;
+                  const rejectReason = (rejectReasons[row.id] ?? "").trim();
+                  const paymentRef = (paymentRefs[row.id] ?? "").trim();
+                  const confirmEmail = (confirmEmails[row.id] ?? "").trim();
+                  const emailMatch = confirmEmail === row.user.email;
+
                   return (
                     <tr key={row.id} className="align-top hover:bg-white/[0.02]">
                       <td className="px-5 py-4 sm:px-6">
@@ -278,8 +335,47 @@ export default function AdminPayoutsPage() {
                       <td className="whitespace-nowrap px-5 py-4 font-semibold tabular-nums text-emerald-200 sm:px-6">
                         {fmtUsd(row.amount)}
                       </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-white/65 sm:px-6">
-                        {fmtDate(row.requestedAt)}
+                      <td className="px-5 py-4 sm:px-6">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ring-1 ${statusBadgeClass(row.status)}`}
+                        >
+                          {row.status}
+                        </span>
+                      </td>
+                      <td className="max-w-xs px-5 py-4 text-xs leading-relaxed text-white/55 sm:px-6">
+                        <p>
+                          <span className="text-white/35">Requested:</span>{" "}
+                          {fmtDate(row.requestedAt)}
+                        </p>
+                        {row.approvedAt ? (
+                          <p className="mt-1">
+                            <span className="text-white/35">Approved:</span>{" "}
+                            {fmtDate(row.approvedAt)} by {actorLabel(row.approvedBy)}
+                            {row.approvalReason ? (
+                              <span className="block text-white/45">
+                                Reason: {row.approvalReason}
+                              </span>
+                            ) : null}
+                          </p>
+                        ) : null}
+                        {row.rejectedAt ? (
+                          <p className="mt-1 text-red-200/80">
+                            <span className="text-red-300/60">Rejected:</span>{" "}
+                            {fmtDate(row.rejectedAt)} by {actorLabel(row.rejectedBy)}
+                            {row.rejectionReason ? (
+                              <span className="block">{row.rejectionReason}</span>
+                            ) : null}
+                          </p>
+                        ) : null}
+                        {row.completedAt ? (
+                          <p className="mt-1 text-emerald-200/80">
+                            <span className="text-emerald-300/60">Paid:</span>{" "}
+                            {fmtDate(row.completedAt)} by {actorLabel(row.completedBy)}
+                            {row.paymentReference ? (
+                              <span className="block">UTR: {row.paymentReference}</span>
+                            ) : null}
+                          </p>
+                        ) : null}
                       </td>
                       <td className="max-w-xs px-5 py-4 text-xs leading-relaxed text-white/55 sm:px-6">
                         <p>
@@ -296,37 +392,166 @@ export default function AdminPayoutsPage() {
                         </p>
                       </td>
                       <td className="whitespace-nowrap px-5 py-4 text-right sm:px-6">
-                        <div className="flex flex-col items-end gap-2">
-                          <input
-                            type="text"
-                            value={paymentRefs[row.id] ?? ""}
-                            onChange={(e) =>
-                              setPaymentRefs((prev) => ({
-                                ...prev,
-                                [row.id]: e.target.value,
-                              }))
-                            }
-                            placeholder="UTR / bank txn id"
-                            disabled={!!rowBusy[row.id]}
-                            className="w-44 rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-emerald-500/50 focus:outline-none disabled:opacity-50"
-                            aria-label={`Payment reference for ${row.user.email}`}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => void markPaid(row.id)}
-                            disabled={
-                              !!rowBusy[row.id] ||
-                              !(paymentRefs[row.id] ?? "").trim()
-                            }
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:opacity-50"
-                          >
-                            {rowBusy[row.id] ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                            ) : (
-                              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
-                            )}
-                            Mark as Paid
-                          </button>
+                        <div className="flex min-w-[220px] flex-col items-end gap-2">
+                          {row.status === "PENDING" ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void postAction(row.id, "approve", {}, "Payout approved.")
+                                }
+                                disabled={!!rowBusy[row.id]}
+                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-sky-500/20 px-3 py-2 text-xs font-semibold text-sky-100 ring-1 ring-sky-500/35 transition hover:bg-sky-500/30 disabled:opacity-50"
+                              >
+                                {rowBusy[row.id] ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                                )}
+                                Approve
+                              </button>
+                              <input
+                                type="text"
+                                value={rejectReasons[row.id] ?? ""}
+                                onChange={(e) =>
+                                  setRejectReasons((prev) => ({
+                                    ...prev,
+                                    [row.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Rejection reason (required)"
+                                disabled={!!rowBusy[row.id]}
+                                className="w-full rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-red-500/50 focus:outline-none disabled:opacity-50"
+                              />
+                              <input
+                                type="text"
+                                value={confirmEmails[row.id] ?? ""}
+                                onChange={(e) =>
+                                  setConfirmEmails((prev) => ({
+                                    ...prev,
+                                    [row.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder={`Type ${row.user.email} to confirm`}
+                                disabled={!!rowBusy[row.id]}
+                                className="w-full rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-red-500/50 focus:outline-none disabled:opacity-50"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void postAction(
+                                    row.id,
+                                    "reject",
+                                    {
+                                      reason: rejectReason,
+                                      confirmation: confirmEmail,
+                                    },
+                                    "Payout rejected; commission released.",
+                                  )
+                                }
+                                disabled={
+                                  !!rowBusy[row.id] || !rejectReason || !emailMatch
+                                }
+                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-100 ring-1 ring-red-500/35 transition hover:bg-red-500/25 disabled:opacity-50"
+                              >
+                                {rowBusy[row.id] ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <XCircle className="h-3.5 w-3.5" aria-hidden />
+                                )}
+                                Reject
+                              </button>
+                            </>
+                          ) : null}
+
+                          {row.status === "APPROVED" ? (
+                            <>
+                              <input
+                                type="text"
+                                value={paymentRefs[row.id] ?? ""}
+                                onChange={(e) =>
+                                  setPaymentRefs((prev) => ({
+                                    ...prev,
+                                    [row.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="UTR / bank txn id"
+                                disabled={!!rowBusy[row.id]}
+                                className="w-full rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-emerald-500/50 focus:outline-none disabled:opacity-50"
+                              />
+                              <input
+                                type="text"
+                                value={confirmEmails[row.id] ?? ""}
+                                onChange={(e) =>
+                                  setConfirmEmails((prev) => ({
+                                    ...prev,
+                                    [row.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder={`Type ${row.user.email} to confirm`}
+                                disabled={!!rowBusy[row.id]}
+                                className="w-full rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-emerald-500/50 focus:outline-none disabled:opacity-50"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void postAction(
+                                    row.id,
+                                    "complete",
+                                    {
+                                      paymentReference: paymentRef,
+                                      confirmation: confirmEmail,
+                                    },
+                                    "Payout marked as paid.",
+                                  )
+                                }
+                                disabled={
+                                  !!rowBusy[row.id] || !paymentRef || !emailMatch
+                                }
+                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:opacity-50"
+                              >
+                                {rowBusy[row.id] ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                                )}
+                                Complete (mark paid)
+                              </button>
+                              <input
+                                type="text"
+                                value={rejectReasons[row.id] ?? ""}
+                                onChange={(e) =>
+                                  setRejectReasons((prev) => ({
+                                    ...prev,
+                                    [row.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Rejection reason (required)"
+                                disabled={!!rowBusy[row.id]}
+                                className="w-full rounded-lg border border-glassBorder bg-white/[0.04] px-2.5 py-1.5 text-left text-xs text-white placeholder:text-white/35 focus:border-red-500/50 focus:outline-none disabled:opacity-50"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void postAction(
+                                    row.id,
+                                    "reject",
+                                    {
+                                      reason: rejectReason,
+                                      confirmation: confirmEmail,
+                                    },
+                                    "Payout rejected; commission released.",
+                                  )
+                                }
+                                disabled={
+                                  !!rowBusy[row.id] || !rejectReason || !emailMatch
+                                }
+                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-100 ring-1 ring-red-500/35 transition hover:bg-red-500/25 disabled:opacity-50"
+                              >
+                                Reject
+                              </button>
+                            </>
+                          ) : null}
                         </div>
                       </td>
                     </tr>

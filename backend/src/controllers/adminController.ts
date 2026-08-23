@@ -92,8 +92,10 @@ import {
 import { parseSalesMemberRoleInput } from "../utils/roleNormalize.js";
 import { buildAdminNetworkTree } from "../services/affiliateNetworkService.js";
 import {
+  approvePartnerPayout,
   completePartnerPayout,
-  listPendingPartnerPayouts,
+  listActionablePartnerPayouts,
+  rejectPartnerPayout,
 } from "../services/affiliatePayoutService.js";
 import {
   approveMemberUpgradeRequest,
@@ -3908,9 +3910,114 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const payouts = await listPendingPartnerPayouts(prisma);
+      const payouts = await listActionablePartnerPayouts(prisma);
       applyNoStoreCacheHeaders(res);
       res.json({ payouts });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function approvePartnerPayoutHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const rawId = req.params.id;
+      const payoutId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof payoutId !== "string" || !payoutId.trim()) {
+        res.status(400).json({ error: "Payout id is required" });
+        return;
+      }
+
+      const body = req.body as { reason?: unknown };
+      const reason =
+        typeof body?.reason === "string" ? body.reason.trim() : undefined;
+
+      const outcome = await approvePartnerPayout(
+        prisma,
+        payoutId.trim(),
+        adminUserId,
+        reason,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        payoutRequestId: outcome.payoutRequestId,
+        status: outcome.status,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function rejectPartnerPayoutHandler(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const adminUserId = req.userId;
+      if (!adminUserId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const rawId = req.params.id;
+      const payoutId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof payoutId !== "string" || !payoutId.trim()) {
+        res.status(400).json({ error: "Payout id is required" });
+        return;
+      }
+
+      const payout = await prisma.payoutRequest.findUnique({
+        where: { id: payoutId.trim() },
+        include: { user: { select: { email: true } } },
+      });
+      if (!payout) {
+        res.status(404).json({ error: "Payout request not found" });
+        return;
+      }
+
+      if (!requireTypedConfirmation(req, res, payout.user.email)) {
+        return;
+      }
+
+      const body = req.body as { reason?: unknown };
+      const reason =
+        typeof body?.reason === "string" ? body.reason.trim() : "";
+      if (!reason) {
+        res.status(400).json({ error: "reason is required when rejecting" });
+        return;
+      }
+
+      const outcome = await rejectPartnerPayout(
+        prisma,
+        payoutId.trim(),
+        adminUserId,
+        reason,
+      );
+      if (!outcome.ok) {
+        res.status(outcome.status).json({ error: outcome.message });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        payoutRequestId: outcome.payoutRequestId,
+        status: outcome.status,
+      });
     } catch (err) {
       next(err);
     }
@@ -3944,6 +4051,19 @@ export function createAdminController(prisma: PrismaClient) {
         res.status(400).json({
           error: "paymentReference (UTR / bank txn id) is required",
         });
+        return;
+      }
+
+      const payout = await prisma.payoutRequest.findUnique({
+        where: { id: payoutId.trim() },
+        include: { user: { select: { email: true } } },
+      });
+      if (!payout) {
+        res.status(404).json({ error: "Payout request not found" });
+        return;
+      }
+
+      if (!requireTypedConfirmation(req, res, payout.user.email)) {
         return;
       }
 
@@ -4577,6 +4697,8 @@ export function createAdminController(prisma: PrismaClient) {
     deleteUserSafely,
     listPartnerPayouts,
     completePartnerPayout: completePartnerPayoutHandler,
+    approvePartnerPayout: approvePartnerPayoutHandler,
+    rejectPartnerPayout: rejectPartnerPayoutHandler,
     listWalletWithdrawals,
     getWalletAdminSummary,
     listWalletUsers,

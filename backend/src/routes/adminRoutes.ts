@@ -364,6 +364,8 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
   router.get("/network-tree", adminController.getNetworkTree);
 
   router.get("/payouts", adminController.listPartnerPayouts);
+  router.post("/payouts/:id/approve", adminController.approvePartnerPayout);
+  router.post("/payouts/:id/reject", adminController.rejectPartnerPayout);
   router.post("/payouts/:id/complete", adminController.completePartnerPayout);
 
   router.get("/wallet/withdrawals", adminController.listWalletWithdrawals);

@@ -52,7 +52,9 @@ enum ReferralRequestStatus {
 /** Partner monthly payout request lifecycle (Phase 9). */
 enum PayoutRequestStatus {
   PENDING
+  APPROVED
   COMPLETED
+  REJECTED
 }
 
 /** Partner profile lifecycle — suspended when role is downgraded to USER (Phase 10). */
@@ -249,6 +251,8 @@ model User {
   affiliateUpgradesPerformed AffiliateProfile[] @relation("AffiliateUpgradedBy")
   payoutRequests       PayoutRequest[]
   partnerPayoutsCompleted PayoutRequest[]    @relation("PayoutCompletedBy")
+  partnerPayoutsApproved  PayoutRequest[]    @relation("PayoutApprovedBy")
+  partnerPayoutsRejected  PayoutRequest[]    @relation("PayoutRejectedBy")
   upgradeRequestsSubmitted MemberUpgradeRequest[] @relation("UpgradeRequestRequester")
   upgradeRequestsAsParent  MemberUpgradeRequest[] @relation("UpgradeRequestAssignedParent")
   referralRequestsSubmitted ReferralRequest[]     @relation("ReferralRequestSponsor")
@@ -1007,6 +1011,12 @@ model PayoutRequest {
   amount           Decimal             @db.Decimal(24, 10)
   status           PayoutRequestStatus @default(PENDING)
   requestedAt      DateTime            @default(now())
+  approvedAt       DateTime?
+  approvedById     String?
+  approvalReason   String?
+  rejectedAt       DateTime?
+  rejectedById     String?
+  rejectionReason  String?
   completedAt      DateTime?
   completedById    String?
   /** UTR / bank transaction id — required when marking COMPLETED. */
@@ -1017,12 +1027,16 @@ model PayoutRequest {
   updatedAt        DateTime            @updatedAt
 
   user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  approvedBy        User?              @relation("PayoutApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  rejectedBy        User?              @relation("PayoutRejectedBy", fields: [rejectedById], references: [id], onDelete: SetNull)
   completedBy       User?              @relation("PayoutCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
   commissionLedgers CommissionLedger[]
 
   @@index([userId, status])
   @@index([status, requestedAt])
   @@index([payoutClaimToken])
+  @@index([approvedById])
+  @@index([rejectedById])
 }
 
 model ArbitrageTrade {

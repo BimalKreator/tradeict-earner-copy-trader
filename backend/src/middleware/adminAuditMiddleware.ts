@@ -25,6 +25,8 @@ const REDACT_KEYS = new Set([
  * Compared against a normalized path template (`:id` for UUID/cuid segments).
  */
 export const MONEY_CRITICAL_PATHS: readonly string[] = [
+  "/payouts/:id/approve",
+  "/payouts/:id/reject",
   "/payouts/:id/complete",
   "/revenue/user/:id/profit-share",
   "/revenue/invoice/:id/status",

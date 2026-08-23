@@ -48,6 +48,18 @@ type PartnerMetrics = {
   canRequestPayoutWindowOpen?: boolean;
   canRequestPayout?: boolean;
   canRequestPayoutUntil?: string;
+  latestPayoutRequest?: {
+    id: string;
+    amount: number;
+    status: string;
+    statusLabel: string;
+    requestedAt: string;
+    approvedAt: string | null;
+    completedAt: string | null;
+    rejectedAt: string | null;
+    rejectionReason: string | null;
+    paymentReference: string | null;
+  } | null;
 };
 
 type UserFinancials = {
@@ -678,7 +690,40 @@ export default function PartnerDashboardPage() {
                 icon={<Wallet className="h-5 w-5" aria-hidden />}
                 accent="emerald"
                 action={
-                  <div className="group relative">
+                  <div className="group relative space-y-2">
+                    {metrics.latestPayoutRequest &&
+                    (metrics.latestPayoutRequest.status === "PENDING" ||
+                      metrics.latestPayoutRequest.status === "APPROVED" ||
+                      metrics.latestPayoutRequest.status === "REJECTED") ? (
+                      <div
+                        className={`rounded-lg border px-3 py-2 text-xs ${
+                          metrics.latestPayoutRequest.status === "REJECTED"
+                            ? "border-red-500/30 bg-red-500/10 text-red-100"
+                            : metrics.latestPayoutRequest.status === "APPROVED"
+                              ? "border-sky-500/30 bg-sky-500/10 text-sky-100"
+                              : "border-amber-500/30 bg-amber-500/10 text-amber-100"
+                        }`}
+                      >
+                        <p className="font-semibold">
+                          Payout {metrics.latestPayoutRequest.statusLabel} —{" "}
+                          {fmtUsd(metrics.latestPayoutRequest.amount)}
+                        </p>
+                        <p className="mt-1 text-white/55">
+                          Requested {fmtDate(metrics.latestPayoutRequest.requestedAt)}
+                        </p>
+                        {metrics.latestPayoutRequest.status === "REJECTED" &&
+                        metrics.latestPayoutRequest.rejectionReason ? (
+                          <p className="mt-1 text-red-200/90">
+                            Reason: {metrics.latestPayoutRequest.rejectionReason}
+                          </p>
+                        ) : null}
+                        {metrics.latestPayoutRequest.status === "APPROVED" ? (
+                          <p className="mt-1 text-sky-100/80">
+                            Approved — bank transfer pending
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void requestPayout()}
@@ -686,9 +731,12 @@ export default function PartnerDashboardPage() {
                       title={
                         !payoutWindowOpen
                           ? "Available on the last day of the month (IST)"
-                          : metrics.wallets.withdrawable <= 0
-                            ? "No withdrawable balance"
-                            : undefined
+                          : metrics.latestPayoutRequest?.status === "PENDING" ||
+                              metrics.latestPayoutRequest?.status === "APPROVED"
+                            ? "An active payout request is already in progress"
+                            : metrics.wallets.withdrawable <= 0
+                              ? "No withdrawable balance"
+                              : undefined
                       }
                       className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-40"
                     >
@@ -698,10 +746,13 @@ export default function PartnerDashboardPage() {
                       Request Payout
                     </button>
                     {!canRequestPayout ? (
-                      <p className="mt-2 text-center text-[11px] text-white/35">
+                      <p className="text-center text-[11px] text-white/35">
                         {!payoutWindowOpen
                           ? "Available on the last day of the month (IST)"
-                          : "No withdrawable balance yet"}
+                          : metrics.latestPayoutRequest?.status === "PENDING" ||
+                              metrics.latestPayoutRequest?.status === "APPROVED"
+                            ? "Payout already in progress"
+                            : "No withdrawable balance yet"}
                       </p>
                     ) : null}
                   </div>

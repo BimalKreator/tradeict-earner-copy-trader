@@ -1,13 +1,18 @@
 import {
   CommissionLedgerStatus,
   InvoiceStatus,
+  PayoutRequestStatus,
   Prisma,
   Role,
   SubscriptionStatus,
   type PrismaClient,
 } from "@prisma/client";
 import { isSalesMemberRole } from "./affiliateMemberService.js";
-import { getPayoutWindowState } from "./affiliatePayoutService.js";
+import {
+  getLatestPartnerPayoutRequest,
+  getPayoutWindowState,
+  type PartnerPayoutRequestSummary,
+} from "./affiliatePayoutService.js";
 import {
   fetchDeltaBalancesForUserIds,
   strategyShortName,
@@ -28,10 +33,12 @@ export type PartnerMetrics = {
   wallets: PartnerWalletTotals;
   /** True on the last calendar day of the month in Asia/Kolkata (IST). */
   canRequestPayoutWindowOpen: boolean;
-  /** Window open and withdrawable balance &gt; 0. */
+  /** Window open, withdrawable balance &gt; 0, no active payout request. */
   canRequestPayout: boolean;
   /** Exclusive end of the current IST month (ISO). */
   canRequestPayoutUntil: string;
+  /** Most recent payout request for partner visibility. */
+  latestPayoutRequest: PartnerPayoutRequestSummary | null;
 };
 
 function decimalSumToNumber(
@@ -145,12 +152,17 @@ export async function getPartnerMetrics(
   });
   const acquiredIds = acquiredUsers.map((u) => u.id);
 
-  const [wallets, networkAum] = await Promise.all([
+  const [wallets, networkAum, latestPayoutRequest] = await Promise.all([
     sumCommissionWalletsByStatus(prisma, userId),
     sumDeltaBalancesForUserIds(prisma, acquiredIds),
+    getLatestPartnerPayoutRequest(prisma, userId),
   ]);
 
   const payoutWindow = getPayoutWindowState();
+  const hasActivePayout =
+    latestPayoutRequest != null &&
+    (latestPayoutRequest.status === PayoutRequestStatus.PENDING ||
+      latestPayoutRequest.status === PayoutRequestStatus.APPROVED);
 
   return {
     referralCode: user.affiliateProfile?.referralCode ?? null,
@@ -160,8 +172,11 @@ export async function getPartnerMetrics(
     wallets,
     canRequestPayoutWindowOpen: payoutWindow.canRequestPayout,
     canRequestPayout:
-      payoutWindow.canRequestPayout && wallets.withdrawable > 0,
+      payoutWindow.canRequestPayout &&
+      wallets.withdrawable > 0 &&
+      !hasActivePayout,
     canRequestPayoutUntil: payoutWindow.canRequestPayoutUntil,
+    latestPayoutRequest,
   };
 }
 
