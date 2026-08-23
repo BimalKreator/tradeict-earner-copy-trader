@@ -2,7 +2,9 @@
 
 import {
   AlertTriangle,
+  ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Loader2,
   RefreshCw,
   ShieldCheck,
@@ -33,6 +35,8 @@ import {
   formatIstSnapshotDay,
   currentIstYearMonth,
 } from "@/lib/istDates";
+import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
+import { runSafeRecompute } from "@/components/admin/AdminUserStructureBillingPanel";
 
 const UNMATCHED_AMBER_THRESHOLD = 3;
 
@@ -62,6 +66,27 @@ type HealthUser = {
   overlapCount: number;
 };
 
+type DetailInvoice = {
+  id: string;
+  periodYear: number;
+  periodMonth: number;
+  realizedPnl: number;
+  cumulativeRealizedPnl?: number | null;
+  hwmBefore: number;
+  hwmAfter: number;
+  billableProfit: number;
+  profitSharePct: number;
+  commissionAmount: number;
+  creditNoteAmount?: number | null;
+  creditNoteReason?: string | null;
+  status: string;
+  overlapTxnCount?: number | null;
+  suspectStructuresCount?: number | null;
+  suspectLossesCountedCount?: number | null;
+  suspectLossesCountedAmount?: number | null;
+  voidReason?: string | null;
+};
+
 type UserDetail = {
   user: { id: string; email: string; name: string | null };
   profitShareOverride: number | null;
@@ -75,6 +100,7 @@ type UserDetail = {
     commissionCumulative: number;
   }>;
   structures: Array<{
+    id: string;
     botStructureId: number;
     status: string;
     openedAt: string;
@@ -99,17 +125,32 @@ type UserDetail = {
       liquidationFeeTotal?: number | null;
     }>;
   }>;
-  invoices: Array<{
-    periodYear: number;
-    periodMonth: number;
-    billableProfit: number;
-    profitSharePct: number;
-    commissionAmount: number;
-    status: string;
-    overlapTxnCount?: number | null;
-    suspectStructuresCount?: number | null;
-    suspectLossesCountedCount?: number | null;
-    suspectLossesCountedAmount?: number | null;
+  invoices: DetailInvoice[];
+};
+
+type StructureLedgerPayload = {
+  nearbyPadHours: number;
+  legs: Array<{
+    botLegId: number;
+    legRole: string;
+    symbol: string | null;
+    productId: number;
+    matched: Array<{
+      deltaUuid: string;
+      transactionType: string;
+      amount: number;
+      occurredAt: string;
+      productId: number | null;
+      productSymbol: string | null;
+    }>;
+  }>;
+  nearbyUnmatched: Array<{
+    deltaUuid: string;
+    transactionType: string;
+    amount: number;
+    occurredAt: string;
+    productId: number | null;
+    productSymbol: string | null;
   }>;
 };
 
@@ -121,6 +162,14 @@ function pnlClass(n: number): string {
 
 function defaultPeriod(): { year: number; month: number } {
   return currentIstYearMonth();
+}
+
+function canVoidInvoice(status: string): boolean {
+  return status === "ACCRUED" || status === "INVOICED";
+}
+
+function canCreditNote(status: string): boolean {
+  return status === "INVOICED" || status === "PAID";
 }
 
 export function AdminDeltaRevenueDashboard() {
@@ -140,6 +189,39 @@ export function AdminDeltaRevenueDashboard() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [overrideInput, setOverrideInput] = useState("");
   const [savingOverride, setSavingOverride] = useState(false);
+  const [expandedWhyId, setExpandedWhyId] = useState<string | null>(null);
+  const [invoiceSidePanel, setInvoiceSidePanel] = useState<{
+    invoiceId: string;
+    kind: "commissions" | "history";
+    loading: boolean;
+    error: string | null;
+    data: unknown;
+  } | null>(null);
+  const [voidModal, setVoidModal] = useState<{
+    invoice: DetailInvoice;
+    reason: string;
+  } | null>(null);
+  const [creditModal, setCreditModal] = useState<{
+    invoice: DetailInvoice;
+    amount: string;
+    reason: string;
+  } | null>(null);
+  const [invoiceActionBusy, setInvoiceActionBusy] = useState(false);
+  const [invoiceActionError, setInvoiceActionError] = useState<string | null>(null);
+  const [invoiceActionResult, setInvoiceActionResult] = useState<string | null>(null);
+  const [safeRecomputeUserId, setSafeRecomputeUserId] = useState<string | null>(null);
+  const [structureFocus, setStructureFocus] = useState<"unmatched" | "overlap" | null>(
+    null,
+  );
+  const [expandedStructureLedgerId, setExpandedStructureLedgerId] = useState<
+    string | null
+  >(null);
+  const [structureLedgers, setStructureLedgers] = useState<
+    Record<string, StructureLedgerPayload>
+  >({});
+  const [structureLedgerLoading, setStructureLedgerLoading] = useState<string | null>(
+    null,
+  );
 
   const loadOverview = useCallback(async () => {
     if (!resolveApiBase()) return;
@@ -256,12 +338,159 @@ export function AdminDeltaRevenueDashboard() {
     }
   }
 
+  async function handleSafeRecompute(userId: string) {
+    setSafeRecomputeUserId(userId);
+    try {
+      await runSafeRecompute(userId);
+      await loadOverview();
+      if (selectedUserId === userId) await loadDetail(userId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Safe recompute failed");
+    } finally {
+      setSafeRecomputeUserId(null);
+    }
+  }
+
+  async function loadInvoiceSide(
+    invoiceId: string,
+    kind: "commissions" | "history",
+  ) {
+    setInvoiceSidePanel({ invoiceId, kind, loading: true, error: null, data: null });
+    try {
+      const path =
+        kind === "commissions"
+          ? `/admin/revenue/invoice/${invoiceId}/commissions`
+          : `/admin/revenue/invoice/${invoiceId}/ledger`;
+      const res = await authFetch(path);
+      if (!res.ok) {
+        throw new Error(formatFetchError(kind, res, buildApiUrl(path)));
+      }
+      const data: unknown = await res.json();
+      setInvoiceSidePanel({ invoiceId, kind, loading: false, error: null, data });
+    } catch (err) {
+      setInvoiceSidePanel({
+        invoiceId,
+        kind,
+        loading: false,
+        error: err instanceof Error ? err.message : "Load failed",
+        data: null,
+      });
+    }
+  }
+
+  async function toggleStructureLedger(structurePnlId: string) {
+    if (expandedStructureLedgerId === structurePnlId) {
+      setExpandedStructureLedgerId(null);
+      return;
+    }
+    setExpandedStructureLedgerId(structurePnlId);
+    if (structureLedgers[structurePnlId]) return;
+    setStructureLedgerLoading(structurePnlId);
+    try {
+      const path = `/admin/revenue/structure/${structurePnlId}/ledger`;
+      const res = await authFetch(path);
+      if (!res.ok) {
+        throw new Error(formatFetchError("structure ledger", res, buildApiUrl(path)));
+      }
+      const data = (await res.json()) as StructureLedgerPayload;
+      setStructureLedgers((prev) => ({ ...prev, [structurePnlId]: data }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load ledger");
+      setExpandedStructureLedgerId(null);
+    } finally {
+      setStructureLedgerLoading(null);
+    }
+  }
+
+  async function confirmVoid(confirmation: string) {
+    if (!voidModal || !selectedUserId) return;
+    setInvoiceActionBusy(true);
+    setInvoiceActionError(null);
+    setInvoiceActionResult(null);
+    try {
+      const path = `/admin/revenue/invoice/${voidModal.invoice.id}/status`;
+      const res = await authFetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "VOID",
+          reason: voidModal.reason.trim(),
+          confirmation,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        expectedHint?: string;
+      };
+      if (!res.ok) {
+        throw new Error(
+          (body.error ?? formatFetchError("void", res, buildApiUrl(path))) +
+            (body.expectedHint ? ` ${body.expectedHint}` : ""),
+        );
+      }
+      setInvoiceActionResult("Invoice voided.");
+      await loadDetail(selectedUserId);
+      await loadOverview();
+    } catch (err) {
+      setInvoiceActionError(err instanceof Error ? err.message : "Void failed");
+    } finally {
+      setInvoiceActionBusy(false);
+    }
+  }
+
+  async function confirmCreditNote(confirmation: string) {
+    if (!creditModal || !selectedUserId) return;
+    setInvoiceActionBusy(true);
+    setInvoiceActionError(null);
+    setInvoiceActionResult(null);
+    try {
+      const path = `/admin/revenue/invoice/${creditModal.invoice.id}/credit-note`;
+      const res = await authFetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: Number(creditModal.amount),
+          reason: creditModal.reason.trim(),
+          confirmation,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        expectedHint?: string;
+      };
+      if (!res.ok) {
+        throw new Error(
+          (body.error ?? formatFetchError("credit note", res, buildApiUrl(path))) +
+            (body.expectedHint ? ` ${body.expectedHint}` : ""),
+        );
+      }
+      setInvoiceActionResult("Credit note applied.");
+      await loadDetail(selectedUserId);
+      await loadOverview();
+    } catch (err) {
+      setInvoiceActionError(err instanceof Error ? err.message : "Credit note failed");
+    } finally {
+      setInvoiceActionBusy(false);
+    }
+  }
+
+  function openUserFromHealth(
+    userId: string,
+    focus: "unmatched" | "overlap" | null,
+  ) {
+    setStructureFocus(focus);
+    setSelectedUserId(userId);
+  }
+
   if (selectedUserId && detail) {
     return (
       <div className="mx-auto max-w-6xl space-y-6 px-4 py-8">
         <button
           type="button"
-          onClick={() => setSelectedUserId(null)}
+          onClick={() => {
+            setSelectedUserId(null);
+            setStructureFocus(null);
+          }}
           className="inline-flex items-center gap-1 text-sm text-white/60 hover:text-white"
         >
           <ChevronLeft className="h-4 w-4" /> Back to overview
@@ -328,60 +557,246 @@ export function AdminDeltaRevenueDashboard() {
           {detail.invoices.length === 0 ? (
             <p className="text-sm text-white/45">No invoices yet.</p>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-white/10">
-              <table className="w-full text-left text-sm">
-                <thead className="text-xs uppercase text-white/40">
-                  <tr>
-                    <th className="px-4 py-2">Period</th>
-                    <th className="px-4 py-2">Billable</th>
-                    <th className="px-4 py-2">Share</th>
-                    <th className="px-4 py-2">Commission</th>
-                    <th className="px-4 py-2">Overlaps</th>
-                    <th className="px-4 py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {detail.invoices.map((inv) => (
-                    <tr key={`${inv.periodYear}-${inv.periodMonth}`}>
-                      <td className="px-4 py-2">
-                        {formatIstMonthYear(inv.periodMonth, inv.periodYear)}
-                      </td>
-                      <td className="px-4 py-2 tabular-nums">{fmtUsd(inv.billableProfit)}</td>
-                      <td className="px-4 py-2 tabular-nums">{inv.profitSharePct.toFixed(1)}%</td>
-                      <td className="px-4 py-2 tabular-nums">{fmtUsd(inv.commissionAmount)}</td>
-                      <td
-                        className={`px-4 py-2 tabular-nums ${
-                          (inv.overlapTxnCount ?? 0) > 0
-                            ? "text-red-300 font-medium"
-                            : ""
-                        }`}
-                      >
-                        {inv.overlapTxnCount ?? 0}
-                      </td>
-                      <td className="px-4 py-2">{inv.status}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="space-y-3">
+              {detail.invoices.map((inv) => {
+                const whyOpen = expandedWhyId === inv.id;
+                const freePortion = Math.max(0, inv.realizedPnl - inv.billableProfit);
+                return (
+                  <div
+                    key={inv.id}
+                    className="rounded-lg border border-white/10 bg-white/[0.02] p-3 text-sm"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-white">
+                          {formatIstMonthYear(inv.periodMonth, inv.periodYear)} ·{" "}
+                          {inv.status}
+                        </p>
+                        <p className="mt-0.5 text-xs text-white/45">
+                          Billable {fmtUsd(inv.billableProfit)} · Share{" "}
+                          {inv.profitSharePct.toFixed(1)}% · Commission{" "}
+                          {fmtUsd(inv.commissionAmount)}
+                          {(inv.overlapTxnCount ?? 0) > 0
+                            ? ` · Overlaps ${inv.overlapTxnCount}`
+                            : ""}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedWhyId(whyOpen ? null : inv.id)
+                          }
+                          className="rounded border border-white/15 px-2 py-1 text-[11px] text-white/80 hover:bg-white/5"
+                        >
+                          Why this amount?
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void loadInvoiceSide(inv.id, "commissions")}
+                          className="rounded border border-white/15 px-2 py-1 text-[11px] text-white/80 hover:bg-white/5"
+                        >
+                          Commissions
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void loadInvoiceSide(inv.id, "history")}
+                          className="rounded border border-white/15 px-2 py-1 text-[11px] text-white/80 hover:bg-white/5"
+                        >
+                          History
+                        </button>
+                        {canCreditNote(inv.status) ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInvoiceActionError(null);
+                              setInvoiceActionResult(null);
+                              setCreditModal({
+                                invoice: inv,
+                                amount: "",
+                                reason: "",
+                              });
+                            }}
+                            className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-100"
+                          >
+                            Credit note
+                          </button>
+                        ) : null}
+                        {canVoidInvoice(inv.status) ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInvoiceActionError(null);
+                              setInvoiceActionResult(null);
+                              setVoidModal({ invoice: inv, reason: "" });
+                            }}
+                            className="rounded border border-red-500/40 bg-red-500/15 px-2 py-1 text-[11px] text-red-100"
+                          >
+                            Void
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {whyOpen ? (
+                      <div className="mt-3 space-y-1 rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70">
+                        <div className="flex justify-between gap-4">
+                          <span>Realized P&amp;L (realizedPnl)</span>
+                          <span className="tabular-nums">{fmtUsd(inv.realizedPnl)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>HWM before (hwmBefore)</span>
+                          <span className="tabular-nums">{fmtUsd(inv.hwmBefore)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>HWM after (hwmAfter)</span>
+                          <span className="tabular-nums">{fmtUsd(inv.hwmAfter)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Billable (billableProfit)</span>
+                          <span className="tabular-nums">{fmtUsd(inv.billableProfit)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Free portion (above HWM not billed)</span>
+                          <span className="tabular-nums">{fmtUsd(freePortion)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Share % (profitSharePct)</span>
+                          <span className="tabular-nums">
+                            {inv.profitSharePct.toFixed(1)}%
+                          </span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Commission (commissionAmount)</span>
+                          <span className="tabular-nums">
+                            {fmtUsd(inv.commissionAmount)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Credit note</span>
+                          <span className="tabular-nums">
+                            {inv.creditNoteAmount != null
+                              ? `${fmtUsd(inv.creditNoteAmount)}${
+                                  inv.creditNoteReason
+                                    ? ` — ${inv.creditNoteReason}`
+                                    : ""
+                                }`
+                              : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Suspect structures / losses counted</span>
+                          <span className="tabular-nums">
+                            {inv.suspectStructuresCount ?? 0} /{" "}
+                            {inv.suspectLossesCountedCount ?? 0}
+                            {inv.suspectLossesCountedAmount != null
+                              ? ` (${fmtUsd(inv.suspectLossesCountedAmount)})`
+                              : ""}
+                          </span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Overlap txn count</span>
+                          <span
+                            className={`tabular-nums ${
+                              (inv.overlapTxnCount ?? 0) > 0 ? "text-red-300" : ""
+                            }`}
+                          >
+                            {inv.overlapTxnCount ?? 0}
+                          </span>
+                        </div>
+                        {inv.voidReason ? (
+                          <div className="flex justify-between gap-4 text-red-200/90">
+                            <span>Void reason</span>
+                            <span>{inv.voidReason}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {invoiceSidePanel?.invoiceId === inv.id ? (
+                      <div className="mt-3 rounded border border-white/10 bg-black/40 p-3 text-xs">
+                        <div className="mb-2 flex items-center justify-between">
+                          <p className="font-medium text-white/80">
+                            {invoiceSidePanel.kind === "commissions"
+                              ? "Commissions"
+                              : "Invoice history"}
+                          </p>
+                          <button
+                            type="button"
+                            className="text-white/40 hover:text-white"
+                            onClick={() => setInvoiceSidePanel(null)}
+                          >
+                            Close
+                          </button>
+                        </div>
+                        {invoiceSidePanel.loading ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-white/30" />
+                        ) : invoiceSidePanel.error ? (
+                          <p className="text-amber-200">{invoiceSidePanel.error}</p>
+                        ) : (
+                          <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-[11px] text-white/65">
+                            {JSON.stringify(invoiceSidePanel.data, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
 
-        <div className="space-y-2">
-          <h2 className="text-lg font-medium text-white">Structures</h2>
-          {detail.structures.map((s) => (
+        <div className="space-y-2" id="admin-revenue-structures">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-medium text-white">Structures</h2>
+            {structureFocus ? (
+              <p className="text-xs text-amber-200">
+                Focus: {structureFocus === "unmatched" ? "unmatched txns" : "overlap legs"} —
+                open ledger rows on structures below.
+              </p>
+            ) : null}
+          </div>
+          {detail.structures.map((s) => {
+            const highlightZero =
+              structureFocus === "unmatched" && s.matchedTxnCount === 0;
+            const highlightOverlap =
+              structureFocus === "overlap" && s.matchedTxnCount > 0;
+            const ledgerOpen = expandedStructureLedgerId === s.id;
+            const ledger = structureLedgers[s.id];
+            return (
             <div
-              key={s.botStructureId}
-              className="rounded-lg border border-white/10 px-4 py-3 text-sm"
+              key={s.id}
+              className={`rounded-lg border px-4 py-3 text-sm ${
+                highlightZero || highlightOverlap
+                  ? "border-amber-500/40 bg-amber-500/[0.06]"
+                  : "border-white/10"
+              }`}
             >
-              <div className="flex justify-between">
-                <span>
-                  #{s.botStructureId} · {s.status} · {formatIstCalendarDate(s.openedAt)}
-                  {s.closedAt ? ` → ${formatIstCalendarDate(s.closedAt)}` : ""}
-                </span>
-                <span className={pnlClass(s.realizedPnl ?? 0)}>
-                  {s.realizedPnl != null ? fmtUsd(s.realizedPnl) : "—"}
-                </span>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="flex justify-between gap-4 flex-1">
+                  <span>
+                    #{s.botStructureId} · {s.status} · {formatIstCalendarDate(s.openedAt)}
+                    {s.closedAt ? ` → ${formatIstCalendarDate(s.closedAt)}` : ""}
+                  </span>
+                  <span className={pnlClass(s.realizedPnl ?? 0)}>
+                    {s.realizedPnl != null ? fmtUsd(s.realizedPnl) : "—"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void toggleStructureLedger(s.id)}
+                  className="inline-flex items-center gap-1 rounded border border-sky-500/35 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-100"
+                >
+                  {structureLedgerLoading === s.id ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : ledgerOpen ? (
+                    <ChevronDown className="h-3 w-3" />
+                  ) : (
+                    <ChevronRight className="h-3 w-3" />
+                  )}
+                  Show ledger rows
+                </button>
               </div>
               <p className="mt-1 text-xs text-white/40">
                 {s.legs.length} legs · {s.matchedTxnCount} matched txns
@@ -396,6 +811,39 @@ export function AdminDeltaRevenueDashboard() {
                 {" · "}
                 liq {fmtUsd(s.liquidationFeeTotal ?? 0)}
               </p>
+              {ledgerOpen && ledger ? (
+                <div className="mt-2 space-y-2 rounded border border-white/10 bg-black/30 p-2 text-[11px]">
+                  {ledger.legs.map((leg) => (
+                    <div key={leg.botLegId}>
+                      <p className="text-white/60">
+                        {leg.legRole}
+                        {leg.symbol ? ` · ${leg.symbol}` : ""} · {leg.matched.length}{" "}
+                        matched
+                      </p>
+                      <ul className="mt-1 space-y-0.5 text-white/50">
+                        {leg.matched.slice(0, 20).map((r) => (
+                          <li key={r.deltaUuid} className="font-mono">
+                            {r.transactionType} {fmtUsd(r.amount)} ·{" "}
+                            {r.deltaUuid.slice(0, 10)}…
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                  <p className="text-amber-200/80">
+                    Nearby unmatched ({ledger.nearbyUnmatched.length}) ±
+                    {ledger.nearbyPadHours}h
+                  </p>
+                  <ul className="space-y-0.5 text-white/50">
+                    {ledger.nearbyUnmatched.slice(0, 30).map((r) => (
+                      <li key={r.deltaUuid} className="font-mono">
+                        {r.transactionType} {fmtUsd(r.amount)} · product{" "}
+                        {r.productId ?? "—"} · {r.deltaUuid.slice(0, 10)}…
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {s.legs.length > 0 ? (
                 <div className="mt-2 overflow-x-auto rounded border border-white/5">
                   <table className="w-full min-w-[640px] text-left text-xs text-white/70">
@@ -446,8 +894,115 @@ export function AdminDeltaRevenueDashboard() {
                 </div>
               ) : null}
             </div>
-          ))}
+          );
+          })}
         </div>
+
+        <ConfirmDestructiveModal
+          open={voidModal != null}
+          title="Void invoice"
+          description={`Void ${
+            voidModal
+              ? formatIstMonthYear(
+                  voidModal.invoice.periodMonth,
+                  voidModal.invoice.periodYear,
+                )
+              : ""
+          } invoice (${voidModal?.invoice.status ?? ""}). Commissions reverse per lifecycle rules. Type the customer email to confirm.`}
+          expectedConfirmation={detail.user.email}
+          customerEmail={detail.user.email}
+          confirmButtonText="Void invoice"
+          busy={invoiceActionBusy}
+          error={invoiceActionError}
+          result={invoiceActionResult}
+          onClose={() => {
+            if (!invoiceActionBusy) setVoidModal(null);
+          }}
+          onConfirm={(confirmation) => {
+            if (!voidModal?.reason.trim()) {
+              setInvoiceActionError("Reason is required");
+              return;
+            }
+            void confirmVoid(confirmation);
+          }}
+        />
+        {voidModal ? (
+          <div className="fixed bottom-4 left-1/2 z-[60] w-full max-w-md -translate-x-1/2 rounded-lg border border-white/15 bg-zinc-900 p-3 shadow-xl">
+            <label className="block text-xs text-white/60">
+              Void reason
+              <input
+                value={voidModal.reason}
+                onChange={(e) =>
+                  setVoidModal({ ...voidModal, reason: e.target.value })
+                }
+                className="mt-1 w-full rounded border border-white/15 bg-black/40 px-2 py-1.5 text-sm text-white"
+              />
+            </label>
+          </div>
+        ) : null}
+
+        <ConfirmDestructiveModal
+          open={creditModal != null}
+          title="Apply credit note"
+          description={`Credit note on ${
+            creditModal
+              ? formatIstMonthYear(
+                  creditModal.invoice.periodMonth,
+                  creditModal.invoice.periodYear,
+                )
+              : ""
+          } reduces collectible amount (max ${fmtUsd(
+            creditModal?.invoice.commissionAmount ?? 0,
+          )}). Type the customer email to confirm.`}
+          expectedConfirmation={detail.user.email}
+          customerEmail={detail.user.email}
+          confirmButtonText="Apply credit note"
+          busy={invoiceActionBusy}
+          error={invoiceActionError}
+          result={invoiceActionResult}
+          onClose={() => {
+            if (!invoiceActionBusy) setCreditModal(null);
+          }}
+          onConfirm={(confirmation) => {
+            if (!creditModal?.reason.trim()) {
+              setInvoiceActionError("Reason is required");
+              return;
+            }
+            const amt = Number(creditModal?.amount);
+            if (!Number.isFinite(amt) || amt <= 0) {
+              setInvoiceActionError("Amount must be a positive number");
+              return;
+            }
+            void confirmCreditNote(confirmation);
+          }}
+        />
+        {creditModal ? (
+          <div className="fixed bottom-4 left-1/2 z-[60] w-full max-w-md -translate-x-1/2 space-y-2 rounded-lg border border-white/15 bg-zinc-900 p-3 shadow-xl">
+            <label className="block text-xs text-white/60">
+              Credit amount (USD)
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={creditModal.amount}
+                onChange={(e) =>
+                  setCreditModal({ ...creditModal, amount: e.target.value })
+                }
+                className="mt-1 w-full rounded border border-white/15 bg-black/40 px-2 py-1.5 text-sm text-white"
+              />
+            </label>
+            <label className="block text-xs text-white/60">
+              Reason
+              <input
+                value={creditModal.reason}
+                onChange={(e) =>
+                  setCreditModal({ ...creditModal, reason: e.target.value })
+                }
+                className="mt-1 w-full rounded border border-white/15 bg-black/40 px-2 py-1.5 text-sm text-white"
+              />
+            </label>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -515,7 +1070,7 @@ export function AdminDeltaRevenueDashboard() {
           Pipeline health
         </h2>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] text-left text-sm">
+          <table className="w-full min-w-[1050px] text-left text-sm">
             <thead className="text-xs uppercase text-white/40">
               <tr>
                 <th className="px-4 py-2">User</th>
@@ -525,6 +1080,7 @@ export function AdminDeltaRevenueDashboard() {
                 <th className="px-4 py-2">Unmatched</th>
                 <th className="px-4 py-2">Zero-match</th>
                 <th className="px-4 py-2">Overlap</th>
+                <th className="px-4 py-2">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
@@ -532,6 +1088,7 @@ export function AdminDeltaRevenueDashboard() {
                 const unmatchedWarn = h.unmatchedTxnCount >= UNMATCHED_AMBER_THRESHOLD;
                 const zeroMatchBad = h.zeroMatchStructureCount > 0;
                 const overlapBad = h.overlapCount > 0;
+                const hasIssue = unmatchedWarn || zeroMatchBad || overlapBad;
                 return (
                   <tr key={h.userId} className="text-white/80">
                     <td className="px-4 py-2">{h.email ?? h.userId.slice(0, 8)}</td>
@@ -560,6 +1117,44 @@ export function AdminDeltaRevenueDashboard() {
                       className={`px-4 py-2 tabular-nums ${overlapBad ? "text-red-300 font-medium" : ""}`}
                     >
                       {h.overlapCount}
+                    </td>
+                    <td className="px-4 py-2">
+                      {hasIssue ? (
+                        <div className="flex flex-wrap gap-1">
+                          {zeroMatchBad ? (
+                            <button
+                              type="button"
+                              disabled={safeRecomputeUserId === h.userId}
+                              onClick={() => void handleSafeRecompute(h.userId)}
+                              className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-1 text-[10px] text-emerald-100 disabled:opacity-50"
+                            >
+                              {safeRecomputeUserId === h.userId
+                                ? "…"
+                                : "Recompute (safe)"}
+                            </button>
+                          ) : null}
+                          {unmatchedWarn ? (
+                            <button
+                              type="button"
+                              onClick={() => openUserFromHealth(h.userId, "unmatched")}
+                              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100"
+                            >
+                              Show ledger rows
+                            </button>
+                          ) : null}
+                          {overlapBad ? (
+                            <button
+                              type="button"
+                              onClick={() => openUserFromHealth(h.userId, "overlap")}
+                              className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[10px] text-red-100"
+                            >
+                              Open overlap legs
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-white/30">OK</span>
+                      )}
                     </td>
                   </tr>
                 );

@@ -358,6 +358,7 @@ export async function getAdminRevenueUserDetail(
     };
     }),
     invoices: invoices.map((inv) => ({
+      id: inv.id,
       periodYear: inv.periodYear,
       periodMonth: inv.periodMonth,
       structuresClosed: inv.structuresClosed,
@@ -377,6 +378,9 @@ export async function getAdminRevenueUserDetail(
       billableProfit: dec(inv.billableProfit),
       profitSharePct: dec(inv.profitSharePct),
       commissionAmount: dec(inv.commissionAmount),
+      creditNoteAmount:
+        inv.creditNoteAmount != null ? dec(inv.creditNoteAmount) : null,
+      creditNoteReason: inv.creditNoteReason ?? null,
       status: inv.status,
       invoicedAt: inv.invoicedAt?.toISOString() ?? null,
       dueDate: inv.dueDate?.toISOString() ?? null,
@@ -388,6 +392,128 @@ export async function getAdminRevenueUserDetail(
       paymentReference: inv.paymentReference ?? null,
       isSimulated: inv.isSimulated,
     })),
+  };
+}
+
+/** Pad around leg windows for nearby unmatched ledger rows (forensic only). */
+const STRUCTURE_LEDGER_NEARBY_PAD_MS = 6 * 60 * 60 * 1000;
+
+export type StructureLedgerEntryRow = {
+  deltaUuid: string;
+  transactionType: string;
+  amount: number;
+  occurredAt: string;
+  productId: number | null;
+  productSymbol: string | null;
+};
+
+/**
+ * Admin forensic view: Delta ledger rows matched to each leg window, plus
+ * nearby unmatched rows. Read-only — does not change customer-facing P&L.
+ */
+export async function getStructureLedgerForensic(
+  prisma: PrismaClient,
+  structurePnlId: string,
+  includeSimulated = false,
+) {
+  const simFilter = excludeSimulatedFilter(includeSimulated);
+  const structure = await prisma.structurePnl.findFirst({
+    where: { id: structurePnlId, ...simFilter },
+    include: {
+      legs: { where: simFilter, orderBy: { openedAt: "asc" } },
+      user: { select: { id: true, email: true } },
+    },
+  });
+  if (!structure) return null;
+
+  const legSpecs: LegWindowSpec[] = structure.legs.map((leg) => ({
+    botStructureId: structure.botStructureId,
+    botLegId: leg.botLegId,
+    productId: leg.productId,
+    openedAt: leg.openedAt,
+    attributionFrom: leg.attributionFrom,
+    closedAt: leg.closedAt,
+  }));
+
+  let windowMin = structure.openedAt.getTime();
+  let windowMax = (structure.closedAt ?? new Date()).getTime();
+  for (const leg of structure.legs) {
+    const start = (leg.attributionFrom ?? leg.openedAt).getTime();
+    const end = (leg.closedAt ?? new Date()).getTime();
+    windowMin = Math.min(windowMin, start);
+    windowMax = Math.max(windowMax, end);
+  }
+
+  const rangeStart = new Date(windowMin - STRUCTURE_LEDGER_NEARBY_PAD_MS);
+  const rangeEnd = new Date(windowMax + STRUCTURE_LEDGER_NEARBY_PAD_MS);
+
+  const ledgerRows = await prisma.deltaLedgerEntry.findMany({
+    where: {
+      userId: structure.userId,
+      transactionType: { in: [...BILLING_TXN_TYPES] },
+      occurredAt: { gte: rangeStart, lte: rangeEnd },
+      ...simFilter,
+    },
+    orderBy: { occurredAt: "asc" },
+    select: {
+      deltaUuid: true,
+      transactionType: true,
+      amount: true,
+      occurredAt: true,
+      productId: true,
+      productSymbol: true,
+    },
+  });
+
+  const toRow = (row: (typeof ledgerRows)[number]): StructureLedgerEntryRow => ({
+    deltaUuid: row.deltaUuid,
+    transactionType: row.transactionType,
+    amount: dec(row.amount),
+    occurredAt: row.occurredAt.toISOString(),
+    productId: row.productId,
+    productSymbol: row.productSymbol,
+  });
+
+  const matchedUuids = new Set<string>();
+  const legs = structure.legs.map((leg) => {
+    const matched = ledgerRows.filter((txn) => {
+      const hits = findMatchingLegWindows(
+        { productId: txn.productId, occurredAt: txn.occurredAt },
+        legSpecs,
+      );
+      return hits.some((h) => h.botLegId === leg.botLegId);
+    });
+    for (const m of matched) matchedUuids.add(m.deltaUuid);
+    return {
+      botLegId: leg.botLegId,
+      legRole: leg.legRole,
+      symbol: leg.symbol,
+      productId: leg.productId,
+      openedAt: leg.openedAt.toISOString(),
+      attributionFrom: leg.attributionFrom?.toISOString() ?? null,
+      closedAt: leg.closedAt?.toISOString() ?? null,
+      matchedTxnCount: leg.matchedTxnCount,
+      matched: matched.map(toRow),
+    };
+  });
+
+  const nearbyUnmatched = ledgerRows
+    .filter((row) => !matchedUuids.has(row.deltaUuid))
+    .map(toRow);
+
+  return {
+    structurePnlId: structure.id,
+    botStructureId: structure.botStructureId,
+    userId: structure.userId,
+    userEmail: structure.user.email,
+    status: structure.status,
+    openedAt: structure.openedAt.toISOString(),
+    closedAt: structure.closedAt?.toISOString() ?? null,
+    realizedPnl: structure.realizedPnl != null ? dec(structure.realizedPnl) : null,
+    matchedTxnCount: structure.matchedTxnCount,
+    nearbyPadHours: STRUCTURE_LEDGER_NEARBY_PAD_MS / (60 * 60 * 1000),
+    legs,
+    nearbyUnmatched,
   };
 }
 

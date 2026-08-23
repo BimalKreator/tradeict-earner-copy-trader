@@ -6,6 +6,7 @@ import {
   getAdminRevenueOverview,
   getAdminRevenueReconcile,
   getAdminRevenueUserDetail,
+  getStructureLedgerForensic,
   getUnbilledRevenueUsers,
 } from "../services/adminDeltaRevenueService.js";
 import { getAttributionHealthForUser } from "../services/structureAttributionHealthService.js";
@@ -515,6 +516,34 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function getStructureLedger(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.structurePnlId;
+      const structurePnlId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof structurePnlId !== "string" || !structurePnlId.trim()) {
+        res.status(400).json({ error: "structurePnlId required" });
+        return;
+      }
+      const includeSimulated = parseIncludeSimulated(req.query.includeSimulated);
+      const data = await getStructureLedgerForensic(
+        prisma,
+        structurePnlId.trim(),
+        includeSimulated,
+      );
+      if (!data) {
+        res.status(404).json({ error: "Structure not found" });
+        return;
+      }
+      res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getUnbilledUsers(
     _req: Request,
     res: Response,
@@ -540,6 +569,7 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     postInvoiceCreditNote,
     getInvoiceCommissions,
     getInvoiceLedger,
+    getStructureLedger,
     getUnbilledUsers,
   };
 }
