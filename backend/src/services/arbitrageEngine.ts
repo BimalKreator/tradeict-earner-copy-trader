@@ -309,12 +309,11 @@ export async function runArbitrageEngineCycle(
 
 /**
  * Schedules the automated arbitrage worker (default: every 4 minutes, UTC).
- * Set `ARBITRAGE_ENGINE_ENABLED=false` to disable. Override schedule with
+ * Only runs when `ARBITRAGE_ENGINE_ENABLED=1`. Override schedule with
  * `ARBITRAGE_ENGINE_CRON` (node-cron expression).
  */
 export function initArbitrageEngine(prisma: PrismaClient): void {
-  if (process.env.ARBITRAGE_ENGINE_ENABLED === "false") {
-    console.log("[arbitrage-engine] Disabled (ARBITRAGE_ENGINE_ENABLED=false)");
+  if (process.env.ARBITRAGE_ENGINE_ENABLED !== "1") {
     return;
   }
 

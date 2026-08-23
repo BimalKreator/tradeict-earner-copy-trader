@@ -2,6 +2,11 @@
 
 import { resolveApiBase } from "@/lib/apiBase";
 import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
+import {
   Activity,
   Banknote,
   Loader2,
@@ -10,7 +15,7 @@ import {
   Users,
   Wallet,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 type CronJobStatus = {
   name: string;
@@ -37,6 +42,26 @@ type CronHealthResponse = {
     failedLastRun: number;
     neverRun: number;
   };
+};
+
+type SystemAlertRow = {
+  id: string;
+  key: string;
+  severity: "CRITICAL" | "WARN";
+  source: string;
+  message: string;
+  detail: unknown;
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  acknowledgedAt: string | null;
+  acknowledgedById: string | null;
+  resolved: boolean;
+};
+
+type SystemAlertsResponse = {
+  alerts: SystemAlertRow[];
+  total: number;
 };
 
 type DashboardStats = {
@@ -100,23 +125,101 @@ function cronStatusClass(cron: CronJobStatus): string {
   return "text-emerald-400";
 }
 
+function fmtRelative(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "—";
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
+function alertSeverityClass(severity: SystemAlertRow["severity"]): string {
+  return severity === "CRITICAL"
+    ? "border-red-500/40 bg-red-500/10"
+    : "border-amber-500/40 bg-amber-500/10";
+}
+
+function alertSeverityTextClass(severity: SystemAlertRow["severity"]): string {
+  return severity === "CRITICAL" ? "text-red-300" : "text-amber-300";
+}
+
 export default function AdminDashboardPage() {
   const [data, setData] = useState<DashboardStats | null>(null);
   const [cronHealth, setCronHealth] = useState<CronHealthResponse | null>(null);
+  const [alerts, setAlerts] = useState<SystemAlertRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [cronError, setCronError] = useState<string | null>(null);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [alertActionId, setAlertActionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const headers = useMemo(
     () => ({ Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` }),
     [],
   );
 
+  const loadAlerts = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${resolveApiBase()}/admin/system/alerts?resolved=false`,
+        { headers },
+      );
+      if (!res.ok) {
+        setAlertsError(`Alerts unavailable (${res.status})`);
+        return;
+      }
+      const body = (await res.json()) as SystemAlertsResponse;
+      setAlerts(body.alerts);
+      setAlertsError(null);
+    } catch (e) {
+      setAlertsError(e instanceof Error ? e.message : "Failed to load alerts");
+    }
+  }, [headers]);
+
+  const runAlertAction = useCallback(
+    async (id: string, action: "ack" | "resolve") => {
+      setAlertActionId(id);
+      try {
+        const res = await fetch(
+          `${resolveApiBase()}/admin/system/alerts/${id}/${action}`,
+          { method: "POST", headers },
+        );
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error ?? `Request failed (${res.status})`);
+        }
+        if (action === "resolve") {
+          setAlerts((prev) => prev.filter((a) => a.id !== id));
+        } else {
+          const body = (await res.json()) as { alert?: SystemAlertRow };
+          if (body.alert) {
+            setAlerts((prev) =>
+              prev.map((a) => (a.id === id ? body.alert! : a)),
+            );
+          } else {
+            await loadAlerts();
+          }
+        }
+      } catch (e) {
+        setAlertsError(e instanceof Error ? e.message : "Alert action failed");
+      } finally {
+        setAlertActionId(null);
+      }
+    },
+    [headers, loadAlerts],
+  );
+
   useEffect(() => {
     void (async () => {
       try {
-        const [statsRes, cronRes] = await Promise.all([
+        const [statsRes, cronRes, alertsRes] = await Promise.all([
           fetch(`${resolveApiBase()}/admin/dashboard-stats`, { headers }),
           fetch(`${resolveApiBase()}/admin/system/cron`, { headers }),
+          fetch(`${resolveApiBase()}/admin/system/alerts?resolved=false`, { headers }),
         ]);
         if (!statsRes.ok) throw new Error(`Request failed (${statsRes.status})`);
         setData((await statsRes.json()) as DashboardStats);
@@ -125,6 +228,13 @@ export default function AdminDashboardPage() {
           setCronError(null);
         } else {
           setCronError(`Cron health unavailable (${cronRes.status})`);
+        }
+        if (alertsRes.ok) {
+          const body = (await alertsRes.json()) as SystemAlertsResponse;
+          setAlerts(body.alerts);
+          setAlertsError(null);
+        } else {
+          setAlertsError(`Alerts unavailable (${alertsRes.status})`);
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load dashboard");
@@ -154,6 +264,12 @@ export default function AdminDashboardPage() {
       {cronError && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
           {cronError}
+        </div>
+      )}
+
+      {alertsError && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          {alertsError}
         </div>
       )}
 
@@ -241,6 +357,57 @@ export default function AdminDashboardPage() {
               className="lg:col-span-2"
             />
           </div>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-medium uppercase tracking-wider text-slate-400">
+                  Alerts
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Open operational alerts from billing, ledger sync, and cron jobs.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadAlerts()}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+              >
+                Refresh
+              </button>
+            </div>
+
+            {alerts.length === 0 ? (
+              <p className="mt-4 text-sm text-emerald-400">No open alerts</p>
+            ) : (
+              <div className="mt-4">
+                <ResponsiveMoneyTable
+                  table={
+                    <div className="divide-y divide-slate-800">
+                      {alerts.map((alert) => (
+                        <AlertDesktopRow
+                          key={alert.id}
+                          alert={alert}
+                          busy={alertActionId === alert.id}
+                          onAck={() => void runAlertAction(alert.id, "ack")}
+                          onResolve={() => void runAlertAction(alert.id, "resolve")}
+                        />
+                      ))}
+                    </div>
+                  }
+                  cards={alerts.map((alert) => (
+                    <AlertMobileCard
+                      key={alert.id}
+                      alert={alert}
+                      busy={alertActionId === alert.id}
+                      onAck={() => void runAlertAction(alert.id, "ack")}
+                      onResolve={() => void runAlertAction(alert.id, "resolve")}
+                    />
+                  ))}
+                />
+              </div>
+            )}
+          </section>
 
           <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -450,5 +617,163 @@ function StatusDot({ connected }: { connected: boolean }) {
         <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400 opacity-75" />
       )}
     </span>
+  );
+}
+
+function AlertActionButtons({
+  busy,
+  onAck,
+  onResolve,
+}: {
+  busy: boolean;
+  onAck: () => void;
+  onResolve: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          onAck();
+        }}
+        className="rounded-md border border-slate-600 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+      >
+        Ack
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          onResolve();
+        }}
+        className="rounded-md border border-slate-600 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+      >
+        Resolve
+      </button>
+    </div>
+  );
+}
+
+function AlertDetails({ detail }: { detail: unknown }) {
+  if (detail == null) {
+    return <p className="text-sm text-slate-500">No detail payload.</p>;
+  }
+  return (
+    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-950/80 p-3 font-mono text-xs text-slate-300">
+      {JSON.stringify(detail, null, 2)}
+    </pre>
+  );
+}
+
+function AlertDesktopRow({
+  alert,
+  busy,
+  onAck,
+  onResolve,
+}: {
+  alert: SystemAlertRow;
+  busy: boolean;
+  onAck: () => void;
+  onResolve: () => void;
+}) {
+  const [showDetails, setShowDetails] = useState(false);
+  const acked = alert.acknowledgedAt != null;
+
+  return (
+    <div
+      className={`px-4 py-4 ${acked ? "opacity-60" : ""} ${alertSeverityClass(alert.severity)} border-l-4`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${alertSeverityTextClass(alert.severity)}`}
+            >
+              {alert.severity}
+            </span>
+            <span className="font-mono text-xs text-slate-400">{alert.source}</span>
+            {acked ? (
+              <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+                acked
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-2 text-sm text-slate-100">{alert.message}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            seen {alert.count}x · last {fmtRelative(alert.lastSeenAt)} · key{" "}
+            <span className="font-mono">{alert.key}</span>
+          </p>
+          {alert.detail != null ? (
+            <button
+              type="button"
+              onClick={() => setShowDetails((v) => !v)}
+              className="mt-2 text-xs text-cyan-400 hover:text-cyan-300"
+            >
+              {showDetails ? "Hide details" : "Details"}
+            </button>
+          ) : null}
+          {showDetails ? (
+            <div className="mt-2">
+              <AlertDetails detail={alert.detail} />
+            </div>
+          ) : null}
+        </div>
+        <AlertActionButtons busy={busy} onAck={onAck} onResolve={onResolve} />
+      </div>
+    </div>
+  );
+}
+
+function AlertMobileCard({
+  alert,
+  busy,
+  onAck,
+  onResolve,
+}: {
+  alert: SystemAlertRow;
+  busy: boolean;
+  onAck: () => void;
+  onResolve: () => void;
+}) {
+  const acked = alert.acknowledgedAt != null;
+
+  return (
+    <div className={acked ? "opacity-60" : ""}>
+      <MoneyRowCard
+        primary={alert.message}
+        secondary={`${alert.source} · seen ${alert.count}x · ${fmtRelative(alert.lastSeenAt)}`}
+        amount={
+          <span
+            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${alertSeverityTextClass(alert.severity)}`}
+          >
+            {alert.severity}
+          </span>
+        }
+        status={
+          acked ? (
+            <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-400">
+              acked
+            </span>
+          ) : null
+        }
+        details={
+          <div className="space-y-3">
+            <DetailRow label="Key" value={<span className="font-mono text-xs">{alert.key}</span>} />
+            <DetailRow label="First seen" value={new Date(alert.firstSeenAt).toLocaleString()} />
+            <DetailRow label="Last seen" value={new Date(alert.lastSeenAt).toLocaleString()} />
+            {alert.detail != null ? (
+              <div>
+                <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">Details</p>
+                <AlertDetails detail={alert.detail} />
+              </div>
+            ) : null}
+            <AlertActionButtons busy={busy} onAck={onAck} onResolve={onResolve} />
+          </div>
+        }
+      />
+    </div>
   );
 }

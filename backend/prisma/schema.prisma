@@ -1146,7 +1146,9 @@ model AdminAuditLog {
   @@index([createdAt])
 }
 
-/** Deduplicated operational alerts for admin (persists across log rotation). */
+/// DB holds a PARTIAL unique index: UNIQUE ("key") WHERE "resolved" = false.
+/// Prisma cannot express partial unique indexes, so it is intentionally not
+/// declared here. Do not "fix" this by adding @@unique — see 8.6b.
 model SystemAlert {
   id               String    @id @default(uuid())
   key              String
@@ -1161,6 +1163,6 @@ model SystemAlert {
   acknowledgedById String?
   resolved         Boolean   @default(false)
 
-  @@unique([key, resolved])
+  @@index([key])
   @@index([severity, acknowledgedAt])
 }

@@ -73,6 +73,7 @@ import {
   setDeltaRestApiManualPause,
 } from "../utils/deltaRateLimiter.js";
 import { getCronStatusSnapshots } from "../utils/cronGuard.js";
+import { auditFromRequest } from "../utils/auditLogger.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -173,6 +174,126 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         neverRun: crons.filter((c) => c.lastStartedAt == null).length,
       },
     });
+  });
+
+  /** GET /api/admin/system/alerts — open or resolved SystemAlert rows for admin review. */
+  router.get("/system/alerts", async (req, res, next) => {
+    try {
+      const resolvedParam = String(req.query.resolved ?? "false").toLowerCase();
+      const resolved = resolvedParam === "true";
+      const severityRaw = req.query.severity;
+      const severity =
+        severityRaw === "CRITICAL" || severityRaw === "WARN"
+          ? severityRaw
+          : undefined;
+
+      const alerts = await prisma.systemAlert.findMany({
+        where: {
+          resolved,
+          ...(severity ? { severity } : {}),
+        },
+        orderBy: [{ severity: "asc" }, { lastSeenAt: "desc" }],
+        take: 200,
+        select: {
+          id: true,
+          key: true,
+          severity: true,
+          source: true,
+          message: true,
+          detail: true,
+          count: true,
+          firstSeenAt: true,
+          lastSeenAt: true,
+          acknowledgedAt: true,
+          acknowledgedById: true,
+          resolved: true,
+        },
+      });
+
+      res.json({ alerts, total: alerts.length });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** POST /api/admin/system/alerts/:id/ack — mark alert as seen (stays open). */
+  router.post("/system/alerts/:id/ack", async (req, res, next) => {
+    try {
+      const id = req.params.id?.trim();
+      if (!id) {
+        res.status(400).json({ error: "Alert id required" });
+        return;
+      }
+      const adminId = req.admin?.id;
+      if (!adminId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const updated = await prisma.systemAlert.updateMany({
+        where: { id, resolved: false },
+        data: {
+          acknowledgedAt: new Date(),
+          acknowledgedById: adminId,
+        },
+      });
+
+      if (updated.count === 0) {
+        res.status(404).json({ error: "Alert not found or already resolved" });
+        return;
+      }
+
+      const alert = await prisma.systemAlert.findUnique({ where: { id } });
+      res.json({ ok: true, alert });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** POST /api/admin/system/alerts/:id/resolve — close alert (allows future re-raise on same key). */
+  router.post("/system/alerts/:id/resolve", async (req, res, next) => {
+    try {
+      const id = req.params.id?.trim();
+      if (!id) {
+        res.status(400).json({ error: "Alert id required" });
+        return;
+      }
+      const adminId = req.admin?.id;
+      if (!adminId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const existing = await prisma.systemAlert.findUnique({ where: { id } });
+      if (!existing || existing.resolved) {
+        res.status(404).json({ error: "Alert not found or already resolved" });
+        return;
+      }
+
+      const alert = await prisma.systemAlert.update({
+        where: { id },
+        data: { resolved: true },
+      });
+
+      auditFromRequest(
+        prisma,
+        req,
+        "RESOLVE_SYSTEM_ALERT",
+        "SystemAlert",
+        id,
+        {
+          key: alert.key,
+          severity: alert.severity,
+          source: alert.source,
+          message: alert.message,
+          count: alert.count,
+        },
+      );
+
+      res.json({ ok: true, alert });
+    } catch (err) {
+      next(err);
+    }
   });
 
   router.get("/engine-status", (_req, res) => {

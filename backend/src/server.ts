@@ -297,7 +297,13 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(
     "[BOOT] Future Hedge autonomous engine is DISABLED (SL/TP/breakeven/admin exits only).",
   );
-  console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
+  if (process.env.ARBITRAGE_ENGINE_ENABLED === "1") {
+    console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
+  } else {
+    console.log(
+      "[BOOT] Crypto arbitrage engine cron is DISABLED (set ARBITRAGE_ENGINE_ENABLED=1 to enable)",
+    );
+  }
   startBotSyncService(prisma);
   void countLegacyBotSyncTrades(prisma)
     .then((count) => {
