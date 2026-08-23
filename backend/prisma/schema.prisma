@@ -201,6 +201,8 @@ model User {
   createdAt     DateTime            @default(now())
   /** High-water mark for Delta wallet transaction ledger ingestion (UTC). */
   deltaLedgerSyncedUpTo DateTime?
+  /** Set when a deep sweep inserts rows into an already-invoiced period — manual recompute needed. */
+  deltaLedgerRecomputeRequired Boolean @default(false)
 
   deltaApiKeys     DeltaApiKey[]
   exchangeAccounts ExchangeAccount[]
@@ -415,6 +417,9 @@ model DeltaLedgerEntry {
   metaJson        Json?
   occurredAt      DateTime
   ingestedAt      DateTime @default(now())
+  /** Incoming amount when Delta corrected a row we already stored (stored amount unchanged). */
+  conflictAmount  Decimal? @db.Decimal(24, 10)
+  conflictSeenAt  DateTime?
   isSimulated     Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
