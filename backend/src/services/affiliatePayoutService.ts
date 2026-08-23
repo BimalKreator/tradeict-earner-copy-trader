@@ -1,23 +1,68 @@
 import {
   CommissionLedgerStatus,
   PayoutRequestStatus,
+  Prisma,
   type PrismaClient,
 } from "@prisma/client";
+import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
+import { randomUUID } from "crypto";
 import { isSalesMemberRole } from "./affiliateMemberService.js";
+import {
+  calendarPartsInTimeZone,
+  DASHBOARD_PNL_DAY_TIMEZONE,
+  endOfMonthInTimeZone,
+} from "./dashboardMetricsService.js";
 
 export const PAYOUT_LAST_DAY_ONLY_MSG =
-  "Payouts can only be requested on the last day of the month.";
+  "Payouts can only be requested on the last day of the month (IST).";
 
 export const NO_WITHDRAWABLE_BALANCE_MSG =
   "No withdrawable commission balance.";
 
-/** True when `ref` is the final UTC calendar day of its month. */
-export function isLastDayOfUtcMonth(ref: Date = new Date()): boolean {
-  const year = ref.getUTCFullYear();
-  const month = ref.getUTCMonth();
-  const day = ref.getUTCDate();
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+export const NOTHING_TO_PAY_OUT_MSG = "nothing to pay out";
+
+export const EMPTY_PAYOUT_COMPLETE_MSG =
+  "Payout request has no linked commission ledger rows";
+
+/** True when `ref` is the final calendar day of its month in Asia/Kolkata (IST). */
+export function isLastDayOfIstMonth(ref: Date = new Date()): boolean {
+  const { year, month, day } = calendarPartsInTimeZone(
+    ref,
+    DASHBOARD_PNL_DAY_TIMEZONE,
+  );
+  // Date.UTC(y, month, 0) with 1-based calendar month → last day of that month
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
   return day === lastDay;
+}
+
+/** @deprecated Use {@link isLastDayOfIstMonth} — payout window is IST, not UTC. */
+export function isLastDayOfUtcMonth(ref: Date = new Date()): boolean {
+  return isLastDayOfIstMonth(ref);
+}
+
+/**
+ * Exclusive end of the current IST payout window (start of next IST month).
+ * Partners may request payout while `now < canRequestPayoutUntil` on the last IST day.
+ */
+export function getCanRequestPayoutUntil(ref: Date = new Date()): Date {
+  return endOfMonthInTimeZone(ref, DASHBOARD_PNL_DAY_TIMEZONE);
+}
+
+export function getPayoutWindowState(ref: Date = new Date()): {
+  canRequestPayout: boolean;
+  canRequestPayoutUntil: string;
+} {
+  const until = getCanRequestPayoutUntil(ref);
+  return {
+    canRequestPayout: isLastDayOfIstMonth(ref),
+    canRequestPayoutUntil: until.toISOString(),
+  };
+}
+
+function decimalToNumber(value: Prisma.Decimal | number | null | undefined): number {
+  if (value == null) return 0;
+  if (typeof value === "number") return value;
+  return value.toNumber();
 }
 
 export type RequestPartnerPayoutOutcome =
@@ -37,69 +82,98 @@ export async function requestPartnerPayout(
     return { ok: false, status: 403, message: "Partner access required" };
   }
 
-  if (!isLastDayOfUtcMonth()) {
+  if (!isLastDayOfIstMonth()) {
     return { ok: false, status: 400, message: PAYOUT_LAST_DAY_ONLY_MSG };
   }
 
-  const preview = await prisma.commissionLedger.aggregate({
-    where: {
-      beneficiaryUserId: userId,
-      status: CommissionLedgerStatus.WITHDRAWABLE,
-      isSimulated: false,
-    },
-    _sum: { amount: true },
-  });
-
-  const previewAmount = preview._sum.amount ?? 0;
-  if (previewAmount <= 0) {
-    return { ok: false, status: 400, message: NO_WITHDRAWABLE_BALANCE_MSG };
-  }
-
   const now = new Date();
-  const result = await prisma.$transaction(async (tx) => {
-    const ledgers = await tx.commissionLedger.findMany({
-      where: {
-        beneficiaryUserId: userId,
-        status: CommissionLedgerStatus.WITHDRAWABLE,
-        isSimulated: false,
-      },
-      select: { id: true, amount: true },
+  const claimToken = randomUUID();
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // Claim first — only one concurrent request can move these rows.
+      const claimed = await tx.commissionLedger.updateMany({
+        where: {
+          beneficiaryUserId: userId,
+          status: CommissionLedgerStatus.WITHDRAWABLE,
+          isSimulated: false,
+        },
+        data: {
+          status: CommissionLedgerStatus.WITHDRAWN,
+          withdrawnAt: now,
+          payoutClaimToken: claimToken,
+        },
+      });
+
+      if (claimed.count === 0) {
+        return null;
+      }
+
+      const ledgers = await tx.commissionLedger.findMany({
+        where: {
+          beneficiaryUserId: userId,
+          payoutClaimToken: claimToken,
+          isSimulated: false,
+        },
+        select: { id: true, amount: true },
+      });
+
+      if (ledgers.length === 0) {
+        return null;
+      }
+
+      const amount = ledgers.reduce(
+        (sum, row) => sum.plus(row.amount),
+        new Prisma.Decimal(0),
+      );
+
+      if (amount.lte(0)) {
+        return null;
+      }
+
+      const payout = await tx.payoutRequest.create({
+        data: {
+          userId,
+          amount,
+          status: PayoutRequestStatus.PENDING,
+          payoutClaimToken: claimToken,
+        },
+      });
+
+      await tx.commissionLedger.updateMany({
+        where: {
+          payoutClaimToken: claimToken,
+          beneficiaryUserId: userId,
+        },
+        data: {
+          payoutRequestId: payout.id,
+        },
+      });
+
+      return {
+        payoutRequestId: payout.id,
+        amount: amount.toNumber(),
+      };
     });
 
-    if (ledgers.length === 0) {
-      return null;
+    if (!result) {
+      return { ok: false, status: 409, message: NOTHING_TO_PAY_OUT_MSG };
     }
 
-    const amount = ledgers.reduce((sum, row) => sum + row.amount, 0);
-    const payout = await tx.payoutRequest.create({
-      data: {
-        userId,
-        amount,
-        status: PayoutRequestStatus.PENDING,
-      },
-    });
-
-    await tx.commissionLedger.updateMany({
-      where: {
-        beneficiaryUserId: userId,
-        status: CommissionLedgerStatus.WITHDRAWABLE,
-        isSimulated: false,
-      },
-      data: {
-        status: CommissionLedgerStatus.WITHDRAWN,
-        withdrawnAt: now,
-        payoutRequestId: payout.id,
-      },
-    });
-
-    return { payoutRequestId: payout.id, amount };
-  });
-
-  if (!result) {
-    return { ok: false, status: 400, message: NO_WITHDRAWABLE_BALANCE_MSG };
+    return { ok: true, ...result };
+  } catch (err) {
+    if (
+      err instanceof PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        message: "A pending payout request already exists for this partner",
+      };
+    }
+    throw err;
   }
-
-  return { ok: true, ...result };
 }
 
 export type AdminPartnerPayoutRow = {
@@ -141,7 +215,7 @@ export async function listPendingPartnerPayouts(
 
   return rows.map((row) => ({
     id: row.id,
-    amount: row.amount,
+    amount: decimalToNumber(row.amount),
     status: row.status,
     requestedAt: row.requestedAt.toISOString(),
     user: row.user,
@@ -169,7 +243,7 @@ export async function completePartnerPayout(
 
   const row = await prisma.payoutRequest.findUnique({
     where: { id: payoutRequestId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, payoutClaimToken: true },
   });
 
   if (!row) {
@@ -178,6 +252,31 @@ export async function completePartnerPayout(
 
   if (row.status !== PayoutRequestStatus.PENDING) {
     return { ok: false, status: 400, message: "Payout request is not pending" };
+  }
+
+  const linkedWhere = row.payoutClaimToken
+    ? {
+        OR: [
+          { payoutRequestId },
+          { payoutClaimToken: row.payoutClaimToken },
+        ],
+        isSimulated: false,
+      }
+    : { payoutRequestId, isSimulated: false };
+
+  const linkedCount = await prisma.commissionLedger.count({
+    where: linkedWhere,
+  });
+
+  if (linkedCount === 0) {
+    console.error(
+      `[Payout] empty payout refused id=${payoutRequestId} claimToken=${row.payoutClaimToken ?? "null"} — no linked ledger rows`,
+    );
+    return {
+      ok: false,
+      status: 409,
+      message: EMPTY_PAYOUT_COMPLETE_MSG,
+    };
   }
 
   await prisma.payoutRequest.update({

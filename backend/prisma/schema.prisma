@@ -946,7 +946,7 @@ model CommissionLedger {
   sourceUserId        String
   /** Team member receiving the commission cut. */
   beneficiaryUserId   String
-  amount              Float
+  amount              Decimal                @db.Decimal(24, 10)
   /** App revenue-share $ this row was calculated from (e.g. $15 of user's due). */
   appRevenueBase      Float
   /** Rate applied at distribution (e.g. 5 = 5%). */
@@ -968,6 +968,8 @@ model CommissionLedger {
   paymentTransactionId String?
   /** Set when included in a partner payout request (Phase 9). */
   payoutRequestId     String?
+  /** Batch claim token — written before PayoutRequest create (race-safe claim-first). */
+  payoutClaimToken    String?
   earnedAt            DateTime               @default(now())
   payableAt           DateTime?
   withdrawableAt      DateTime?
@@ -990,6 +992,7 @@ model CommissionLedger {
 
   @@index([beneficiaryUserId, status])
   @@index([payoutRequestId])
+  @@index([payoutClaimToken])
   @@index([sourceUserId, profitDate])
   @@index([status, unlockDate])
   @@index([invoiceId])
@@ -1001,13 +1004,15 @@ model CommissionLedger {
 model PayoutRequest {
   id               String              @id @default(uuid())
   userId           String
-  amount           Float
+  amount           Decimal             @db.Decimal(24, 10)
   status           PayoutRequestStatus @default(PENDING)
   requestedAt      DateTime            @default(now())
   completedAt      DateTime?
   completedById    String?
   /** UTR / bank transaction id — required when marking COMPLETED. */
   paymentReference String?
+  /** Matches CommissionLedger.payoutClaimToken for this batch. */
+  payoutClaimToken String?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
@@ -1017,6 +1022,7 @@ model PayoutRequest {
 
   @@index([userId, status])
   @@index([status, requestedAt])
+  @@index([payoutClaimToken])
 }
 
 model ArbitrageTrade {

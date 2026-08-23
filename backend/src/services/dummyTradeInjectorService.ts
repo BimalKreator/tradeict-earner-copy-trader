@@ -243,7 +243,13 @@ export async function injectTrade(
     symbol,
     commissionsCreated: pnlResult.commissionsCreated,
     commissionsSkipped: pnlResult.commissionsSkipped,
-    commissionLedger,
+    commissionLedger: commissionLedger.map((row) => ({
+      id: row.id,
+      beneficiaryUserId: row.beneficiaryUserId,
+      amount: row.amount.toNumber(),
+      commissionRate: row.commissionRate,
+      status: row.status,
+    })),
     bookedAfter: {
       grossPnl: bookedAfter.grossPnl,
       appRevenue: bookedAfter.appRevenue,

@@ -511,7 +511,7 @@ function creditNoteReversalIdempotencyKey(
 type OriginalAccrualRow = {
   id: string;
   beneficiaryUserId: string;
-  amount: number;
+  amount: Prisma.Decimal;
   appRevenueBase: number;
   commissionRate: number;
   beneficiaryTier: import("@prisma/client").SalesTier;
@@ -552,12 +552,12 @@ async function insertSignedCommissionReversal(
     invoiceId: string;
     sourceUserId: string;
     original: OriginalAccrualRow;
-    reversalAmount: number;
+    reversalAmount: Prisma.Decimal;
     idempotencyKey: string;
     profitDate: Date;
   },
 ): Promise<{ created: boolean; needsClawback: boolean }> {
-  if (!Number.isFinite(args.reversalAmount) || args.reversalAmount >= -0.0000001) {
+  if (args.reversalAmount.gte(-0.0000001)) {
     return { created: false, needsClawback: false };
   }
 
@@ -632,14 +632,14 @@ export async function reverseMonthlyRevenueInvoiceCommissionsOnVoid(
       },
       _sum: { amount: true },
     });
-    const netAmount = net._sum.amount ?? 0;
-    if (netAmount <= 0.0000001) continue;
+    const netAmount = net._sum.amount ?? new Prisma.Decimal(0);
+    if (netAmount.lte(0.0000001)) continue;
 
     const result = await insertSignedCommissionReversal(tx, {
       invoiceId: invoice.id,
       sourceUserId: invoice.userId,
       original,
-      reversalAmount: -netAmount,
+      reversalAmount: netAmount.neg(),
       idempotencyKey: voidReversalIdempotencyKey(
         invoice.id,
         original.beneficiaryUserId,
@@ -688,7 +688,7 @@ export async function reverseMonthlyRevenueInvoiceCommissionsForCreditNote(
   let clawbackCount = 0;
 
   for (const original of originals) {
-    const targetReverseTotal = original.amount * fraction.toNumber();
+    const targetReverseTotal = original.amount.mul(fraction);
     const priorCreditReversals = await tx.commissionLedger.aggregate({
       where: {
         monthlyRevenueInvoiceId: invoice.id,
@@ -700,15 +700,17 @@ export async function reverseMonthlyRevenueInvoiceCommissionsForCreditNote(
       },
       _sum: { amount: true },
     });
-    const alreadyReversed = Math.abs(priorCreditReversals._sum.amount ?? 0);
-    const delta = targetReverseTotal - alreadyReversed;
-    if (delta <= 0.0000001) continue;
+    const alreadyReversed = (
+      priorCreditReversals._sum.amount ?? new Prisma.Decimal(0)
+    ).abs();
+    const delta = targetReverseTotal.minus(alreadyReversed);
+    if (delta.lte(0.0000001)) continue;
 
     const result = await insertSignedCommissionReversal(tx, {
       invoiceId: invoice.id,
       sourceUserId: invoice.userId,
       original,
-      reversalAmount: -delta,
+      reversalAmount: delta.neg(),
       idempotencyKey: creditNoteReversalIdempotencyKey(
         invoice.id,
         original.beneficiaryUserId,
@@ -763,7 +765,7 @@ export async function reverseLegacyPendingEarnedCommissionsForSourceUser(
         profitDate: row.profitDate,
         sourceUserId: row.sourceUserId,
         beneficiaryUserId: row.beneficiaryUserId,
-        amount: -row.amount,
+        amount: row.amount.neg(),
         appRevenueBase: row.appRevenueBase,
         commissionRate: row.commissionRate,
         beneficiaryTier: row.beneficiaryTier,

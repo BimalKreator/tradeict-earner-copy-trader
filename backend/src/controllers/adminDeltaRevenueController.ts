@@ -403,7 +403,7 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
           beneficiaryUserId: row.beneficiaryUserId,
           beneficiaryEmail: row.beneficiaryUser.email,
           beneficiaryName: row.beneficiaryUser.name,
-          amount: row.amount,
+          amount: row.amount.toNumber(),
           appRevenueBase: row.appRevenueBase,
           commissionRate: row.commissionRate,
           beneficiaryTier: row.beneficiaryTier,

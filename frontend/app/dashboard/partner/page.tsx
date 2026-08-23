@@ -45,6 +45,9 @@ type PartnerMetrics = {
   directAcquiredCount: number;
   networkAum: number;
   wallets: PartnerWallets;
+  canRequestPayoutWindowOpen?: boolean;
+  canRequestPayout?: boolean;
+  canRequestPayoutUntil?: string;
 };
 
 type UserFinancials = {
@@ -115,14 +118,6 @@ function fmtDate(iso: string | null): string {
     month: "short",
     day: "numeric",
   });
-}
-
-function isLastDayOfUtcMonth(ref: Date = new Date()): boolean {
-  const year = ref.getUTCFullYear();
-  const month = ref.getUTCMonth();
-  const day = ref.getUTCDate();
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return day === lastDay;
 }
 
 function referralSignupUrl(code: string): string {
@@ -393,9 +388,8 @@ export default function PartnerDashboardPage() {
     return false;
   }, [salesTeamRole, user?.role, network?.viewerRole]);
 
-  const payoutWindowOpen = isLastDayOfUtcMonth();
-  const canRequestPayout =
-    (metrics?.wallets.withdrawable ?? 0) > 0 && payoutWindowOpen;
+  const payoutWindowOpen = metrics?.canRequestPayoutWindowOpen === true;
+  const canRequestPayout = metrics?.canRequestPayout === true;
 
   const designation =
     salesTeamRole != null
@@ -680,7 +674,7 @@ export default function PartnerDashboardPage() {
               <WalletCard
                 title="Withdrawable Revenue"
                 amount={metrics.wallets.withdrawable}
-                description="Ready for payout. Request on the last UTC day of each month."
+                description="Ready for payout. Request on the last day of each month (IST)."
                 icon={<Wallet className="h-5 w-5" aria-hidden />}
                 accent="emerald"
                 action={
@@ -691,7 +685,7 @@ export default function PartnerDashboardPage() {
                       disabled={!canRequestPayout || payoutBusy}
                       title={
                         !payoutWindowOpen
-                          ? "Available on the last day of the month"
+                          ? "Available on the last day of the month (IST)"
                           : metrics.wallets.withdrawable <= 0
                             ? "No withdrawable balance"
                             : undefined
@@ -706,7 +700,7 @@ export default function PartnerDashboardPage() {
                     {!canRequestPayout ? (
                       <p className="mt-2 text-center text-[11px] text-white/35">
                         {!payoutWindowOpen
-                          ? "Available on the last day of the month"
+                          ? "Available on the last day of the month (IST)"
                           : "No withdrawable balance yet"}
                       </p>
                     ) : null}

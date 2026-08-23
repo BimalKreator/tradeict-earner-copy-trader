@@ -1,11 +1,13 @@
 import {
   CommissionLedgerStatus,
   InvoiceStatus,
+  Prisma,
   Role,
   SubscriptionStatus,
   type PrismaClient,
 } from "@prisma/client";
 import { isSalesMemberRole } from "./affiliateMemberService.js";
+import { getPayoutWindowState } from "./affiliatePayoutService.js";
 import {
   fetchDeltaBalancesForUserIds,
   strategyShortName,
@@ -24,7 +26,21 @@ export type PartnerMetrics = {
   directAcquiredCount: number;
   networkAum: number;
   wallets: PartnerWalletTotals;
+  /** True on the last calendar day of the month in Asia/Kolkata (IST). */
+  canRequestPayoutWindowOpen: boolean;
+  /** Window open and withdrawable balance &gt; 0. */
+  canRequestPayout: boolean;
+  /** Exclusive end of the current IST month (ISO). */
+  canRequestPayoutUntil: string;
 };
+
+function decimalSumToNumber(
+  value: Prisma.Decimal | number | null | undefined,
+): number {
+  if (value == null) return 0;
+  if (typeof value === "number") return value;
+  return value.toNumber();
+}
 
 export type PartnerDirectUserRow = {
   id: string;
@@ -62,7 +78,7 @@ async function sumCommissionWalletsByStatus(
 
   const wallets = emptyWallets();
   for (const row of groups) {
-    const amount = row._sum.amount ?? 0;
+    const amount = decimalSumToNumber(row._sum.amount);
     if (row.status === CommissionLedgerStatus.EARNED) wallets.earned = amount;
     else if (row.status === CommissionLedgerStatus.PAYABLE) wallets.payable = amount;
     else if (row.status === CommissionLedgerStatus.WITHDRAWABLE) {
@@ -134,12 +150,18 @@ export async function getPartnerMetrics(
     sumDeltaBalancesForUserIds(prisma, acquiredIds),
   ]);
 
+  const payoutWindow = getPayoutWindowState();
+
   return {
     referralCode: user.affiliateProfile?.referralCode ?? null,
     directAcquiredCount:
       user.affiliateProfile?.directAcquiredCount ?? acquiredIds.length,
     networkAum,
     wallets,
+    canRequestPayoutWindowOpen: payoutWindow.canRequestPayout,
+    canRequestPayout:
+      payoutWindow.canRequestPayout && wallets.withdrawable > 0,
+    canRequestPayoutUntil: payoutWindow.canRequestPayoutUntil,
   };
 }
 
@@ -323,7 +345,7 @@ async function loadUserFinancialMaps(
   for (const row of commissionGroups) {
     const fin = map.get(row.sourceUserId);
     if (!fin) continue;
-    const amount = row._sum.amount ?? 0;
+    const amount = decimalSumToNumber(row._sum.amount);
     if (row.status === CommissionLedgerStatus.EARNED) {
       fin.memberCommissionEarned += amount;
     } else if (

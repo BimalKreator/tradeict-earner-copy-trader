@@ -367,7 +367,7 @@ export async function getMonthlyRevenueInvoiceLedger(
       beneficiaryUserId: row.beneficiaryUserId,
       beneficiaryEmail: row.beneficiaryUser.email,
       beneficiaryName: row.beneficiaryUser.name,
-      amount: row.amount,
+      amount: row.amount.toNumber(),
       status: row.status,
       commissionRate: row.commissionRate,
       beneficiaryTier: row.beneficiaryTier,
