@@ -304,128 +304,23 @@ export type DistributeRevenueShareCommissionsArgs = {
 };
 
 /**
- * Insert EARNED commission ledger rows for one positive PnL / revenue-share event.
+ * @deprecated LEGACY — do not call. Partner commissions are created only when a
+ * MonthlyRevenueInvoice transitions to INVOICED (see
+ * distributeMonthlyRevenueInvoiceCommissions). This PnLRecord path is retained
+ * only so accidental callers fail loudly without writing money rows.
  */
 export async function distributeRevenueShareCommissions(
   prisma: PrismaClient,
   args: DistributeRevenueShareCommissionsArgs,
 ): Promise<{ created: number; skipped: number }> {
-  if (args.isDummy === true) {
-    console.log(
-      `[affiliateCommission] skip distribution sourceUser=${args.sourceUserId} ` +
-        `pnlRecord=${args.pnlRecordId} — isDummy`,
-    );
-    return { created: 0, skipped: 0 };
-  }
-
-  const appRevenueBase = args.appRevenueBase;
-  if (!Number.isFinite(appRevenueBase) || appRevenueBase <= 0) {
-    console.log(
-      `[affiliateCommission] skip distribution sourceUser=${args.sourceUserId} ` +
-        `pnlRecord=${args.pnlRecordId} — appRevenueBase<=0 (${appRevenueBase})`,
-    );
-    return { created: 0, skipped: 0 };
-  }
-
-  const source = await prisma.user.findUnique({
-    where: { id: args.sourceUserId },
-    select: { role: true, acquiredById: true, parentId: true },
-  });
-  if (!source) {
-    console.warn(
-      `[affiliateCommission] skip distribution — source user not found id=${args.sourceUserId}`,
-    );
-    return { created: 0, skipped: 0 };
-  }
-
-  const chain = await resolveCommissionChain(prisma, source);
-  if (chain.length === 0) {
-    console.log(
-      `[affiliateCommission] no commission chain sourceUser=${args.sourceUserId} ` +
-        `role=${source.role} acquiredById=${source.acquiredById ?? "none"} ` +
-        `parentId=${source.parentId ?? "none"} appRevenueBase=$${appRevenueBase.toFixed(2)}`,
-    );
-    return { created: 0, skipped: 0 };
-  }
-
-  console.log(
-    `[affiliateCommission] calculating commissions sourceUser=${args.sourceUserId} ` +
-      `pnlRecord=${args.pnlRecordId} appRevenueBase=$${appRevenueBase.toFixed(2)} ` +
-      `chainLen=${chain.length} ` +
-      chain
-        .map(
-          (s) =>
-            `partner=${s.beneficiaryUserId} tier=${s.beneficiaryTier} rate=${s.commissionRate}%`,
-        )
-        .join(" | "),
+  console.error(
+    `[affiliateCommission] BLOCKED legacy distributeRevenueShareCommissions ` +
+      `sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId} — ` +
+      `use MonthlyRevenueInvoice INVOICED transition instead`,
   );
-
-  const profitDate = startOfUtcDay(args.profitDate);
-  const unlockDate = new Date(profitDate);
-  unlockDate.setUTCDate(unlockDate.getUTCDate() + 30);
-
-  let created = 0;
-  let skipped = 0;
-
-  await prisma.$transaction(async (tx) => {
-    for (const slice of chain) {
-      if (slice.commissionRate <= 0) continue;
-
-      const amount = appRevenueBase * (slice.commissionRate / 100);
-      if (!Number.isFinite(amount) || amount <= 0) continue;
-
-      const idempotencyKey = `${args.pnlRecordId}:${slice.beneficiaryUserId}:EARNED`;
-
-      try {
-        const row = await tx.commissionLedger.create({
-          data: {
-            profitDate,
-            sourceUserId: args.sourceUserId,
-            beneficiaryUserId: slice.beneficiaryUserId,
-            amount,
-            appRevenueBase,
-            commissionRate: slice.commissionRate,
-            beneficiaryTier: slice.beneficiaryTier,
-            status: CommissionLedgerStatus.EARNED,
-            unlockDate,
-            idempotencyKey,
-            pnlRecordId: args.pnlRecordId,
-            isSimulated: args.isSimulated,
-          },
-        });
-        created += 1;
-        console.log(
-          `[affiliateCommission] ledger insert id=${row.id} status=EARNED ` +
-            `partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
-            `rate=${slice.commissionRate}% tier=${slice.beneficiaryTier} ` +
-            `sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId}`,
-        );
-      } catch (err) {
-        if (
-          err instanceof PrismaClientKnownRequestError &&
-          err.code === "P2002"
-        ) {
-          skipped += 1;
-          console.error(
-            `[affiliateCommission] DUPLICATE idempotency collision status=EARNED ` +
-              `partnerId=${slice.beneficiaryUserId} amount=$${amount.toFixed(4)} ` +
-              `sourceUser=${args.sourceUserId} key=${idempotencyKey}`,
-          );
-          continue;
-        }
-        throw err;
-      }
-    }
-  });
-
-  if (created > 0) {
-    console.log(
-      `[affiliateCommission] distributed sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId} ` +
-        `base=$${appRevenueBase.toFixed(2)} rows=${created} skipped=${skipped}`,
-    );
-  }
-
-  return { created, skipped };
+  void prisma;
+  void args;
+  return { created: 0, skipped: 0 };
 }
 
 export type MonthlyRevenueInvoiceCommissionInput = {
@@ -602,19 +497,17 @@ export async function voidPendingEarnedCommissionsForSourceUser(
   return result.count;
 }
 
-/** Fire-and-forget wrapper — must not throw to callers. */
+/** @deprecated LEGACY — commissions accrue on invoice INVOICED only. */
 export async function triggerAffiliateCommissionDistribution(
   prisma: PrismaClient,
   args: DistributeRevenueShareCommissionsArgs,
 ): Promise<void> {
-  try {
-    await distributeRevenueShareCommissions(prisma, args);
-  } catch (err) {
-    console.error(
-      `[affiliateCommission] distribution failed sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
+  console.error(
+    `[affiliateCommission] BLOCKED legacy triggerAffiliateCommissionDistribution ` +
+      `sourceUser=${args.sourceUserId} pnlRecord=${args.pnlRecordId} — ` +
+      `use MonthlyRevenueInvoice INVOICED transition instead`,
+  );
+  void prisma;
 }
 
 /** UTC calendar month bounds for invoice `month` (1–12) / `year`. */

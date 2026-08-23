@@ -13,11 +13,7 @@ import {
   resolveEmailRecipientName,
   sendTemplateEmailAsync,
 } from "../services/emailService.js";
-import {
-  distributeRevenueShareCommissions,
-  triggerAffiliateCommissionDistribution,
-  voidPendingEarnedCommissionsForSourceUser,
-} from "../services/affiliateCommissionService.js";
+import { voidPendingEarnedCommissionsForSourceUser } from "../services/affiliateCommissionService.js";
 import { computeUserBookedPnlAndRevenueDue } from "../services/dashboardMetricsService.js";
 import {
   deployedCapitalFromMultiplier,
@@ -110,26 +106,6 @@ export async function recordTradePnl(
       commissionsCreated: 0,
       commissionsSkipped: 0,
     };
-  }
-
-  if (commissionAmount > 0) {
-    const distArgs = {
-      sourceUserId: args.userId,
-      pnlRecordId: row.id,
-      appRevenueBase: commissionAmount,
-      profitDate: row.timestamp,
-      isSimulated: false,
-    };
-    if (args.awaitCommissionDistribution === true) {
-      const dist = await distributeRevenueShareCommissions(prisma, distArgs);
-      return {
-        pnlRecordId: row.id,
-        commissionAmount,
-        commissionsCreated: dist.created,
-        commissionsSkipped: dist.skipped,
-      };
-    }
-    void triggerAffiliateCommissionDistribution(prisma, distArgs);
   }
 
   return {

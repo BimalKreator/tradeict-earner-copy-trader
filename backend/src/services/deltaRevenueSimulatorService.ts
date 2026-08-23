@@ -5,8 +5,8 @@ import {
   DASHBOARD_PNL_DAY_TIMEZONE,
   startOfDayInTimeZone,
 } from "./dashboardMetricsService.js";
-import { distributeRevenueShareCommissions } from "./affiliateCommissionService.js";
 import { recomputeStructurePnlForUsers, ATTRIBUTION_STATUS } from "./structurePnlService.js";
+import { resolveCommissionChainForUser } from "./affiliateCommissionService.js";
 import {
   computeMonthlyRevenueInvoiceForUser,
   runDailyPnlSnapshots,
@@ -218,6 +218,18 @@ async function assertSimulationSlotsFree(
   await prisma.dailyPnlSnapshot.deleteMany({
     where: { userId, snapshotDate, isSimulated: true },
   });
+
+  const simInvoices = await prisma.monthlyRevenueInvoice.findMany({
+    where: { userId, periodYear, periodMonth, isSimulated: true },
+    select: { id: true },
+  });
+  if (simInvoices.length > 0) {
+    await prisma.commissionLedger.deleteMany({
+      where: {
+        monthlyRevenueInvoiceId: { in: simInvoices.map((inv) => inv.id) },
+      },
+    });
+  }
   await prisma.monthlyRevenueInvoice.deleteMany({
     where: { userId, periodYear, periodMonth, isSimulated: true },
   });
@@ -321,35 +333,27 @@ async function writeSimulatedStructure(
   };
 }
 
-async function triggerSimulatedAffiliateCommissions(
+async function previewAffiliateCommissionsOnInvoiced(
   prisma: PrismaClient,
   userId: string,
-  appRevenueBase: number,
-  profitDate: Date,
-  strategyId: string,
+  commissionAmount: Prisma.Decimal,
 ) {
-  const pnlRecord = await prisma.pnLRecord.create({
-    data: {
-      userId,
-      strategyId,
-      profitAmount: appRevenueBase,
-      commissionAmount: appRevenueBase,
-      isSimulated: true,
-    },
-  });
-
-  const dist = await distributeRevenueShareCommissions(prisma, {
-    sourceUserId: userId,
-    pnlRecordId: pnlRecord.id,
-    appRevenueBase,
-    profitDate,
-    isSimulated: true,
-  });
-
+  const chain = await resolveCommissionChainForUser(prisma, userId);
   return {
-    created: dist.created,
-    skipped: dist.skipped,
-    pnlRecordId: pnlRecord.id,
+    note:
+      "No commission rows created during simulation. " +
+      "Partner commissions are written when the invoice transitions to INVOICED.",
+    chainLength: chain.length,
+    onInvoiced: chain.map((slice) => ({
+      beneficiaryUserId: slice.beneficiaryUserId,
+      commissionRate: slice.commissionRate,
+      beneficiaryTier: slice.beneficiaryTier,
+      estimatedAmount: commissionAmount
+        .mul(slice.commissionRate)
+        .div(100)
+        .toDecimalPlaces(10, Prisma.Decimal.ROUND_HALF_EVEN)
+        .toNumber(),
+    })),
   };
 }
 
@@ -385,7 +389,6 @@ export async function simulateDeltaRevenueStructure(
 
   const targets = scenarioTargets(input.scenario, input.realizedPnl);
   const structures: Array<Record<string, unknown>> = [];
-  let lastSnapshotDate: Date | null = null;
   let lastPeriod: { year: number; month: number } | null = null;
 
   for (let i = 0; i < targets.length; i += 1) {
@@ -446,12 +449,11 @@ export async function simulateDeltaRevenueStructure(
       data: { isSimulated: true },
     });
 
-    lastSnapshotDate = snapshotDate;
     lastPeriod = { year: istParts.year, month: istParts.month };
   }
 
-  let affiliate: Record<string, unknown> | null = null;
-  if (lastPeriod && lastSnapshotDate) {
+  let affiliatePreview: Record<string, unknown> | null = null;
+  if (lastPeriod) {
     const inv = await prisma.monthlyRevenueInvoice.findUnique({
       where: {
         userId_periodYear_periodMonth: {
@@ -461,14 +463,11 @@ export async function simulateDeltaRevenueStructure(
         },
       },
     });
-    const commission = inv?.commissionAmount.toNumber() ?? 0;
-    if (commission > 0) {
-      affiliate = await triggerSimulatedAffiliateCommissions(
+    if (inv && inv.commissionAmount.gt(0)) {
+      affiliatePreview = await previewAffiliateCommissionsOnInvoiced(
         prisma,
         input.userId,
-        commission,
-        lastSnapshotDate,
-        sub.strategyId,
+        inv.commissionAmount,
       );
     }
   }
@@ -477,7 +476,7 @@ export async function simulateDeltaRevenueStructure(
     ok: true,
     scenario: input.scenario,
     structures,
-    affiliate,
+    affiliatePreview,
     chain: await getSimulationChainState(prisma, input.userId, true),
   };
 }
@@ -596,6 +595,13 @@ export async function purgeSimulatedDeltaRevenue(
 
   console.warn(`[Simulation] PURGE user=${userId ?? "ALL"}`);
 
+  const simInvoiceIds = (
+    await prisma.monthlyRevenueInvoice.findMany({
+      where: { isSimulated: true, ...userFilter },
+      select: { id: true },
+    })
+  ).map((row) => row.id);
+
   const affectedUsers = userId
     ? [userId]
     : (
@@ -606,10 +612,26 @@ export async function purgeSimulatedDeltaRevenue(
         })
       ).map((r) => r.userId);
 
+  const commissionLedgerWhere: Prisma.CommissionLedgerWhereInput =
+    simInvoiceIds.length > 0
+      ? {
+          OR: [
+            { monthlyRevenueInvoiceId: { in: simInvoiceIds } },
+            {
+              isSimulated: true,
+              ...(userId ? { sourceUserId: userId } : {}),
+            },
+          ],
+        }
+      : {
+          isSimulated: true,
+          ...(userId ? { sourceUserId: userId } : {}),
+        };
+
   const deleted = {
     commissionLedger: (
       await prisma.commissionLedger.deleteMany({
-        where: { isSimulated: true, ...(userId ? { sourceUserId: userId } : {}) },
+        where: commissionLedgerWhere,
       })
     ).count,
     pnlRecords: (
