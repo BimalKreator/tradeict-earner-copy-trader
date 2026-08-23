@@ -1,11 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 import {
   ATTRIBUTION_STATUS,
+  BILLING_TXN_TYPES,
   ledgerTxnMatchesLegWindow,
   resolveLegAttributionWindowStart,
 } from "./structurePnlService.js";
-
-const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
 
 export type AttributionHealthLeg = {
   botLegId: number;

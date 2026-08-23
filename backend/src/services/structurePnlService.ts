@@ -16,7 +16,29 @@ export type AttributionStatus =
 /** Minimum matched billing txns for a closed leg (entry+exit cashflow + commissions). */
 const MIN_CLOSED_LEG_MATCHED_TXNS = 4;
 
-const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
+/**
+ * Minimum matched txns when the leg closed via settlement (ITM expiry),
+ * not a trade exit — settlement alone is enough evidence of close.
+ */
+const MIN_SETTLEMENT_CLOSED_MATCHED_TXNS = 1;
+
+/**
+ * Ledger transaction types that count toward customer structure P&L.
+ * - cashflow: option/perp trade premiums and trade cashflows
+ * - commission: exchange trading fees (customer cost)
+ * - funding: perpetual futures funding payments — this strategy runs a
+ *   futures hedge, so funding is paid from the customer’s wallet
+ * - settlement: ITM option expiry settlement (not a trade fill)
+ * - liquidation_fee: cost of liquidation events
+ * Deposits, withdrawals, and sub_account_transfer stay excluded.
+ */
+export const BILLING_TXN_TYPES = new Set([
+  "cashflow",
+  "commission",
+  "funding",
+  "settlement",
+  "liquidation_fee",
+]);
 
 type BotLeg = {
   botLegId: number;
@@ -242,18 +264,27 @@ function isBillingTxnType(transactionType: string): boolean {
 type LegTotals = {
   grossCashflow: Prisma.Decimal;
   commissionTotal: Prisma.Decimal;
+  fundingTotal: Prisma.Decimal;
+  settlementTotal: Prisma.Decimal;
+  liquidationFeeTotal: Prisma.Decimal;
   matchedTxnCount: number;
   cashflowHasPositive: boolean;
   cashflowHasNegative: boolean;
+  /** True when at least one settlement row was attributed to this leg. */
+  hasSettlement: boolean;
 };
 
 function emptyLegTotals(): LegTotals {
   return {
     grossCashflow: zeroDecimal(),
     commissionTotal: zeroDecimal(),
+    fundingTotal: zeroDecimal(),
+    settlementTotal: zeroDecimal(),
+    liquidationFeeTotal: zeroDecimal(),
     matchedTxnCount: 0,
     cashflowHasPositive: false,
     cashflowHasNegative: false,
+    hasSettlement: false,
   };
 }
 
@@ -266,12 +297,24 @@ function applyTxnToLegTotals(totals: LegTotals, txn: LedgerRow): void {
     if (txn.amount.lessThan(0)) totals.cashflowHasNegative = true;
   } else if (tt === "commission") {
     totals.commissionTotal = totals.commissionTotal.add(txn.amount);
+  } else if (tt === "funding") {
+    totals.fundingTotal = totals.fundingTotal.add(txn.amount);
+  } else if (tt === "settlement") {
+    totals.settlementTotal = totals.settlementTotal.add(txn.amount);
+    totals.hasSettlement = true;
+  } else if (tt === "liquidation_fee") {
+    totals.liquidationFeeTotal = totals.liquidationFeeTotal.add(txn.amount);
   }
 }
 
 function legRealizedPnl(totals: LegTotals, leg: BotLeg): Prisma.Decimal | null {
   if (!leg.closedAt) return null;
-  return totals.grossCashflow.add(totals.commissionTotal);
+  // Delta costs arrive as negative amounts — .add() is correct (same as commission).
+  return totals.grossCashflow
+    .add(totals.commissionTotal)
+    .add(totals.fundingTotal)
+    .add(totals.settlementTotal)
+    .add(totals.liquidationFeeTotal);
 }
 
 export type LegAttributionWindow = {
@@ -312,6 +355,19 @@ function evaluateClosedLegAttribution(
   leg: BotLeg,
 ): LegAttributionFailure | null {
   if (!leg.closedAt) return null;
+
+  // Settlement close (e.g. ITM expiry / expire-worthless): no entry+exit
+  // cashflow pair is expected — skip the dual-sign check.
+  if (totals.hasSettlement) {
+    if (totals.matchedTxnCount < MIN_SETTLEMENT_CLOSED_MATCHED_TXNS) {
+      return {
+        botLegId: leg.botLegId,
+        matchedTxnCount: totals.matchedTxnCount,
+        reason: `settlement-closed but matchedTxnCount < ${MIN_SETTLEMENT_CLOSED_MATCHED_TXNS}`,
+      };
+    }
+    return null;
+  }
 
   const hasBothCashflowSigns =
     totals.cashflowHasPositive && totals.cashflowHasNegative;
@@ -470,6 +526,9 @@ async function recomputeStructurePnlForUser(
   for (const structure of structures) {
     let structGross = zeroDecimal();
     let structCommission = zeroDecimal();
+    let structFunding = zeroDecimal();
+    let structSettlement = zeroDecimal();
+    let structLiquidationFee = zeroDecimal();
     let structMatched = 0;
     let closedLegCount = 0;
 
@@ -515,6 +574,11 @@ async function recomputeStructurePnlForUser(
         emptyLegTotals();
       structGross = structGross.add(totals.grossCashflow);
       structCommission = structCommission.add(totals.commissionTotal);
+      structFunding = structFunding.add(totals.fundingTotal);
+      structSettlement = structSettlement.add(totals.settlementTotal);
+      structLiquidationFee = structLiquidationFee.add(
+        totals.liquidationFeeTotal,
+      );
       structMatched += totals.matchedTxnCount;
       if (leg.closedAt) closedLegCount += 1;
 
@@ -543,6 +607,9 @@ async function recomputeStructurePnlForUser(
           closedAt: leg.closedAt,
           grossCashflow: totals.grossCashflow,
           commissionTotal: totals.commissionTotal,
+          fundingTotal: totals.fundingTotal,
+          settlementTotal: totals.settlementTotal,
+          liquidationFeeTotal: totals.liquidationFeeTotal,
           realizedPnl: legRealized,
           matchedTxnCount: totals.matchedTxnCount,
         },
@@ -560,6 +627,9 @@ async function recomputeStructurePnlForUser(
           closedAt: leg.closedAt,
           grossCashflow: totals.grossCashflow,
           commissionTotal: totals.commissionTotal,
+          fundingTotal: totals.fundingTotal,
+          settlementTotal: totals.settlementTotal,
+          liquidationFeeTotal: totals.liquidationFeeTotal,
           realizedPnl: legRealized,
           matchedTxnCount: totals.matchedTxnCount,
         },
@@ -571,7 +641,11 @@ async function recomputeStructurePnlForUser(
       structure.legs.every((leg) => leg.closedAt != null);
     const structureRealized =
       structure.status === "closed" && allLegsClosed
-        ? structGross.add(structCommission)
+        ? structGross
+            .add(structCommission)
+            .add(structFunding)
+            .add(structSettlement)
+            .add(structLiquidationFee)
         : null;
 
     if (structureRealized != null) {

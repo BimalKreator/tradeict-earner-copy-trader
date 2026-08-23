@@ -474,6 +474,12 @@ model StructureLegPnl {
   closedAt         DateTime?
   grossCashflow    Decimal  @db.Decimal(24, 10)
   commissionTotal  Decimal  @db.Decimal(24, 10)
+  /** Perp futures funding attributed to this leg (customer cost). */
+  fundingTotal     Decimal? @db.Decimal(24, 10)
+  /** ITM option expiry settlement attributed to this leg. */
+  settlementTotal  Decimal? @db.Decimal(24, 10)
+  /** Liquidation fee attributed to this leg. */
+  liquidationFeeTotal Decimal? @db.Decimal(24, 10)
   realizedPnl      Decimal? @db.Decimal(24, 10)
   matchedTxnCount  Int
   isSimulated      Boolean  @default(false)

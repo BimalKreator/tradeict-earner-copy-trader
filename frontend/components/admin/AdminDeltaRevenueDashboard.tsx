@@ -81,12 +81,22 @@ type UserDetail = {
     closedAt: string | null;
     realizedPnl: number | null;
     matchedTxnCount: number;
+    grossCashflow?: number;
+    commissionTotal?: number;
+    fundingTotal?: number;
+    settlementTotal?: number;
+    liquidationFeeTotal?: number;
     legs: Array<{
       legRole: string;
       symbol: string | null;
       productId: number;
       realizedPnl: number | null;
       matchedTxnCount: number;
+      grossCashflow?: number;
+      commissionTotal?: number;
+      fundingTotal?: number | null;
+      settlementTotal?: number | null;
+      liquidationFeeTotal?: number | null;
     }>;
   }>;
   invoices: Array<{
@@ -361,7 +371,66 @@ export function AdminDeltaRevenueDashboard() {
               </div>
               <p className="mt-1 text-xs text-white/40">
                 {s.legs.length} legs · {s.matchedTxnCount} matched txns
+                {" · "}
+                cash {fmtUsd(s.grossCashflow ?? 0)}
+                {" · "}
+                fee {fmtUsd(s.commissionTotal ?? 0)}
+                {" · "}
+                funding {fmtUsd(s.fundingTotal ?? 0)}
+                {" · "}
+                settlement {fmtUsd(s.settlementTotal ?? 0)}
+                {" · "}
+                liq {fmtUsd(s.liquidationFeeTotal ?? 0)}
               </p>
+              {s.legs.length > 0 ? (
+                <div className="mt-2 overflow-x-auto rounded border border-white/5">
+                  <table className="w-full min-w-[640px] text-left text-xs text-white/70">
+                    <thead className="bg-white/[0.03] text-[10px] uppercase tracking-wide text-white/35">
+                      <tr>
+                        <th className="px-2 py-1.5 font-medium">Leg</th>
+                        <th className="px-2 py-1.5 font-medium">Cashflow</th>
+                        <th className="px-2 py-1.5 font-medium">Commission</th>
+                        <th className="px-2 py-1.5 font-medium">Funding</th>
+                        <th className="px-2 py-1.5 font-medium">Settlement</th>
+                        <th className="px-2 py-1.5 font-medium">Liq fee</th>
+                        <th className="px-2 py-1.5 font-medium">Realized</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {s.legs.map((leg, idx) => (
+                        <tr key={`${s.botStructureId}-${leg.productId}-${idx}`}>
+                          <td className="px-2 py-1.5">
+                            {leg.legRole}
+                            {leg.symbol ? ` · ${leg.symbol}` : ""}
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            {fmtUsd(leg.grossCashflow ?? 0)}
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            {fmtUsd(leg.commissionTotal ?? 0)}
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            {fmtUsd(leg.fundingTotal ?? 0)}
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            {fmtUsd(leg.settlementTotal ?? 0)}
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            {fmtUsd(leg.liquidationFeeTotal ?? 0)}
+                          </td>
+                          <td
+                            className={`px-2 py-1.5 tabular-nums ${pnlClass(leg.realizedPnl ?? 0)}`}
+                          >
+                            {leg.realizedPnl != null
+                              ? fmtUsd(leg.realizedPnl)
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

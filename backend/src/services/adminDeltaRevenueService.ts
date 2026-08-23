@@ -1,5 +1,10 @@
 import { Prisma, TradeStatus, type PrismaClient } from "@prisma/client";
-import { LEG_CLOSE_GRACE_MS, listEligibleStructurePnlUserIds, resolveLegAttributionWindowStart } from "./structurePnlService.js";
+import {
+  BILLING_TXN_TYPES,
+  LEG_CLOSE_GRACE_MS,
+  listEligibleStructurePnlUserIds,
+  resolveLegAttributionWindowStart,
+} from "./structurePnlService.js";
 import {
   countLegacyBotSyncTrades,
   istMonthWindow,
@@ -14,8 +19,6 @@ import {
   botStrategyWhere,
 } from "./tradeBillingFilters.js";
 import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
-
-const BILLING_TXN_TYPES = new Set(["cashflow", "commission"]);
 
 type DbLeg = {
   botStructureId: number;
@@ -298,7 +301,23 @@ export async function getAdminRevenueUserDetail(
       openStructureCount: row.openStructureCount,
       isSimulated: row.isSimulated,
     })),
-    structures: structures.map((s) => ({
+    structures: structures.map((s) => {
+      const fundingTotal = s.legs.reduce(
+        (sum, leg) => sum + (leg.fundingTotal != null ? dec(leg.fundingTotal) : 0),
+        0,
+      );
+      const settlementTotal = s.legs.reduce(
+        (sum, leg) =>
+          sum + (leg.settlementTotal != null ? dec(leg.settlementTotal) : 0),
+        0,
+      );
+      const liquidationFeeTotal = s.legs.reduce(
+        (sum, leg) =>
+          sum +
+          (leg.liquidationFeeTotal != null ? dec(leg.liquidationFeeTotal) : 0),
+        0,
+      );
+      return {
       id: s.id,
       botStructureId: s.botStructureId,
       status: s.status,
@@ -308,6 +327,9 @@ export async function getAdminRevenueUserDetail(
       realizedPnl: s.realizedPnl != null ? dec(s.realizedPnl) : null,
       grossCashflow: dec(s.grossCashflow),
       commissionTotal: dec(s.commissionTotal),
+      fundingTotal,
+      settlementTotal,
+      liquidationFeeTotal,
       matchedTxnCount: s.matchedTxnCount,
       legs: s.legs.map((leg) => ({
         botLegId: leg.botLegId,
@@ -321,10 +343,19 @@ export async function getAdminRevenueUserDetail(
         closedAt: leg.closedAt?.toISOString() ?? null,
         grossCashflow: dec(leg.grossCashflow),
         commissionTotal: dec(leg.commissionTotal),
+        fundingTotal:
+          leg.fundingTotal != null ? dec(leg.fundingTotal) : null,
+        settlementTotal:
+          leg.settlementTotal != null ? dec(leg.settlementTotal) : null,
+        liquidationFeeTotal:
+          leg.liquidationFeeTotal != null
+            ? dec(leg.liquidationFeeTotal)
+            : null,
         realizedPnl: leg.realizedPnl != null ? dec(leg.realizedPnl) : null,
         matchedTxnCount: leg.matchedTxnCount,
       })),
-    })),
+    };
+    }),
     invoices: invoices.map((inv) => ({
       periodYear: inv.periodYear,
       periodMonth: inv.periodMonth,
