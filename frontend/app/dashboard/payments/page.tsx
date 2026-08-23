@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Building2,
@@ -11,9 +12,6 @@ import {
 } from "lucide-react";
 import { COMPANY } from "@/lib/company";
 import { openRazorpayCheckout } from "@/lib/razorpay";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 type TabId = "razorpay" | "upi" | "bank";
 
@@ -60,7 +58,7 @@ function calcFee(base: number, pgFeePercent: number, method: "RAZORPAY" | "UPI" 
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(`${API_BASE}${path}`, {
+  return fetch(`${resolveApiBase()}${path}`, {
     ...init,
     headers: {
       ...(init?.headers ?? {}),

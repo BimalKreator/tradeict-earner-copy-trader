@@ -1,9 +1,7 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useEffect, useState } from "react";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 const inputClass =
   "mt-1 w-full rounded-lg border border-white/15 bg-black/40 px-3 py-2.5 text-white outline-none transition focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/30";
@@ -44,7 +42,7 @@ export function ExpertApplicationForm() {
     };
 
     try {
-      const res = await fetch(`${API_BASE}/public/apply-expert`, {
+      const res = await fetch(`${resolveApiBase()}/public/apply-expert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

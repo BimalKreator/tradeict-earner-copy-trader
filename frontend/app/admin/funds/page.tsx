@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,8 +12,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type DepositTx = {
   id: string;
@@ -62,7 +61,7 @@ export default function AdminFundsPage() {
     setForbidden(false);
 
     try {
-      const res = await fetch(`${API_BASE}/admin/deposits`, {
+      const res = await fetch(`${resolveApiBase()}/admin/deposits`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -122,7 +121,7 @@ export default function AdminFundsPage() {
     setRowAction((prev) => ({ ...prev, [id]: key }));
 
     try {
-      const res = await fetch(`${API_BASE}/admin/deposits/${id}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/deposits/${id}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -382,7 +381,7 @@ export default function AdminFundsPage() {
             </div>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={`${API_BASE}${screenshotModal}`}
+              src={`${resolveApiBase()}${screenshotModal}`}
               alt="Deposit screenshot"
               className="mx-auto max-h-[75vh] rounded-lg object-contain"
             />

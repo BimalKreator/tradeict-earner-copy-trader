@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   AlertTriangle,
   Banknote,
@@ -12,8 +13,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
 
@@ -124,7 +123,7 @@ function statusBadgeClasses(status: InvoiceStatus): string {
 async function authFetch(path: string): Promise<Response> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(`${API_BASE}${path}`, {
+  return fetch(`${resolveApiBase()}${path}`, {
     cache: "no-store",
     headers: { Authorization: `Bearer ${token ?? ""}` },
   });

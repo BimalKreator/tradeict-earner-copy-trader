@@ -1,10 +1,9 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useState } from "react";
 import { GitCompare, Loader2, RefreshCw } from "lucide-react";
 import Link from "next/link";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type ArbitrageTradeRow = {
   id: string;
@@ -138,11 +137,11 @@ export default function ArbitrageTradesPage() {
       const headers = { Authorization: `Bearer ${token ?? ""}` };
 
       const [tradesRes, withdrawalsRes] = await Promise.all([
-        fetch(`${API_BASE}/user/arbitrage-trades?limit=500`, {
+        fetch(`${resolveApiBase()}/user/arbitrage-trades?limit=500`, {
           cache: "no-store",
           headers,
         }),
-        fetch(`${API_BASE}/user/arbitrage-withdrawals`, {
+        fetch(`${resolveApiBase()}/user/arbitrage-withdrawals`, {
           cache: "no-store",
           headers,
         }),

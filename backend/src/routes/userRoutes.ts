@@ -45,6 +45,7 @@ export function createUserRoutes(prisma: PrismaClient): Router {
   router.patch("/me", jwtAuth, user.patchMe);
   router.post("/profile/set-referrer", jwtAuth, user.setProfileReferrer);
   router.get("/dashboard-overview", jwtAuth, user.getDashboardOverview);
+  router.get("/api-status", jwtAuth, user.getApiStatus);
   router.get("/arbitrage-trades", jwtAuth, user.listArbitrageTrades);
   router.get("/arbitrage-withdrawals", jwtAuth, user.listArbitrageWithdrawals);
   router.patch("/copy-trading", jwtAuth, user.patchCopyTrading);

@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { StrategySubscriptionCheckout } from "@/components/strategies/StrategySubscriptionCheckout";
 import { StrategySparkline } from "@/components/strategies/StrategySparkline";
 import {
@@ -25,13 +26,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const ENV_API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") return `${window.location.origin.replace(/\/$/, "")}/api`;
-  return "";
-}
 
 type Strategy = {
   id: string;

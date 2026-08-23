@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
@@ -17,8 +18,6 @@ import {
   usdToInr,
 } from "@/lib/currency";
 import { openRazorpayCheckout } from "@/lib/razorpay";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
 type InvoiceKind = "REVENUE_SHARE" | "STRATEGY_FEE";
@@ -148,7 +147,7 @@ function invoiceAmountInr(inv: InvoiceRow): number {
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(`${API_BASE}${path}`, {
+  return fetch(`${resolveApiBase()}${path}`, {
     ...init,
     cache: "no-store",
     headers: {

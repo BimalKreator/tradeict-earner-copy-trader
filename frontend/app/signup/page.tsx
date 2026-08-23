@@ -1,11 +1,10 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/context/AuthContext";
-
-const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "details" | "otp";
 
@@ -52,7 +51,7 @@ export default function SignupPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/send-otp`, {
+      const res = await fetch(`${resolveApiBase()}/auth/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -76,7 +75,7 @@ export default function SignupPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/register`, {
+      const res = await fetch(`${resolveApiBase()}/auth/register`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

@@ -1,13 +1,12 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth, type AuthUser } from "@/context/AuthContext";
-
-const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "credentials" | "otp";
 
@@ -64,7 +63,7 @@ function LoginForm() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/login`, {
+      const res = await fetch(`${resolveApiBase()}/auth/login`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -145,7 +144,7 @@ function LoginForm() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/verify-otp`, {
+      const res = await fetch(`${resolveApiBase()}/auth/verify-otp`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

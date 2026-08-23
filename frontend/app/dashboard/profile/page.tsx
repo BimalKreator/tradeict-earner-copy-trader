@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { Loader2, UserCircle } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -10,8 +11,6 @@ import {
   type ProfileFormValues,
   type UserProfileData,
 } from "@/components/profile/UserProfileForm";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 export default function DashboardProfilePage() {
   const [profile, setProfile] = useState<UserProfileData | null>(null);
@@ -39,7 +38,7 @@ export default function DashboardProfilePage() {
     setUnauthorized(false);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/user/profile`, {
+      const res = await fetch(`${resolveApiBase()}/user/profile`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 401) {
@@ -80,7 +79,7 @@ export default function DashboardProfilePage() {
     }
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/user/profile`, {
+      const res = await fetch(`${resolveApiBase()}/user/profile`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",

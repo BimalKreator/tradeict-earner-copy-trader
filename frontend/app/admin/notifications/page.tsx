@@ -1,10 +1,8 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { Bell, CheckCircle2, Loader2, Search, Send, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 const SEARCH_DEBOUNCE_MS = 350;
 const MIN_SEARCH_LENGTH = 3;
@@ -54,7 +52,7 @@ export default function AdminNotificationsPage() {
       try {
         const params = new URLSearchParams({ q: query });
         const res = await fetch(
-          `${API_BASE}/admin/users/search?${params.toString()}`,
+          `${resolveApiBase()}/admin/users/search?${params.toString()}`,
           {
             headers: { Authorization: `Bearer ${token}` },
             cache: "no-store",
@@ -153,7 +151,7 @@ export default function AdminNotificationsPage() {
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${API_BASE}/admin/notifications/broadcast`, {
+      const res = await fetch(`${resolveApiBase()}/admin/notifications/broadcast`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

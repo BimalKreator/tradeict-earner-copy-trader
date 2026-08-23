@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   Check,
   Copy,
@@ -15,22 +16,11 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
 const SERVER_IP =
   process.env.NEXT_PUBLIC_SERVER_IP?.trim() || "169.58.123.144";
 
 const DELTA_API_GUIDE_URL =
   "https://www.delta.exchange/support/api-trading/";
-
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
 
 type ExchangeAccountRow = {
   id: string;

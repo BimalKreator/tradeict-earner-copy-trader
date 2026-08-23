@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   ArrowLeft,
   Crown,
@@ -12,8 +13,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type Period = {
   label: string;
@@ -53,7 +52,7 @@ export default function LeaderboardPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`${API_BASE}/leaderboard`);
+        const res = await fetch(`${resolveApiBase()}/leaderboard`);
         if (!res.ok) throw new Error(`Could not load leaderboard (${res.status})`);
         const json: unknown = await res.json();
         if (

@@ -33,8 +33,8 @@ import {
   readOptionalFiniteNumber,
   readStringArray,
 } from "@/lib/safeJson";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
+import { resolveApiBase } from "@/lib/apiBase";
+import { fetchWithTimeout, isFetchTimeoutError } from "@/lib/fetchTimeout";
 
 type DashboardOverview = {
   earnedPnl: number;
@@ -176,39 +176,72 @@ export default function DashboardPage() {
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [toggleBusy, setToggleBusy] = useState(false);
   const { token } = useAuth();
+  const apiBase = resolveApiBase();
 
   const loadWallet = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/wallet/me`, {
+    const res = await fetchWithTimeout(`${apiBase}/wallet/me`, {
       headers: { Authorization: `Bearer ${token ?? ""}` },
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`Failed to load wallet (${res.status})`);
     const parsed = parseWalletSummary(await res.json());
     setWallet(parsed);
-  }, [token]);
+  }, [token, apiBase]);
 
   const loadOverview = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/user/dashboard-overview`, {
+    const res = await fetchWithTimeout(`${apiBase}/user/dashboard-overview`, {
       headers: { Authorization: `Bearer ${token ?? ""}` },
     });
     if (!res.ok) throw new Error(`Failed to load dashboard (${res.status})`);
     const parsed = parseDashboardOverview(await res.json());
     if (!parsed) throw new Error("Invalid dashboard response");
     setData(parsed);
-  }, [token]);
+  }, [token, apiBase]);
+
+  const refreshApiStatus = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetchWithTimeout(`${apiBase}/user/api-status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const body = parseJsonObject(await res.json());
+      if (!body) return;
+      const apiStatus =
+        body.apiStatus === "connected" ? "connected" : "disconnected";
+      const copyTradingPaused = body.copyTradingPaused === true;
+      const copyTradingActive =
+        body.copyTradingActive === true ||
+        (!copyTradingPaused && apiStatus === "connected");
+      setData((prev) =>
+        prev
+          ? { ...prev, apiStatus, copyTradingPaused, copyTradingActive }
+          : prev,
+      );
+    } catch {
+      // Non-blocking — overview already rendered.
+    }
+  }, [token, apiBase]);
 
   useEffect(() => {
     void (async () => {
       try {
         await Promise.all([loadOverview(), loadWallet()]);
+        void refreshApiStatus();
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load dashboard");
+        setError(
+          isFetchTimeoutError(e)
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : "Failed to load dashboard",
+        );
       } finally {
         setLoading(false);
         setWalletLoading(false);
       }
     })();
-  }, [loadOverview, loadWallet]);
+  }, [loadOverview, loadWallet, refreshApiStatus]);
 
   useEffect(() => {
     if (!toast) return;
@@ -226,7 +259,7 @@ export default function DashboardPage() {
     setToggleBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/user/copy-trading`, {
+      const res = await fetchWithTimeout(`${apiBase}/user/copy-trading`, {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${token ?? ""}`,
@@ -251,7 +284,13 @@ export default function DashboardPage() {
           : prev,
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update copy trading");
+      setError(
+        isFetchTimeoutError(e)
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Failed to update copy trading",
+      );
     } finally {
       setToggleBusy(false);
     }
@@ -352,7 +391,7 @@ export default function DashboardPage() {
 
       <WithdrawFundsModal
         open={withdrawOpen}
-        apiBase={API_BASE ?? ""}
+        apiBase={apiBase}
         token={token}
         availableBalance={availableWalletUsd}
         onClose={() => setWithdrawOpen(false)}

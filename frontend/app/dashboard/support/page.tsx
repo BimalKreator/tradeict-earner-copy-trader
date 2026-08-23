@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -16,9 +17,6 @@ import {
   type TicketDetailResponse,
   type TicketSummary,
 } from "@/lib/tickets";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 export default function SupportTicketsPage() {
   const router = useRouter();
@@ -41,7 +39,7 @@ export default function SupportTicketsPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/tickets`, {
+      const res = await fetch(`${resolveApiBase()}/tickets`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Failed to load tickets (${res.status})`);
@@ -64,7 +62,7 @@ export default function SupportTicketsPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/tickets`, {
+      const res = await fetch(`${resolveApiBase()}/tickets`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -2,11 +2,13 @@ import type { NextFunction, Request, Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import {
   activeStrategiesForUser,
-  checkDeltaApiConnected,
   computeUserBookedPnlAndRevenueDue,
-  fetchUserCapitalBreakdownForDisplay,
+  fetchUserCapitalBreakdownForDashboard,
+  getCachedDeltaApiStatus,
   pnlPercentOfCapital,
+  probeAndCacheDeltaApiStatus,
   realizedTradePnl,
+  resolveDashboardApiStatus,
   resolveStoredOrComputedTradeRevenueShare,
   resolveUserDeltaCreds,
   startOfUtcMonth,
@@ -266,17 +268,23 @@ export function createUserController(prisma: PrismaClient) {
           select: { copyTradingPaused: true },
         }),
         computeTodaysPnl(prisma, userId),
-        fetchUserCapitalBreakdownForDisplay(prisma, userId),
+        fetchUserCapitalBreakdownForDashboard(prisma, userId),
         activeStrategiesForUser(prisma, userId),
         getUserArbitrageDashboardMetrics(prisma, userId),
         computeUserBookedPnlAndRevenueDue(prisma, userId, null),
         computeUserBookedPnlAndRevenueDue(prisma, userId, monthStart),
       ]);
 
-      const creds = await resolveUserDeltaCreds(prisma, userId);
-      const apiStatus = creds
-        ? (await checkDeltaApiConnected(creds)) ? "connected" : "disconnected"
-        : "disconnected";
+      const { apiStatus } = resolveDashboardApiStatus(userId);
+      // Refresh cache in background — never block the dashboard response on Delta.
+      void (async () => {
+        const cached = getCachedDeltaApiStatus(userId);
+        const stale =
+          !cached || Date.now() - cached.checkedAt > 60_000;
+        if (!stale) return;
+        const creds = await resolveUserDeltaCreds(prisma, userId);
+        await probeAndCacheDeltaApiStatus(userId, creds);
+      })();
 
       const copyTradingActive =
         !userRow?.copyTradingPaused && apiStatus === "connected";
@@ -457,14 +465,43 @@ export function createUserController(prisma: PrismaClient) {
       });
 
       const creds = await resolveUserDeltaCreds(prisma, userId);
-      const apiStatus = creds
-        ? (await checkDeltaApiConnected(creds)) ? "connected" : "disconnected"
-        : "disconnected";
+      const apiStatus = await probeAndCacheDeltaApiStatus(userId, creds);
 
       res.json({
         copyTradingPaused: user.copyTradingPaused,
         copyTradingActive: !user.copyTradingPaused && apiStatus === "connected",
         apiStatus,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async function getApiStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = req.userId;
+      if (!userId) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+
+      const creds = await resolveUserDeltaCreds(prisma, userId);
+      const apiStatus = await probeAndCacheDeltaApiStatus(userId, creds);
+      const userRow = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { copyTradingPaused: true },
+      });
+
+      res.json({
+        apiStatus,
+        copyTradingPaused: userRow?.copyTradingPaused ?? false,
+        copyTradingActive:
+          !(userRow?.copyTradingPaused ?? false) && apiStatus === "connected",
+        checkedAt: new Date().toISOString(),
       });
     } catch (err) {
       next(err);
@@ -1368,6 +1405,7 @@ export function createUserController(prisma: PrismaClient) {
     listArbitrageTrades,
     listArbitrageWithdrawals,
     patchCopyTrading,
+    getApiStatus,
     createDeposit,
     listDeposits,
     exportTrades,

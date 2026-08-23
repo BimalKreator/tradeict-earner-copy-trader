@@ -1,11 +1,10 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { History, Loader2, RefreshCw } from "lucide-react";
 import Link from "next/link";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type TradeRow = {
   id: string;
@@ -124,7 +123,7 @@ export default function DashboardTradesPage() {
     try {
       const token =
         typeof window !== "undefined" ? localStorage.getItem("token") : null;
-      const res = await fetch(`${API_BASE}/user/trades?limit=200`, {
+      const res = await fetch(`${resolveApiBase()}/user/trades?limit=200`, {
         cache: "no-store",
         headers: {
           Authorization: `Bearer ${token ?? ""}`,
@@ -197,7 +196,7 @@ export default function DashboardTradesPage() {
       if (fromDate) qs.set("startDate", fromDate);
       if (toDate) qs.set("endDate", toDate);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      const res = await fetch(`${API_BASE}/user/trades/export${suffix}`, {
+      const res = await fetch(`${resolveApiBase()}/user/trades/export${suffix}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {

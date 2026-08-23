@@ -1,18 +1,10 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 import { CheckCircle2, Loader2, Tag } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const ENV_API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
 
 type Props = {
   strategyId: string;

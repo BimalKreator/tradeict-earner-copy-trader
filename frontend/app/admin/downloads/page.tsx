@@ -1,9 +1,8 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { Loader2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type DownloadFileRow = {
   id: string;
@@ -31,7 +30,7 @@ export default function AdminDownloadsPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/downloads`, { headers: authHeaders });
+      const res = await fetch(`${resolveApiBase()}/admin/downloads`, { headers: authHeaders });
       if (!res.ok) {
         throw new Error(`Failed to load downloads (${res.status})`);
       }
@@ -57,7 +56,7 @@ export default function AdminDownloadsPage() {
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/downloads/${id}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/downloads/${id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -128,7 +127,7 @@ export default function AdminDownloadsPage() {
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-2">
                         <a
-                          href={`${API_BASE}${r.filePath}`}
+                          href={`${resolveApiBase()}${r.filePath}`}
                           target="_blank"
                           rel="noreferrer"
                           className="rounded-md border border-cyan-500/45 bg-cyan-500/15 px-3 py-1.5 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/25"

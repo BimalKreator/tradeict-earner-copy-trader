@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -9,8 +10,6 @@ import { AdminUserStructureBillingPanel } from "@/components/admin/AdminUserStru
 import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { AdminUserSimulationPanel } from "@/components/admin/AdminUserSimulationPanel";
 import { Loader2, Pencil, X } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type AcquiredByUser = {
   id: string;
@@ -214,17 +213,17 @@ export default function AdminUserDetails({
     setError(null);
     try {
       const results = await Promise.allSettled([
-        fetch(`${API_BASE}/admin/users/${userId}/management`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/balance`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/strategies`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/trades`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/transactions`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/users/${userId}/arbitrage-withdrawals`, {
+        fetch(`${resolveApiBase()}/admin/users/${userId}/management`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/balance`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/strategies`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/trades`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/transactions`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/arbitrage-withdrawals`, {
           headers: authHeaders,
         }),
-        fetch(`${API_BASE}/admin/users`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/members`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/members`, { headers: authHeaders }),
       ]);
 
       const mgRes = results[0].status === "fulfilled" ? results[0].value : null;
@@ -458,7 +457,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/flush-arbitrage-trades`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/flush-arbitrage-trades`, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),
@@ -497,7 +496,7 @@ export default function AdminUserDetails({
     setSavingBalanceOffset(true);
     try {
       const res = await fetch(
-        `${API_BASE}/admin/users/${userId}/balance-display-offset`,
+        `${resolveApiBase()}/admin/users/${userId}/balance-display-offset`,
         {
           method: "PATCH",
           headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -546,12 +545,12 @@ export default function AdminUserDetails({
 
       const adjustment = cryptoBalanceAdjustment.trim();
       const requests: Promise<Response>[] = [
-        fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/enabled`, {
+        fetch(`${resolveApiBase()}/admin/users/${userId}/crypto-arbitrage/enabled`, {
           method: "PATCH",
           headers: { ...authHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({ enabled: cryptoArbitrageEnabledDraft }),
         }),
-        fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/allocation`, {
+        fetch(`${resolveApiBase()}/admin/users/${userId}/crypto-arbitrage/allocation`, {
           method: "PATCH",
           headers: { ...authHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({ percent: allocation }),
@@ -564,7 +563,7 @@ export default function AdminUserDetails({
           throw new Error("Balance adjustment must be a valid number.");
         }
         requests.push(
-          fetch(`${API_BASE}/admin/users/${userId}/crypto-arbitrage/balance`, {
+          fetch(`${resolveApiBase()}/admin/users/${userId}/crypto-arbitrage/balance`, {
             method: "PATCH",
             headers: { ...authHeaders, "Content-Type": "application/json" },
             body: JSON.stringify({ delta }),
@@ -603,7 +602,7 @@ export default function AdminUserDetails({
     setNotice(null);
     try {
       const sourceId = arbitrageSourceUserIdDraft.trim();
-      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/${userId}`, {
         method: "PUT",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -644,7 +643,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${userId}/sync-arbitrage`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/${userId}/sync-arbitrage`, {
         method: "POST",
         headers: authHeaders,
       });
@@ -690,7 +689,7 @@ export default function AdminUserDetails({
     try {
       const dateIso = new Date(`${withdrawDate}T12:00:00`).toISOString();
       const res = await fetch(
-        `${API_BASE}/admin/users/${userId}/arbitrage-withdrawals`,
+        `${resolveApiBase()}/admin/users/${userId}/arbitrage-withdrawals`,
         {
           method: "POST",
           headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -719,13 +718,13 @@ export default function AdminUserDetails({
     try {
       const keyUpdate =
         apiKeyDraft.trim().length > 0 && apiSecretDraft.trim().length > 0;
-      const statusRes = await fetch(`${API_BASE}/admin/users/${userId}/status`, {
+      const statusRes = await fetch(`${resolveApiBase()}/admin/users/${userId}/status`, {
         method: "PATCH",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ status: statusDraft }),
       });
       const keysRes = keyUpdate
-        ? await fetch(`${API_BASE}/admin/users/${userId}/api-keys`, {
+        ? await fetch(`${resolveApiBase()}/admin/users/${userId}/api-keys`, {
             method: "PUT",
             headers: { ...authHeaders, "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -735,7 +734,7 @@ export default function AdminUserDetails({
             }),
           })
         : null;
-      const copyRes = await fetch(`${API_BASE}/admin/users/${userId}/copy-trading`, {
+      const copyRes = await fetch(`${resolveApiBase()}/admin/users/${userId}/copy-trading`, {
         method: "PATCH",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ paused: copyTradingPausedDraft }),
@@ -790,7 +789,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/${userId}`, {
         method: "DELETE",
         headers: authHeaders,
       });
@@ -814,7 +813,7 @@ export default function AdminUserDetails({
     setNotice(null);
     try {
       const res = await fetch(
-        `${API_BASE}/admin/users/${userId}/trades/reconcile-stale-open`,
+        `${resolveApiBase()}/admin/users/${userId}/trades/reconcile-stale-open`,
         {
           method: "POST",
           headers: authHeaders,
@@ -857,7 +856,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/flush-trades`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/flush-trades`, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -910,7 +909,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${userId}/reset-password-link`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/${userId}/reset-password-link`, {
         method: "POST",
         headers: authHeaders,
       });
@@ -933,7 +932,7 @@ export default function AdminUserDetails({
       if (tradeStartDate) qs.set("startDate", tradeStartDate);
       if (tradeEndDate) qs.set("endDate", tradeEndDate);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      const res = await fetch(`${API_BASE}/admin/trades/export${suffix}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/trades/export${suffix}`, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),
@@ -984,7 +983,7 @@ export default function AdminUserDetails({
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${userId}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/users/${userId}`, {
         method: "PUT",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1009,7 +1008,7 @@ export default function AdminUserDetails({
       const nextReferrerId = editAcquiredById.trim();
       if (nextReferrerId !== priorReferrerId) {
         const refRes = await fetch(
-          `${API_BASE}/admin/users/${userId}/change-referrer`,
+          `${resolveApiBase()}/admin/users/${userId}/change-referrer`,
           {
             method: "POST",
             headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -1061,7 +1060,7 @@ export default function AdminUserDetails({
     setNotice(null);
     try {
       const res = await fetch(
-        `${API_BASE}/admin/users/${userId}/change-requests/${requestId}/${action}`,
+        `${resolveApiBase()}/admin/users/${userId}/change-requests/${requestId}/${action}`,
         { method: "POST", headers: authHeaders },
       );
       if (!res.ok) throw new Error(`Failed to ${action} request.`);

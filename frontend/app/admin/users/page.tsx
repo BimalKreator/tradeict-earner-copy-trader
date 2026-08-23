@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { Eye, Mail, UserCog } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -9,18 +10,7 @@ import { EmailManagerModal } from "@/components/admin/EmailManagerModal";
 import { useAdminProfileEdit } from "@/components/admin/useAdminProfileEdit";
 import { useAdminSession } from "@/context/AdminSessionContext";
 
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
 /** Backend prefix: env, or same-origin `/api` when env is missing (typical reverse-proxy setup). */
-function resolveAdminApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
-
 function authHeaders(): HeadersInit {
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -57,7 +47,7 @@ function fmtUsd(n: number | null | undefined): string {
 }
 
 export default function AdminUsersPage() {
-  const apiBase = useMemo(() => resolveAdminApiBase(), []);
+  const apiBase = useMemo(() => resolveApiBase(), []);
   const { isSuperAdmin } = useAdminSession();
 
   const [users, setUsers] = useState<AdminUser[]>([]);

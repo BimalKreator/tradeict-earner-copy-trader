@@ -1,5 +1,6 @@
 import {
   InvoiceStatus,
+  Prisma,
   Role,
   SubscriptionStatus,
   TradeStatus,
@@ -14,7 +15,11 @@ import {
 } from "./exchangeService.js";
 import { FUTURE_HEDGE_STRATEGY_TITLE } from "../constants/strategyTitles.js";
 import { sumDeltaPipelineInvoices } from "./deltaPipelineBillingService.js";
-import { excludeLegacyBotSyncTradesWhere } from "./tradeBillingFilters.js";
+import {
+  BOT_SYNC_EXIT_REASON,
+  TRADE_SOURCE_BOT_SYNC_LEGACY,
+  excludeLegacyBotSyncTradesWhere,
+} from "./tradeBillingFilters.js";
 import { excludeTestPnlFilter } from "./simulatedDataFilters.js";
 
 /** Trade has no isSimulated column — dummy injector sets isDummy only. */
@@ -370,6 +375,106 @@ export async function checkDeltaApiConnected(
   }
 }
 
+const API_STATUS_TTL_MS = 60_000;
+const DASHBOARD_DELTA_CAPITAL_TIMEOUT_MS = 4_000;
+
+type ApiStatusCacheEntry = {
+  status: "connected" | "disconnected";
+  checkedAt: number;
+};
+
+const apiStatusCache = new Map<string, ApiStatusCacheEntry>();
+
+type CapitalCacheEntry = {
+  breakdown: DeltaBalanceBreakdown;
+  checkedAt: number;
+};
+
+const capitalCache = new Map<string, CapitalCacheEntry>();
+const CAPITAL_CACHE_TTL_MS = 60_000;
+
+function raceWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    void promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        resolve(fallback);
+      });
+  });
+}
+
+/** Last known apiStatus for a user (null when never probed). */
+export function getCachedDeltaApiStatus(
+  userId: string,
+): ApiStatusCacheEntry | null {
+  return apiStatusCache.get(userId) ?? null;
+}
+
+/** Live Delta probe — updates in-memory cache. Never throws. */
+export async function probeAndCacheDeltaApiStatus(
+  userId: string,
+  creds: UserCreds | null,
+): Promise<"connected" | "disconnected"> {
+  if (!creds) {
+    const entry: ApiStatusCacheEntry = {
+      status: "disconnected",
+      checkedAt: Date.now(),
+    };
+    apiStatusCache.set(userId, entry);
+    return "disconnected";
+  }
+  const ok = await checkDeltaApiConnected(creds);
+  const status = ok ? "connected" : "disconnected";
+  apiStatusCache.set(userId, { status, checkedAt: Date.now() });
+  return status;
+}
+
+/**
+ * Non-blocking apiStatus for dashboard: prefer fresh cache, else "disconnected"
+ * until a background probe (or GET /api-status) fills the cache.
+ */
+export function resolveDashboardApiStatus(userId: string): {
+  apiStatus: "connected" | "disconnected";
+  fromCache: boolean;
+} {
+  const cached = apiStatusCache.get(userId);
+  if (cached) {
+    return { apiStatus: cached.status, fromCache: true };
+  }
+  return { apiStatus: "disconnected", fromCache: false };
+}
+
+/** Dashboard capital — short timeout + cache so a slow Delta never hangs the page. */
+export async function fetchUserCapitalBreakdownForDashboard(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<DeltaBalanceBreakdown> {
+  const cached = capitalCache.get(userId);
+  const cachedFresh =
+    cached != null && Date.now() - cached.checkedAt < CAPITAL_CACHE_TTL_MS
+      ? cached.breakdown
+      : null;
+
+  const live = fetchUserCapitalBreakdownForDisplay(prisma, userId).then(
+    (breakdown) => {
+      capitalCache.set(userId, { breakdown, checkedAt: Date.now() });
+      return breakdown;
+    },
+  );
+
+  const fallback = cachedFresh ?? { ...ZERO_BREAKDOWN };
+  return raceWithTimeout(live, DASHBOARD_DELTA_CAPITAL_TIMEOUT_MS, fallback);
+}
+
 export async function sumClosedTradePnlSince(
   prisma: PrismaClient,
   userId: string,
@@ -572,6 +677,99 @@ export async function computeUsersBookedPnlAndRevenueDue(
   return out;
 }
 
+type TradePnlAggRow = {
+  strategyId: string;
+  grossPnl: number;
+  storedRevenue: number;
+  pnlNeedingShare: number;
+};
+
+/**
+ * SQL aggregate of closed-trade gross PnL + revenue share inputs per strategy.
+ * Same math as row-scan `realizedTradePnl` / `resolveStoredOrComputedTradeRevenueShare`
+ * (linear in profitShare%), without deserializing every trade into memory.
+ */
+async function aggregateClosedTradePnlByStrategy(
+  prisma: PrismaClient,
+  userId: string,
+  since: Date | null,
+): Promise<TradePnlAggRow[]> {
+  const sinceClause = since
+    ? Prisma.sql`AND t."createdAt" >= ${since}`
+    : Prisma.empty;
+
+  return prisma.$queryRaw<TradePnlAggRow[]>`
+    SELECT
+      t."strategyId" AS "strategyId",
+      COALESCE(SUM(
+        CASE
+          WHEN t."tradePnl" <> 0 THEN t."tradePnl"
+          ELSE COALESCE(t."pnl", 0)
+        END
+      ), 0)::float AS "grossPnl",
+      COALESCE(SUM(
+        CASE
+          WHEN t."revenueShareAmt" <> 0 THEN t."revenueShareAmt"
+          ELSE 0
+        END
+      ), 0)::float AS "storedRevenue",
+      COALESCE(SUM(
+        CASE
+          WHEN t."revenueShareAmt" = 0 THEN
+            CASE
+              WHEN t."tradePnl" <> 0 THEN t."tradePnl"
+              ELSE COALESCE(t."pnl", 0)
+            END
+          ELSE 0
+        END
+      ), 0)::float AS "pnlNeedingShare"
+    FROM "Trade" t
+    INNER JOIN "Strategy" s ON s.id = t."strategyId"
+    WHERE t."userId" = ${userId}
+      AND t.status = CAST('CLOSED' AS "TradeStatus")
+      AND t."isDummy" = false
+      AND NOT (
+        t.source = ${TRADE_SOURCE_BOT_SYNC_LEGACY}
+        OR (
+          t."exitReason" = ${BOT_SYNC_EXIT_REASON}
+          AND s."botStrategyType" IS NOT NULL
+          AND s."botStrategyType" <> ''
+        )
+      )
+      ${sinceClause}
+    GROUP BY t."strategyId"
+  `;
+}
+
+function bookedPnlFromStrategyAggregates(
+  rows: TradePnlAggRow[],
+  profitShareByStrategyId: Map<string, number>,
+): BookedPnlAndRevenueDue {
+  if (rows.length === 0) {
+    return withPnlAliases(ZERO_PNL_BREAKDOWN);
+  }
+
+  let grossPnl = 0;
+  let rawAppRevenue = 0;
+
+  for (const row of rows) {
+    const g = Number(row.grossPnl) || 0;
+    const stored = Number(row.storedRevenue) || 0;
+    const needing = Number(row.pnlNeedingShare) || 0;
+    const pct = profitShareByStrategyId.get(row.strategyId) ?? 0;
+    grossPnl += g;
+    rawAppRevenue +=
+      stored + computePerTradeRevenueShareAmt(needing, pct);
+  }
+
+  const appRevenue = floorRevenueShareDue(rawAppRevenue);
+  return withPnlAliases({
+    grossPnl,
+    appRevenue,
+    netEarnedPnl: grossPnl - appRevenue,
+  });
+}
+
 /**
  * Gross booked PnL and revenue-sharing due from CLOSED trades only.
  * @param since — UTC start of window; `null` = all-time.
@@ -582,30 +780,16 @@ export async function computeUserBookedPnlAndRevenueDue(
   since: Date | null,
 ): Promise<BookedPnlAndRevenueDue> {
   // BILLING QUERY — must always carry excludeSimulatedFilter()
-  const trades = await prisma.trade.findMany({
-    where: {
-      userId,
-      status: TradeStatus.CLOSED,
-      ...excludeLegacyBotSyncTradesWhere(),
-      ...excludeDummyTrades,
-      ...(since ? { createdAt: { gte: since } } : {}),
-    },
-    select: {
-      strategyId: true,
-      tradePnl: true,
-      pnl: true,
-      revenueShareAmt: true,
-    },
-  });
+  const aggRows = await aggregateClosedTradePnlByStrategy(prisma, userId, since);
 
   let tradeBooked = withPnlAliases(ZERO_PNL_BREAKDOWN);
-  if (trades.length > 0) {
+  if (aggRows.length > 0) {
     const strategies = await prisma.strategy.findMany({
-      where: { id: { in: [...new Set(trades.map((t) => t.strategyId))] } },
+      where: { id: { in: aggRows.map((r) => r.strategyId) } },
       select: { id: true, profitShare: true },
     });
     const sharePctById = new Map(strategies.map((s) => [s.id, s.profitShare]));
-    tradeBooked = computeBookedPnlAndRevenueDueFromTrades(trades, sharePctById);
+    tradeBooked = bookedPnlFromStrategyAggregates(aggRows, sharePctById);
   }
 
   const deltaBooked = await sumDeltaPipelineInvoices(prisma, userId, { since });

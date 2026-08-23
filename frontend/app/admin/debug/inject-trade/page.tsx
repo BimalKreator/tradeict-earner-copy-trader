@@ -1,19 +1,9 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { Loader2, TestTube2, Trash2 } from "lucide-react";
-
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
 
 function authHeaders(): HeadersInit {
   const token =

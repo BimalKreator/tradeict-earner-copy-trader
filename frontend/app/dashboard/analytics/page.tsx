@@ -1,5 +1,7 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
+import { fetchWithTimeout, isFetchTimeoutError } from "@/lib/fetchTimeout";
 import {
   Activity,
   BarChart3,
@@ -24,8 +26,6 @@ import {
 
 import "react-calendar-heatmap/dist/styles.css";
 import "./analytics-heatmap.css";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type CalendarDay = { date: string; profit: number };
 
@@ -139,12 +139,16 @@ export default function AnalyticsPage() {
       const headers = { Authorization: `Bearer ${token}` };
 
       const [calRes, cumRes, actRes] = await Promise.all([
-        fetch(
-          `${API_BASE}/analytics/calendar?year=${year}&month=${month}`,
+        fetchWithTimeout(
+          `${resolveApiBase()}/analytics/calendar?year=${year}&month=${month}`,
           { headers },
         ),
-        fetch(`${API_BASE}/analytics/cumulative-strategies`, { headers }),
-        fetch(`${API_BASE}/analytics/activity?limit=75`, { headers }),
+        fetchWithTimeout(`${resolveApiBase()}/analytics/cumulative-strategies`, {
+          headers,
+        }),
+        fetchWithTimeout(`${resolveApiBase()}/analytics/activity?limit=75`, {
+          headers,
+        }),
       ]);
 
       if (calRes.status === 401 || cumRes.status === 401 || actRes.status === 401) {
@@ -177,7 +181,13 @@ export default function AnalyticsPage() {
       const itemsRaw = (actJson as { items?: unknown }).items;
       setActivities(Array.isArray(itemsRaw) ? (itemsRaw as ActivityItem[]) : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load analytics");
+      setError(
+        isFetchTimeoutError(e)
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Failed to load analytics",
+      );
     } finally {
       setLoading(false);
     }

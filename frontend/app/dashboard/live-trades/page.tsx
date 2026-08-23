@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
@@ -11,19 +12,8 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
 const LIVE_TRADES_REFRESH_MS = 8_000;
 const BOT_TRADES_REFRESH_MS = 30_000;
-
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
 
 type LiveRow = {
   entryTime: string | null;

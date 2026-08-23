@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,9 +16,6 @@ import {
   type TicketDetailResponse,
   type TicketMessage,
 } from "@/lib/tickets";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 function AdminMessageBubble({ msg }: { msg: TicketMessage }) {
   const isAdmin = msg.isAdmin;
@@ -63,7 +61,7 @@ export default function AdminSupportTicketPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/tickets/${ticketId}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/tickets/${ticketId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Failed (${res.status})`);
@@ -91,7 +89,7 @@ export default function AdminSupportTicketPage() {
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/tickets/${ticketId}/reply`, {
+      const res = await fetch(`${resolveApiBase()}/admin/tickets/${ticketId}/reply`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -116,7 +114,7 @@ export default function AdminSupportTicketPage() {
     if (!token || !confirm("Close this ticket for the user?")) return;
     setClosing(true);
     try {
-      const res = await fetch(`${API_BASE}/admin/tickets/${ticketId}/close`, {
+      const res = await fetch(`${resolveApiBase()}/admin/tickets/${ticketId}/close`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });

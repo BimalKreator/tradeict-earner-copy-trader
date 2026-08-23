@@ -41,17 +41,7 @@ import {
   BulkMasterAdjustQtyModal,
   type BulkMasterAdjustQtyTarget,
 } from "@/components/admin/BulkMasterAdjustQtyModal";
-
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
-function resolveAdminApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
+import { resolveApiBase } from "@/lib/apiBase";
 
 type LiveRow = {
   entryTime: string | null;
@@ -116,7 +106,7 @@ function BtcUsdLiveTicker() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const base = resolveAdminApiBase();
+      const base = resolveApiBase();
       if (!base || cancelled) return;
       try {
         const res = await fetch(
@@ -1037,7 +1027,7 @@ function RiskManagementPanel({
   const pnlNegative = totalLivePnl < 0;
 
   const saveAutoExit = async () => {
-    const base = resolveAdminApiBase();
+    const base = resolveApiBase();
     if (!base) {
       onSaved("API base URL is not configured.");
       return;
@@ -1605,7 +1595,7 @@ export default function AdminLiveTradesPage() {
     } else {
       setIsRefreshing(true);
     }
-    const base = resolveAdminApiBase();
+    const base = resolveApiBase();
     if (!base) {
       if (!silent) {
         setError(
@@ -1712,7 +1702,7 @@ export default function AdminLiveTradesPage() {
       const key = `${args.strategyId}:${args.symbol}:${args.side}:${args.userId ?? "master"}`;
       setClosingKey(key);
       try {
-        const base = resolveAdminApiBase();
+        const base = resolveApiBase();
         const res = await fetch(`${base}/admin/trades/close-manual`, {
           method: "POST",
           headers: {
@@ -1755,7 +1745,7 @@ export default function AdminLiveTradesPage() {
       setDestructiveError(null);
       setError(null);
       try {
-        const base = resolveAdminApiBase();
+        const base = resolveApiBase();
         const res = await fetch(`${base}/admin/live-trades/close-all`, {
           method: "POST",
           headers: {
@@ -1818,7 +1808,7 @@ export default function AdminLiveTradesPage() {
       setDestructiveError(null);
       setError(null);
       try {
-        const base = resolveAdminApiBase();
+        const base = resolveApiBase();
         const res = await fetch(`${base}/admin/live-trades/sync-all-followers`, {
           method: "POST",
           headers: {
@@ -1874,7 +1864,7 @@ export default function AdminLiveTradesPage() {
   }, [load]);
 
   const loadBotTrades = useCallback(async () => {
-    const base = resolveAdminApiBase();
+    const base = resolveApiBase();
     if (!base) return;
     try {
       const res = await fetch(
@@ -2171,7 +2161,7 @@ export default function AdminLiveTradesPage() {
           userId={granularSyncModal.userId}
           userLabel={granularSyncModal.userLabel}
           masterLegs={granularSyncModal.masterLegs}
-          apiBase={resolveAdminApiBase()}
+          apiBase={resolveApiBase()}
           authToken={
             typeof window !== "undefined"
               ? localStorage.getItem("token") ?? ""
@@ -2190,7 +2180,7 @@ export default function AdminLiveTradesPage() {
         open={adjustQtyTarget != null}
         target={adjustQtyTarget}
         onClose={() => setAdjustQtyTarget(null)}
-        apiBase={resolveAdminApiBase()}
+        apiBase={resolveApiBase()}
         authToken={
           typeof window !== "undefined"
             ? localStorage.getItem("token") ?? ""
@@ -2208,7 +2198,7 @@ export default function AdminLiveTradesPage() {
         open={bulkAdjustTarget != null}
         target={bulkAdjustTarget}
         onClose={() => setBulkAdjustTarget(null)}
-        apiBase={resolveAdminApiBase()}
+        apiBase={resolveApiBase()}
         authToken={
           typeof window !== "undefined"
             ? localStorage.getItem("token") ?? ""
@@ -2226,7 +2216,7 @@ export default function AdminLiveTradesPage() {
         open={masterAdjustTarget != null}
         target={masterAdjustTarget}
         onClose={() => setMasterAdjustTarget(null)}
-        apiBase={resolveAdminApiBase()}
+        apiBase={resolveApiBase()}
         authToken={
           typeof window !== "undefined"
             ? localStorage.getItem("token") ?? ""
@@ -2244,7 +2234,7 @@ export default function AdminLiveTradesPage() {
         open={bulkMasterAdjustTarget != null}
         target={bulkMasterAdjustTarget}
         onClose={() => setBulkMasterAdjustTarget(null)}
-        apiBase={resolveAdminApiBase()}
+        apiBase={resolveApiBase()}
         authToken={
           typeof window !== "undefined"
             ? localStorage.getItem("token") ?? ""

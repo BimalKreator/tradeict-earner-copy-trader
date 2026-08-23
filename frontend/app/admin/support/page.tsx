@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -13,9 +14,6 @@ import {
   type TicketStatus,
   type TicketSummary,
 } from "@/lib/tickets";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 export default function AdminSupportPage() {
   const [tickets, setTickets] = useState<TicketSummary[]>([]);
@@ -33,7 +31,7 @@ export default function AdminSupportPage() {
     try {
       const q =
         statusFilter === "ALL" ? "" : `?status=${statusFilter}`;
-      const res = await fetch(`${API_BASE}/admin/tickets${q}`, {
+      const res = await fetch(`${resolveApiBase()}/admin/tickets${q}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 403) {

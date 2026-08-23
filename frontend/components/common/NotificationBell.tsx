@@ -1,10 +1,10 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
+import { fetchWithTimeout } from "@/lib/fetchTimeout";
 import { Bell } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type NotificationRow = {
   id: string;
@@ -24,7 +24,7 @@ export function NotificationBell() {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/notifications`, {
+      const res = await fetchWithTimeout(`${resolveApiBase()}/notifications`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
@@ -62,7 +62,7 @@ export function NotificationBell() {
 
   async function markRead(id: string) {
     if (!token) return;
-    await fetch(`${API_BASE}/notifications/${id}/read`, {
+    await fetch(`${resolveApiBase()}/notifications/${id}/read`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}` },
     });

@@ -13,6 +13,21 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    files: ["**/*.{js,jsx,ts,tsx}"],
+    ignores: ["lib/apiBase.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "MemberExpression[object.object.name='process'][object.property.name='env'][property.name='NEXT_PUBLIC_API_URL']",
+          message:
+            "Use resolveApiBase() from @/lib/apiBase — do not read NEXT_PUBLIC_API_URL directly.",
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;

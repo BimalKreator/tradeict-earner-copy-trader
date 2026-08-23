@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,9 +16,6 @@ import {
   type TicketDetailResponse,
   type TicketMessage,
 } from "@/lib/tickets";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 function MessageBubble({ msg }: { msg: TicketMessage }) {
   const isUser = !msg.isAdmin;
@@ -65,7 +63,7 @@ export default function SupportTicketThreadPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/tickets/${ticketId}`, {
+      const res = await fetch(`${resolveApiBase()}/tickets/${ticketId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Failed to load ticket (${res.status})`);
@@ -94,7 +92,7 @@ export default function SupportTicketThreadPage() {
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/tickets/${ticketId}/reply`, {
+      const res = await fetch(`${resolveApiBase()}/tickets/${ticketId}/reply`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -122,7 +120,7 @@ export default function SupportTicketThreadPage() {
     setClosing(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/tickets/${ticketId}/close`, {
+      const res = await fetch(`${resolveApiBase()}/tickets/${ticketId}/close`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });

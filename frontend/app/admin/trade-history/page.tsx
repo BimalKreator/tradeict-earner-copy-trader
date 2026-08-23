@@ -1,10 +1,10 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { AlertTriangle, History, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 const FLUSH_ALL_CONFIRM_PHRASE = "FLUSH ALL TRADES";
 
 type UserOption = {
@@ -88,7 +88,7 @@ export default function AdminTradeHistoryPage() {
       try {
         const qs = new URLSearchParams({ limit: "300" });
         if (selectedUserId) qs.set("userId", selectedUserId);
-        const res = await fetch(`${API_BASE}/admin/trades?${qs.toString()}`, {
+        const res = await fetch(`${resolveApiBase()}/admin/trades?${qs.toString()}`, {
           headers,
           cache: "no-store",
         });
@@ -111,7 +111,7 @@ export default function AdminTradeHistoryPage() {
   useEffect(() => {
     async function loadUsers(): Promise<void> {
       try {
-        const res = await fetch(`${API_BASE}/admin/users/list`, {
+        const res = await fetch(`${resolveApiBase()}/admin/users/list`, {
           headers,
           cache: "no-store",
         });
@@ -139,7 +139,7 @@ export default function AdminTradeHistoryPage() {
     setError(null);
     setFlushSuccess(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/trades/flush-all`, {
+      const res = await fetch(`${resolveApiBase()}/admin/trades/flush-all`, {
         method: "POST",
         headers: {
           ...headers,

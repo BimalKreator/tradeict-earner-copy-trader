@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   Banknote,
   CheckCircle2,
@@ -10,17 +11,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SALES_TEAM_ROLE_LABELS, isSalesTeamMember } from "@/lib/roles";
-
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
-
-function resolveApiBase(): string {
-  if (ENV_API_BASE) return ENV_API_BASE;
-  if (typeof window !== "undefined") {
-    return `${window.location.origin.replace(/\/$/, "")}/api`;
-  }
-  return "";
-}
 
 type PayoutStatus = "PENDING" | "APPROVED" | "COMPLETED" | "REJECTED";
 

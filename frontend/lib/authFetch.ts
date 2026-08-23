@@ -1,4 +1,5 @@
 import { resolveApiBase } from "./apiBase";
+import { fetchWithTimeout } from "./fetchTimeout";
 
 /**
  * Build a full API URL from a path relative to the API base.
@@ -21,18 +22,23 @@ export function authHeaders(): HeadersInit {
 export async function authFetch(
   path: string,
   init?: RequestInit,
+  timeoutMs = 15_000,
 ): Promise<Response> {
   const url = buildApiUrl(path);
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(url, {
-    ...init,
-    cache: init?.cache ?? "no-store",
-    headers: {
-      ...(init?.headers ?? {}),
-      Authorization: `Bearer ${token ?? ""}`,
+  return fetchWithTimeout(
+    url,
+    {
+      ...init,
+      cache: init?.cache ?? "no-store",
+      headers: {
+        ...(init?.headers ?? {}),
+        Authorization: `Bearer ${token ?? ""}`,
+      },
     },
-  });
+    timeoutMs,
+  );
 }
 
 export function formatFetchError(

@@ -1,9 +1,8 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { ArrowUpDown, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 export type DexArbitrageRow = {
   token: string;
@@ -139,7 +138,7 @@ export function DexArbitrageTable() {
     try {
       const token = localStorage.getItem("token");
       const qs = forceRefresh ? "?refresh=1" : "";
-      const res = await fetch(`${API_BASE}/arbitrage/dex${qs}`, {
+      const res = await fetch(`${resolveApiBase()}/arbitrage/dex${qs}`, {
         headers: { Authorization: `Bearer ${token ?? ""}` },
         cache: "no-store",
       });

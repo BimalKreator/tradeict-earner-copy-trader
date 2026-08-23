@@ -1,11 +1,9 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Save, Shield, UsersRound } from "lucide-react";
 import { usePlatformConfig } from "@/context/PlatformConfigContext";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "") ?? "";
 
 type PartnerCommissionRates = {
   maxTotalPct: number;
@@ -166,10 +164,10 @@ export default function AdminSettingsPage() {
     try {
       const token = localStorage.getItem("token");
       const [paymentRes, partnerRes] = await Promise.all([
-        fetch(`${API_BASE}/admin/settings/payment`, {
+        fetch(`${resolveApiBase()}/admin/settings/payment`, {
           headers: { Authorization: `Bearer ${token ?? ""}` },
         }),
-        fetch(`${API_BASE}/admin/settings/partner-commission`, {
+        fetch(`${resolveApiBase()}/admin/settings/partner-commission`, {
           headers: { Authorization: `Bearer ${token ?? ""}` },
         }),
       ]);
@@ -257,7 +255,7 @@ export default function AdminSettingsPage() {
     else setSavingMaintenance(true);
     try {
       const token = localStorage.getItem("token");
-      const res = await fetch(`${API_BASE}/admin/settings/payment`, {
+      const res = await fetch(`${resolveApiBase()}/admin/settings/payment`, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token ?? ""}`,
@@ -374,7 +372,7 @@ export default function AdminSettingsPage() {
         throw new Error(preview.validationError);
       }
       const token = localStorage.getItem("token");
-      const res = await fetch(`${API_BASE}/admin/settings/partner-commission`, {
+      const res = await fetch(`${resolveApiBase()}/admin/settings/partner-commission`, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token ?? ""}`,

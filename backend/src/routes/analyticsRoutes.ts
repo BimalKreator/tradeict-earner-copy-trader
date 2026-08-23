@@ -88,31 +88,62 @@ export function createAnalyticsRoutes(prisma: PrismaClient): Router {
         series: { date: string; cumulative: number }[];
       }[] = [];
 
-      for (const sub of subs) {
-        // BILLING QUERY — must always carry excludeSimulatedFilter()
-        const rows = await prisma.pnLRecord.findMany({
-          where: {
-            userId,
-            strategyId: sub.strategyId,
-            ...excludeTestPnlFilter(false),
-          },
-          orderBy: { timestamp: "asc" },
-          select: { timestamp: true, profitAmount: true },
-        });
+      if (subs.length === 0) {
+        res.json({ strategies: strategiesOut });
+        return;
+      }
 
-        let cumulative = 0;
-        const series = rows.map((r) => {
-          cumulative += r.profitAmount;
-          return {
+      const strategyIds = [...new Set(subs.map((s) => s.strategyId))];
+      const titleById = new Map(
+        subs.map((s) => [s.strategyId, s.strategy.title] as const),
+      );
+
+      // Bound history so one user cannot pull unbounded PnL rows into memory.
+      const since = new Date();
+      since.setUTCMonth(since.getUTCMonth() - 18);
+
+      // BILLING QUERY — must always carry excludeSimulatedFilter()
+      const rows = await prisma.pnLRecord.findMany({
+        where: {
+          userId,
+          strategyId: { in: strategyIds },
+          timestamp: { gte: since },
+          ...excludeTestPnlFilter(false),
+        },
+        orderBy: { timestamp: "asc" },
+        select: { strategyId: true, timestamp: true, profitAmount: true },
+        take: 50_000,
+      });
+
+      const seriesByStrategy = new Map<
+        string,
+        { date: string; cumulative: number }[]
+      >();
+      const cumulativeByStrategy = new Map<string, number>();
+
+      for (const id of strategyIds) {
+        seriesByStrategy.set(id, []);
+        cumulativeByStrategy.set(id, 0);
+      }
+
+      for (const r of rows) {
+        const prev = cumulativeByStrategy.get(r.strategyId) ?? 0;
+        const next = prev + r.profitAmount;
+        cumulativeByStrategy.set(r.strategyId, next);
+        const series = seriesByStrategy.get(r.strategyId);
+        if (series) {
+          series.push({
             date: r.timestamp.toISOString(),
-            cumulative,
-          };
-        });
+            cumulative: next,
+          });
+        }
+      }
 
+      for (const strategyId of strategyIds) {
         strategiesOut.push({
-          strategyId: sub.strategyId,
-          title: sub.strategy.title,
-          series,
+          strategyId,
+          title: titleById.get(strategyId) ?? strategyId,
+          series: seriesByStrategy.get(strategyId) ?? [],
         });
       }
 

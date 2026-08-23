@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   ArrowLeft,
   BarChart3,
@@ -40,8 +41,6 @@ import {
 } from "@/lib/strategyPerformance";
 
 import "../../analytics/analytics-heatmap.css";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type StrategyDetail = {
   id: string;
@@ -136,7 +135,7 @@ export default function StrategyPerformancePage() {
     }
     try {
       const res = await fetch(
-        `${API_BASE}/subscriptions/strategies/${encodeURIComponent(id)}`,
+        `${resolveApiBase()}/subscriptions/strategies/${encodeURIComponent(id)}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (res.status === 401) {
@@ -152,7 +151,7 @@ export default function StrategyPerformancePage() {
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       setStrategy((await res.json()) as StrategyDetail);
 
-      const mineRes = await fetch(`${API_BASE}/subscriptions/mine`, {
+      const mineRes = await fetch(`${resolveApiBase()}/subscriptions/mine`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (mineRes.ok) {

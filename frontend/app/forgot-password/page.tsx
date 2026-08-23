@@ -1,10 +1,9 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
-
-const AUTH_API = process.env.NEXT_PUBLIC_API_URL;
 
 type Step = "email" | "otp" | "password";
 
@@ -43,7 +42,7 @@ export default function ForgotPasswordPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/forgot-password`, {
+      const res = await fetch(`${resolveApiBase()}/auth/forgot-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -85,7 +84,7 @@ export default function ForgotPasswordPage() {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${AUTH_API}/auth/reset-password`, {
+      const res = await fetch(`${resolveApiBase()}/auth/reset-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

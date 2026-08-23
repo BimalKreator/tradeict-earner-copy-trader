@@ -1,5 +1,6 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import {
   Activity,
   Banknote,
@@ -10,8 +11,6 @@ import {
   Wallet,
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type CronJobStatus = {
   name: string;
@@ -116,8 +115,8 @@ export default function AdminDashboardPage() {
     void (async () => {
       try {
         const [statsRes, cronRes] = await Promise.all([
-          fetch(`${API_BASE}/admin/dashboard-stats`, { headers }),
-          fetch(`${API_BASE}/admin/system/cron`, { headers }),
+          fetch(`${resolveApiBase()}/admin/dashboard-stats`, { headers }),
+          fetch(`${resolveApiBase()}/admin/system/cron`, { headers }),
         ]);
         if (!statsRes.ok) throw new Error(`Request failed (${statsRes.status})`);
         setData((await statsRes.json()) as DashboardStats);

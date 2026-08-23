@@ -1,9 +1,8 @@
 "use client";
 
+import { resolveApiBase } from "@/lib/apiBase";
 import { Loader2, Plus, RefreshCw, Tag, ToggleLeft, ToggleRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
 type Coupon = {
   id: string;
@@ -40,7 +39,7 @@ export default function AdminCouponsPage() {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/admin/coupons`, {
+      const res = await fetch(`${resolveApiBase()}/admin/coupons`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 403) {
@@ -66,7 +65,7 @@ export default function AdminCouponsPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/coupons`, {
+      const res = await fetch(`${resolveApiBase()}/admin/coupons`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -93,7 +92,7 @@ export default function AdminCouponsPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/coupons/bulk`, {
+      const res = await fetch(`${resolveApiBase()}/admin/coupons/bulk`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -118,7 +117,7 @@ export default function AdminCouponsPage() {
 
   async function toggleActive(id: string) {
     try {
-      const res = await fetch(`${API_BASE}/admin/coupons/${id}/toggle`, {
+      const res = await fetch(`${resolveApiBase()}/admin/coupons/${id}/toggle`, {
         method: "PATCH",
         headers: { Authorization: `Bearer ${token}` },
       });
