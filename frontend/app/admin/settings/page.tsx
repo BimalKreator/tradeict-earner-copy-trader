@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Save, Shield, UsersRound } from "lucide-react";
 import { usePlatformConfig } from "@/context/PlatformConfigContext";
 
@@ -17,6 +17,13 @@ type PartnerCommissionRates = {
   directorDirectPct: number;
 };
 
+type CommissionPreviewChain = {
+  label: string;
+  totalPct: number;
+  withinCap: boolean;
+  slices: Array<{ role: string; pct: number; amountUsd: number }>;
+};
+
 const DEFAULT_PARTNER_RATES: PartnerCommissionRates = {
   maxTotalPct: 8,
   executiveDirectPct: 5,
@@ -26,6 +33,107 @@ const DEFAULT_PARTNER_RATES: PartnerCommissionRates = {
   directorUnderManagerPct: 2,
   directorDirectPct: 8,
 };
+
+const PREVIEW_PLATFORM_REVENUE_USD = 100;
+
+function executiveChainTotal(rates: PartnerCommissionRates): number {
+  return (
+    rates.executiveDirectPct +
+    rates.managerUnderExecutivePct +
+    rates.directorUnderExecutivePct
+  );
+}
+
+function managerChainTotal(rates: PartnerCommissionRates): number {
+  return rates.managerDirectPct + rates.directorUnderManagerPct;
+}
+
+function directorChainTotal(rates: PartnerCommissionRates): number {
+  return rates.directorDirectPct;
+}
+
+function buildCommissionPreview(
+  rates: PartnerCommissionRates,
+  platformRevenueUsd = PREVIEW_PLATFORM_REVENUE_USD,
+): { chains: CommissionPreviewChain[]; validationError: string | null } {
+  const amount = (pct: number) =>
+    Math.round(((platformRevenueUsd * pct) / 100) * 100) / 100;
+
+  const executiveTotal = executiveChainTotal(rates);
+  const managerTotal = managerChainTotal(rates);
+  const directorTotal = directorChainTotal(rates);
+
+  let validationError: string | null = null;
+  if (!Number.isFinite(rates.maxTotalPct) || rates.maxTotalPct <= 0) {
+    validationError = `maxTotalPct must be greater than 0 (got ${rates.maxTotalPct})`;
+  } else if (executiveTotal > rates.maxTotalPct) {
+    validationError =
+      `Executive chain total ${executiveTotal}% exceeds maxTotalPct cap ${rates.maxTotalPct}%`;
+  } else if (managerTotal > rates.maxTotalPct) {
+    validationError =
+      `Manager chain total ${managerTotal}% exceeds maxTotalPct cap ${rates.maxTotalPct}%`;
+  } else if (directorTotal > rates.maxTotalPct) {
+    validationError =
+      `Senior Manager chain total ${directorTotal}% exceeds maxTotalPct cap ${rates.maxTotalPct}%`;
+  }
+
+  return {
+    validationError,
+    chains: [
+      {
+        label: "Executive acquired the trader",
+        totalPct: executiveTotal,
+        withinCap: executiveTotal <= rates.maxTotalPct,
+        slices: [
+          {
+            role: "Executive",
+            pct: rates.executiveDirectPct,
+            amountUsd: amount(rates.executiveDirectPct),
+          },
+          {
+            role: "Manager (upline)",
+            pct: rates.managerUnderExecutivePct,
+            amountUsd: amount(rates.managerUnderExecutivePct),
+          },
+          {
+            role: "Senior Manager (upline)",
+            pct: rates.directorUnderExecutivePct,
+            amountUsd: amount(rates.directorUnderExecutivePct),
+          },
+        ],
+      },
+      {
+        label: "Manager acquired the trader",
+        totalPct: managerTotal,
+        withinCap: managerTotal <= rates.maxTotalPct,
+        slices: [
+          {
+            role: "Manager",
+            pct: rates.managerDirectPct,
+            amountUsd: amount(rates.managerDirectPct),
+          },
+          {
+            role: "Senior Manager (upline)",
+            pct: rates.directorUnderManagerPct,
+            amountUsd: amount(rates.directorUnderManagerPct),
+          },
+        ],
+      },
+      {
+        label: "Senior Manager acquired the trader",
+        totalPct: directorTotal,
+        withinCap: directorTotal <= rates.maxTotalPct,
+        slices: [
+          {
+            role: "Senior Manager",
+            pct: rates.directorDirectPct,
+            amountUsd: amount(rates.directorDirectPct),
+          },
+        ],
+      },
+    ],
+  };
+}
 
 export default function AdminSettingsPage() {
   const { refresh: refreshPlatformConfig } = usePlatformConfig();
@@ -46,6 +154,11 @@ export default function AdminSettingsPage() {
   const [savingPartnerCommission, setSavingPartnerCommission] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const commissionPreview = useMemo(
+    () => buildCommissionPreview(partnerRates),
+    [partnerRates],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -252,6 +365,13 @@ export default function AdminSettingsPage() {
         if (!Number.isFinite(val) || val < 0 || val > 100) {
           throw new Error(`${key} must be between 0 and 100`);
         }
+      }
+      if (parsed.maxTotalPct <= 0) {
+        throw new Error("maxTotalPct must be greater than 0");
+      }
+      const preview = buildCommissionPreview(parsed);
+      if (preview.validationError) {
+        throw new Error(preview.validationError);
       }
       const token = localStorage.getItem("token");
       const res = await fetch(`${API_BASE}/admin/settings/partner-commission`, {
@@ -611,7 +731,7 @@ export default function AdminSettingsPage() {
                 Max total per event (%)
                 <input
                   type="number"
-                  min={0}
+                  min={0.01}
                   max={100}
                   step={0.01}
                   required
@@ -621,13 +741,70 @@ export default function AdminSettingsPage() {
                   className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-violet-500/40"
                 />
               </label>
+
+              <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                <h3 className="text-sm font-semibold text-white">
+                  Live preview — ${PREVIEW_PLATFORM_REVENUE_USD} platform revenue
+                </h3>
+                <p className="mt-1 text-xs text-white/45">
+                  Percent of app revenue (not gross trade PnL) paid per acquisition
+                  path. Each chain total must stay at or below the cap before you
+                  can save.
+                </p>
+                {commissionPreview.validationError ? (
+                  <p className="mt-3 rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                    {commissionPreview.validationError}
+                  </p>
+                ) : null}
+                <div className="mt-4 space-y-4">
+                  {commissionPreview.chains.map((chain) => (
+                    <div
+                      key={chain.label}
+                      className={`rounded-lg border px-3 py-3 ${
+                        chain.withinCap
+                          ? "border-emerald-500/25 bg-emerald-500/5"
+                          : "border-red-500/35 bg-red-500/10"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-white">{chain.label}</p>
+                        <p
+                          className={`text-xs font-semibold tabular-nums ${
+                            chain.withinCap ? "text-emerald-200" : "text-red-200"
+                          }`}
+                        >
+                          Chain total: {chain.totalPct}% / cap {partnerRates.maxTotalPct}%
+                        </p>
+                      </div>
+                      <ul className="mt-2 space-y-1.5">
+                        {chain.slices.map((slice) => (
+                          <li
+                            key={`${chain.label}-${slice.role}`}
+                            className="flex items-center justify-between text-xs text-white/70"
+                          >
+                            <span>{slice.role}</span>
+                            <span className="tabular-nums text-white/85">
+                              {slice.pct}% → ${slice.amountUsd.toFixed(2)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <p className="text-xs text-white/45">
-                If tier rates sum above the cap, all slices are scaled down proportionally.
-                Changes apply to new profit bookings only — existing ledger rows are unchanged.
+                Each acquisition-path total must be at or below the max cap. Save is
+                rejected if any chain exceeds it — rates are never silently scaled.
+                Changes apply to new profit bookings only — existing ledger rows are
+                unchanged.
               </p>
               <button
                 type="submit"
-                disabled={savingPartnerCommission}
+                disabled={
+                  savingPartnerCommission || commissionPreview.validationError != null
+                }
                 className="inline-flex items-center gap-2 rounded-lg border border-violet-500/40 bg-violet-500/15 px-5 py-2.5 text-sm font-medium text-violet-100 hover:bg-violet-500/25 disabled:opacity-50"
               >
                 {savingPartnerCommission ? (

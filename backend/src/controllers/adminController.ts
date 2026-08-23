@@ -4535,9 +4535,6 @@ export function createAdminController(prisma: PrismaClient) {
         }
         tiers.push({
           tierLevel,
-          directCommissionRate: Number(row.directCommissionRate),
-          teamCommissionRate: Number(row.teamCommissionRate),
-          networkCommissionRate: Number(row.networkCommissionRate),
           minReferralsRequired: Number(row.minReferralsRequired),
           benefits: Array.isArray(row.benefits)
             ? row.benefits.filter((b): b is string => typeof b === "string")

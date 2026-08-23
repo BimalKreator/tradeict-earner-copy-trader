@@ -92,10 +92,21 @@ function capTotalCommissionRate(
   slices: CommissionChainSlice[],
   maxTotalPct: number,
 ): CommissionChainSlice[] {
+  if (!Number.isFinite(maxTotalPct) || maxTotalPct <= 0) {
+    console.error(
+      `[Commission] maxTotalPct=${maxTotalPct} is invalid — refusing to allocate commission`,
+    );
+    return [];
+  }
+
   const total = slices.reduce((sum, s) => sum + s.commissionRate, 0);
   if (total <= maxTotalPct) {
     return slices;
   }
+
+  console.error(
+    `[Commission] rates exceed cap total=${total} max=${maxTotalPct} -- scaling applied, this should have been caught at settings time`,
+  );
   const scale = maxTotalPct / total;
   return slices.map((s) => ({
     ...s,

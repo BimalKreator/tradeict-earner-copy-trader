@@ -1,4 +1,8 @@
 import { SalesTier, type PrismaClient } from "@prisma/client";
+import {
+  getPartnerCommissionRates,
+  type PartnerCommissionRates,
+} from "./partnerCommissionConfigService.js";
 
 const TIER_ORDER: SalesTier[] = [
   SalesTier.EXECUTIVE,
@@ -6,25 +10,58 @@ const TIER_ORDER: SalesTier[] = [
   SalesTier.SENIOR_MANAGER,
 ];
 
-export type TierConfigDto = {
-  id: string;
-  tierLevel: SalesTier;
+/** Display-only commission columns — sourced from SystemSettings, not TierConfig DB columns. */
+export type TierCommissionDisplay = {
   directCommissionRate: number;
   teamCommissionRate: number;
   networkCommissionRate: number;
+};
+
+export type TierConfigDto = {
+  id: string;
+  tierLevel: SalesTier;
   minReferralsRequired: number;
   benefits: string[];
-};
+} & TierCommissionDisplay;
 
 /** Partner-facing tier row — no internal database ids. */
 export type PublicTierConfigDto = {
   tierLevel: SalesTier;
-  directCommissionRate: number;
-  teamCommissionRate: number;
-  networkCommissionRate: number;
   minReferralsRequired: number;
   benefits: string[];
-};
+} & TierCommissionDisplay;
+
+function tierCommissionDisplayFromPartnerRates(
+  tierLevel: SalesTier,
+  rates: PartnerCommissionRates,
+): TierCommissionDisplay {
+  switch (tierLevel) {
+    case SalesTier.EXECUTIVE:
+      return {
+        directCommissionRate: rates.executiveDirectPct,
+        teamCommissionRate: rates.managerUnderExecutivePct,
+        networkCommissionRate: rates.directorUnderExecutivePct,
+      };
+    case SalesTier.MANAGER:
+      return {
+        directCommissionRate: rates.managerDirectPct,
+        teamCommissionRate: rates.directorUnderManagerPct,
+        networkCommissionRate: 0,
+      };
+    case SalesTier.SENIOR_MANAGER:
+      return {
+        directCommissionRate: rates.directorDirectPct,
+        teamCommissionRate: 0,
+        networkCommissionRate: 0,
+      };
+    default:
+      return {
+        directCommissionRate: 0,
+        teamCommissionRate: 0,
+        networkCommissionRate: 0,
+      };
+  }
+}
 
 export function toPublicTierConfig(row: TierConfigDto): PublicTierConfigDto {
   return {
@@ -46,9 +83,6 @@ export async function listPublicTierConfigs(
 
 export type TierConfigUpdateInput = {
   tierLevel: SalesTier;
-  directCommissionRate: number;
-  teamCommissionRate: number;
-  networkCommissionRate: number;
   minReferralsRequired: number;
   benefits: string[];
 };
@@ -64,31 +98,22 @@ function parseBenefits(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function mapRow(row: {
-  id: string;
-  tierLevel: SalesTier;
-  directCommissionRate: number;
-  teamCommissionRate: number;
-  networkCommissionRate: number;
-  minReferralsRequired: number;
-  benefits: unknown;
-}): TierConfigDto {
+function mapRow(
+  row: {
+    id: string;
+    tierLevel: SalesTier;
+    minReferralsRequired: number;
+    benefits: unknown;
+  },
+  rates: PartnerCommissionRates,
+): TierConfigDto {
   return {
     id: row.id,
     tierLevel: row.tierLevel,
-    directCommissionRate: row.directCommissionRate,
-    teamCommissionRate: row.teamCommissionRate,
-    networkCommissionRate: row.networkCommissionRate,
     minReferralsRequired: row.minReferralsRequired,
     benefits: parseBenefits(row.benefits),
+    ...tierCommissionDisplayFromPartnerRates(row.tierLevel, rates),
   };
-}
-
-function clampRate(value: number, label: string): number | null {
-  if (!Number.isFinite(value) || value < 0 || value > 100) {
-    return null;
-  }
-  return Math.round(value * 100) / 100;
 }
 
 function isSalesTier(value: string): value is SalesTier {
@@ -102,23 +127,25 @@ function isSalesTier(value: string): value is SalesTier {
 export async function listTierConfigs(
   prisma: PrismaClient,
 ): Promise<TierConfigDto[]> {
-  const rows = await prisma.tierConfig.findMany({
-    orderBy: { tierLevel: "asc" },
-  });
+  const [rows, partnerRates] = await Promise.all([
+    prisma.tierConfig.findMany({
+      orderBy: { tierLevel: "asc" },
+    }),
+    getPartnerCommissionRates(prisma),
+  ]);
 
-  const byTier = new Map(rows.map((r) => [r.tierLevel, mapRow(r)]));
-  return TIER_ORDER.map(
-    (tier) =>
-      byTier.get(tier) ?? {
-        id: "",
-        tierLevel: tier,
-        directCommissionRate: 5,
-        teamCommissionRate: 2,
-        networkCommissionRate: 1,
-        minReferralsRequired: tier === SalesTier.EXECUTIVE ? 0 : 10,
-        benefits: [],
-      },
-  );
+  const byTier = new Map(rows.map((r) => [r.tierLevel, r]));
+  return TIER_ORDER.map((tier) => {
+    const row = byTier.get(tier);
+    if (row) return mapRow(row, partnerRates);
+    return {
+      id: "",
+      tierLevel: tier,
+      minReferralsRequired: tier === SalesTier.EXECUTIVE ? 0 : 10,
+      benefits: [],
+      ...tierCommissionDisplayFromPartnerRates(tier, partnerRates),
+    };
+  });
 }
 
 export async function updateTierConfigs(
@@ -149,20 +176,6 @@ export async function updateTierConfigs(
     }
     seen.add(levelRaw);
 
-    const direct = clampRate(Number(tier.directCommissionRate), "directCommissionRate");
-    const team = clampRate(Number(tier.teamCommissionRate), "teamCommissionRate");
-    const network = clampRate(
-      Number(tier.networkCommissionRate),
-      "networkCommissionRate",
-    );
-    if (direct == null || team == null || network == null) {
-      return {
-        ok: false,
-        status: 400,
-        error: "Commission rates must be numbers between 0 and 100",
-      };
-    }
-
     const minReferrals = Number(tier.minReferralsRequired);
     if (!Number.isInteger(minReferrals) || minReferrals < 0) {
       return {
@@ -181,9 +194,6 @@ export async function updateTierConfigs(
 
     normalized.push({
       tierLevel: levelRaw,
-      directCommissionRate: direct,
-      teamCommissionRate: team,
-      networkCommissionRate: network,
       minReferralsRequired: minReferrals,
       benefits,
     });
@@ -195,16 +205,14 @@ export async function updateTierConfigs(
         where: { tierLevel: tier.tierLevel },
         create: {
           tierLevel: tier.tierLevel,
-          directCommissionRate: tier.directCommissionRate,
-          teamCommissionRate: tier.teamCommissionRate,
-          networkCommissionRate: tier.networkCommissionRate,
+          // Deprecated columns — kept for schema compatibility; rates live in SystemSettings.
+          directCommissionRate: 0,
+          teamCommissionRate: 0,
+          networkCommissionRate: 0,
           minReferralsRequired: tier.minReferralsRequired,
           benefits: tier.benefits,
         },
         update: {
-          directCommissionRate: tier.directCommissionRate,
-          teamCommissionRate: tier.teamCommissionRate,
-          networkCommissionRate: tier.networkCommissionRate,
           minReferralsRequired: tier.minReferralsRequired,
           benefits: tier.benefits,
         },
