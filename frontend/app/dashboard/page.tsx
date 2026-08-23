@@ -23,8 +23,16 @@ import { WithdrawFundsModal } from "@/components/wallet/WithdrawFundsModal";
 import {
   fmtUsd,
   fmtUsdBalance,
+  fmtPct,
+  fmtNumber,
   formatINR,
 } from "@/lib/currency";
+import {
+  parseJsonObject,
+  readFiniteNumber,
+  readOptionalFiniteNumber,
+  readStringArray,
+} from "@/lib/safeJson";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
@@ -70,12 +78,62 @@ type WalletSummary = {
 
 type Toast = { kind: "success" | "error"; text: string } | null;
 
-function fmtPct(n: number): string {
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${n.toFixed(2)}%`;
+function parseDashboardOverview(raw: unknown): DashboardOverview | null {
+  const obj = parseJsonObject(raw);
+  if (!obj) return null;
+
+  const activeRaw = parseJsonObject(obj.activeStrategies);
+
+  return {
+    earnedPnl: readFiniteNumber(obj, "earnedPnl"),
+    earnedPnlPercent: readFiniteNumber(obj, "earnedPnlPercent"),
+    todayPnl: readFiniteNumber(obj, "todayPnl"),
+    todayPnlPercent: readFiniteNumber(obj, "todayPnlPercent"),
+    monthlyPnl: readFiniteNumber(obj, "monthlyPnl"),
+    monthlyPnlPercent: readFiniteNumber(obj, "monthlyPnlPercent"),
+    grossPnlAllTime: readOptionalFiniteNumber(obj, "grossPnlAllTime") ?? undefined,
+    grossPnlMonth: readOptionalFiniteNumber(obj, "grossPnlMonth") ?? undefined,
+    appRevenueAllTime: readOptionalFiniteNumber(obj, "appRevenueAllTime") ?? undefined,
+    appRevenueMonth: readOptionalFiniteNumber(obj, "appRevenueMonth") ?? undefined,
+    grossBookedPnlMonth: readOptionalFiniteNumber(obj, "grossBookedPnlMonth") ?? undefined,
+    revenueSharingDue: readFiniteNumber(obj, "revenueSharingDue"),
+    availableCapital: readFiniteNumber(obj, "availableCapital"),
+    totalBalance: readFiniteNumber(obj, "totalBalance"),
+    availableBalance: readFiniteNumber(obj, "availableBalance"),
+    usedBalance: readFiniteNumber(obj, "usedBalance"),
+    activeStrategies: {
+      count: activeRaw ? readFiniteNumber(activeRaw, "count") : 0,
+      names: activeRaw ? readStringArray(activeRaw, "names") : [],
+      daysUntilNextFee: activeRaw
+        ? readOptionalFiniteNumber(activeRaw, "daysUntilNextFee")
+        : null,
+    },
+    apiStatus: obj.apiStatus === "connected" ? "connected" : "disconnected",
+    copyTradingActive: obj.copyTradingActive === true,
+    copyTradingPaused: obj.copyTradingPaused === true,
+    cryptoBalance: readFiniteNumber(obj, "cryptoBalance"),
+    arbitrageTodayPnl: readFiniteNumber(obj, "arbitrageTodayPnl"),
+    arbitrageMonthlyPnl: readFiniteNumber(obj, "arbitrageMonthlyPnl"),
+    arbitrageTodayPnlPercent: readFiniteNumber(obj, "arbitrageTodayPnlPercent"),
+    arbitrageMonthlyPnlPercent: readFiniteNumber(obj, "arbitrageMonthlyPnlPercent"),
+    cryptoArbitrageEnabled: obj.cryptoArbitrageEnabled === true,
+  };
 }
 
-function pnlTone(n: number): string {
+function parseWalletSummary(raw: unknown): WalletSummary {
+  const obj = parseJsonObject(raw);
+  if (!obj) return { exists: false, balance: 0 };
+
+  return {
+    exists: obj.exists === true,
+    balance: readFiniteNumber(obj, "balance"),
+    availableBalance: readOptionalFiniteNumber(obj, "availableBalance") ?? undefined,
+    lockedBalance: readOptionalFiniteNumber(obj, "lockedBalance") ?? undefined,
+  };
+}
+
+function pnlTone(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "text-slate-300";
   if (n > 0) return "text-emerald-400";
   if (n < 0) return "text-red-400";
   return "text-slate-300";
@@ -125,7 +183,8 @@ export default function DashboardPage() {
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`Failed to load wallet (${res.status})`);
-    setWallet((await res.json()) as WalletSummary);
+    const parsed = parseWalletSummary(await res.json());
+    setWallet(parsed);
   }, [token]);
 
   const loadOverview = useCallback(async () => {
@@ -133,7 +192,9 @@ export default function DashboardPage() {
       headers: { Authorization: `Bearer ${token ?? ""}` },
     });
     if (!res.ok) throw new Error(`Failed to load dashboard (${res.status})`);
-    setData((await res.json()) as DashboardOverview);
+    const parsed = parseDashboardOverview(await res.json());
+    if (!parsed) throw new Error("Invalid dashboard response");
+    setData(parsed);
   }, [token]);
 
   useEffect(() => {
@@ -226,7 +287,7 @@ export default function DashboardPage() {
         </div>
       ) : null}
 
-      {!loading && data && data.activeStrategies.count === 0 ? (
+      {!loading && data && (data.activeStrategies?.count ?? 0) === 0 ? (
         <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-4 sm:px-5">
           <p className="text-sm text-primary-100">
             You don&apos;t have an active strategy.{" "}
@@ -416,20 +477,20 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Layers className="h-5 w-5 text-indigo-400" />}
               label="Active Strategies"
-              value={String(data.activeStrategies.count)}
+              value={String(data.activeStrategies?.count ?? 0)}
               sub={
-                data.activeStrategies.count > 0 ? (
+                (data.activeStrategies?.count ?? 0) > 0 ? (
                   <div className="space-y-1">
-                    {data.activeStrategies.daysUntilNextFee != null ? (
+                    {data.activeStrategies?.daysUntilNextFee != null ? (
                       <p className="text-xs font-medium text-indigo-300/90">
                         {data.activeStrategies.daysUntilNextFee} day
                         {data.activeStrategies.daysUntilNextFee === 1 ? "" : "s"}{" "}
                         until next subscription fee
                       </p>
                     ) : null}
-                    {data.activeStrategies.names.length > 0 ? (
+                    {(data.activeStrategies?.names ?? []).length > 0 ? (
                       <p className="text-xs leading-relaxed text-slate-400">
-                        {data.activeStrategies.names.join(" · ")}
+                        {(data.activeStrategies?.names ?? []).join(" · ")}
                       </p>
                     ) : null}
                   </div>
@@ -502,8 +563,8 @@ export default function DashboardPage() {
             label="Today's Arbitrage PnL"
             value={fmtUsd(data.arbitrageTodayPnl ?? 0)}
             sub={
-              <span className={pnlTone(data.arbitrageTodayPnlPercent ?? 0)}>
-                {fmtPct(data.arbitrageTodayPnlPercent ?? 0)} of crypto balance
+              <span className={pnlTone(data.arbitrageTodayPnlPercent)}>
+                {fmtPct(data.arbitrageTodayPnlPercent)} of crypto balance
               </span>
             }
             valueClass={pnlTone(data.arbitrageTodayPnl ?? 0)}
@@ -514,8 +575,8 @@ export default function DashboardPage() {
             label="Monthly Arbitrage PnL"
             value={fmtUsd(data.arbitrageMonthlyPnl ?? 0)}
             sub={
-              <span className={pnlTone(data.arbitrageMonthlyPnlPercent ?? 0)}>
-                {fmtPct(data.arbitrageMonthlyPnlPercent ?? 0)} of crypto balance
+              <span className={pnlTone(data.arbitrageMonthlyPnlPercent)}>
+                {fmtPct(data.arbitrageMonthlyPnlPercent)} of crypto balance
               </span>
             }
             valueClass={pnlTone(data.arbitrageMonthlyPnl ?? 0)}
@@ -524,7 +585,7 @@ export default function DashboardPage() {
           <MetricCard
             icon={<CircleDollarSign className="h-5 w-5 text-teal-400" />}
             label="Crypto Balance"
-            value={`${(data.cryptoBalance ?? 0).toFixed(2)} USDT`}
+            value={`${fmtNumber(data.cryptoBalance)} USDT`}
             sub={
               <Link
                 href="/dashboard/arbitrage-trades"

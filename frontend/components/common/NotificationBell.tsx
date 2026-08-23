@@ -28,8 +28,17 @@ export function NotificationBell() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
-      const body = (await res.json()) as { notifications?: NotificationRow[] };
-      setItems(Array.isArray(body.notifications) ? body.notifications.slice(0, 20) : []);
+      const body: unknown = await res.json();
+      const notifications =
+        typeof body === "object" &&
+        body !== null &&
+        "notifications" in body &&
+        Array.isArray((body as { notifications: unknown }).notifications)
+          ? (body as { notifications: NotificationRow[] }).notifications.slice(0, 20)
+          : [];
+      setItems(notifications);
+    } catch {
+      // Network offline or parse failure — keep existing items, no unhandled rejection
     } finally {
       setLoading(false);
     }

@@ -70,7 +70,7 @@ function mergeChartData(strategies: StrategySeries[]): {
 
   const daySet = new Set<string>();
   for (const s of strategies) {
-    for (const p of s.series) {
+    for (const p of s.series ?? []) {
       daySet.add(p.date.slice(0, 10));
     }
   }
@@ -94,7 +94,7 @@ function mergeChartData(strategies: StrategySeries[]): {
     const row: Record<string, string | number> = { day };
     for (const s of strategies) {
       row[s.strategyId] = Number(
-        cumulativeOnOrBefore(s.series, day).toFixed(4),
+        cumulativeOnOrBefore(s.series ?? [], day).toFixed(4),
       );
     }
     return row;

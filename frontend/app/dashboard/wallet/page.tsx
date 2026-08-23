@@ -804,9 +804,9 @@ export default function DashboardWalletPage() {
                     Cumulative PnL
                   </dt>
                   <dd
-                    className={`mt-1 text-2xl font-semibold tabular-nums ${pnlToneClass(liveCycle?.totals.cumulativePnl ?? null)}`}
+                    className={`mt-1 text-2xl font-semibold tabular-nums ${pnlToneClass(liveCycle?.totals?.cumulativePnl ?? null)}`}
                   >
-                    {fmtSigned(liveCycle?.totals.cumulativePnl ?? 0)}
+                    {fmtSigned(liveCycle?.totals?.cumulativePnl ?? 0)}
                   </dd>
                 </div>
                 <div>
@@ -814,18 +814,18 @@ export default function DashboardWalletPage() {
                     Est. revenue share due
                   </dt>
                   <dd className="mt-1 text-2xl font-semibold text-white tabular-nums">
-                    {fmtUsd(liveCycle?.totals.estimatedDue ?? 0)}
+                    {fmtUsd(liveCycle?.totals?.estimatedDue ?? 0)}
                   </dd>
                 </div>
               </dl>
 
-              {liveCycle && liveCycle.byStrategy.length > 1 ? (
+              {liveCycle && (liveCycle.byStrategy?.length ?? 0) > 1 ? (
                 <div className="mt-6 space-y-2 border-t border-white/[0.06] pt-4">
                   <p className="text-xs uppercase tracking-wider text-white/45">
                     By strategy
                   </p>
                   <ul className="space-y-1.5">
-                    {liveCycle.byStrategy.map((s) => (
+                    {(liveCycle.byStrategy ?? []).map((s) => (
                       <li
                         key={s.strategyId}
                         className="flex items-center justify-between gap-3 text-sm"

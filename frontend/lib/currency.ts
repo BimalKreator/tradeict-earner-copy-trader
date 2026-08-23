@@ -43,6 +43,19 @@ export function fmtUsd(n: number | null | undefined): string {
   return usdFmt.format(n);
 }
 
+/** Percent display — "—" when value is unknown (distinct from 0%). */
+export function fmtPct(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(2)}%`;
+}
+
+/** Fixed-decimal number for API metrics (e.g. USDT balance). */
+export function fmtNumber(n: number | null | undefined, decimals = 2): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return n.toFixed(decimals);
+}
+
 /** Balance display — never show negative wallet/margin amounts. */
 export function fmtUsdBalance(n: number | null | undefined): string {
   const safe = typeof n === "number" && Number.isFinite(n) ? Math.max(0, n) : 0;

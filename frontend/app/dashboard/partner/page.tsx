@@ -164,7 +164,10 @@ function roleLabel(role: string, nodeType: NetworkNode["nodeType"]): string {
 
 function countDescendantUsers(node: NetworkNode): number {
   if (node.nodeType === "user") return 1;
-  return node.children.reduce((sum, child) => sum + countDescendantUsers(child), 0);
+  return (node.children ?? []).reduce(
+    (sum, child) => sum + countDescendantUsers(child),
+    0,
+  );
 }
 
 function hasPersonalTradingActivity(financials: UserFinancials): boolean {
@@ -295,7 +298,8 @@ function NetworkHierarchyRow({
   node: NetworkNode;
   defaultExpanded: boolean;
 }) {
-  const hasChildren = node.children.length > 0;
+  const children = node.children ?? [];
+  const hasChildren = children.length > 0;
   const [expanded, setExpanded] = useState(defaultExpanded);
   const indent = node.depth * 18;
 
@@ -340,7 +344,7 @@ function NetworkHierarchyRow({
                   {countDescendantUsers(node)} referred trader
                   {countDescendantUsers(node) === 1 ? "" : "s"} in branch
                   {hasChildren
-                    ? ` · ${node.children.length} direct report${node.children.length === 1 ? "" : "s"}`
+                    ? ` · ${children.length} direct report${children.length === 1 ? "" : "s"}`
                     : ""}
                   {hasPersonalTradingActivity(node.financials)
                     ? " · personal trading account"
@@ -359,7 +363,7 @@ function NetworkHierarchyRow({
       </tr>
 
       {hasChildren && expanded
-        ? node.children.map((child) => (
+        ? children.map((child) => (
             <NetworkHierarchyRow
               key={child.id}
               node={child}
@@ -907,7 +911,7 @@ export default function PartnerDashboardPage() {
               </div>
             </div>
 
-            {!network || network.tree.length === 0 ? (
+            {!network || (network.tree ?? []).length === 0 ? (
               <div className="px-6 py-14 text-center text-sm text-white/45">
                 No network traders yet. Share your referral link to grow your hierarchy.
               </div>
@@ -935,7 +939,7 @@ export default function PartnerDashboardPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {network.tree.map((root) => (
+                    {(network.tree ?? []).map((root) => (
                       <NetworkHierarchyRow
                         key={root.id}
                         node={root}
