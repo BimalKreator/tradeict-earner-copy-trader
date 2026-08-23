@@ -3,11 +3,9 @@
 import Link from "next/link";
 import {
   Activity,
-  Bot,
   Calendar,
   CircleDollarSign,
   CreditCard,
-  GitCompare,
   KeyRound,
   Layers,
   Loader2,
@@ -24,7 +22,6 @@ import {
   fmtUsd,
   fmtUsdBalance,
   fmtPct,
-  fmtNumber,
   formatINR,
 } from "@/lib/currency";
 import {
@@ -63,12 +60,6 @@ type DashboardOverview = {
   apiStatus: "connected" | "disconnected";
   copyTradingActive: boolean;
   copyTradingPaused: boolean;
-  cryptoBalance: number;
-  arbitrageTodayPnl: number;
-  arbitrageMonthlyPnl: number;
-  arbitrageTodayPnlPercent: number;
-  arbitrageMonthlyPnlPercent: number;
-  cryptoArbitrageEnabled: boolean;
 };
 
 type WalletSummary = {
@@ -120,12 +111,6 @@ function parseDashboardOverview(raw: unknown): DashboardOverview | null {
     apiStatus: obj.apiStatus === "connected" ? "connected" : "disconnected",
     copyTradingActive: obj.copyTradingActive === true,
     copyTradingPaused: obj.copyTradingPaused === true,
-    cryptoBalance: readFiniteNumber(obj, "cryptoBalance"),
-    arbitrageTodayPnl: readFiniteNumber(obj, "arbitrageTodayPnl"),
-    arbitrageMonthlyPnl: readFiniteNumber(obj, "arbitrageMonthlyPnl"),
-    arbitrageTodayPnlPercent: readFiniteNumber(obj, "arbitrageTodayPnlPercent"),
-    arbitrageMonthlyPnlPercent: readFiniteNumber(obj, "arbitrageMonthlyPnlPercent"),
-    cryptoArbitrageEnabled: obj.cryptoArbitrageEnabled === true,
   };
 }
 
@@ -350,7 +335,7 @@ export default function DashboardPage() {
           Dashboard
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Delta copy-trading and crypto arbitrage at a glance.
+          Your Delta copy-trading account at a glance.
         </p>
       </header>
 
@@ -619,93 +604,6 @@ export default function DashboardPage() {
               valueClass={data.copyTradingActive ? "text-emerald-400" : "text-slate-400"}
             />
           </div>
-        ) : null}
-      </DashboardSection>
-
-      <div className="border-t border-slate-800/80 pt-10" aria-hidden />
-
-      <DashboardSection
-        title="Crypto Arbitrage Trading"
-        subtitle="Cross-exchange arbitrage performance and automated execution."
-      >
-        {loading ? (
-          <div className="flex justify-center rounded-xl border border-slate-800 bg-slate-900 py-20">
-            <Loader2 className="h-8 w-8 animate-spin text-teal-400" />
-          </div>
-        ) : data ? (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            icon={<Activity className="h-5 w-5 text-teal-400" />}
-            label="Today's Arbitrage PnL"
-            value={fmtUsd(data.arbitrageTodayPnl ?? 0)}
-            sub={
-              <span className={pnlTone(data.arbitrageTodayPnlPercent)}>
-                {fmtPct(data.arbitrageTodayPnlPercent)} of crypto balance
-              </span>
-            }
-            valueClass={pnlTone(data.arbitrageTodayPnl ?? 0)}
-          />
-
-          <MetricCard
-            icon={<Calendar className="h-5 w-5 text-teal-400/80" />}
-            label="Monthly Arbitrage PnL"
-            value={fmtUsd(data.arbitrageMonthlyPnl ?? 0)}
-            sub={
-              <span className={pnlTone(data.arbitrageMonthlyPnlPercent)}>
-                {fmtPct(data.arbitrageMonthlyPnlPercent)} of crypto balance
-              </span>
-            }
-            valueClass={pnlTone(data.arbitrageMonthlyPnl ?? 0)}
-          />
-
-          <MetricCard
-            icon={<CircleDollarSign className="h-5 w-5 text-teal-400" />}
-            label="Crypto Balance"
-            value={`${fmtNumber(data.cryptoBalance)} USDT`}
-            sub={
-              <Link
-                href="/dashboard/arbitrage-trades"
-                className="text-xs text-teal-400/90 hover:text-teal-300"
-              >
-                View arbitrage trades →
-              </Link>
-            }
-            valueClass="text-white text-3xl"
-          />
-
-          <MetricCard
-            icon={<Bot className="h-5 w-5 text-teal-400" />}
-            label="Active Arbitrage Bots"
-            value={data.cryptoArbitrageEnabled ? "1" : "0"}
-            sub={
-              <span className="text-slate-500">
-                {data.cryptoArbitrageEnabled
-                  ? "Automated execution enabled"
-                  : "Contact support to enable"}
-              </span>
-            }
-            valueClass="text-3xl text-white"
-          />
-
-          <MetricCard
-            icon={<GitCompare className="h-5 w-5 text-teal-400" />}
-            label="Arbitrage Status"
-            value={data.cryptoArbitrageEnabled ? "Active" : "Paused"}
-            sub={
-              <StatusDot
-                connected={data.cryptoArbitrageEnabled}
-                label={
-                  data.cryptoArbitrageEnabled
-                    ? "Scanning and executing opportunities"
-                    : "Arbitrage execution is paused"
-                }
-              />
-            }
-            valueClass={
-              data.cryptoArbitrageEnabled ? "text-emerald-400" : "text-slate-400"
-            }
-          />
-        </div>
         ) : null}
       </DashboardSection>
     </div>

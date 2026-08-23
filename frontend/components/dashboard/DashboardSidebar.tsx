@@ -9,22 +9,20 @@ import { useAuth } from "@/context/AuthContext";
 
 const baseLinks = [
   { href: "/dashboard", label: "Home" },
-  { href: "/dashboard/analytics", label: "Analytics" },
   { href: "/dashboard/performance", label: "Performance" },
-  { href: "/dashboard/strategies", label: "Strategies" },
-  { href: "/dashboard/live-trades", label: "Live trades" },
-  { href: "/dashboard/dex-arbitrage", label: "Dex Arbitrage" },
-  { href: "/dashboard/arbitrage-trades", label: "Arbitrage Trades" },
+  { href: "/dashboard/live-trades", label: "Bot" },
   { href: "/dashboard/trades", label: "Trades" },
   { href: "/dashboard/payments", label: "Payments" },
   { href: "/dashboard/wallet", label: "Wallet" },
-  { href: "/dashboard/support", label: "Support" },
+  { href: "/dashboard/strategies", label: "Strategies" },
   { href: "/dashboard/settings", label: "Settings" },
+  { href: "/dashboard/profile", label: "Profile" },
+  { href: "/dashboard/support", label: "Support" },
 ] as const;
 
 const partnerLink = {
   href: "/dashboard/partner",
-  label: "Partner Dashboard",
+  label: "Partner",
   icon: Briefcase,
 } as const;
 
@@ -40,9 +38,9 @@ export function DashboardSidebar({ mobileOpen, onClose }: DashboardSidebarProps)
   const links = useMemo(() => {
     if (!isSalesTeamMember) return [...baseLinks];
     return [
-      baseLinks[0],
+      ...baseLinks.slice(0, 4),
       partnerLink,
-      ...baseLinks.slice(1),
+      ...baseLinks.slice(4),
     ];
   }, [isSalesTeamMember]);
 
