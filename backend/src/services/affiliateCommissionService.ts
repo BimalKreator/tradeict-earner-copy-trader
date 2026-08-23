@@ -476,25 +476,311 @@ export async function markMonthlyRevenueInvoiceCommissionsAsPayable(
   return { updated: result.count };
 }
 
-/** Remove unpaid EARNED partner commissions when trader net PnL is not positive. */
-export async function voidPendingEarnedCommissionsForSourceUser(
+const CLAWBACK_COMMISSION_STATUSES = new Set<CommissionLedgerStatus>([
+  CommissionLedgerStatus.PAYABLE,
+  CommissionLedgerStatus.WITHDRAWABLE,
+  CommissionLedgerStatus.WITHDRAWN,
+]);
+
+function voidReversalIdempotencyKey(
+  invoiceId: string,
+  beneficiaryUserId: string,
+): string {
+  return `INV:${invoiceId}:${beneficiaryUserId}:REVERSAL`;
+}
+
+function creditNoteReversalIdempotencyKey(
+  invoiceId: string,
+  beneficiaryUserId: string,
+  creditNoteAmount: Prisma.Decimal,
+): string {
+  return `INV:${invoiceId}:${beneficiaryUserId}:CREDIT_REVERSAL:${creditNoteAmount.toFixed(2)}`;
+}
+
+type OriginalAccrualRow = {
+  id: string;
+  beneficiaryUserId: string;
+  amount: number;
+  appRevenueBase: number;
+  commissionRate: number;
+  beneficiaryTier: import("@prisma/client").SalesTier;
+  status: CommissionLedgerStatus;
+  profitDate: Date;
+  unlockDate: Date;
+  isSimulated: boolean;
+};
+
+async function loadOriginalInvoiceAccruals(
+  tx: Prisma.TransactionClient,
+  invoiceId: string,
+): Promise<OriginalAccrualRow[]> {
+  return tx.commissionLedger.findMany({
+    where: {
+      monthlyRevenueInvoiceId: invoiceId,
+      amount: { gt: 0 },
+      idempotencyKey: { endsWith: ":EARNED" },
+    },
+    select: {
+      id: true,
+      beneficiaryUserId: true,
+      amount: true,
+      appRevenueBase: true,
+      commissionRate: true,
+      beneficiaryTier: true,
+      status: true,
+      profitDate: true,
+      unlockDate: true,
+      isSimulated: true,
+    },
+  });
+}
+
+async function insertSignedCommissionReversal(
+  tx: Prisma.TransactionClient,
+  args: {
+    invoiceId: string;
+    sourceUserId: string;
+    original: OriginalAccrualRow;
+    reversalAmount: number;
+    idempotencyKey: string;
+    profitDate: Date;
+  },
+): Promise<{ created: boolean; needsClawback: boolean }> {
+  if (!Number.isFinite(args.reversalAmount) || args.reversalAmount >= -0.0000001) {
+    return { created: false, needsClawback: false };
+  }
+
+  const needsClawback = CLAWBACK_COMMISSION_STATUSES.has(args.original.status);
+  if (needsClawback) {
+    console.error(
+      `[affiliateCommission] CLAWBACK REQUIRED invoice=${args.invoiceId} ` +
+        `partner=${args.original.beneficiaryUserId} originalStatus=${args.original.status} ` +
+        `originalAmount=$${args.original.amount.toFixed(4)} reversal=$${args.reversalAmount.toFixed(4)}`,
+    );
+  }
+
+  try {
+    await tx.commissionLedger.create({
+      data: {
+        profitDate: args.profitDate,
+        sourceUserId: args.sourceUserId,
+        beneficiaryUserId: args.original.beneficiaryUserId,
+        amount: args.reversalAmount,
+        appRevenueBase: args.original.appRevenueBase,
+        commissionRate: args.original.commissionRate,
+        beneficiaryTier: args.original.beneficiaryTier,
+        status: CommissionLedgerStatus.REVERSED,
+        unlockDate: args.original.unlockDate,
+        idempotencyKey: args.idempotencyKey,
+        monthlyRevenueInvoiceId: args.invoiceId,
+        reversesLedgerId: args.original.id,
+        needsClawback,
+        isSimulated: args.original.isSimulated,
+      },
+    });
+    return { created: true, needsClawback };
+  } catch (err) {
+    if (
+      err instanceof PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      console.error(
+        `[affiliateCommission] DUPLICATE reversal idempotency collision key=${args.idempotencyKey}`,
+      );
+      return { created: false, needsClawback };
+    }
+    throw err;
+  }
+}
+
+/**
+ * On invoice VOID — signed negative rows for each partner accrual (never delete/edit).
+ */
+export async function reverseMonthlyRevenueInvoiceCommissionsOnVoid(
+  tx: Prisma.TransactionClient,
+  invoice: {
+    id: string;
+    userId: string;
+    invoicedAt: Date | null;
+  },
+): Promise<{ reversed: number; clawbackCount: number }> {
+  const originals = await loadOriginalInvoiceAccruals(tx, invoice.id);
+  if (originals.length === 0) {
+    return { reversed: 0, clawbackCount: 0 };
+  }
+
+  const profitDate = startOfUtcDay(invoice.invoicedAt ?? new Date());
+  let reversed = 0;
+  let clawbackCount = 0;
+
+  for (const original of originals) {
+    const net = await tx.commissionLedger.aggregate({
+      where: {
+        monthlyRevenueInvoiceId: invoice.id,
+        beneficiaryUserId: original.beneficiaryUserId,
+      },
+      _sum: { amount: true },
+    });
+    const netAmount = net._sum.amount ?? 0;
+    if (netAmount <= 0.0000001) continue;
+
+    const result = await insertSignedCommissionReversal(tx, {
+      invoiceId: invoice.id,
+      sourceUserId: invoice.userId,
+      original,
+      reversalAmount: -netAmount,
+      idempotencyKey: voidReversalIdempotencyKey(
+        invoice.id,
+        original.beneficiaryUserId,
+      ),
+      profitDate,
+    });
+    if (result.created) {
+      reversed += 1;
+      if (result.needsClawback) clawbackCount += 1;
+    }
+  }
+
+  if (reversed > 0) {
+    console.log(
+      `[affiliateCommission] void reversal invoice=${invoice.id} rows=${reversed} clawback=${clawbackCount}`,
+    );
+  }
+
+  return { reversed, clawbackCount };
+}
+
+/**
+ * Partial commission reversal when a credit note reduces collectible revenue.
+ */
+export async function reverseMonthlyRevenueInvoiceCommissionsForCreditNote(
+  tx: Prisma.TransactionClient,
+  invoice: {
+    id: string;
+    userId: string;
+    commissionAmount: Prisma.Decimal;
+    creditNoteAmount: Prisma.Decimal;
+    invoicedAt: Date | null;
+  },
+): Promise<{ reversed: number; clawbackCount: number }> {
+  if (invoice.creditNoteAmount.lte(0)) {
+    return { reversed: 0, clawbackCount: 0 };
+  }
+  if (invoice.commissionAmount.lte(0)) {
+    return { reversed: 0, clawbackCount: 0 };
+  }
+
+  const originals = await loadOriginalInvoiceAccruals(tx, invoice.id);
+  const profitDate = startOfUtcDay(invoice.invoicedAt ?? new Date());
+  const fraction = invoice.creditNoteAmount.div(invoice.commissionAmount);
+  let reversed = 0;
+  let clawbackCount = 0;
+
+  for (const original of originals) {
+    const targetReverseTotal = original.amount * fraction.toNumber();
+    const priorCreditReversals = await tx.commissionLedger.aggregate({
+      where: {
+        monthlyRevenueInvoiceId: invoice.id,
+        beneficiaryUserId: original.beneficiaryUserId,
+        status: CommissionLedgerStatus.REVERSED,
+        idempotencyKey: {
+          startsWith: `INV:${invoice.id}:${original.beneficiaryUserId}:CREDIT_REVERSAL:`,
+        },
+      },
+      _sum: { amount: true },
+    });
+    const alreadyReversed = Math.abs(priorCreditReversals._sum.amount ?? 0);
+    const delta = targetReverseTotal - alreadyReversed;
+    if (delta <= 0.0000001) continue;
+
+    const result = await insertSignedCommissionReversal(tx, {
+      invoiceId: invoice.id,
+      sourceUserId: invoice.userId,
+      original,
+      reversalAmount: -delta,
+      idempotencyKey: creditNoteReversalIdempotencyKey(
+        invoice.id,
+        original.beneficiaryUserId,
+        invoice.creditNoteAmount,
+      ),
+      profitDate,
+    });
+    if (result.created) {
+      reversed += 1;
+      if (result.needsClawback) clawbackCount += 1;
+    }
+  }
+
+  if (reversed > 0) {
+    console.log(
+      `[affiliateCommission] credit-note reversal invoice=${invoice.id} ` +
+        `credit=$${invoice.creditNoteAmount.toFixed(2)} rows=${reversed} clawback=${clawbackCount}`,
+    );
+  }
+
+  return { reversed, clawbackCount };
+}
+
+/** Signed reversals for legacy PnL-path EARNED rows — never hard-delete ledger history. */
+export async function reverseLegacyPendingEarnedCommissionsForSourceUser(
   prisma: PrismaClient,
   sourceUserId: string,
 ): Promise<number> {
-  const result = await prisma.commissionLedger.deleteMany({
+  const rows = await prisma.commissionLedger.findMany({
     where: {
       sourceUserId,
       status: CommissionLedgerStatus.EARNED,
       invoiceId: null,
+      monthlyRevenueInvoiceId: null,
       isSimulated: false,
+      amount: { gt: 0 },
     },
   });
-  if (result.count > 0) {
+
+  let created = 0;
+  for (const row of rows) {
+    const idempotencyKey = row.pnlRecordId
+      ? `${row.pnlRecordId}:${row.beneficiaryUserId}:REVERSAL`
+      : `LEGACY:${row.id}:REVERSAL`;
+    const existing = await prisma.commissionLedger.findUnique({
+      where: { idempotencyKey },
+    });
+    if (existing) continue;
+
+    await prisma.commissionLedger.create({
+      data: {
+        profitDate: row.profitDate,
+        sourceUserId: row.sourceUserId,
+        beneficiaryUserId: row.beneficiaryUserId,
+        amount: -row.amount,
+        appRevenueBase: row.appRevenueBase,
+        commissionRate: row.commissionRate,
+        beneficiaryTier: row.beneficiaryTier,
+        status: CommissionLedgerStatus.REVERSED,
+        unlockDate: row.unlockDate,
+        idempotencyKey,
+        pnlRecordId: row.pnlRecordId,
+        reversesLedgerId: row.id,
+        isSimulated: false,
+      },
+    });
+    created += 1;
+  }
+
+  if (created > 0) {
     console.log(
-      `[affiliateCommission] voided ${result.count} EARNED row(s) sourceUser=${sourceUserId} — net PnL ≤ 0`,
+      `[affiliateCommission] reversed ${created} legacy EARNED row(s) sourceUser=${sourceUserId}`,
     );
   }
-  return result.count;
+  return created;
+}
+
+/** @deprecated Use {@link reverseLegacyPendingEarnedCommissionsForSourceUser}. */
+export async function voidPendingEarnedCommissionsForSourceUser(
+  prisma: PrismaClient,
+  sourceUserId: string,
+): Promise<number> {
+  return reverseLegacyPendingEarnedCommissionsForSourceUser(prisma, sourceUserId);
 }
 
 /** @deprecated LEGACY — commissions accrue on invoice INVOICED only. */

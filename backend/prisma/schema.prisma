@@ -31,6 +31,8 @@ enum CommissionLedgerStatus {
   WITHDRAWABLE
   /** Set when included in an approved monthly payout (Phase 9). */
   WITHDRAWN
+  /** Signed reversal row — never mutate or delete the original accrual. */
+  REVERSED
 }
 
 /** Which sales tier earned a commission row (snapshot at distribution time). */
@@ -431,7 +433,7 @@ model DeltaLedgerEntry {
   conflictSeenAt  DateTime?
   isSimulated     Boolean  @default(false)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
   exchangeAccount ExchangeAccount? @relation(fields: [exchangeAccountId], references: [id], onDelete: SetNull)
 
   // Delta wallet txn ids are exchange-wide ledger keys — unique per Tradeict user without account.
@@ -464,7 +466,7 @@ model StructurePnl {
   attributionNote    String?
   isSimulated        Boolean  @default(false)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
   legs StructureLegPnl[]
 
   @@unique([userId, botStructureId])
@@ -520,7 +522,7 @@ model DailyPnlSnapshot {
   computedAt           DateTime
   isSimulated          Boolean  @default(false)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@unique([userId, snapshotDate])
   @@index([isSimulated])
@@ -561,11 +563,14 @@ model MonthlyRevenueInvoice {
   /** USD/INR rate pinned at invoicing. */
   usdInrRate       Decimal? @db.Decimal(24, 10)
   paymentReference String?
+  /** Admin credit note — reduces collectible amount without changing commissionAmount. */
+  creditNoteAmount Decimal? @db.Decimal(24, 10)
+  creditNoteReason String?
   isFinal          Boolean  @default(false)
   isSimulated      Boolean  @default(false)
   generatedAt      DateTime
 
-  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user               User               @relation(fields: [userId], references: [id], onDelete: Restrict)
   commissionLedgers  CommissionLedger[]
 
   @@unique([userId, periodYear, periodMonth])
@@ -961,12 +966,16 @@ model CommissionLedger {
   payableAt           DateTime?
   withdrawableAt      DateTime?
   withdrawnAt         DateTime?
+  /** True when reversing a row that was already paid out to the partner. */
+  needsClawback       Boolean                @default(false)
+  /** Original accrual row this reversal offsets (audit trail). */
+  reversesLedgerId    String?
   isSimulated         Boolean                @default(false)
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
 
-  sourceUser          User                @relation("CommissionSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
-  beneficiaryUser     User                @relation("CommissionBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Cascade)
+  sourceUser          User                @relation("CommissionSource", fields: [sourceUserId], references: [id], onDelete: Restrict)
+  beneficiaryUser     User                @relation("CommissionBeneficiary", fields: [beneficiaryUserId], references: [id], onDelete: Restrict)
   invoice             Invoice?            @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
   monthlyRevenueInvoice MonthlyRevenueInvoice? @relation(fields: [monthlyRevenueInvoiceId], references: [id], onDelete: SetNull)
   pnlRecord           PnLRecord?          @relation(fields: [pnlRecordId], references: [id], onDelete: SetNull)

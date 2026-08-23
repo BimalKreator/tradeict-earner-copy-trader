@@ -15,11 +15,16 @@ import {
   recomputeInvoiceChain,
 } from "../services/structureRevenueService.js";
 import {
+  CreditNoteError,
+  INVOICE_STATUS,
   InvoiceNotFoundError,
   InvoiceTransitionError,
+  applyMonthlyRevenueInvoiceCreditNote,
+  getMonthlyRevenueInvoiceLedger,
   parseMonthlyRevenueInvoiceStatus,
   transitionMonthlyRevenueInvoiceStatus,
 } from "../services/monthlyRevenueInvoiceLifecycleService.js";
+import { requireTypedConfirmation } from "../utils/requireTypedConfirmation.js";
 import { parseIncludeSimulated } from "../services/simulatedDataFilters.js";
 
 function parsePeriod(
@@ -308,6 +313,22 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
         transitionOpts.paymentReference = body.paymentReference.trim();
       }
 
+      if (targetStatus === INVOICE_STATUS.VOID) {
+        const inv = await prisma.monthlyRevenueInvoice.findUnique({
+          where: { id: invoiceId.trim() },
+          include: { user: { select: { email: true } } },
+        });
+        if (!inv) {
+          res.status(404).json({ error: "Invoice not found" });
+          return;
+        }
+        if (
+          !requireTypedConfirmation(req, res, inv.user.email)
+        ) {
+          return;
+        }
+      }
+
       const invoice = await transitionMonthlyRevenueInvoiceStatus(
         prisma,
         invoiceId.trim(),
@@ -399,6 +420,101 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     }
   }
 
+  async function postInvoiceCreditNote(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const invoiceId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof invoiceId !== "string" || !invoiceId.trim()) {
+        res.status(400).json({ error: "invoice id required" });
+        return;
+      }
+
+      const inv = await prisma.monthlyRevenueInvoice.findUnique({
+        where: { id: invoiceId.trim() },
+        include: { user: { select: { email: true } } },
+      });
+      if (!inv) {
+        res.status(404).json({ error: "Invoice not found" });
+        return;
+      }
+      if (!requireTypedConfirmation(req, res, inv.user.email)) {
+        return;
+      }
+
+      const body = (req.body ?? {}) as { amount?: unknown; reason?: unknown };
+      const amountRaw = body.amount;
+      const amountNum =
+        typeof amountRaw === "number"
+          ? amountRaw
+          : typeof amountRaw === "string"
+            ? Number.parseFloat(amountRaw)
+            : NaN;
+      if (!Number.isFinite(amountNum) || amountNum <= 0) {
+        res.status(400).json({ error: "amount must be a positive number" });
+        return;
+      }
+
+      const reason =
+        typeof body.reason === "string" ? body.reason.trim() : "";
+      if (!reason) {
+        res.status(400).json({ error: "reason is required" });
+        return;
+      }
+
+      const invoice = await applyMonthlyRevenueInvoiceCreditNote(
+        prisma,
+        invoiceId.trim(),
+        {
+          amount: new Prisma.Decimal(amountNum),
+          reason,
+        },
+      );
+
+      res.json({ ok: true, invoice });
+    } catch (err) {
+      if (err instanceof InvoiceNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      if (err instanceof CreditNoteError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      next(err);
+    }
+  }
+
+  async function getInvoiceLedger(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const rawId = req.params.id;
+      const invoiceId = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (typeof invoiceId !== "string" || !invoiceId.trim()) {
+        res.status(400).json({ error: "invoice id required" });
+        return;
+      }
+
+      const ledger = await getMonthlyRevenueInvoiceLedger(
+        prisma,
+        invoiceId.trim(),
+      );
+      if (!ledger) {
+        res.status(404).json({ error: "Invoice not found" });
+        return;
+      }
+      res.json(ledger);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function getUnbilledUsers(
     _req: Request,
     res: Response,
@@ -421,7 +537,9 @@ export function createAdminDeltaRevenueController(prisma: PrismaClient) {
     patchProfitShareOverride,
     postRecomputeChain,
     postInvoiceStatus,
+    postInvoiceCreditNote,
     getInvoiceCommissions,
+    getInvoiceLedger,
     getUnbilledUsers,
   };
 }

@@ -809,6 +809,10 @@ export async function assertUserSafeToDelete(
     pendingPayouts,
     downlineMembers,
     acquiredUsers,
+    monthlyInvoices,
+    structurePnlRows,
+    ledgerRows,
+    dailySnapshots,
   ] = await Promise.all([
     prisma.commissionLedger.count({
       where: { beneficiaryUserId: userId, isSimulated: false },
@@ -826,7 +830,27 @@ export async function assertUserSafeToDelete(
       },
     }),
     prisma.user.count({ where: { acquiredById: userId } }),
+    prisma.monthlyRevenueInvoice.count({
+      where: { userId, isSimulated: false },
+    }),
+    prisma.structurePnl.count({ where: { userId, isSimulated: false } }),
+    prisma.deltaLedgerEntry.count({ where: { userId, isSimulated: false } }),
+    prisma.dailyPnlSnapshot.count({ where: { userId, isSimulated: false } }),
   ]);
+
+  if (
+    monthlyInvoices > 0 ||
+    structurePnlRows > 0 ||
+    ledgerRows > 0 ||
+    dailySnapshots > 0
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "Cannot delete a user with billing history. Anonymise instead.",
+    };
+  }
 
   if (asBeneficiary > 0 || asSource > 0) {
     return {

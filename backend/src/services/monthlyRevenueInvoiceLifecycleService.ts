@@ -5,6 +5,8 @@ import {
   distributeMonthlyRevenueInvoiceCommissions,
   markMonthlyRevenueInvoiceCommissionsAsPayable,
   resolveCommissionChainForUser,
+  reverseMonthlyRevenueInvoiceCommissionsForCreditNote,
+  reverseMonthlyRevenueInvoiceCommissionsOnVoid,
 } from "./affiliateCommissionService.js";
 
 /** Matches legacy `billingService` INVOICE_DUE_DAYS; override via env. */
@@ -212,6 +214,171 @@ export async function transitionMonthlyRevenueInvoiceStatus(
       await markMonthlyRevenueInvoiceCommissionsAsPayable(tx, updated.id);
     }
 
+    if (targetStatus === INVOICE_STATUS.VOID) {
+      await reverseMonthlyRevenueInvoiceCommissionsOnVoid(tx, {
+        id: updated.id,
+        userId: updated.userId,
+        invoicedAt: updated.invoicedAt,
+      });
+    }
+
     return updated;
   });
+}
+
+export class CreditNoteError extends Error {
+  readonly statusCode = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CreditNoteError";
+  }
+}
+
+/**
+ * Apply or update a credit note on a monthly invoice.
+ * Does not change commissionAmount — reduces collectible amount only.
+ */
+export async function applyMonthlyRevenueInvoiceCreditNote(
+  prisma: PrismaClient,
+  invoiceId: string,
+  args: { amount: Prisma.Decimal; reason: string },
+): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
+  const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+    where: { id: invoiceId },
+  });
+  if (!invoice) {
+    throw new InvoiceNotFoundError(invoiceId);
+  }
+
+  if (
+    invoice.status !== INVOICE_STATUS.INVOICED &&
+    invoice.status !== INVOICE_STATUS.PAID
+  ) {
+    throw new CreditNoteError(
+      `Credit notes apply only to INVOICED or PAID invoices (current: ${invoice.status})`,
+    );
+  }
+
+  if (args.amount.lte(0)) {
+    throw new CreditNoteError("Credit note amount must be positive");
+  }
+  if (args.amount.gt(invoice.commissionAmount)) {
+    throw new CreditNoteError(
+      "Credit note amount cannot exceed invoice commissionAmount",
+    );
+  }
+
+  const reason = args.reason.trim();
+  if (!reason) {
+    throw new CreditNoteError("reason is required for a credit note");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.monthlyRevenueInvoice.update({
+      where: { id: invoiceId },
+      data: {
+        creditNoteAmount: args.amount,
+        creditNoteReason: reason,
+      },
+    });
+
+    await reverseMonthlyRevenueInvoiceCommissionsForCreditNote(tx, {
+      id: updated.id,
+      userId: updated.userId,
+      commissionAmount: updated.commissionAmount,
+      creditNoteAmount: updated.creditNoteAmount ?? args.amount,
+      invoicedAt: updated.invoicedAt,
+    });
+
+    return updated;
+  });
+}
+
+export async function getMonthlyRevenueInvoiceLedger(
+  prisma: PrismaClient,
+  invoiceId: string,
+) {
+  const invoice = await prisma.monthlyRevenueInvoice.findUnique({
+    where: { id: invoiceId },
+    include: {
+      user: { select: { id: true, email: true, name: true } },
+    },
+  });
+  if (!invoice) return null;
+
+  const commissions = await prisma.commissionLedger.findMany({
+    where: { monthlyRevenueInvoiceId: invoiceId },
+    include: {
+      beneficiaryUser: { select: { id: true, email: true, name: true } },
+    },
+    orderBy: [{ createdAt: "asc" }, { beneficiaryUserId: "asc" }],
+  });
+
+  const collectibleAmount = invoice.commissionAmount.sub(
+    invoice.creditNoteAmount ?? new Prisma.Decimal(0),
+  );
+
+  return {
+    invoice: {
+      id: invoice.id,
+      userId: invoice.userId,
+      userEmail: invoice.user.email,
+      userName: invoice.user.name,
+      periodYear: invoice.periodYear,
+      periodMonth: invoice.periodMonth,
+      status: invoice.status,
+      commissionAmount: invoice.commissionAmount.toNumber(),
+      creditNoteAmount: invoice.creditNoteAmount?.toNumber() ?? null,
+      creditNoteReason: invoice.creditNoteReason ?? null,
+      collectibleAmount: collectibleAmount.toNumber(),
+      amountInr: invoice.amountInr?.toNumber() ?? null,
+      invoicedAt: invoice.invoicedAt?.toISOString() ?? null,
+      dueDate: invoice.dueDate?.toISOString() ?? null,
+      paidAt: invoice.paidAt?.toISOString() ?? null,
+      voidedAt: invoice.voidedAt?.toISOString() ?? null,
+      voidReason: invoice.voidReason ?? null,
+      paymentReference: invoice.paymentReference ?? null,
+      isSimulated: invoice.isSimulated,
+    },
+    statusTimeline: [
+      { status: "ACCRUED", at: invoice.generatedAt.toISOString() },
+      ...(invoice.invoicedAt
+        ? [{ status: "INVOICED", at: invoice.invoicedAt.toISOString() }]
+        : []),
+      ...(invoice.paidAt
+        ? [{ status: "PAID", at: invoice.paidAt.toISOString() }]
+        : []),
+      ...(invoice.voidedAt
+        ? [{ status: "VOID", at: invoice.voidedAt.toISOString(), reason: invoice.voidReason }]
+        : []),
+      ...(invoice.creditNoteAmount != null
+        ? [
+            {
+              status: "CREDIT_NOTE",
+              amount: invoice.creditNoteAmount.toNumber(),
+              reason: invoice.creditNoteReason,
+            },
+          ]
+        : []),
+    ],
+    commissionRows: commissions.map((row) => ({
+      id: row.id,
+      beneficiaryUserId: row.beneficiaryUserId,
+      beneficiaryEmail: row.beneficiaryUser.email,
+      beneficiaryName: row.beneficiaryUser.name,
+      amount: row.amount,
+      status: row.status,
+      commissionRate: row.commissionRate,
+      beneficiaryTier: row.beneficiaryTier,
+      idempotencyKey: row.idempotencyKey,
+      reversesLedgerId: row.reversesLedgerId,
+      needsClawback: row.needsClawback,
+      isSimulated: row.isSimulated,
+      earnedAt: row.earnedAt.toISOString(),
+      payableAt: row.payableAt?.toISOString() ?? null,
+      withdrawableAt: row.withdrawableAt?.toISOString() ?? null,
+      withdrawnAt: row.withdrawnAt?.toISOString() ?? null,
+    })),
+  };
 }

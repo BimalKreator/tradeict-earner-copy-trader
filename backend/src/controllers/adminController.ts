@@ -9,6 +9,7 @@ import {
   UserStatus,
   type PrismaClient,
 } from "@prisma/client";
+import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import {
   aggregateUsersAum,
   ADMIN_DELTA_BALANCE_CONCURRENCY,
@@ -3890,6 +3891,13 @@ export function createAdminController(prisma: PrismaClient) {
       });
       res.status(204).send();
     } catch (err) {
+      if (err instanceof PrismaClientKnownRequestError && err.code === "P2003") {
+        res.status(409).json({
+          error:
+            "Cannot delete a user with billing history. Anonymise instead.",
+        });
+        return;
+      }
       next(err);
     }
   }
