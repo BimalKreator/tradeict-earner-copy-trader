@@ -1,19 +1,19 @@
-/** Fixed USD → INR rate for all user-facing balance displays. */
-export const USD_TO_INR_RATE = 85;
+/** Platform default when no server rate is available — matches backend SystemSettings. */
+export const FALLBACK_USD_INR_RATE = 83;
 
-/** @deprecated Use {@link USD_TO_INR_RATE}. */
-export const FALLBACK_USD_INR_RATE = USD_TO_INR_RATE;
-
-export function getUsdInrRate(_apiRate?: number | null): number {
-  return USD_TO_INR_RATE;
+export function getUsdInrRate(apiRate?: number | null): number {
+  if (typeof apiRate === "number" && Number.isFinite(apiRate) && apiRate > 0) {
+    return apiRate;
+  }
+  return FALLBACK_USD_INR_RATE;
 }
 
-export function usdToInr(usd: number): number {
-  return usd * USD_TO_INR_RATE;
+export function usdToInr(usd: number, rate?: number | null): number {
+  return usd * getUsdInrRate(rate);
 }
 
-export function inrToUsdDisplay(inr: number): number {
-  return inr / USD_TO_INR_RATE;
+export function inrToUsdDisplay(inr: number, rate?: number | null): number {
+  return inr / getUsdInrRate(rate);
 }
 
 const usdFmt = new Intl.NumberFormat("en-US", {
@@ -23,6 +23,14 @@ const usdFmt = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const usdSignedFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  signDisplay: "always",
+});
+
 const inrFmt = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -30,17 +38,60 @@ const inrFmt = new Intl.NumberFormat("en-IN", {
   maximumFractionDigits: 2,
 });
 
-const dateTimeFmt = new Intl.DateTimeFormat("en-IN", {
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
+const inrSignedFmt = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  signDisplay: "always",
 });
+
+export type PnlDirection = "up" | "down" | "flat" | "unknown";
+
+export function pnlDirection(n: number | null | undefined): PnlDirection {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "unknown";
+  if (n > 0) return "up";
+  if (n < 0) return "down";
+  return "flat";
+}
+
+export function pnlToneClass(n: number | null | undefined): string {
+  switch (pnlDirection(n)) {
+    case "up":
+      return "text-emerald-300";
+    case "down":
+      return "text-red-300";
+    default:
+      return "text-white/75";
+  }
+}
+
+export function pnlGlyph(n: number | null | undefined): string {
+  switch (pnlDirection(n)) {
+    case "up":
+      return "▲";
+    case "down":
+      return "▼";
+    default:
+      return "";
+  }
+}
 
 export function fmtUsd(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return usdFmt.format(n);
+}
+
+/** Signed USD — always shows +/−; null is unknown, zero is truly zero. */
+export function fmtUsdSigned(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return usdSignedFmt.format(n);
+}
+
+/** Signed INR — always shows +/−. */
+export function fmtInrSigned(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return inrSignedFmt.format(n);
 }
 
 /** Percent display — "—" when value is unknown (distinct from 0%). */
@@ -56,22 +107,42 @@ export function fmtNumber(n: number | null | undefined, decimals = 2): string {
   return n.toFixed(decimals);
 }
 
-/** Balance display — never show negative wallet/margin amounts. */
-export function fmtUsdBalance(n: number | null | undefined): string {
+/** Wallet balance only — never show negative available balance. */
+export function fmtWalletBalance(n: number | null | undefined): string {
   const safe = typeof n === "number" && Number.isFinite(n) ? Math.max(0, n) : 0;
   return fmtUsd(safe);
 }
 
-/** Converts a USD amount to INR at {@link USD_TO_INR_RATE} and formats it. */
-export function formatINR(usdValue: number): string {
-  if (!Number.isFinite(usdValue)) return "—";
-  return inrFmt.format(usdValue * USD_TO_INR_RATE);
+/** @deprecated Use {@link fmtWalletBalance}. */
+export const fmtUsdBalance = fmtWalletBalance;
+
+export function fmtRateLabel(rate: number): string {
+  const r = getUsdInrRate(rate);
+  return `(at ₹${r.toLocaleString("en-IN")}/$)`;
 }
 
-/** INR equivalent with approximate prefix for secondary balance lines. */
-export function formatINRApprox(usdValue: number): string {
-  const formatted = formatINR(usdValue);
-  return formatted === "—" ? formatted : `≈ ${formatted}`;
+/** Converts USD to INR at the given (or platform) rate and formats with sign. */
+export function formatINR(
+  usdValue: number | null | undefined,
+  rate?: number | null,
+): string {
+  if (usdValue === null || usdValue === undefined || !Number.isFinite(usdValue)) {
+    return "—";
+  }
+  return inrSignedFmt.format(usdValue * getUsdInrRate(rate));
+}
+
+/** INR equivalent with approximate prefix and pinned rate label. */
+export function formatINRApprox(
+  usdValue: number | null | undefined,
+  rate?: number | null,
+): string {
+  if (usdValue === null || usdValue === undefined || !Number.isFinite(usdValue)) {
+    return "—";
+  }
+  const r = getUsdInrRate(rate);
+  const inr = inrSignedFmt.format(usdValue * r);
+  return `≈ ${inr} ${fmtRateLabel(r)}`;
 }
 
 export function fmtInr(n: number | null | undefined): string {
@@ -79,9 +150,17 @@ export function fmtInr(n: number | null | undefined): string {
   return inrFmt.format(n);
 }
 
+/** @deprecated Use {@link formatIstDateTime} from `@/lib/istDates`. */
 export function fmtDateTime(iso: string): string {
   try {
-    return dateTimeFmt.format(new Date(iso));
+    return new Intl.DateTimeFormat("en-IN", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(iso));
   } catch {
     return iso;
   }

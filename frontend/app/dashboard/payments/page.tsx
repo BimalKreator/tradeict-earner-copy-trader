@@ -10,6 +10,14 @@ import {
   Loader2,
   QrCode,
 } from "lucide-react";
+import { InrMoneyDisplay, MoneyDisplay, MoneyDisplayCompact } from "@/components/money/MoneyDisplay";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
+import { formatIstDateTime } from "@/lib/istDates";
 import { COMPANY } from "@/lib/company";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 
@@ -71,6 +79,7 @@ const inputClass =
   "mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none ring-primary/25 placeholder:text-white/30 focus:ring-2 disabled:opacity-50";
 
 export default function DashboardPaymentsPage() {
+  const { rate: usdInrRate } = useUsdInrRate();
   const [tab, setTab] = useState<TabId>("razorpay");
   const [pgFeePercent, setPgFeePercent] = useState(2.36);
   const [loadingFee, setLoadingFee] = useState(true);
@@ -115,7 +124,7 @@ export default function DashboardPaymentsPage() {
     try {
       const res = await authFetch("/payments/pg-fee");
       if (res.ok) {
-        const data = (await res.json()) as { pgFeePercent?: number };
+        const data = (await res.json()) as { pgFeePercent?: number; usdInrRate?: number };
         if (typeof data.pgFeePercent === "number") {
           setPgFeePercent(data.pgFeePercent);
         }
@@ -564,59 +573,105 @@ export default function DashboardPaymentsPage() {
           </div>
         </div>
 
-        <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[800px] text-left text-sm">
-            <thead className="border-b border-glassBorder bg-white/[0.02] text-white/70">
-              <tr>
-                <th className="px-4 py-3 font-medium">Date</th>
-                <th className="px-4 py-3 font-medium">Method</th>
-                <th className="px-4 py-3 text-right font-medium">Amount</th>
-                <th className="px-4 py-3 text-right font-medium">Fee</th>
-                <th className="px-4 py-3 text-right font-medium">Net credit</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {historyLoading ? (
+        <ResponsiveMoneyTable
+          table={
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-glassBorder bg-white/[0.02] text-white/70">
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-white/45">
-                    <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
-                  </td>
+                  <th className="px-4 py-3 font-medium">Date</th>
+                  <th className="px-4 py-3 font-medium">Method</th>
+                  <th className="px-4 py-3 text-right font-medium">Amount (INR)</th>
+                  <th className="px-4 py-3 text-right font-medium">Fee</th>
+                  <th className="px-4 py-3 text-right font-medium">Net credit</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
                 </tr>
-              ) : history.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-white/45">
-                    No transactions yet.
-                  </td>
-                </tr>
-              ) : (
-                history.map((r) => (
-                  <tr
-                    key={r.id}
-                    className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 text-white/70 tabular-nums">
-                      {new Date(r.date).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-white/80">{r.method}</td>
-                    <td className="px-4 py-3 text-right tabular-nums text-white">
-                      {inrFmt.format(r.amount)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-amber-200/90">
-                      {inrFmt.format(r.fee)}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-emerald-300">
-                      {usdFmt.format(r.netCredit)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={r.status} />
+              </thead>
+              <tbody>
+                {historyLoading ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-12 text-center text-white/45">
+                      <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                ) : history.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-12 text-center text-white/45">
+                      No transactions yet.
+                    </td>
+                  </tr>
+                ) : (
+                  history.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 tabular-nums text-white/70">
+                        {formatIstDateTime(r.date)}
+                      </td>
+                      <td className="px-4 py-3 text-white/80">{r.method}</td>
+                      <td className="px-4 py-3 text-right">
+                        <InrMoneyDisplay inr={r.amount} />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <InrMoneyDisplay inr={-Math.abs(r.fee)} />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <MoneyDisplay usd={r.netCredit} rate={usdInrRate} align="right" />
+                      </td>
+                      <td className="px-4 py-3">
+                        <StatusBadge status={r.status} />
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          }
+          cards={
+            historyLoading ? (
+              <div className="flex justify-center py-12">
+                <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
+              </div>
+            ) : history.length === 0 ? (
+              <div className="px-4 py-12 text-center text-white/45">No transactions yet.</div>
+            ) : (
+              history.map((r) => (
+                <MoneyRowCard
+                  key={r.id}
+                  primary={r.method}
+                  secondary={
+                    <span className="tabular-nums">{formatIstDateTime(r.date)}</span>
+                  }
+                  amount={
+                    <MoneyDisplayCompact usd={r.netCredit} rate={usdInrRate} />
+                  }
+                  status={<StatusBadge status={r.status} />}
+                  details={
+                    <div className="divide-y divide-white/5">
+                      <DetailRow
+                        label="Amount (INR)"
+                        value={<InrMoneyDisplay inr={r.amount} />}
+                      />
+                      <DetailRow
+                        label="Fee"
+                        value={<InrMoneyDisplay inr={-Math.abs(r.fee)} />}
+                      />
+                      <DetailRow
+                        label="Net wallet credit"
+                        value={
+                          <MoneyDisplay usd={r.netCredit} rate={usdInrRate} align="right" />
+                        }
+                      />
+                      {r.referenceId ? (
+                        <DetailRow label="Reference" value={r.referenceId} />
+                      ) : null}
+                    </div>
+                  }
+                />
+              ))
+            )
+          }
+        />
       </section>
     </div>
   );

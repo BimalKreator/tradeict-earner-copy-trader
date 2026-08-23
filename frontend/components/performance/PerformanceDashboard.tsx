@@ -21,11 +21,19 @@ import {
 import { RevenueInvoiceTable } from "@/components/billing/RevenueInvoiceTable";
 import { StrategySubscriptionFees } from "@/components/billing/StrategySubscriptionFees";
 import { HighWaterMarkCard } from "@/components/money/HighWaterMarkCard";
+import { MoneyDisplay, MoneyDisplayCompact } from "@/components/money/MoneyDisplay";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
 import { resolveApiBase } from "@/lib/apiBase";
-import { fmtUsd, formatINRApprox } from "@/lib/currency";
+import { fmtUsd } from "@/lib/currency";
 import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 import {
   formatIstCalendarDate,
+  formatIstDateTime,
   formatIstSnapshotDay,
   currentIstYearMonth,
   isUtcInstantInIstMonth,
@@ -86,21 +94,15 @@ function fmtSnapshotDay(iso: string): string {
   return formatIstSnapshotDay(iso);
 }
 
-function MoneyCell({
-  usd,
-  muted = false,
-}: {
-  usd: number | null;
-  muted?: boolean;
-}) {
-  if (usd === null) {
-    return <span className="text-white/45">—</span>;
-  }
+function LegStatusPill({ open }: { open: boolean }) {
   return (
-    <div className={muted ? "text-white/70" : ""}>
-      <div className="font-medium tabular-nums">{fmtUsd(usd)}</div>
-      <div className="text-xs text-white/45 tabular-nums">{formatINRApprox(usd)}</div>
-    </div>
+    <span
+      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+        open ? "bg-amber-500/15 text-amber-200" : "bg-emerald-500/15 text-emerald-200"
+      }`}
+    >
+      {open ? "Open" : "Closed"}
+    </span>
   );
 }
 
@@ -127,6 +129,7 @@ function SummaryCard({
 }
 
 export function PerformanceDashboard() {
+  const { rate: usdInrRate } = useUsdInrRate();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [structures, setStructures] = useState<StructureRow[]>([]);
@@ -287,20 +290,38 @@ export function PerformanceDashboard() {
             title="Cumulative realized P&L"
             loading={loading}
             basis="Realized from your Delta account. Open positions are not included."
-            value={<MoneyCell usd={latest?.cumulativeRealized ?? (hasClosedHistory ? 0 : null)} />}
+            value={
+              <MoneyDisplay
+                usd={latest?.cumulativeRealized ?? (hasClosedHistory ? 0 : null)}
+                rate={usdInrRate}
+                align="left"
+              />
+            }
           />
           <SummaryCard
             title="High-water mark"
             loading={loading}
             basis="Your lifetime best cumulative realized P&L."
-            value={<MoneyCell usd={latest?.highWaterMark ?? (hasClosedHistory ? 0 : null)} />}
+            value={
+              <MoneyDisplay
+                usd={latest?.highWaterMark ?? (hasClosedHistory ? 0 : null)}
+                rate={usdInrRate}
+                align="left"
+                mode="neutral"
+              />
+            }
           />
           <SummaryCard
             title="Commission to date"
             loading={loading}
             basis="Accrued only on profit above your previous best."
             value={
-              <MoneyCell usd={latest?.commissionCumulative ?? (hasClosedHistory ? 0 : null)} />
+              <MoneyDisplay
+                usd={latest?.commissionCumulative ?? (hasClosedHistory ? 0 : null)}
+                rate={usdInrRate}
+                align="left"
+                mode="neutral"
+              />
             }
           />
           <SummaryCard
@@ -318,7 +339,13 @@ export function PerformanceDashboard() {
             title="This month's realized"
             loading={loading}
             basis="Structures that closed this calendar month (IST)."
-            value={<MoneyCell usd={hasClosedHistory || thisMonthRealized !== 0 ? thisMonthRealized : null} />}
+            value={
+              <MoneyDisplay
+                usd={hasClosedHistory || thisMonthRealized !== 0 ? thisMonthRealized : null}
+                rate={usdInrRate}
+                align="left"
+              />
+            }
           />
         </div>
       </section>
@@ -457,61 +484,149 @@ export function PerformanceDashboard() {
                           </p>
                         </div>
                       ) : (
-                        <MoneyCell usd={s.realizedPnl} />
+                        <MoneyDisplay usd={s.realizedPnl} rate={usdInrRate} align="right" />
                       )}
                     </div>
                   </button>
                   {expanded ? (
                     <div className="border-t border-white/10 px-4 py-3">
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[640px] text-left text-sm">
-                          <thead>
-                            <tr className="text-xs uppercase text-white/40">
-                              <th className="pb-2 pr-3">Leg</th>
-                              <th className="pb-2 pr-3">Symbol</th>
-                              <th className="pb-2 pr-3">Window</th>
-                              <th className="pb-2 pr-3">Cashflow</th>
-                              <th className="pb-2 pr-3">Commission</th>
-                              <th className="pb-2 pr-3">Realized</th>
-                              <th className="pb-2">Txns</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-white/5">
+                      <ResponsiveMoneyTable
+                        table={
+                          <table className="w-full text-left text-sm">
+                            <thead>
+                              <tr className="text-xs uppercase text-white/40">
+                                <th className="pb-2 pr-3">Leg</th>
+                                <th className="pb-2 pr-3">Symbol</th>
+                                <th className="pb-2 pr-3">Window</th>
+                                <th className="pb-2 pr-3">Cashflow</th>
+                                <th className="pb-2 pr-3">Commission</th>
+                                <th className="pb-2 pr-3">Realized</th>
+                                <th className="pb-2">Txns</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                              {s.legs.map((leg) => {
+                                const legOpen = leg.closedAt == null || leg.realizedPnl === null;
+                                return (
+                                  <tr key={leg.id} className="text-white/80">
+                                    <td className="py-2 pr-3">
+                                      {leg.legRole} · {leg.side} ×{leg.quantity}
+                                    </td>
+                                    <td className="py-2 pr-3">
+                                      {leg.symbol ?? leg.productId}
+                                      {leg.strike != null ? ` @ ${leg.strike}` : ""}
+                                    </td>
+                                    <td className="py-2 pr-3 text-xs text-white/50">
+                                      {fmtDay(leg.openedAt)}
+                                      {leg.closedAt ? ` → ${fmtDay(leg.closedAt)}` : " → open"}
+                                    </td>
+                                    <td className="py-2 pr-3">
+                                      <MoneyDisplay
+                                        usd={leg.grossCashflow}
+                                        rate={usdInrRate}
+                                        align="left"
+                                        mode="neutral"
+                                      />
+                                    </td>
+                                    <td className="py-2 pr-3">
+                                      <MoneyDisplay
+                                        usd={leg.commissionTotal}
+                                        rate={usdInrRate}
+                                        align="left"
+                                        mode="neutral"
+                                      />
+                                    </td>
+                                    <td className="py-2 pr-3">
+                                      {legOpen ? (
+                                        <span className="text-white/45">—</span>
+                                      ) : (
+                                        <MoneyDisplay
+                                          usd={leg.realizedPnl}
+                                          rate={usdInrRate}
+                                          align="left"
+                                        />
+                                      )}
+                                    </td>
+                                    <td className="py-2 tabular-nums">{leg.matchedTxnCount}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        }
+                        cards={
+                          <>
                             {s.legs.map((leg) => {
                               const legOpen = leg.closedAt == null || leg.realizedPnl === null;
+                              const primary = `${leg.legRole} · ${leg.side} ×${leg.quantity}`;
+                              const symbol =
+                                `${leg.symbol ?? leg.productId}${leg.strike != null ? ` @ ${leg.strike}` : ""}`;
                               return (
-                                <tr key={leg.id} className="text-white/80">
-                                  <td className="py-2 pr-3">
-                                    {leg.legRole} · {leg.side} ×{leg.quantity}
-                                  </td>
-                                  <td className="py-2 pr-3">
-                                    {leg.symbol ?? leg.productId}
-                                    {leg.strike != null ? ` @ ${leg.strike}` : ""}
-                                  </td>
-                                  <td className="py-2 pr-3 text-xs text-white/50">
-                                    {fmtDay(leg.openedAt)}
-                                    {leg.closedAt ? ` → ${fmtDay(leg.closedAt)}` : " → open"}
-                                  </td>
-                                  <td className="py-2 pr-3">
-                                    <MoneyCell usd={leg.grossCashflow} muted />
-                                  </td>
-                                  <td className="py-2 pr-3">
-                                    <MoneyCell usd={leg.commissionTotal} muted />
-                                  </td>
-                                  <td className="py-2 pr-3">
-                                    {legOpen ? (
+                                <MoneyRowCard
+                                  key={leg.id}
+                                  primary={primary}
+                                  secondary={
+                                    <>
+                                      <span>{symbol}</span>
+                                      <span className="mt-0.5 block">
+                                        {formatIstDateTime(leg.openedAt)}
+                                        {leg.closedAt
+                                          ? ` → ${formatIstDateTime(leg.closedAt)}`
+                                          : " → open"}
+                                      </span>
+                                    </>
+                                  }
+                                  amount={
+                                    legOpen ? (
                                       <span className="text-white/45">—</span>
                                     ) : (
-                                      <MoneyCell usd={leg.realizedPnl} muted />
-                                    )}
-                                  </td>
-                                  <td className="py-2 tabular-nums">{leg.matchedTxnCount}</td>
-                                </tr>
+                                      <MoneyDisplayCompact
+                                        usd={leg.realizedPnl}
+                                        rate={usdInrRate}
+                                      />
+                                    )
+                                  }
+                                  status={<LegStatusPill open={legOpen} />}
+                                  details={
+                                    <div className="divide-y divide-white/5">
+                                      <DetailRow
+                                        label="Cashflow"
+                                        value={
+                                          <MoneyDisplay
+                                            usd={leg.grossCashflow}
+                                            rate={usdInrRate}
+                                            align="right"
+                                            mode="neutral"
+                                          />
+                                        }
+                                      />
+                                      <DetailRow
+                                        label="Commission"
+                                        value={
+                                          <MoneyDisplay
+                                            usd={leg.commissionTotal}
+                                            rate={usdInrRate}
+                                            align="right"
+                                            mode="neutral"
+                                          />
+                                        }
+                                      />
+                                      <DetailRow
+                                        label="Matched txns"
+                                        value={
+                                          <span className="tabular-nums text-white/80">
+                                            {leg.matchedTxnCount}
+                                          </span>
+                                        }
+                                      />
+                                    </div>
+                                  }
+                                />
                               );
                             })}
-                          </tbody>
-                        </table>
-                      </div>
+                          </>
+                        }
+                      />
                     </div>
                   ) : null}
                 </div>

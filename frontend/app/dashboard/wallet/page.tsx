@@ -12,17 +12,23 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { RevenueInvoiceTable } from "@/components/billing/RevenueInvoiceTable";
+import { MoneyDisplay, MoneyDisplayCompact } from "@/components/money/MoneyDisplay";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
 import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 import {
-  fmtDateTime,
-  fmtInr,
+  fmtWalletBalance,
   fmtUsd,
   formatINR,
   formatINRApprox,
+  getUsdInrRate,
   mapPaymentStatus,
-  USD_TO_INR_RATE,
   usdToInr,
 } from "@/lib/currency";
+import { formatIstDateTime } from "@/lib/istDates";
 
 type WalletResponse = {
   exists: boolean;
@@ -69,27 +75,6 @@ type HistoryRow = {
 };
 
 type Toast = { kind: "success" | "error"; text: string } | null;
-
-const usdFmt = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const dateFmt = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-});
-
-function fmtDate(iso: string): string {
-  try {
-    return dateFmt.format(new Date(iso));
-  } catch {
-    return iso;
-  }
-}
 
 function ledgerDescription(tx: LedgerTransactionRow): string {
   switch (tx.type) {
@@ -156,10 +141,11 @@ function historyStatusBadge(status: string, ledgerType?: string): string {
 function mergeTransactionHistory(
   payments: PaymentHistoryRow[],
   ledger: LedgerTransactionRow[],
+  rate: number,
 ): HistoryRow[] {
   const paymentRows: HistoryRow[] = payments.map((tx) => {
     const usd = tx.netCredit;
-    const inr = tx.amount > 0 ? tx.amount : usdToInr(usd);
+    const inr = tx.amount > 0 ? tx.amount : usdToInr(usd, rate);
     const label = `${tx.method} · ${tx.referenceId ? `Ref ${tx.referenceId}` : "Wallet top-up"}`;
     return {
       id: `payment-${tx.id}`,
@@ -176,7 +162,7 @@ function mergeTransactionHistory(
     date: tx.date,
     description: ledgerDescription(tx),
     amountUsd: ledgerAmountUsd(tx),
-    inr: usdToInr(Math.abs(tx.amount)),
+    inr: usdToInr(Math.abs(tx.amount), rate),
     status: tx.status,
     ledgerType: tx.type,
   }));
@@ -207,6 +193,7 @@ export default function DashboardWalletPage() {
   const [paymentHistory, setPaymentHistory] = useState<PaymentHistoryRow[]>([]);
   const [ledgerTransactions, setLedgerTransactions] = useState<LedgerTransactionRow[]>([]);
   const [revenueInvoices, setRevenueInvoices] = useState<RevenueInvoiceRow[]>([]);
+  const [platformRate, setPlatformRate] = useState<number | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -262,6 +249,7 @@ export default function DashboardWalletPage() {
       };
 
       setWallet(w);
+      setPlatformRate(getUsdInrRate(w.usdInrRate ?? hist.usdInrRate));
       setPaymentHistory(
         Array.isArray(hist.transactions) ? hist.transactions : [],
       );
@@ -305,9 +293,11 @@ export default function DashboardWalletPage() {
   const balanceUsd =
     wallet?.availableBalance ?? wallet?.balanceUsd ?? wallet?.balance ?? 0;
 
+  const usdInrRate = getUsdInrRate(platformRate ?? wallet?.usdInrRate);
+
   const transactionHistory = useMemo(
-    () => mergeTransactionHistory(paymentHistory, ledgerTransactions),
-    [ledgerTransactions, paymentHistory],
+    () => mergeTransactionHistory(paymentHistory, ledgerTransactions, usdInrRate),
+    [ledgerTransactions, paymentHistory, usdInrRate],
   );
 
   if (unauthorized) {
@@ -342,7 +332,7 @@ export default function DashboardWalletPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center rounded-full border border-cyan-500/35 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-200">
-            1 USD = {USD_TO_INR_RATE.toLocaleString("en-IN")} INR
+            1 USD = {usdInrRate.toLocaleString("en-IN")} INR
           </span>
         <button
           type="button"
@@ -396,15 +386,15 @@ export default function DashboardWalletPage() {
                 Available balance
               </p>
               <p className="mt-4 text-4xl font-bold tabular-nums text-white">
-                {fmtUsd(balanceUsd)}
+                {fmtWalletBalance(balanceUsd)}
               </p>
               <p className="mt-1 text-sm tabular-nums text-white/50">
-                {formatINRApprox(Math.max(0, balanceUsd))}
+                {formatINRApprox(balanceUsd, usdInrRate)}
               </p>
               {wallet && wallet.pendingFees > 0 ? (
                 <p className="mt-3 text-xs text-amber-200">
                   Pending fees: {fmtUsd(wallet.pendingFees)} (
-                  {formatINR(wallet.pendingFees)})
+                  {formatINR(wallet.pendingFees, usdInrRate)})
                 </p>
               ) : null}
               <Link
@@ -420,11 +410,11 @@ export default function DashboardWalletPage() {
                 Exchange rate
               </p>
               <p className="mt-4 text-2xl font-semibold text-white tabular-nums">
-                1 USD = {USD_TO_INR_RATE.toLocaleString("en-IN")} INR
+                1 USD = {usdInrRate.toLocaleString("en-IN")} INR
               </p>
               <p className="mt-3 text-sm text-white/55">
-                INR equivalents on this page use the fixed platform rate of{" "}
-                {USD_TO_INR_RATE} INR per USD.
+                INR equivalents use the live platform rate from your wallet ({usdInrRate}{" "}
+                INR per USD).
               </p>
             </article>
           </section>
@@ -436,73 +426,98 @@ export default function DashboardWalletPage() {
                 Deposits, withdrawals, and payments — USD with INR equivalent
               </p>
             </div>
-            <div className="scroll-table overflow-x-auto">
-              <table className="w-full min-w-[880px] text-left text-sm">
-                <thead className="border-b border-glassBorder bg-white/[0.02]">
-                  <tr>
-                    <th className="px-4 py-3 font-medium text-white/70">Date &amp; time</th>
-                    <th className="px-4 py-3 font-medium text-white/70">Description</th>
-                    <th className="px-4 py-3 text-right font-medium text-white/70">Amount (USD)</th>
-                    <th className="px-4 py-3 text-right font-medium text-white/70">Amount (INR)</th>
-                    <th className="px-4 py-3 font-medium text-white/70">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transactionHistory.length === 0 ? (
+            <ResponsiveMoneyTable
+              table={
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-glassBorder bg-white/[0.02]">
                     <tr>
-                      <td colSpan={5} className="px-4 py-14 text-center text-white/55">
-                        No transactions yet.{" "}
-                        <Link href="/dashboard/payments" className="text-cyan-400 hover:underline">
-                          Add funds
-                        </Link>
-                      </td>
+                      <th className="px-4 py-3 font-medium text-white/70">Date &amp; time</th>
+                      <th className="px-4 py-3 font-medium text-white/70">Description</th>
+                      <th className="px-4 py-3 text-right font-medium text-white/70">Amount</th>
+                      <th className="px-4 py-3 font-medium text-white/70">Status</th>
                     </tr>
-                  ) : (
-                    transactionHistory.map((tx) => {
-                      const isDebit = tx.amountUsd < 0;
-                      const displayStatus = historyStatusLabel(
-                        tx.status,
-                        tx.ledgerType,
-                      );
-                      return (
-                        <tr
-                          key={tx.id}
-                          className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
-                        >
-                          <td className="whitespace-nowrap px-4 py-3 text-white/70 tabular-nums">
-                            {fmtDateTime(tx.date)}
-                          </td>
-                          <td
-                            className="max-w-[240px] truncate px-4 py-3 text-white/85"
-                            title={tx.description}
+                  </thead>
+                  <tbody>
+                    {transactionHistory.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-14 text-center text-white/55">
+                          No transactions yet.{" "}
+                          <Link href="/dashboard/payments" className="text-cyan-400 hover:underline">
+                            Add funds
+                          </Link>
+                        </td>
+                      </tr>
+                    ) : (
+                      transactionHistory.map((tx) => {
+                        const displayStatus = historyStatusLabel(tx.status, tx.ledgerType);
+                        return (
+                          <tr
+                            key={tx.id}
+                            className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
                           >
-                            {tx.description}
-                          </td>
-                          <td
-                            className={`px-4 py-3 text-right tabular-nums ${
-                              isDebit ? "text-red-300" : "text-emerald-300"
-                            }`}
-                          >
-                            {isDebit ? "−" : "+"}
-                            {fmtUsd(Math.abs(tx.amountUsd))}
-                          </td>
-                          <td className="px-4 py-3 text-right tabular-nums text-white/80">
-                            {fmtInr(tx.inr)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${historyStatusBadge(tx.status, tx.ledgerType)}`}
+                            <td className="whitespace-nowrap px-4 py-3 tabular-nums text-white/70">
+                              {formatIstDateTime(tx.date)}
+                            </td>
+                            <td
+                              className="max-w-[240px] truncate px-4 py-3 text-white/85"
+                              title={tx.description}
                             >
-                              {displayStatus}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                              {tx.description}
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <MoneyDisplay usd={tx.amountUsd} rate={usdInrRate} align="right" />
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${historyStatusBadge(tx.status, tx.ledgerType)}`}
+                              >
+                                {displayStatus}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              }
+              cards={
+                transactionHistory.length === 0 ? (
+                  <div className="px-4 py-14 text-center text-white/55">
+                    No transactions yet.{" "}
+                    <Link href="/dashboard/payments" className="text-cyan-400 hover:underline">
+                      Add funds
+                    </Link>
+                  </div>
+                ) : (
+                  transactionHistory.map((tx) => {
+                    const displayStatus = historyStatusLabel(tx.status, tx.ledgerType);
+                    return (
+                      <MoneyRowCard
+                        key={tx.id}
+                        primary={tx.description}
+                        secondary={
+                          <span className="tabular-nums">{formatIstDateTime(tx.date)}</span>
+                        }
+                        amount={
+                          <MoneyDisplayCompact usd={tx.amountUsd} rate={usdInrRate} />
+                        }
+                        status={
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${historyStatusBadge(tx.status, tx.ledgerType)}`}
+                          >
+                            {displayStatus}
+                          </span>
+                        }
+                        details={
+                          <MoneyDisplay usd={tx.amountUsd} rate={usdInrRate} align="right" />
+                        }
+                      />
+                    );
+                  })
+                )
+              }
+            />
           </section>
 
           <RevenueInvoiceTable

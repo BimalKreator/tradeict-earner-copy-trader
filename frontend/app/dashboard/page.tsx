@@ -20,9 +20,10 @@ import { useAuth } from "@/context/AuthContext";
 import { WithdrawFundsModal } from "@/components/wallet/WithdrawFundsModal";
 import {
   fmtUsd,
-  fmtUsdBalance,
+  fmtWalletBalance,
   fmtPct,
   formatINR,
+  getUsdInrRate,
 } from "@/lib/currency";
 import {
   parseJsonObject,
@@ -67,6 +68,7 @@ type WalletSummary = {
   balance: number;
   availableBalance?: number;
   lockedBalance?: number;
+  usdInrRate?: number;
 };
 
 type DeltaMoneySummary = {
@@ -123,6 +125,7 @@ function parseWalletSummary(raw: unknown): WalletSummary {
     balance: readFiniteNumber(obj, "balance"),
     availableBalance: readOptionalFiniteNumber(obj, "availableBalance") ?? undefined,
     lockedBalance: readOptionalFiniteNumber(obj, "lockedBalance") ?? undefined,
+    usdInrRate: readOptionalFiniteNumber(obj, "usdInrRate") ?? undefined,
   };
 }
 
@@ -134,7 +137,7 @@ function pnlTone(n: number | null | undefined): string {
 }
 
 function usdSecondaryLabel(usd: number, balance = false): string {
-  return `≈ ${balance ? fmtUsdBalance(usd) : fmtUsd(usd)}`;
+  return `≈ ${balance ? fmtWalletBalance(usd) : fmtUsd(usd)}`;
 }
 
 /** INR primary (large) + USD secondary (small) — single source of truth for metric cards. */
@@ -142,20 +145,24 @@ function DualCurrencyValue({
   usd,
   balance = false,
   valueClass = "text-white",
+  rate,
 }: {
   usd: number;
   balance?: boolean;
   valueClass?: string;
+  rate?: number | null;
 }) {
   const displayUsd = balance ? Math.max(0, usd) : usd;
+  const fx = getUsdInrRate(rate);
   return (
     <div className="mt-3">
       <p className={`text-2xl font-bold tabular-nums ${valueClass}`}>
-        {formatINR(displayUsd)}
+        {formatINR(displayUsd, fx)}
       </p>
       <p className="mt-1 text-sm text-slate-500 tabular-nums">
         {usdSecondaryLabel(displayUsd, balance)}
       </p>
+      <p className="mt-0.5 text-[10px] text-slate-600">(at ₹{fx.toLocaleString("en-IN")}/$)</p>
     </div>
   );
 }
@@ -285,6 +292,7 @@ export default function DashboardPage() {
     0,
     wallet?.availableBalance ?? wallet?.balance ?? 0,
   );
+  const usdInrRate = getUsdInrRate(wallet?.usdInrRate);
 
   async function toggleCopyTrading() {
     if (!data || toggleBusy) return;
@@ -391,10 +399,10 @@ export default function DashboardPage() {
               ) : (
                 <>
                   <p className="mt-1 text-3xl font-semibold tabular-nums text-white">
-                    {formatINR(availableWalletUsd)}
+                    {formatINR(availableWalletUsd, usdInrRate)}
                   </p>
                   <p className="mt-1 text-sm tabular-nums text-slate-500">
-                    ≈ {fmtUsdBalance(availableWalletUsd)}
+                    ≈ {fmtWalletBalance(availableWalletUsd)}
                   </p>
                 </>
               )}
@@ -465,6 +473,7 @@ export default function DashboardPage() {
                 </Link>
               }
               valueClass={pnlTone(deltaMoney?.cumulativeRealized ?? 0)}
+              fxRate={usdInrRate}
             />
 
             <MetricCard
@@ -477,6 +486,7 @@ export default function DashboardPage() {
                 </span>
               }
               valueClass={pnlTone(deltaMoney?.thisMonthRealized ?? 0)}
+              fxRate={usdInrRate}
             />
 
             <MetricCard
@@ -489,6 +499,7 @@ export default function DashboardPage() {
                 </span>
               }
               valueClass="text-white"
+              fxRate={usdInrRate}
             />
 
             <MetricCard
@@ -513,6 +524,7 @@ export default function DashboardPage() {
                 )
               }
               valueClass="text-amber-300"
+              fxRate={usdInrRate}
             />
 
             <MetricCard
@@ -525,14 +537,17 @@ export default function DashboardPage() {
                   <BalanceSubRow
                     label="Available"
                     usd={Math.max(0, data.availableBalance ?? data.availableCapital)}
+                    fxRate={usdInrRate}
                   />
                   <BalanceSubRow
                     label="In active trades"
                     usd={Math.max(0, data.usedBalance)}
+                    fxRate={usdInrRate}
                   />
                 </div>
               }
               valueClass="text-white"
+              fxRate={usdInrRate}
             />
 
             <MetricCard
@@ -641,6 +656,7 @@ function MetricCard({
   secondaryValue,
   sub,
   valueClass = "text-white",
+  fxRate,
 }: {
   icon: ReactNode;
   label: string;
@@ -650,6 +666,7 @@ function MetricCard({
   secondaryValue?: ReactNode;
   sub: ReactNode;
   valueClass?: string;
+  fxRate?: number | null;
 }) {
   const hasCurrency = typeof currencyUsd === "number" && Number.isFinite(currencyUsd);
 
@@ -664,6 +681,7 @@ function MetricCard({
           usd={currencyUsd}
           balance={currencyAsBalance}
           valueClass={valueClass}
+          rate={fxRate}
         />
       ) : (
         <>
@@ -678,14 +696,22 @@ function MetricCard({
   );
 }
 
-function BalanceSubRow({ label, usd }: { label: string; usd: number }) {
+function BalanceSubRow({
+  label,
+  usd,
+  fxRate,
+}: {
+  label: string;
+  usd: number;
+  fxRate?: number | null;
+}) {
   const safeUsd = Math.max(0, usd);
   return (
     <div className="text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="text-slate-500">{label}</span>
         <span className="font-bold tabular-nums text-slate-200">
-          {formatINR(safeUsd)}
+          {formatINR(safeUsd, fxRate)}
         </span>
       </div>
       <p className="mt-0.5 text-right text-[11px] tabular-nums text-slate-500">

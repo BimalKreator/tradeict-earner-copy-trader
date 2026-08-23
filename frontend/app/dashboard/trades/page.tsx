@@ -3,6 +3,12 @@
 import { resolveApiBase } from "@/lib/apiBase";
 import { useCallback, useEffect, useState } from "react";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
+import { formatIstDateTime } from "@/lib/istDates";
 import { History, Loader2, RefreshCw } from "lucide-react";
 import Link from "next/link";
 
@@ -30,40 +36,9 @@ const usdPriceFmt = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 6,
 });
 
-const usdPnlFmt = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-  signDisplay: "always",
-});
-
-const usdFeeFmt = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const dateFmt = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-});
-
 function fmtPrice(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return usdPriceFmt.format(n);
-}
-
-function fmtDate(iso: string): string {
-  try {
-    return dateFmt.format(new Date(iso));
-  } catch {
-    return iso;
-  }
 }
 
 function sideToneClass(side: string): string {
@@ -71,6 +46,20 @@ function sideToneClass(side: string): string {
   if (s === "BUY" || s === "LONG") return "bg-emerald-500/15 text-emerald-300";
   if (s === "SELL" || s === "SHORT") return "bg-red-500/15 text-red-300";
   return "bg-white/10 text-white/70";
+}
+
+function tradeStatusPill(status: TradeRow["status"]) {
+  const cls =
+    status === "OPEN"
+      ? "bg-amber-500/15 text-amber-200"
+      : status === "CLOSED"
+        ? "bg-emerald-500/15 text-emerald-200"
+        : "bg-red-500/15 text-red-300";
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${cls}`}>
+      {status}
+    </span>
+  );
 }
 
 export default function DashboardTradesPage() {
@@ -287,99 +276,153 @@ export default function DashboardTradesPage() {
       )}
 
       <section className="glass-card border border-glassBorder overflow-hidden">
-        <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[900px] text-left text-sm">
-            <thead className="border-b border-glassBorder bg-white/[0.03]">
-              <tr>
-                <th className="px-4 py-3 font-medium text-white/70">Date</th>
-                <th className="px-4 py-3 font-medium text-white/70">
-                  Strategy
-                </th>
-                <th className="px-4 py-3 font-medium text-white/70">Symbol</th>
-                <th className="px-4 py-3 font-medium text-white/70">Side</th>
-                <th className="px-4 py-3 font-medium text-white/70">
-                  Entry price
-                </th>
-                <th className="px-4 py-3 font-medium text-white/70">
-                  Exit price
-                </th>
-                <th className="px-4 py-3 font-medium text-white/70">Size</th>
-                <th className="px-4 py-3 font-medium text-white/70">Close Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
+        <ResponsiveMoneyTable
+          table={
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-glassBorder bg-white/[0.03]">
                 <tr>
-                  <td colSpan={8} className="px-4 py-14 text-center">
-                    <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
-                  </td>
+                  <th className="px-4 py-3 font-medium text-white/70">Date</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Strategy</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Symbol</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Side</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Entry price</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Exit price</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Size</th>
+                  <th className="px-4 py-3 font-medium text-white/70">Close Reason</th>
                 </tr>
-              ) : rows.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan={8}
-                    className="px-4 py-16 text-center text-white/55"
-                  >
-                    <p className="text-sm">No trades executed yet.</p>
-                    <p className="mt-1 text-xs text-white/40">
-                      Once you subscribe to a strategy and the trade engine
-                      mirrors a master entry, it will appear here.
-                    </p>
-                    <Link
-                      href="/dashboard/strategies"
-                      className="mt-4 inline-flex rounded-lg bg-primary px-4 py-2 text-xs font-medium text-white hover:bg-primary/90"
-                    >
-                      Browse strategies
-                    </Link>
-                  </td>
-                </tr>
-              ) : (
-                rows.map((r) => {
-                  const isOpen = r.status === "OPEN";
-                  return (
-                    <tr
-                      key={r.id}
-                      className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
-                    >
-                      <td className="whitespace-nowrap px-4 py-3 tabular-nums text-white/55">
-                        {fmtDate(r.createdAt)}
-                      </td>
-                      <td className="max-w-[220px] truncate px-4 py-3 text-white/85">
-                        <span title={r.strategyTitle}>{r.strategyTitle}</span>
-                      </td>
-                      <td className="px-4 py-3 font-medium text-white">
-                        {r.symbol}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase tracking-wide ${sideToneClass(r.side)}`}
-                        >
-                          {r.side}
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-14 text-center">
+                      <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+                    </td>
+                  </tr>
+                ) : rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-16 text-center text-white/55">
+                      <p className="text-sm">No trades executed yet.</p>
+                      <p className="mt-1 text-xs text-white/40">
+                        Once you subscribe to a strategy and the trade engine mirrors a master
+                        entry, it will appear here.
+                      </p>
+                      <Link
+                        href="/dashboard/strategies"
+                        className="mt-4 inline-flex rounded-lg bg-primary px-4 py-2 text-xs font-medium text-white hover:bg-primary/90"
+                      >
+                        Browse strategies
+                      </Link>
+                    </td>
+                  </tr>
+                ) : (
+                  rows.map((r) => {
+                    const isOpen = r.status === "OPEN";
+                    return (
+                      <tr
+                        key={r.id}
+                        className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                      >
+                        <td className="whitespace-nowrap px-4 py-3 tabular-nums text-white/55">
+                          {formatIstDateTime(r.createdAt)}
+                        </td>
+                        <td className="max-w-[220px] truncate px-4 py-3 text-white/85">
+                          <span title={r.strategyTitle}>{r.strategyTitle}</span>
+                        </td>
+                        <td className="px-4 py-3 font-medium text-white">{r.symbol}</td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase tracking-wide ${sideToneClass(r.side)}`}
+                          >
+                            {r.side}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-white/80">
+                          {fmtPrice(r.entryPrice)}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-white/80">
+                          {isOpen ? (
+                            <span className="text-white/40">open</span>
+                          ) : (
+                            fmtPrice(r.exitPrice)
+                          )}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-white/80">{r.size}</td>
+                        <td className="px-4 py-3">
+                          <ExitReasonBadge reason={r.exitReason} />
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          }
+          cards={
+            loading ? (
+              <div className="flex justify-center py-14">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            ) : rows.length === 0 ? (
+              <div className="px-4 py-16 text-center text-white/55">
+                <p className="text-sm">No trades executed yet.</p>
+                <Link
+                  href="/dashboard/strategies"
+                  className="mt-4 inline-flex rounded-lg bg-primary px-4 py-2 text-xs font-medium text-white hover:bg-primary/90"
+                >
+                  Browse strategies
+                </Link>
+              </div>
+            ) : (
+              rows.map((r) => {
+                const isOpen = r.status === "OPEN";
+                return (
+                  <MoneyRowCard
+                    key={r.id}
+                    primary={r.symbol}
+                    secondary={
+                      <>
+                        <span className="block truncate">{r.strategyTitle}</span>
+                        <span className="mt-0.5 block tabular-nums">
+                          {formatIstDateTime(r.createdAt)}
                         </span>
-                      </td>
-                      <td className="px-4 py-3 tabular-nums text-white/80">
+                      </>
+                    }
+                    amount={
+                      <span className="tabular-nums text-sm font-medium text-white/80">
                         {fmtPrice(r.entryPrice)}
-                      </td>
-                      <td className="px-4 py-3 tabular-nums text-white/80">
-                        {isOpen ? (
-                          <span className="text-white/40">open</span>
-                        ) : (
-                          fmtPrice(r.exitPrice)
-                        )}
-                      </td>
-                      <td className="px-4 py-3 tabular-nums text-white/80">
-                        {r.size}
-                      </td>
-                      <td className="px-4 py-3">
-                        <ExitReasonBadge reason={r.exitReason} />
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      </span>
+                    }
+                    status={tradeStatusPill(r.status)}
+                    details={
+                      <div className="divide-y divide-white/5">
+                        <DetailRow
+                          label="Side"
+                          value={
+                            <span
+                              className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium uppercase ${sideToneClass(r.side)}`}
+                            >
+                              {r.side}
+                            </span>
+                          }
+                        />
+                        <DetailRow label="Entry price" value={fmtPrice(r.entryPrice)} />
+                        <DetailRow
+                          label="Exit price"
+                          value={isOpen ? "open" : fmtPrice(r.exitPrice)}
+                        />
+                        <DetailRow label="Size" value={String(r.size)} />
+                        <DetailRow
+                          label="Close reason"
+                          value={<ExitReasonBadge reason={r.exitReason} />}
+                        />
+                      </div>
+                    }
+                  />
+                );
+              })
+            )
+          }
+        />
       </section>
 
       {!loading && rows.length > 0 ? (

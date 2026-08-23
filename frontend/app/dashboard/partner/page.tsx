@@ -27,6 +27,15 @@ import { MilestoneTracker } from "@/components/partner/MilestoneTracker";
 import { ReferralSubmissionForm } from "@/components/partner/ReferralSubmissionForm";
 import { useAuth } from "@/context/AuthContext";
 import { resolveApiBase } from "@/lib/apiBase";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
+import { fmtUsdSigned, pnlToneClass } from "@/lib/currency";
+import { formatIstDateTime } from "@/lib/istDates";
+import { MoneyDisplay, MoneyDisplayCompact } from "@/components/money/MoneyDisplay";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
 import {
   canNominateMembers,
   isSalesTeamMember as isSalesTeamRole,
@@ -96,40 +105,17 @@ type NetworkDetails = {
   };
 };
 
-const usdFmt = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 function fmtUsd(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return usdFmt.format(Math.max(0, n));
+  return fmtUsdSigned(n);
 }
 
-/** Signed USD for net PnL — losses display as negative values. */
 function fmtSignedUsd(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  const sign = n < 0 ? "-" : "";
-  return `${sign}${usdFmt.format(Math.abs(n))}`;
-}
-
-function pnlToneClass(n: number): string {
-  if (n > 0) return "text-emerald-200/90";
-  if (n < 0) return "text-red-300/90";
-  return "text-white/75";
+  return fmtUsdSigned(n);
 }
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return formatIstDateTime(iso);
 }
 
 function referralSignupUrl(code: string): string {
@@ -266,26 +252,30 @@ function StatCard({
   );
 }
 
-function UserFinancialCells({ financials }: { financials: UserFinancials }) {
+function UserFinancialCells({
+  financials,
+  rate,
+}: {
+  financials: UserFinancials;
+  rate: number;
+}) {
   return (
     <>
-      <td className={`hidden whitespace-nowrap px-4 py-3 text-right tabular-nums lg:table-cell xl:px-5 ${pnlToneClass(financials.totalProfitGenerated)}`}>
-        {fmtSignedUsd(financials.totalProfitGenerated)}
+      <td className={`hidden whitespace-nowrap px-4 py-3 text-right lg:table-cell xl:px-5 ${pnlToneClass(financials.totalProfitGenerated)}`}>
+        <MoneyDisplay usd={financials.totalProfitGenerated} rate={rate} align="right" />
       </td>
-      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-white/75 lg:table-cell xl:px-5">
-        {fmtUsd(financials.totalRevenueShareDue)}
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right lg:table-cell xl:px-5">
+        <MoneyDisplay usd={financials.totalRevenueShareDue} rate={rate} align="right" mode="neutral" />
       </td>
-      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-emerald-200/90 lg:table-cell xl:px-5">
-        {fmtUsd(financials.totalRevenuePaid)}
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right lg:table-cell xl:px-5">
+        <MoneyDisplay usd={financials.totalRevenuePaid} rate={rate} align="right" mode="neutral" />
       </td>
-      <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums xl:px-5">
-        <span className="text-amber-200/90">
-          {fmtUsd(financials.memberCommissionEarned)}
-        </span>
-        <span className="text-white/30"> / </span>
-        <span className="text-sky-200/90">
-          {fmtUsd(financials.memberCommissionPayable)}
-        </span>
+      <td className="whitespace-nowrap px-4 py-3 text-right xl:px-5">
+        <div className="flex flex-col items-end gap-1">
+          <MoneyDisplayCompact usd={financials.memberCommissionEarned} rate={rate} mode="neutral" />
+          <span className="text-[10px] text-white/30">/</span>
+          <MoneyDisplayCompact usd={financials.memberCommissionPayable} rate={rate} />
+        </div>
       </td>
     </>
   );
@@ -294,9 +284,11 @@ function UserFinancialCells({ financials }: { financials: UserFinancials }) {
 function NetworkHierarchyRow({
   node,
   defaultExpanded,
+  rate,
 }: {
   node: NetworkNode;
   defaultExpanded: boolean;
+  rate: number;
 }) {
   const children = node.children ?? [];
   const hasChildren = children.length > 0;
@@ -359,7 +351,7 @@ function NetworkHierarchyRow({
           </div>
         </td>
 
-        <UserFinancialCells financials={node.financials} />
+        <UserFinancialCells financials={node.financials} rate={rate} />
       </tr>
 
       {hasChildren && expanded
@@ -367,6 +359,127 @@ function NetworkHierarchyRow({
             <NetworkHierarchyRow
               key={child.id}
               node={child}
+              defaultExpanded={child.depth < 1}
+              rate={rate}
+            />
+          ))
+        : null}
+    </>
+  );
+}
+
+function NetworkHierarchyCard({
+  node,
+  rate,
+  defaultExpanded,
+}: {
+  node: NetworkNode;
+  rate: number;
+  defaultExpanded: boolean;
+}) {
+  const children = node.children ?? [];
+  const [branchExpanded, setBranchExpanded] = useState(defaultExpanded);
+  const name = node.name?.trim() || node.email;
+
+  return (
+    <>
+      <MoneyRowCard
+        primary={
+          <span style={{ paddingLeft: `${node.depth * 12}px` }} className="block">
+            {name}
+          </span>
+        }
+        secondary={
+          node.joinedAt ? (
+            <span className="mt-1 block tabular-nums">{fmtDate(node.joinedAt)}</span>
+          ) : null
+        }
+        amount={
+          <MoneyDisplayCompact usd={node.financials.memberCommissionPayable} rate={rate} />
+        }
+        status={
+          <span
+            className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ring-1 ${roleBadgeClass(node.role)}`}
+          >
+            {roleLabel(node.role, node.nodeType)}
+          </span>
+        }
+        details={
+          <div className="divide-y divide-white/5">
+            <DetailRow
+              label="Gross profit"
+              value={
+                <MoneyDisplay
+                  usd={node.financials.totalProfitGenerated}
+                  rate={rate}
+                  align="right"
+                />
+              }
+            />
+            <DetailRow
+              label="App revenue"
+              value={
+                <MoneyDisplay
+                  usd={node.financials.totalRevenueShareDue}
+                  rate={rate}
+                  align="right"
+                  mode="neutral"
+                />
+              }
+            />
+            <DetailRow
+              label="Revenue paid"
+              value={
+                <MoneyDisplay
+                  usd={node.financials.totalRevenuePaid}
+                  rate={rate}
+                  align="right"
+                  mode="neutral"
+                />
+              }
+            />
+            <DetailRow
+              label="Your commission"
+              value={
+                <div className="space-y-1">
+                  <MoneyDisplay
+                    usd={node.financials.memberCommissionEarned}
+                    rate={rate}
+                    align="right"
+                    mode="neutral"
+                  />
+                  <MoneyDisplay
+                    usd={node.financials.memberCommissionPayable}
+                    rate={rate}
+                    align="right"
+                  />
+                </div>
+              }
+            />
+            {children.length > 0 ? (
+              <DetailRow
+                label="Direct reports"
+                value={
+                  <button
+                    type="button"
+                    className="text-xs text-primary hover:underline"
+                    onClick={() => setBranchExpanded((v) => !v)}
+                  >
+                    {branchExpanded ? "Hide" : "Show"} {children.length} member
+                    {children.length === 1 ? "" : "s"}
+                  </button>
+                }
+              />
+            ) : null}
+          </div>
+        }
+      />
+      {children.length > 0 && branchExpanded
+        ? children.map((child) => (
+            <NetworkHierarchyCard
+              key={child.id}
+              node={child}
+              rate={rate}
               defaultExpanded={child.depth < 1}
             />
           ))
@@ -377,6 +490,7 @@ function NetworkHierarchyRow({
 
 export default function PartnerDashboardPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
+  const { rate: usdInrRate } = useUsdInrRate();
   const { user, token, isSalesTeamMember, salesTeamRole, refreshUser } = useAuth();
 
   const [metrics, setMetrics] = useState<PartnerMetrics | null>(null);
@@ -916,39 +1030,54 @@ export default function PartnerDashboardPage() {
                 No network traders yet. Share your referral link to grow your hierarchy.
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-[920px] w-full text-left text-sm">
-                  <thead className="border-b border-glassBorder bg-white/[0.02] text-[11px] uppercase tracking-wider text-white/40">
-                    <tr>
-                      <th className="px-4 py-3 font-medium xl:px-5">Member / Trader</th>
-                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
-                        Gross Profit
-                      </th>
-                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
-                        App Revenue
-                      </th>
-                      <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
-                        Revenue Paid
-                      </th>
-                      <th className="px-4 py-3 text-right font-medium xl:px-5">
-                        Your Commission
-                        <span className="mt-0.5 block text-[10px] font-normal normal-case tracking-normal text-white/30">
-                          Earned / Payable
-                        </span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
+              <ResponsiveMoneyTable
+                table={
+                  <table className="w-full text-left text-sm">
+                    <thead className="border-b border-glassBorder bg-white/[0.02] text-[11px] uppercase tracking-wider text-white/40">
+                      <tr>
+                        <th className="px-4 py-3 font-medium xl:px-5">Member / Trader</th>
+                        <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                          Gross Profit
+                        </th>
+                        <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                          App Revenue
+                        </th>
+                        <th className="hidden px-4 py-3 text-right font-medium lg:table-cell xl:px-5">
+                          Revenue Paid
+                        </th>
+                        <th className="px-4 py-3 text-right font-medium xl:px-5">
+                          Your Commission
+                          <span className="mt-0.5 block text-[10px] font-normal normal-case tracking-normal text-white/30">
+                            Earned / Payable
+                          </span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(network.tree ?? []).map((root) => (
+                        <NetworkHierarchyRow
+                          key={root.id}
+                          node={root}
+                          defaultExpanded
+                          rate={usdInrRate}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                }
+                cards={
+                  <>
                     {(network.tree ?? []).map((root) => (
-                      <NetworkHierarchyRow
+                      <NetworkHierarchyCard
                         key={root.id}
                         node={root}
+                        rate={usdInrRate}
                         defaultExpanded
                       />
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </>
+                }
+              />
             )}
           </section>
         </>

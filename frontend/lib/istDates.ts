@@ -64,3 +64,67 @@ export function isUtcInstantInIstMonth(
   const parts = currentIstYearMonth(d);
   return parts.year === year && parts.month === month;
 }
+
+const istDateTimeFmt = new Intl.DateTimeFormat("en-IN", {
+  timeZone: IST_TIMEZONE,
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+});
+
+/** Full IST timestamp with zone suffix, e.g. "26 Aug 2026, 3:42 PM IST". */
+export function formatIstDateTime(isoOrDate: string | Date | null | undefined): string {
+  if (isoOrDate == null) return "—";
+  try {
+    const d = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
+    if (Number.isNaN(d.getTime())) return "—";
+    return `${istDateTimeFmt.format(d)} IST`;
+  } catch {
+    return "—";
+  }
+}
+
+function istStartOfDayMs(ref: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: IST_TIMEZONE,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(ref);
+  const y = parseInt(parts.find((p) => p.type === "year")?.value ?? "0", 10);
+  const m = parseInt(parts.find((p) => p.type === "month")?.value ?? "0", 10);
+  const d = parseInt(parts.find((p) => p.type === "day")?.value ?? "0", 10);
+  return Date.UTC(y, m - 1, d, 0, 0, 0) - (5 * 60 + 30) * 60 * 1000;
+}
+
+function relativeIstDayLabel(target: Date, ref = new Date()): string | undefined {
+  const diffDays = Math.round(
+    (istStartOfDayMs(target) - istStartOfDayMs(ref)) / (24 * 60 * 60 * 1000),
+  );
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Tomorrow";
+  if (diffDays === -1) return "Yesterday";
+  if (diffDays > 1) return `In ${diffDays} days`;
+  if (diffDays < -1) return `${Math.abs(diffDays)} days ago`;
+  return undefined;
+}
+
+/** Absolute IST date/time with optional relative secondary line (for due dates). */
+export function dueDateLabel(
+  dueDate: string | null | undefined,
+  status?: string,
+): { primary: string; secondary?: string } {
+  if (!dueDate) return { primary: "—" };
+  const d = new Date(dueDate);
+  if (Number.isNaN(d.getTime())) return { primary: "—" };
+  const primary = formatIstDateTime(d);
+  const normalized = status?.toUpperCase();
+  if (normalized === "PAID" || normalized === "SETTLED") {
+    return { primary };
+  }
+  const secondary = relativeIstDayLabel(d);
+  return secondary ? { primary, secondary } : { primary };
+}
