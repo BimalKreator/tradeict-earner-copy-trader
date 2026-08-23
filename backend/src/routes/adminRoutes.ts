@@ -72,6 +72,7 @@ import {
   getDeltaRestPauseStatus,
   setDeltaRestApiManualPause,
 } from "../utils/deltaRateLimiter.js";
+import { getCronStatusSnapshots } from "../utils/cronGuard.js";
 
 /** Strategy CRUD uses `masterApiKey` / `masterApiSecret` only (leader Delta India CCXT credentials). */
 const roleValues = new Set<string>(Object.values(Role));
@@ -158,8 +159,46 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     settings.updatePartnerCommissionSettings,
   );
 
+  /** GET /api/admin/system/cron — in-memory cron job health (last run, duration, overlap skips). */
+  router.get("/system/cron", (_req, res) => {
+    const crons = getCronStatusSnapshots();
+    const now = Date.now();
+    res.json({
+      checkedAt: new Date(now).toISOString(),
+      crons,
+      summary: {
+        total: crons.length,
+        running: crons.filter((c) => c.running).length,
+        failedLastRun: crons.filter((c) => c.lastSuccess === false).length,
+        neverRun: crons.filter((c) => c.lastStartedAt == null).length,
+      },
+    });
+  });
+
   router.get("/engine-status", (_req, res) => {
-    res.json({ status: "running" });
+    const crons = getCronStatusSnapshots();
+    const running = crons.filter((c) => c.running);
+    const failed = crons.filter((c) => c.lastSuccess === false);
+    const neverRun = crons.filter((c) => c.lastStartedAt == null);
+
+    let status: "healthy" | "degraded" | "starting" = "healthy";
+    if (failed.length > 0 || running.length > 0) {
+      status = "degraded";
+    } else if (neverRun.length === crons.length && crons.length > 0) {
+      status = "starting";
+    }
+
+    res.json({
+      status,
+      uptimeSeconds: Math.floor(process.uptime()),
+      cronJobs: {
+        total: crons.length,
+        running: running.length,
+        failedLastRun: failed.length,
+        neverRun: neverRun.length,
+      },
+      deltaRestPause: getDeltaRestPauseStatus(),
+    });
   });
 
   async function injectTradeHandler(

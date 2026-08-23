@@ -6,7 +6,7 @@ import {
   SubscriptionStatus,
   TradeStatus,
 } from "@prisma/client";
-import cron from "node-cron";
+import { guardedCron } from "../utils/cronGuard.js";
 import { triggerMarkCommissionsAsPayable } from "./affiliateCommissionService.js";
 import { SUBSCRIPTION_SYNC_STATUS } from "./subscriptionSyncService.js";
 import {
@@ -926,49 +926,43 @@ export async function runBillingCycle(prisma: PrismaClient): Promise<void> {
  * monthly-invoice never race for the same midnight tick.
  */
 export function initBillingCronJobs(prisma: PrismaClient): void {
-  cron.schedule(
+  guardedCron(
+    "billing-monthly-invoices",
     "5 0 1 * *",
-    () => {
-      void generateMonthlyInvoices(prisma)
-        .then((res) => {
-          console.log(
-            `[billing] Monthly invoice run for ${res.year}-${String(res.month).padStart(2, "0")}: ` +
-              `created=${res.invoicesCreated} autoPaid=${res.invoicesAutoPaid} skipped=${res.skipped}`,
-          );
-        })
-        .catch((err) => {
-          console.error("[billing] Monthly invoice run failed:", err);
-        });
+    async () => {
+      const res = await generateMonthlyInvoices(prisma);
+      console.log(
+        `[billing] Monthly invoice run for ${res.year}-${String(res.month).padStart(2, "0")}: ` +
+          `created=${res.invoicesCreated} autoPaid=${res.invoicesAutoPaid} skipped=${res.skipped}`,
+      );
     },
     { timezone: "Etc/UTC" },
   );
 
-  cron.schedule(
+  guardedCron(
+    "billing-daily-overdue",
     "0 0 * * *",
-    () => {
-      void runOverdueCheck(prisma)
-        .then((res) => {
-          if (res.invoicesMarkedOverdue > 0 || res.subscriptionsPaused > 0) {
-            console.log(
-              `[billing] Daily overdue: invoices→OVERDUE=${res.invoicesMarkedOverdue}, subs→PAUSED_DUE_TO_FUNDS=${res.subscriptionsPaused}`,
-            );
-          }
-        })
-        .catch((err) => {
-          console.error("[billing] Daily overdue run failed:", err);
-        });
+    async () => {
+      const res = await runOverdueCheck(prisma);
+      if (res.invoicesMarkedOverdue > 0 || res.subscriptionsPaused > 0) {
+        console.log(
+          `[billing] Daily overdue: invoices→OVERDUE=${res.invoicesMarkedOverdue}, subs→PAUSED_DUE_TO_FUNDS=${res.subscriptionsPaused}`,
+        );
+      }
+    },
+    { timezone: "Etc/UTC" },
+  );
 
-      void runUnpaidStrategyFeeCycleEndCheck(prisma)
-        .then((res) => {
-          if (res.subscriptionsHeld > 0 || res.invoicesMarkedOverdue > 0) {
-            console.log(
-              `[billing] Strategy fee cycle: subs→HOLD=${res.subscriptionsHeld}, strategyFeeInvoices→OVERDUE=${res.invoicesMarkedOverdue}`,
-            );
-          }
-        })
-        .catch((err) => {
-          console.error("[billing] Strategy fee cycle check failed:", err);
-        });
+  guardedCron(
+    "billing-daily-strategy-fee",
+    "0 0 * * *",
+    async () => {
+      const res = await runUnpaidStrategyFeeCycleEndCheck(prisma);
+      if (res.subscriptionsHeld > 0 || res.invoicesMarkedOverdue > 0) {
+        console.log(
+          `[billing] Strategy fee cycle: subs→HOLD=${res.subscriptionsHeld}, strategyFeeInvoices→OVERDUE=${res.invoicesMarkedOverdue}`,
+        );
+      }
     },
     { timezone: "Etc/UTC" },
   );

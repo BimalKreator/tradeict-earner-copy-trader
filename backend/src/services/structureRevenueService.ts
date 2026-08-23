@@ -1,5 +1,5 @@
 import { Prisma, SubscriptionStatus, type PrismaClient } from "@prisma/client";
-import cron from "node-cron";
+import { guardedCron } from "../utils/cronGuard.js";
 import {
   DASHBOARD_PNL_DAY_TIMEZONE,
   calendarPartsInTimeZone,
@@ -1039,22 +1039,20 @@ export async function runMonthlyRevenueInvoices(
 }
 
 export function initStructureRevenueCronJobs(prisma: PrismaClient): void {
-  cron.schedule(
+  guardedCron(
+    "structure-revenue-daily-snapshot",
     "5 0 * * *",
-    () => {
-      void runDailyPnlSnapshots(prisma).catch((err) => {
-        console.error("[StructureRevenue] Daily snapshot cron failed:", err);
-      });
+    async () => {
+      await runDailyPnlSnapshots(prisma);
     },
     { timezone: BILLING_TIMEZONE },
   );
 
-  cron.schedule(
+  guardedCron(
+    "structure-revenue-monthly-invoice",
     "0 0 1 * *",
-    () => {
-      void runMonthlyRevenueInvoices(prisma).catch((err) => {
-        console.error("[StructureRevenue] Monthly invoice cron failed:", err);
-      });
+    async () => {
+      await runMonthlyRevenueInvoices(prisma);
     },
     { timezone: BILLING_TIMEZONE },
   );

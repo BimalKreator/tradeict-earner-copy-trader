@@ -1,4 +1,4 @@
-import cron from "node-cron";
+import { guardedCron } from "../utils/cronGuard.js";
 import {
   CommissionLedgerStatus,
   InvoiceStatus,
@@ -957,15 +957,11 @@ export async function processMaturedCommissions(
 
 /** Daily UTC job — matures PAYABLE → WITHDRAWABLE after unlockDate. */
 export function initAffiliateCommissionCronJobs(prisma: PrismaClient): void {
-  cron.schedule(
+  guardedCron(
+    "affiliate-commission-maturity",
     "5 0 * * *",
-    () => {
-      void processMaturedCommissions(prisma).catch((err) => {
-        console.error(
-          "[affiliate-cron] Maturity run failed:",
-          err instanceof Error ? err.message : err,
-        );
-      });
+    async () => {
+      await processMaturedCommissions(prisma);
     },
     { timezone: "Etc/UTC" },
   );

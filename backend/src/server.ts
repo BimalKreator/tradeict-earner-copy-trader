@@ -4,6 +4,9 @@ import { installTradeLogFilter } from "./utils/tradeLogger.js";
 
 installTradeLogFilter();
 
+import { installProcessHandlers } from "./utils/processHandlers.js";
+installProcessHandlers();
+
 if (!process.env.PROCESS_ENCRYPTION_KEY) {
   console.error("FATAL: PROCESS_ENCRYPTION_KEY is missing");
   process.exit(1);
@@ -294,9 +297,13 @@ app.listen(PORT, "0.0.0.0", () => {
   );
   console.log("[BOOT] Crypto arbitrage engine cron is scheduled (every ~4 min).");
   startBotSyncService(prisma);
-  void countLegacyBotSyncTrades(prisma).then((count) => {
-    console.log(
-      `[BOOT] BOT_SYNC_LEGACY Trade rows marked for comparison: ${count} (billing excludes these)`,
-    );
-  });
+  void countLegacyBotSyncTrades(prisma)
+    .then((count) => {
+      console.log(
+        `[BOOT] BOT_SYNC_LEGACY Trade rows marked for comparison: ${count} (billing excludes these)`,
+      );
+    })
+    .catch((err) => {
+      console.error("[BOOT] Legacy bot sync trade count failed:", err);
+    });
 });

@@ -13,6 +13,33 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 
+type CronJobStatus = {
+  name: string;
+  schedule: string;
+  timezone: string | null;
+  running: boolean;
+  runningSince: string | null;
+  runningForMs: number | null;
+  lastStartedAt: string | null;
+  lastFinishedAt: string | null;
+  lastDurationMs: number | null;
+  lastSuccess: boolean | null;
+  lastError: string | null;
+  runCount: number;
+  skipCount: number;
+};
+
+type CronHealthResponse = {
+  checkedAt: string;
+  crons: CronJobStatus[];
+  summary: {
+    total: number;
+    running: number;
+    failedLastRun: number;
+    neverRun: number;
+  };
+};
+
 type DashboardStats = {
   totalUsers: number;
   activeSubscribers: number;
@@ -52,9 +79,33 @@ function pnlClass(n: number): string {
   return "text-slate-300";
 }
 
+function fmtDuration(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms / 60_000)}m`;
+}
+
+function cronStatusLabel(cron: CronJobStatus): string {
+  if (cron.running) return "Running";
+  if (cron.lastSuccess === false) return "Failed";
+  if (cron.lastStartedAt == null) return "Not run yet";
+  if (cron.lastSuccess === true) return "OK";
+  return "Unknown";
+}
+
+function cronStatusClass(cron: CronJobStatus): string {
+  if (cron.running) return "text-amber-300";
+  if (cron.lastSuccess === false) return "text-red-400";
+  if (cron.lastStartedAt == null) return "text-slate-500";
+  return "text-emerald-400";
+}
+
 export default function AdminDashboardPage() {
   const [data, setData] = useState<DashboardStats | null>(null);
+  const [cronHealth, setCronHealth] = useState<CronHealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cronError, setCronError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const headers = useMemo(
     () => ({ Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` }),
@@ -64,9 +115,18 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dashboard-stats`, { headers });
-        if (!res.ok) throw new Error(`Request failed (${res.status})`);
-        setData((await res.json()) as DashboardStats);
+        const [statsRes, cronRes] = await Promise.all([
+          fetch(`${API_BASE}/admin/dashboard-stats`, { headers }),
+          fetch(`${API_BASE}/admin/system/cron`, { headers }),
+        ]);
+        if (!statsRes.ok) throw new Error(`Request failed (${statsRes.status})`);
+        setData((await statsRes.json()) as DashboardStats);
+        if (cronRes.ok) {
+          setCronHealth((await cronRes.json()) as CronHealthResponse);
+          setCronError(null);
+        } else {
+          setCronError(`Cron health unavailable (${cronRes.status})`);
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load dashboard");
       } finally {
@@ -89,6 +149,12 @@ export default function AdminDashboardPage() {
       {error && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
+        </div>
+      )}
+
+      {cronError && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          {cronError}
         </div>
       )}
 
@@ -176,6 +242,89 @@ export default function AdminDashboardPage() {
               className="lg:col-span-2"
             />
           </div>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-medium uppercase tracking-wider text-slate-400">
+                  Scheduled Jobs (Cron Health)
+                </h2>
+                {cronHealth ? (
+                  <p className="mt-1 text-xs text-slate-500">
+                    {cronHealth.summary.total} jobs · {cronHealth.summary.running} running ·{" "}
+                    {cronHealth.summary.failedLastRun} failed last run · checked{" "}
+                    {new Date(cronHealth.checkedAt).toLocaleString()}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[920px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-500">
+                    <th className="px-3 py-3 font-medium">Job</th>
+                    <th className="px-3 py-3 font-medium">Schedule</th>
+                    <th className="px-3 py-3 font-medium">Status</th>
+                    <th className="px-3 py-3 font-medium">Last run</th>
+                    <th className="px-3 py-3 font-medium">Duration</th>
+                    <th className="px-3 py-3 font-medium text-right">Runs</th>
+                    <th className="px-3 py-3 font-medium text-right">Skips</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(cronHealth?.crons ?? []).map((cron) => (
+                    <tr
+                      key={cron.name}
+                      className="border-b border-slate-800/80 transition hover:bg-slate-800/30"
+                    >
+                      <td className="px-3 py-3 font-mono text-xs text-slate-200">
+                        {cron.name}
+                      </td>
+                      <td className="px-3 py-3 text-slate-400">
+                        <span className="font-mono text-xs">{cron.schedule}</span>
+                        {cron.timezone ? (
+                          <span className="ml-2 text-[11px] text-slate-600">
+                            ({cron.timezone})
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className={`px-3 py-3 font-medium ${cronStatusClass(cron)}`}>
+                        {cronStatusLabel(cron)}
+                        {cron.running && cron.runningForMs != null ? (
+                          <span className="ml-2 text-xs text-slate-500">
+                            {fmtDuration(cron.runningForMs)}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-3 text-slate-400">
+                        {cron.lastFinishedAt
+                          ? new Date(cron.lastFinishedAt).toLocaleString()
+                          : cron.lastStartedAt
+                            ? `${new Date(cron.lastStartedAt).toLocaleString()} (in progress)`
+                            : "—"}
+                      </td>
+                      <td className="px-3 py-3 text-slate-300 tabular-nums">
+                        {fmtDuration(cron.lastDurationMs)}
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums text-slate-300">
+                        {cron.runCount}
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums text-slate-300">
+                        {cron.skipCount > 0 ? (
+                          <span className="text-amber-300">{cron.skipCount}</span>
+                        ) : (
+                          cron.skipCount
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!cronHealth?.crons.length && !cronError ? (
+                <p className="mt-4 text-sm text-slate-500">No cron jobs registered yet.</p>
+              ) : null}
+            </div>
+          </section>
 
           <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
             <h2 className="text-sm font-medium uppercase tracking-wider text-slate-400">

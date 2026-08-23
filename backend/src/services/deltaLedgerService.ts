@@ -1,5 +1,5 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
-import cron from "node-cron";
+import { guardedCron } from "../utils/cronGuard.js";
 import { decryptDeltaSecretOrPlain } from "../utils/encryption.js";
 import { fetchDeltaWalletTransactionsPage } from "./exchangeService.js";
 import {
@@ -665,22 +665,20 @@ async function runDeltaLedgerSyncCycle(prisma: PrismaClient): Promise<void> {
 
 /** Poll Delta wallet transactions every 5 minutes for active bot-strategy subscribers. */
 export function initDeltaLedgerCronJobs(prisma: PrismaClient): void {
-  cron.schedule(
+  guardedCron(
+    "delta-ledger-sync",
     "*/5 * * * *",
-    () => {
-      void runDeltaLedgerSyncCycle(prisma).catch((err) => {
-        console.error("[DeltaLedger] Scheduled sync cycle failed:", err);
-      });
+    async () => {
+      await runDeltaLedgerSyncCycle(prisma);
     },
     { timezone: "Etc/UTC" },
   );
 
-  cron.schedule(
+  guardedCron(
+    "delta-ledger-deep-sweep",
     "30 2 * * *",
-    () => {
-      void runDeltaLedgerDeepSweep(prisma).catch((err) => {
-        console.error("[DeltaLedger] Scheduled deep sweep failed:", err);
-      });
+    async () => {
+      await runDeltaLedgerDeepSweep(prisma);
     },
     { timezone: BILLING_TIMEZONE },
   );

@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SubscriptionStatus } from "@prisma/client";
-import cron from "node-cron";
+import { guardedCron } from "../utils/cronGuard.js";
 import {
   calendarPartsInTimeZone,
   DASHBOARD_PNL_DAY_TIMEZONE,
@@ -177,58 +177,45 @@ export async function appendRevenueFrozenPeriodAlerts(
   });
 }
 
-let pendingFinalInvoiceCronRunning = false;
-let lateLedgerRecomputeCronRunning = false;
-
 export async function runPendingFinalInvoiceCron(
   prisma: PrismaClient,
 ): Promise<{ processed: number; skipped: number; errors: number }> {
-  if (pendingFinalInvoiceCronRunning) {
-    console.info("[BillingCron] pending final invoice cycle skipped — already running");
-    return { processed: 0, skipped: 0, errors: 0 };
-  }
-
-  pendingFinalInvoiceCronRunning = true;
   const cutoff = new Date(Date.now() - finalInvoiceDelayHours() * MS_PER_HOUR);
   let processed = 0;
   let errors = 0;
 
-  try {
-    const users = await prisma.user.findMany({
-      where: {
-        pendingFinalInvoiceSince: { not: null, lte: cutoff },
-      },
-      select: { id: true },
-      orderBy: { pendingFinalInvoiceSince: "asc" },
-    });
+  const users = await prisma.user.findMany({
+    where: {
+      pendingFinalInvoiceSince: { not: null, lte: cutoff },
+    },
+    select: { id: true },
+    orderBy: { pendingFinalInvoiceSince: "asc" },
+  });
 
-    for (const user of users) {
-      try {
-        const result = await issuePendingFinalInvoiceForUser(prisma, user.id);
-        if (result) processed += 1;
-      } catch (err) {
-        errors += 1;
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[BillingCron] pending final invoice failed user=${user.id}: ${msg}`,
-        );
-      }
-    }
-
-    if (processed > 0 || errors > 0) {
-      console.info(
-        `[BillingCron] pending final invoice cycle complete eligible=${users.length} processed=${processed} errors=${errors}`,
-      );
-    } else {
-      console.info(
-        `[BillingCron] pending final invoice cycle complete eligible=0`,
+  for (const user of users) {
+    try {
+      const result = await issuePendingFinalInvoiceForUser(prisma, user.id);
+      if (result) processed += 1;
+    } catch (err) {
+      errors += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[BillingCron] pending final invoice failed user=${user.id}: ${msg}`,
       );
     }
-
-    return { processed, skipped: users.length - processed - errors, errors };
-  } finally {
-    pendingFinalInvoiceCronRunning = false;
   }
+
+  if (processed > 0 || errors > 0) {
+    console.info(
+      `[BillingCron] pending final invoice cycle complete eligible=${users.length} processed=${processed} errors=${errors}`,
+    );
+  } else {
+    console.info(
+      `[BillingCron] pending final invoice cycle complete eligible=0`,
+    );
+  }
+
+  return { processed, skipped: users.length - processed - errors, errors };
 }
 
 export async function runLateLedgerRecomputeCron(
@@ -238,84 +225,79 @@ export async function runLateLedgerRecomputeCron(
   frozenAlerts: number;
   errors: number;
 }> {
-  if (lateLedgerRecomputeCronRunning) {
-    console.info("[BillingCron] late ledger recompute cycle skipped — already running");
-    return { processed: 0, frozenAlerts: 0, errors: 0 };
-  }
-
-  lateLedgerRecomputeCronRunning = true;
   let processed = 0;
   let frozenAlerts = 0;
   let errors = 0;
 
-  try {
-    const users = await prisma.user.findMany({
-      where: { deltaLedgerRecomputeRequired: true },
-      select: { id: true },
-      orderBy: { id: "asc" },
-    });
+  const users = await prisma.user.findMany({
+    where: { deltaLedgerRecomputeRequired: true },
+    select: { id: true },
+    orderBy: { id: "asc" },
+  });
 
-    for (const user of users) {
-      try {
-        await runDeltaLedgerSyncForUsers(prisma, { userId: user.id });
-        await recomputeStructurePnlForUsers(prisma, { userId: user.id });
-        const result = await recomputeInvoiceChain(prisma, user.id, false);
+  for (const user of users) {
+    try {
+      await runDeltaLedgerSyncForUsers(prisma, { userId: user.id });
+      await recomputeStructurePnlForUsers(prisma, { userId: user.id });
+      const result = await recomputeInvoiceChain(prisma, user.id, false);
 
-        if (result.frozenPeriodLateData.length > 0) {
-          frozenAlerts += result.frozenPeriodLateData.length;
-          for (const alert of result.frozenPeriodLateData) {
-            console.error(
-              `[Revenue] frozen period ${alert.periodYear}-${String(alert.periodMonth).padStart(2, "0")} ` +
-                `user=${user.id} has late data — manual credit note or void may be required ` +
-                `fields=${alert.fields.join(",")}`,
-            );
-          }
-          await appendRevenueFrozenPeriodAlerts(
-            prisma,
-            user.id,
-            result.frozenPeriodLateData,
+      if (result.frozenPeriodLateData.length > 0) {
+        frozenAlerts += result.frozenPeriodLateData.length;
+        for (const alert of result.frozenPeriodLateData) {
+          console.error(
+            `[Revenue] frozen period ${alert.periodYear}-${String(alert.periodMonth).padStart(2, "0")} ` +
+              `user=${user.id} has late data — manual credit note or void may be required ` +
+              `fields=${alert.fields.join(",")}`,
           );
         }
-
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { deltaLedgerRecomputeRequired: false },
-        });
-        processed += 1;
-      } catch (err) {
-        errors += 1;
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[BillingCron] late ledger recompute failed user=${user.id}: ${msg}`,
+        await appendRevenueFrozenPeriodAlerts(
+          prisma,
+          user.id,
+          result.frozenPeriodLateData,
         );
       }
-    }
 
-    if (processed > 0 || frozenAlerts > 0 || errors > 0) {
-      console.info(
-        `[BillingCron] late ledger recompute cycle complete flagged=${users.length} ` +
-          `processed=${processed} frozenAlerts=${frozenAlerts} errors=${errors}`,
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { deltaLedgerRecomputeRequired: false },
+      });
+      processed += 1;
+    } catch (err) {
+      errors += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[BillingCron] late ledger recompute failed user=${user.id}: ${msg}`,
       );
-    } else {
-      console.info(`[BillingCron] late ledger recompute cycle complete flagged=0`);
     }
-
-    return { processed, frozenAlerts, errors };
-  } finally {
-    lateLedgerRecomputeCronRunning = false;
   }
+
+  if (processed > 0 || frozenAlerts > 0 || errors > 0) {
+    console.info(
+      `[BillingCron] late ledger recompute cycle complete flagged=${users.length} ` +
+        `processed=${processed} frozenAlerts=${frozenAlerts} errors=${errors}`,
+    );
+  } else {
+    console.info(`[BillingCron] late ledger recompute cycle complete flagged=0`);
+  }
+
+  return { processed, frozenAlerts, errors };
 }
 
 export function initDelayedInvoiceCronJobs(prisma: PrismaClient): void {
-  cron.schedule(
+  guardedCron(
+    "billing-pending-final-invoice",
     "0 * * * *",
-    () => {
-      void runPendingFinalInvoiceCron(prisma).catch((err) => {
-        console.error("[BillingCron] pending final invoice cron failed:", err);
-      });
-      void runLateLedgerRecomputeCron(prisma).catch((err) => {
-        console.error("[BillingCron] late ledger recompute cron failed:", err);
-      });
+    async () => {
+      await runPendingFinalInvoiceCron(prisma);
+    },
+    { timezone: DASHBOARD_PNL_DAY_TIMEZONE },
+  );
+
+  guardedCron(
+    "billing-late-ledger-recompute",
+    "0 * * * *",
+    async () => {
+      await runLateLedgerRecomputeCron(prisma);
     },
     { timezone: DASHBOARD_PNL_DAY_TIMEZONE },
   );
