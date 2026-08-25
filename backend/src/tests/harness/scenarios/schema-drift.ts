@@ -1,5 +1,13 @@
 import { Prisma } from "@prisma/client";
-import type { HarnessScenario, ScenarioContext } from "../types.js";
+import type { AssertionContext } from "../assert.js";
+import type { ScenarioContext } from "../types.js";
+import {
+  buildFieldExpectations,
+  columnMatchesType,
+  expectedPgTypes,
+  getFieldExpectation,
+  type FieldExpectation,
+} from "../schemaExpectations.js";
 
 type DbColumn = {
   table_name: string;
@@ -14,61 +22,17 @@ type DbEnumRow = {
   enum_value: string;
 };
 
-function tableNameForModel(modelName: string, dbName?: string | null): string {
-  return dbName ?? modelName;
-}
-
-function isScalarField(field: (typeof Prisma.dmmf.datamodel.models)[0]["fields"][0]): boolean {
-  return field.kind === "scalar" || field.kind === "enum";
-}
-
-function expectedPgTypes(field: (typeof Prisma.dmmf.datamodel.models)[0]["fields"][0]): string[] {
-  if (field.kind === "enum") {
-    return [field.type];
-  }
-
-  const native = field.nativeType?.[0];
-  if (native === "Date") {
-    return ["date"];
-  }
-
-  switch (field.type) {
-    case "String":
-      return ["text", "varchar", "character varying", "uuid"];
-    case "Int":
-      return ["int4", "integer"];
-    case "Float":
-      return ["float8", "double precision", "real"];
-    case "Boolean":
-      return ["bool", "boolean"];
-    case "DateTime":
-      return ["timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone"];
-    case "Decimal":
-      return ["numeric"];
-    case "Json":
-      return ["json", "jsonb"];
-    case "BigInt":
-      return ["int8", "bigint"];
-    default:
-      return [field.type.toLowerCase()];
-  }
-}
-
-function columnMatches(field: (typeof Prisma.dmmf.datamodel.models)[0]["fields"][0], col: DbColumn): boolean {
-  if (field.kind === "enum") {
-    return col.udt_name === field.type;
-  }
-
-  const allowed = expectedPgTypes(field);
-  const actual = col.udt_name.toLowerCase();
-  const dataType = col.data_type.toLowerCase();
-  return allowed.some(
-    (t) =>
-      actual === t.toLowerCase() ||
-      dataType === t.toLowerCase() ||
-      actual.includes(t.toLowerCase()),
-  );
-}
+const SELF_CHECK_COLUMNS: Array<{
+  model: string;
+  field: string;
+  expectNullable: boolean;
+}> = [
+  { model: "User", field: "id", expectNullable: false },
+  { model: "User", field: "email", expectNullable: false },
+  { model: "PayoutRequest", field: "completedAt", expectNullable: true },
+  { model: "CommissionLedger", field: "amount", expectNullable: false },
+  { model: "SystemAlert", field: "resolved", expectNullable: false },
+];
 
 async function loadDbColumns(ctx: ScenarioContext): Promise<Map<string, DbColumn>> {
   const rows = await ctx.prisma.$queryRaw<DbColumn[]>`
@@ -101,61 +65,121 @@ async function loadDbEnums(ctx: ScenarioContext): Promise<Map<string, Set<string
   return map;
 }
 
-export const schemaDriftScenario: HarnessScenario = {
+function runSelfCheck(
+  assert: AssertionContext,
+  expectations: FieldExpectation[],
+  columns: Map<string, DbColumn>,
+): void {
+  for (const check of SELF_CHECK_COLUMNS) {
+    const field = getFieldExpectation(expectations, check.model, check.field);
+    if (!field) {
+      throw new Error(
+        `drift checker is broken: no schema expectation for ${check.model}.${check.field}`,
+      );
+    }
+
+    const expectedRequired = !check.expectNullable;
+    assert.equal(
+      field.isRequired,
+      expectedRequired,
+      `self-check ${check.model}.${check.field} isRequired`,
+    );
+
+    const key = `${field.table}.${field.column}`;
+    const col = columns.get(key);
+    if (!col) {
+      throw new Error(
+        `drift checker is broken: live column missing for self-check ${key}`,
+      );
+    }
+
+    const actualNullable = col.is_nullable === "YES";
+    assert.equal(
+      actualNullable,
+      check.expectNullable,
+      `self-check ${key} nullability`,
+    );
+
+    assert.assert(
+      columnMatchesType(field, col),
+      `drift checker is broken: type mismatch on self-check ${key}`,
+    );
+  }
+}
+
+function collectDrift(
+  expectations: FieldExpectation[],
+  columns: Map<string, DbColumn>,
+  dbEnums: Map<string, Set<string>>,
+): string[] {
+  const differences: string[] = [];
+
+  for (const field of expectations) {
+    const key = `${field.table}.${field.column}`;
+    const col = columns.get(key);
+
+    if (!col) {
+      differences.push(`MISSING  ${key}`);
+      continue;
+    }
+
+    const expectedNullable = !field.isRequired;
+    const actualNullable = col.is_nullable === "YES";
+    if (expectedNullable !== actualNullable) {
+      differences.push(
+        `MISMATCH ${key} expected nullable=${expectedNullable} actual nullable=${actualNullable}`,
+      );
+    }
+
+    if (!columnMatchesType(field, col)) {
+      differences.push(
+        `MISMATCH ${key} expected type≈${expectedPgTypes(field).join("|")} actual udt=${col.udt_name} data_type=${col.data_type}`,
+      );
+    }
+  }
+
+  for (const enumDef of Prisma.dmmf.datamodel.enums) {
+    const dbValues = dbEnums.get(enumDef.name);
+    if (!dbValues) {
+      differences.push(`MISSING  enum ${enumDef.name}`);
+      continue;
+    }
+    for (const value of enumDef.values) {
+      if (!dbValues.has(value.name)) {
+        differences.push(`MISSING  enum ${enumDef.name}.${value.name}`);
+      }
+    }
+  }
+
+  return differences;
+}
+
+export const schemaDriftScenario = {
   name: "schema-drift",
-  async run(ctx) {
-    const differences: string[] = [];
+  async run(ctx: ScenarioContext) {
+    const expectations = buildFieldExpectations();
     const columns = await loadDbColumns(ctx);
     const dbEnums = await loadDbEnums(ctx);
 
-    for (const model of Prisma.dmmf.datamodel.models) {
-      const table = tableNameForModel(model.name, model.dbName);
-      for (const field of model.fields) {
-        if (!isScalarField(field)) continue;
+    runSelfCheck(ctx.assert, expectations, columns);
 
-        const columnName = field.dbName ?? field.name;
-        const key = `${table}.${columnName}`;
-        const col = columns.get(key);
+    const profitDate = getFieldExpectation(
+      expectations,
+      "CommissionLedger",
+      "profitDate",
+    );
+    ctx.assert.assert(
+      profitDate?.nativeType === "Date",
+      "CommissionLedger.profitDate declares @db.Date in schema.prisma",
+    );
 
-        if (!col) {
-          differences.push(`MISSING  ${key}`);
-          continue;
-        }
-
-        const expectedNullable = !field.isRequired;
-        const actualNullable = col.is_nullable === "YES";
-        if (expectedNullable !== actualNullable) {
-          differences.push(
-            `MISMATCH ${key} expected nullable=${expectedNullable} actual nullable=${actualNullable}`,
-          );
-        }
-
-        if (!columnMatches(field, col)) {
-          differences.push(
-            `MISMATCH ${key} expected type≈${expectedPgTypes(field).join("|")} actual udt=${col.udt_name} data_type=${col.data_type}`,
-          );
-        }
-      }
-    }
-
-    for (const enumDef of Prisma.dmmf.datamodel.enums) {
-      const dbValues = dbEnums.get(enumDef.name);
-      if (!dbValues) {
-        differences.push(`MISSING  enum ${enumDef.name}`);
-        continue;
-      }
-      for (const value of enumDef.values) {
-        if (!dbValues.has(value.name)) {
-          differences.push(`MISSING  enum ${enumDef.name}.${value.name}`);
-        }
-      }
-    }
+    const differences = collectDrift(expectations, columns, dbEnums);
 
     ctx.assert.assert(
       differences.length === 0,
       differences.length > 0
         ? `Schema drift detected (${differences.length}):\n${differences.join("\n")}`
-        : "schema matches Prisma DMMF",
+        : "schema matches Prisma schema expectations",
     );
   },
 };
