@@ -1,38 +1,26 @@
-# Tradeict Earner Copy Trader
+# Tradeict Earner
 
 ## Play Store reviewer account
 
-Google Play reviewers need a working sign-in. Create an **ordinary** demo user
-(no auth backdoors) with:
+Google Play reviewers need a working sign-in. Seed an ordinary demo user (not an auth backdoor) with:
 
 ```bash
 cd backend
-REVIEWER_EMAIL='tradeictdevelopers+review@gmail.com' \
-REVIEWER_PASSWORD='<strong-unique-password>' \
-npx tsx src/scripts/seedReviewerAccount.ts
+REVIEWER_EMAIL='tradeictdevelopers+review@gmail.com' REVIEWER_PASSWORD='<strong-secret>' npx tsx src/scripts/seedReviewerAccount.ts
 ```
 
 Or with argv:
 
 ```bash
 cd backend
-npx tsx src/scripts/seedReviewerAccount.ts \
-  --email='tradeictdevelopers+review@gmail.com' \
-  --password='<strong-unique-password>'
+npx tsx src/scripts/seedReviewerAccount.ts --email='tradeictdevelopers+review@gmail.com' --password='<strong-secret>'
 ```
 
-Put those same credentials in Play Console under **App content → App access**.
+Put the same email and password into Play Console under **App content → App access**.
 
 Notes:
 
-- The script refuses to run without `REVIEWER_EMAIL` / `REVIEWER_PASSWORD` (no
-  hardcoded defaults).
-- It aborts if the address normalises to `tradeictdevelopers@gmail.com`
-  (executive user `695f8b44-0af1-4d87-908b-38d9c942745a`) — never reuse that
-  account.
-- The domain must be on the live email allowlist (`gmail.com` is allowed by
-  default).
-- `isOtpBypassed=true` only skips OTP **after** a correct password.
-- No ExchangeAccount / API keys and no fabricated trades, wallet balance, or
-  revenue.
-- After the app is published, **rotate the password or disable the account**.
+- The account is `isOtpBypassed=true` so login skips OTP **only after a correct password**.
+- It has an ACTIVE strategy subscription and **no** ExchangeAccount / API keys — empty genuine wallet and trade states.
+- Do **not** use `tradeictdevelopers@gmail.com` (user `695f8b44-…`); the script aborts if that address is supplied.
+- Rotate the password or disable the account once the app is published / review is finished.

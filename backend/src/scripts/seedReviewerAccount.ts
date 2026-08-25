@@ -1,12 +1,14 @@
 /**
- * Seed an ordinary Play Store reviewer demo account (no auth backdoors).
+ * Seed (or refresh) the Google Play Store reviewer demo account.
  *
  * Usage (from backend/):
  *   REVIEWER_EMAIL=... REVIEWER_PASSWORD=... npx tsx src/scripts/seedReviewerAccount.ts
  *   npx tsx src/scripts/seedReviewerAccount.ts --email=... --password=...
  *
- * Never hardcode credentials here — that is what 14.2 removed.
+ * No credentials are hardcoded — refuse to run if email/password are missing.
+ * Does NOT create ExchangeAccount, wallet balance, trades, or simulated revenue.
  */
+
 import "dotenv/config";
 import bcrypt from "bcrypt";
 import pg from "pg";
@@ -23,94 +25,89 @@ import {
   parseAllowedEmailDomains,
 } from "../services/settingsService.js";
 import { resolvePrimaryStrategy } from "../services/futureHedgeService.js";
+import { invalidateCopySubscriberCache } from "../services/strategySubscriptionService.js";
+import { resolveStrategyBaseCapital } from "../utils/subscriptionCapital.js";
+import {
+  MAX_SUBSCRIPTION_MULTIPLIER,
+  MIN_SUBSCRIPTION_MULTIPLIER,
+} from "../constants/subscription.js";
 
-/** Same rounds as authController.ts — do not import from that file. */
+/** Same rounds as authController (do not import from there — keep this script self-contained). */
 const BCRYPT_ROUNDS = 12;
 
-/** Same shape as publicController / signup-facing email checks. */
+/** Same shape as publicController email checks. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const PROTECTED_EXECUTIVE_EMAIL = "tradeictdevelopers@gmail.com";
-const PROTECTED_EXECUTIVE_USER_ID = "695f8b44-0af1-4d87-908b-38d9c942745a";
+const PROTECTED_EMAIL = "tradeictdevelopers@gmail.com";
+const PROTECTED_USER_ID = "695f8b44-0af1-4d87-908b-38d9c942745a";
 
-/** Small display capital so strategy UI is populated without real funds. */
+/** Small deployed capital so My Strategies renders without looking like live volume. */
 const REVIEWER_DEPLOYED_CAPITAL_USD = 10;
 
-function parseArgvFlag(name: string): string | undefined {
+function normalizeEmail(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function readArgFlag(name: string): string | undefined {
   const prefix = `--${name}=`;
   for (const arg of process.argv.slice(2)) {
-    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+    if (arg.startsWith(prefix)) {
+      return arg.slice(prefix.length);
+    }
   }
-  const idx = process.argv.indexOf(`--${name}`);
-  if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];
   return undefined;
 }
 
 function resolveCredentials(): { email: string; password: string } {
   const email =
-    parseArgvFlag("email")?.trim() ||
     process.env.REVIEWER_EMAIL?.trim() ||
+    readArgFlag("email")?.trim() ||
     "";
   const password =
-    parseArgvFlag("password") || process.env.REVIEWER_PASSWORD || "";
+    process.env.REVIEWER_PASSWORD ||
+    readArgFlag("password") ||
+    "";
   return { email, password };
 }
 
-/** Lowercase + strip Gmail +tag / dots so aliases cannot collide with the executive. */
-function gmailCanonicalEmail(email: string): string {
-  const normalized = email.trim().toLowerCase();
-  const at = normalized.lastIndexOf("@");
-  if (at < 0) return normalized;
-  const local = normalized.slice(0, at);
-  const domain = normalized.slice(at + 1);
-  if (domain !== "gmail.com" && domain !== "googlemail.com") {
-    return normalized;
-  }
-  const withoutPlus = local.split("+")[0] ?? local;
-  const withoutDots = withoutPlus.replace(/\./g, "");
-  return `${withoutDots}@gmail.com`;
-}
-
-function validateEmailFormat(email: string): void {
-  if (!EMAIL_RE.test(email)) {
-    throw new Error(
-      `Email failed app validation (EMAIL_RE): "${email}". ` +
-        `Expected a simple local@domain form (plus-tags are allowed by this regex).`,
-    );
-  }
-  const parts = email.split("@");
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(`Email failed split/@ validation: "${email}"`);
-  }
+function abort(message: string): never {
+  console.error(`[seedReviewerAccount] ABORT: ${message}`);
+  process.exit(1);
 }
 
 async function main(): Promise<void> {
   const { email: emailRaw, password } = resolveCredentials();
+
   if (!emailRaw || !password) {
-    console.error(
-      "Refuse to run: REVIEWER_EMAIL and REVIEWER_PASSWORD are required " +
-        "(env or --email / --password). No default credentials.",
+    abort(
+      "REVIEWER_EMAIL and REVIEWER_PASSWORD are required (env or --email= / --password=). " +
+        "No default credentials are provided.",
     );
-    process.exit(1);
   }
 
-  const email = emailRaw.trim().toLowerCase();
-  validateEmailFormat(email);
+  if (password.length < 8) {
+    abort("password must be at least 8 characters (same rule as signup).");
+  }
 
-  if (
-    email === PROTECTED_EXECUTIVE_EMAIL ||
-    gmailCanonicalEmail(email) === PROTECTED_EXECUTIVE_EMAIL
-  ) {
-    throw new Error(
-      `Abort: email normalises to ${PROTECTED_EXECUTIVE_EMAIL} — ` +
-        `that is executive user ${PROTECTED_EXECUTIVE_USER_ID}. ` +
-        `The reviewer account must use a distinct address (e.g. +review).`,
+  const email = normalizeEmail(emailRaw);
+
+  if (email === PROTECTED_EMAIL) {
+    abort(
+      `Refusing to seed ${PROTECTED_EMAIL} — that is live EXECUTIVE user ${PROTECTED_USER_ID}. ` +
+        `Use a distinct address (e.g. with a +tag), never this account.`,
+    );
+  }
+
+  if (!EMAIL_RE.test(email)) {
+    abort(
+      `Email failed app validation (EMAIL_RE /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/): "${emailRaw}". ` +
+        `If "+" was rejected, the validator needs a separate fix before Play review.`,
     );
   }
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error("DATABASE_URL is not set");
+    abort("DATABASE_URL is not set");
   }
 
   const pool = new pg.Pool({ connectionString });
@@ -119,117 +116,131 @@ async function main(): Promise<void> {
 
   try {
     const allowedRaw = await getAllowedEmailDomains(prisma);
-    const allowed = parseAllowedEmailDomains(allowedRaw);
-    if (!(await isEmailDomainAllowed(prisma, email))) {
-      throw new Error(
-        `Abort: domain not on allowlist for "${email}". ` +
-          `Allowed domains: ${allowed.join(", ") || "(none)"}`,
+    const allowedDomains = parseAllowedEmailDomains(allowedRaw);
+    const domainAllowed = await isEmailDomainAllowed(prisma, email);
+    if (!domainAllowed) {
+      abort(
+        `Domain not on allowlist for "${email}". Allowed domains: ${allowedDomains.join(", ") || "(none)"}`,
+      );
+    }
+
+    const existingByEmail = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    if (existingByEmail?.id === PROTECTED_USER_ID) {
+      abort(
+        `Email "${email}" resolves to protected user ${PROTECTED_USER_ID} — refuse to modify.`,
       );
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-    const existingByEmail = await prisma.user.findUnique({
+    const user = await prisma.user.upsert({
       where: { email },
+      create: {
+        email,
+        password: passwordHash,
+        name: "Play Store Reviewer",
+        mobile: "0000000000",
+        role: Role.USER,
+        isOtpBypassed: true,
+        otpCode: null,
+        otpExpiry: null,
+        allowSimulation: false,
+        cryptoArbitrageEnabled: false,
+        cryptoBalance: 0,
+        deltaBalanceDisplayOffset: 0,
+        copyTradingPaused: true,
+      },
+      update: {
+        password: passwordHash,
+        name: "Play Store Reviewer",
+        role: Role.USER,
+        isOtpBypassed: true,
+        otpCode: null,
+        otpExpiry: null,
+        allowSimulation: false,
+        cryptoArbitrageEnabled: false,
+        // Do not invent wallet/balance/trades — leave money fields alone on update
+        // except simulation flags which must stay off for this demo account.
+      },
     });
-    if (existingByEmail?.id === PROTECTED_EXECUTIVE_USER_ID) {
-      throw new Error(
-        `Abort: refusing to modify protected executive user ${PROTECTED_EXECUTIVE_USER_ID}`,
+
+    if (user.id === PROTECTED_USER_ID) {
+      abort(
+        `Upsert unexpectedly returned protected user ${PROTECTED_USER_ID} — refusing to continue.`,
       );
     }
 
-    const user = existingByEmail
-      ? await prisma.user.update({
-          where: { id: existingByEmail.id },
-          data: {
-            password: passwordHash,
-            name: existingByEmail.name ?? "Play Store Reviewer",
-            role: Role.USER,
-            isOtpBypassed: true,
-            otpCode: null,
-            otpExpiry: null,
-            allowSimulation: false,
-            cryptoArbitrageEnabled: false,
-            cryptoBalance: 0,
-          },
-        })
-      : await prisma.user.create({
-          data: {
-            email,
-            password: passwordHash,
-            name: "Play Store Reviewer",
-            mobile: null,
-            role: Role.USER,
-            isOtpBypassed: true,
-            allowSimulation: false,
-            cryptoArbitrageEnabled: false,
-            cryptoBalance: 0,
-          },
-        });
-
-    if (user.id === PROTECTED_EXECUTIVE_USER_ID) {
-      throw new Error(
-        `Abort: refusing to modify protected executive user ${PROTECTED_EXECUTIVE_USER_ID}`,
-      );
-    }
-
+    // Never attach exchange credentials to the reviewer account.
     const exchangeCount = await prisma.exchangeAccount.count({
       where: { userId: user.id },
     });
     if (exchangeCount > 0) {
-      throw new Error(
-        `Abort: reviewer user ${user.id} already has ${exchangeCount} ExchangeAccount row(s). ` +
-          `Remove them manually — this script never creates API keys.`,
+      abort(
+        `User ${user.id} already has ${exchangeCount} ExchangeAccount row(s). ` +
+          `Reviewer seed will not attach or leave API keys on this account — clean up manually.`,
       );
     }
 
     const strategy = await resolvePrimaryStrategy(prisma);
-    const baseCapital =
-      typeof strategy.baseCapital === "number" && strategy.baseCapital > 0
-        ? strategy.baseCapital
-        : 10;
-    const multiplier = Math.max(
-      0.01,
-      REVIEWER_DEPLOYED_CAPITAL_USD / baseCapital,
-    );
+    const baseCapital = resolveStrategyBaseCapital(strategy);
+    let multiplier =
+      Math.round((REVIEWER_DEPLOYED_CAPITAL_USD / baseCapital) * 1e6) / 1e6;
+    if (multiplier < MIN_SUBSCRIPTION_MULTIPLIER) {
+      multiplier = MIN_SUBSCRIPTION_MULTIPLIER;
+    }
+    if (multiplier > MAX_SUBSCRIPTION_MULTIPLIER) {
+      multiplier = MAX_SUBSCRIPTION_MULTIPLIER;
+    }
 
-    const subscription = await prisma.userStrategySubscription.upsert({
+    const profitSharePctSnapshot = new Prisma.Decimal(strategy.profitShare ?? 20);
+
+    const existingSub = await prisma.userStrategySubscription.findUnique({
       where: {
-        userId_strategyId: {
-          userId: user.id,
-          strategyId: strategy.id,
-        },
-      },
-      create: {
-        userId: user.id,
-        strategyId: strategy.id,
-        multiplier,
-        isActive: true,
-        status: SubscriptionStatus.ACTIVE,
-        isStrategyFeePaid: true,
-        profitSharePctSnapshot: new Prisma.Decimal(strategy.profitShare ?? 20),
-        exchangeAccountId: null,
-        botSlaveId: null,
-      },
-      update: {
-        multiplier,
-        isActive: true,
-        status: SubscriptionStatus.ACTIVE,
-        isStrategyFeePaid: true,
-        exchangeAccountId: null,
-        botSlaveId: null,
+        userId_strategyId: { userId: user.id, strategyId: strategy.id },
       },
     });
 
-    console.log("Play Store reviewer account ready:");
-    console.log(`  user id:         ${user.id}`);
-    console.log(`  email:           ${user.email}`);
-    console.log(`  subscription id: ${subscription.id}`);
+    const subscription = existingSub
+      ? await prisma.userStrategySubscription.update({
+          where: { id: existingSub.id },
+          data: {
+            status: SubscriptionStatus.ACTIVE,
+            isActive: true,
+            isStrategyFeePaid: true,
+            multiplier,
+            profitSharePctSnapshot,
+            exchangeAccountId: null,
+            botSlaveId: null,
+          },
+        })
+      : await prisma.userStrategySubscription.create({
+          data: {
+            userId: user.id,
+            strategyId: strategy.id,
+            status: SubscriptionStatus.ACTIVE,
+            isActive: true,
+            isStrategyFeePaid: true,
+            multiplier,
+            profitSharePctSnapshot,
+            exchangeAccountId: null,
+            botSlaveId: null,
+          },
+        });
+
+    invalidateCopySubscriberCache();
+
+    console.log(`[seedReviewerAccount] user id=${user.id}`);
+    console.log(`[seedReviewerAccount] email=${user.email}`);
+    console.log(`[seedReviewerAccount] subscription id=${subscription.id}`);
     console.log(
-      `  strategy:        ${strategy.title} (${strategy.id}) multiplier=${multiplier}`,
+      `[seedReviewerAccount] strategy="${strategy.title}" (${strategy.id}) multiplier=${multiplier} (~$${REVIEWER_DEPLOYED_CAPITAL_USD} deployed)`,
     );
-    console.log("  isOtpBypassed=true — skips OTP AFTER a correct password.");
-    console.log("  ExchangeAccount: none (no API keys).");
+    console.log(
+      "isOtpBypassed=true — skips OTP AFTER a correct password.",
+    );
   } finally {
     await prisma.$disconnect();
     await pool.end();
@@ -237,6 +248,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  console.error(err);
   process.exit(1);
 });
