@@ -12,7 +12,9 @@ import {
   ATTRIBUTION_STATUS,
   countBillingOverlapTxnsInIstWindow,
   listEligibleStructurePnlUserIds,
+  recomputeStructurePnlForUsers,
 } from "./structurePnlService.js";
+import { runDeltaLedgerSyncForUsers } from "./deltaLedgerService.js";
 import { scopedSimulatedFilter } from "./simulatedDataFilters.js";
 import {
   INVOICE_STATUS,
@@ -21,6 +23,7 @@ import {
 } from "./monthlyRevenueInvoiceLifecycleService.js";
 import { getUsdInrRate } from "./settingsService.js";
 import { raiseAlert } from "../utils/systemAlert.js";
+import { finalInvoiceDelayHours } from "./billingCronService.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
 const MS_PER_DAY = 86_400_000;
@@ -1007,7 +1010,13 @@ export function isPastIstCalendarMonth(
 
 export async function runMonthlyRevenueInvoices(
   prisma: PrismaClient,
-  opts?: { userId?: string; year?: number; month?: number },
+  opts?: {
+    userId?: string;
+    year?: number;
+    month?: number;
+    /** When true, ACCRUED→INVOICED. When false, compute only. When omitted, issue if period is past (admin default). */
+    issue?: boolean;
+  },
 ): Promise<Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>>> {
   let userIds = await listEligibleStructurePnlUserIds(prisma);
   if (opts?.userId) userIds = userIds.filter((id) => id === opts.userId);
@@ -1017,17 +1026,61 @@ export async function runMonthlyRevenueInvoices(
       ? { year: opts.year, month: opts.month }
       : previousIstCalendarMonth();
 
-  const shouldIssue = isPastIstCalendarMonth(period.year, period.month);
-  if (shouldIssue) {
+  const periodIsPast = isPastIstCalendarMonth(period.year, period.month);
+  const wantIssue =
+    opts?.issue === true || (opts?.issue === undefined && periodIsPast);
+  const passLabel = wantIssue ? "issue" : "compute";
+
+  if (wantIssue) {
     await alertIfConfiguredUsdInrRateMissing(prisma);
   }
-  const usdInrRate = shouldIssue ? await getUsdInrRate(prisma) : null;
+  const usdInrRate = wantIssue ? await getUsdInrRate(prisma) : null;
 
   const results: Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>> =
     {};
+  let refreshed = 0;
+  let skipped = 0;
+  let issued = 0;
 
   for (const userId of userIds) {
     try {
+      await runDeltaLedgerSyncForUsers(prisma, { userId });
+      await recomputeStructurePnlForUsers(prisma, { userId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[StructureRevenue] monthly refresh failed user=${userId}: ${msg}`,
+      );
+      void raiseAlert({
+        key: `monthly-invoice-refresh:${userId}`,
+        severity: "CRITICAL",
+        source: "structureRevenue",
+        message: `Monthly invoice refresh failed for user ${userId}: ${msg}`,
+        detail: { userId, period, pass: passLabel },
+      });
+      skipped += 1;
+      continue;
+    }
+    refreshed += 1;
+
+    try {
+      let priorCommission: Prisma.Decimal | null = null;
+      if (wantIssue) {
+        const existing = await prisma.monthlyRevenueInvoice.findUnique({
+          where: {
+            userId_periodYear_periodMonth: {
+              userId,
+              periodYear: period.year,
+              periodMonth: period.month,
+            },
+          },
+          select: { status: true, commissionAmount: true },
+        });
+        if (existing?.status === INVOICE_STATUS.ACCRUED) {
+          priorCommission = existing.commissionAmount;
+        }
+      }
+
       let invoice = await computeMonthlyRevenueInvoiceForUser(
         prisma,
         userId,
@@ -1036,7 +1089,18 @@ export async function runMonthlyRevenueInvoices(
       );
 
       if (
-        shouldIssue &&
+        wantIssue &&
+        priorCommission != null &&
+        !priorCommission.eq(invoice.commissionAmount)
+      ) {
+        console.warn(
+          `[StructureRevenue] amount moved before issue user=${userId} ` +
+            `was=${priorCommission.toFixed(10)} now=${invoice.commissionAmount.toFixed(10)}`,
+        );
+      }
+
+      if (
+        wantIssue &&
         invoice.status === INVOICE_STATUS.ACCRUED &&
         !invoice.isSimulated &&
         usdInrRate != null
@@ -1047,6 +1111,7 @@ export async function runMonthlyRevenueInvoices(
           INVOICE_STATUS.INVOICED,
           { usdInrRate },
         );
+        issued += 1;
       }
 
       results[userId] = invoice;
@@ -1055,13 +1120,22 @@ export async function runMonthlyRevenueInvoices(
       console.warn(
         `[StructureRevenue] monthly invoice failed user=${userId}: ${msg}`,
       );
+      skipped += 1;
     }
   }
 
   console.log(
-    `[StructureRevenue] monthly invoice ${period.year}-${String(period.month).padStart(2, "0")} users=${userIds.length} issued=${shouldIssue}`,
+    `[StructureRevenue] monthly pass=${passLabel} users=${userIds.length} refreshed=${refreshed} skipped=${skipped} issued=${issued}`,
   );
   return results;
+}
+
+/** Cron for ISSUE pass: midnight on the 1st + FINAL_INVOICE_DELAY_HOURS (IST). */
+function monthlyInvoiceIssueCronExpression(): string {
+  const delayHours = finalInvoiceDelayHours();
+  const dayOfMonth = 1 + Math.floor(delayHours / 24);
+  const hourOfDay = delayHours % 24;
+  return `0 ${hourOfDay} ${dayOfMonth} * *`;
 }
 
 export function initStructureRevenueCronJobs(prisma: PrismaClient): void {
@@ -1075,15 +1149,27 @@ export function initStructureRevenueCronJobs(prisma: PrismaClient): void {
   );
 
   guardedCron(
-    "structure-revenue-monthly-invoice",
+    "structure-revenue-monthly-compute",
     "0 0 1 * *",
     async () => {
-      await runMonthlyRevenueInvoices(prisma);
+      await runMonthlyRevenueInvoices(prisma, { issue: false });
+    },
+    { timezone: BILLING_TIMEZONE },
+  );
+
+  const issueCron = monthlyInvoiceIssueCronExpression();
+  guardedCron(
+    "structure-revenue-monthly-issue",
+    issueCron,
+    async () => {
+      await runMonthlyRevenueInvoices(prisma, { issue: true });
     },
     { timezone: BILLING_TIMEZONE },
   );
 
   console.log(
-    `[StructureRevenue] Cron: daily snapshot @ 00:05 IST; monthly invoice @ 00:00 IST on 1st`,
+    `[StructureRevenue] Cron: daily snapshot @ 00:05 IST; ` +
+      `monthly compute @ 00:00 IST on 1st; monthly issue @ cron=${issueCron} IST ` +
+      `(FINAL_INVOICE_DELAY_HOURS=${finalInvoiceDelayHours()})`,
   );
 }
