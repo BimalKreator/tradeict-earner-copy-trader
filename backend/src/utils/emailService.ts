@@ -3,10 +3,20 @@ import nodemailer from "nodemailer";
 export type OtpEmailPurpose = "Sign Up" | "Login" | "Password Reset";
 
 const inflightMailSends = new Set<Promise<unknown>>();
+let smtpSendAttempts = 0;
 
 /** True when outbound SMTP is disabled (harness sets EMAIL_TRANSPORT=noop). */
 export function isNoopEmailTransport(): boolean {
   return process.env.EMAIL_TRANSPORT === "noop";
+}
+
+/** SMTP handoffs while {@link isNoopEmailTransport} is true — harness asserts zero. */
+export function getSmtpSendAttempts(): number {
+  return smtpSendAttempts;
+}
+
+export function resetSmtpSendAttempts(): void {
+  smtpSendAttempts = 0;
 }
 
 /** Wait until every sendMail started through {@link createMailTransport} settles. */
@@ -39,17 +49,31 @@ function trackMailPromise(result: unknown): unknown {
  * Replace placeholder values in your `.env` before production (never commit real credentials).
  */
 export function createMailTransport(): nodemailer.Transporter {
-  const transport = isNoopEmailTransport()
-    ? nodemailer.createTransport({ jsonTransport: true })
-    : createSmtpTransport();
+  if (isNoopEmailTransport()) {
+    return createNoopTransport();
+  }
+  return createWrappedSmtpTransport();
+}
 
+function createNoopTransport(): nodemailer.Transporter {
+  const transport = nodemailer.createTransport({ jsonTransport: true });
   const originalSendMail = transport.sendMail.bind(transport) as (
     mail: nodemailer.SendMailOptions,
   ) => Promise<nodemailer.SentMessageInfo>;
-
   transport.sendMail = ((mail: nodemailer.SendMailOptions) =>
     trackMailPromise(originalSendMail(mail)) as Promise<nodemailer.SentMessageInfo>) as typeof transport.sendMail;
+  return transport;
+}
 
+function createWrappedSmtpTransport(): nodemailer.Transporter {
+  const transport = createSmtpTransport();
+  const originalSendMail = transport.sendMail.bind(transport) as (
+    mail: nodemailer.SendMailOptions,
+  ) => Promise<nodemailer.SentMessageInfo>;
+  transport.sendMail = ((mail: nodemailer.SendMailOptions) => {
+    smtpSendAttempts += 1;
+    return trackMailPromise(originalSendMail(mail)) as Promise<nodemailer.SentMessageInfo>;
+  }) as typeof transport.sendMail;
   return transport;
 }
 

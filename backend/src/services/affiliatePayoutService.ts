@@ -146,26 +146,17 @@ export type PayoutTransitionOpts = {
   reason?: string;
 };
 
-function isRowLockUnavailable(err: unknown): boolean {
-  if (err instanceof PrismaClientKnownRequestError) {
-    const meta = err.meta as { code?: string; message?: string } | undefined;
-    if (meta?.code === "55P03") return true;
-    if (String(meta?.message ?? "").includes("55P03")) return true;
+function assertValidPayoutTransition(
+  from: PayoutRequestStatus,
+  to: PayoutRequestStatus,
+): void {
+  const allowed = VALID_TRANSITIONS[from];
+  if (!allowed.has(to)) {
+    throw new PayoutTransitionError(
+      `Invalid payout status transition: ${from} → ${to}. ` +
+        `Allowed from ${from}: ${[...allowed].join(", ") || "none"}.`,
+    );
   }
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes("55P03") ||
-    message.toLowerCase().includes("could not obtain lock") ||
-    message.toLowerCase().includes("lock_not_available")
-  );
-}
-
-function allowedFromStatuses(
-  toStatus: PayoutRequestStatus,
-): PayoutRequestStatus[] {
-  return (Object.keys(VALID_TRANSITIONS) as PayoutRequestStatus[]).filter(
-    (from) => VALID_TRANSITIONS[from].has(toStatus),
-  );
 }
 
 function payoutStatusPatch(
@@ -203,8 +194,9 @@ function payoutStatusPatch(
 /**
  * Single entry point for PayoutRequest status changes.
  * REJECT releases claimed WITHDRAWN rows back to WITHDRAWABLE.
- * Status write is conditional on an allowed `from` status in the same UPDATE.
- * Concurrent transitions take FOR UPDATE NOWAIT so exactly one proceeds.
+ * Status is changed with one conditional UPDATE … WHERE status = :fromStatus
+ * inside the same transaction as ledger side-effects. :fromStatus is fixed at
+ * request entry so concurrent approve+reject on PENDING cannot both win.
  * Zero rows affected → 409, never a silent success.
  */
 export async function transitionPayoutRequest(
@@ -231,83 +223,67 @@ export async function transitionPayoutRequest(
     }
   }
 
-  const fromStatuses = allowedFromStatuses(toStatus);
-  if (fromStatuses.length === 0) {
-    throw new PayoutTransitionError(`Unsupported target status: ${toStatus}`);
+  const snapshot = await prisma.payoutRequest.findUnique({
+    where: { id: payoutRequestId },
+    select: {
+      id: true,
+      status: true,
+      payoutClaimToken: true,
+    },
+  });
+
+  if (!snapshot) {
+    throw new PayoutNotFoundError(payoutRequestId);
   }
 
+  assertValidPayoutTransition(snapshot.status, toStatus);
+  const fromStatus = snapshot.status;
   const now = new Date();
 
-  let result: { payoutRequestId: string; status: PayoutRequestStatus };
-  try {
-    result = await prisma.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<
-        Array<{
-          id: string;
-          status: PayoutRequestStatus;
-          payoutClaimToken: string | null;
-        }>
-      >`
-        SELECT id, status, "payoutClaimToken"
-        FROM "PayoutRequest"
-        WHERE id = ${payoutRequestId}
-        FOR UPDATE NOWAIT
-      `;
-
-      const row = locked[0];
-      if (!row) {
-        throw new PayoutNotFoundError(payoutRequestId);
-      }
-
-      const moved = await tx.payoutRequest.updateMany({
-        where: {
-          id: payoutRequestId,
-          status: { in: fromStatuses },
-        },
-        data: payoutStatusPatch(toStatus, opts, now),
-      });
-
-      if (moved.count === 0) {
-        throw new PayoutTransitionError(PAYOUT_STATUS_CONFLICT_MSG, 409);
-      }
-
-      if (
-        toStatus === PayoutRequestStatus.APPROVED ||
-        toStatus === PayoutRequestStatus.COMPLETED
-      ) {
-        const linkedCount = await tx.commissionLedger.count({
-          where: linkedLedgerWhere(row.id, row.payoutClaimToken),
-        });
-        if (linkedCount === 0) {
-          console.error(
-            `[Payout] ${toStatus.toLowerCase()} refused id=${payoutRequestId} ` +
-              `claimToken=${row.payoutClaimToken ?? "null"} — no linked ledger rows`,
-          );
-          throw new PayoutTransitionError(EMPTY_PAYOUT_COMPLETE_MSG, 409);
-        }
-      }
-
-      if (toStatus === PayoutRequestStatus.REJECTED) {
-        const released = await releaseClaimedLedgerRows(
-          tx,
-          row.id,
-          row.payoutClaimToken,
-        );
-        if (released === 0) {
-          console.error(
-            `[Payout] reject id=${payoutRequestId} claimToken=${row.payoutClaimToken ?? "null"} — no WITHDRAWN rows released`,
-          );
-        }
-      }
-
-      return { payoutRequestId, status: toStatus };
+  const result = await prisma.$transaction(async (tx) => {
+    const moved = await tx.payoutRequest.updateMany({
+      where: {
+        id: payoutRequestId,
+        status: fromStatus,
+      },
+      data: payoutStatusPatch(toStatus, opts, now),
     });
-  } catch (err) {
-    if (isRowLockUnavailable(err)) {
+
+    if (moved.count === 0) {
       throw new PayoutTransitionError(PAYOUT_STATUS_CONFLICT_MSG, 409);
     }
-    throw err;
-  }
+
+    if (
+      toStatus === PayoutRequestStatus.APPROVED ||
+      toStatus === PayoutRequestStatus.COMPLETED
+    ) {
+      const linkedCount = await tx.commissionLedger.count({
+        where: linkedLedgerWhere(snapshot.id, snapshot.payoutClaimToken),
+      });
+      if (linkedCount === 0) {
+        console.error(
+          `[Payout] ${toStatus.toLowerCase()} refused id=${payoutRequestId} ` +
+            `claimToken=${snapshot.payoutClaimToken ?? "null"} — no linked ledger rows`,
+        );
+        throw new PayoutTransitionError(EMPTY_PAYOUT_COMPLETE_MSG, 409);
+      }
+    }
+
+    if (toStatus === PayoutRequestStatus.REJECTED) {
+      const released = await releaseClaimedLedgerRows(
+        tx,
+        snapshot.id,
+        snapshot.payoutClaimToken,
+      );
+      if (released === 0) {
+        console.error(
+          `[Payout] reject id=${payoutRequestId} claimToken=${snapshot.payoutClaimToken ?? "null"} — no WITHDRAWN rows released`,
+        );
+      }
+    }
+
+    return { payoutRequestId, status: toStatus };
+  });
 
   if (toStatus === PayoutRequestStatus.REJECTED) {
     console.info(

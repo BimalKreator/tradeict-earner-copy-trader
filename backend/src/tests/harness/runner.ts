@@ -1,5 +1,5 @@
-import "./emailGag.js";
 import "dotenv/config";
+import "./emailGag.js";
 import { AssertionContext } from "./assert.js";
 import {
   createHarnessPrisma,
@@ -12,7 +12,10 @@ import { p12ReversalScenario } from "./scenarios/p12-reversal.js";
 import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
 import { schemaDriftScenario } from "./scenarios/schema-drift.js";
 import type { HarnessScenario, ScenarioResult } from "./types.js";
-import { waitForInflightMail } from "../../utils/emailService.js";
+import {
+  getSmtpSendAttempts,
+  waitForInflightMail,
+} from "../../utils/emailService.js";
 
 const ALL_SCENARIOS: HarnessScenario[] = [
   schemaDriftScenario,
@@ -128,6 +131,15 @@ async function main(): Promise<void> {
   }
 
   await waitForInflightMail();
+
+  const smtpAttempts = getSmtpSendAttempts();
+  if (smtpAttempts > 0) {
+    console.error(
+      `EMAIL LEAK: ${smtpAttempts} SMTP send(s) while EMAIL_TRANSPORT=noop`,
+    );
+    process.exit(1);
+  }
+
   printResultsTable(results);
 
   const leaks = await (async () => {
@@ -154,7 +166,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("All scenarios passed. No TEST-P leaks detected.");
+  console.log("All scenarios passed. No TEST-P leaks detected. No SMTP sends.");
 }
 
 main().catch(async (err) => {
