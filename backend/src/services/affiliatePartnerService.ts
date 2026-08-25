@@ -13,6 +13,7 @@ import {
   getPayoutWindowState,
   type PartnerPayoutRequestSummary,
 } from "./affiliatePayoutService.js";
+import { getPartnerCommissionWalletBreakdown } from "./commissionBalanceService.js";
 import {
   fetchDeltaBalancesForUserIds,
   strategyShortName,
@@ -23,6 +24,9 @@ import {
 export type PartnerWalletTotals = {
   earned: number;
   payable: number;
+  /** WITHDRAWABLE-status bucket — display only. */
+  mature: number;
+  /** Signed net over all non-simulated rows — gates payout; may be negative. */
   withdrawable: number;
 };
 
@@ -59,40 +63,20 @@ export type PartnerDirectUserRow = {
   deltaConnected: boolean;
 };
 
-const COMMISSION_WALLET_STATUSES = [
-  CommissionLedgerStatus.EARNED,
-  CommissionLedgerStatus.PAYABLE,
-  CommissionLedgerStatus.WITHDRAWABLE,
-] as const;
-
-function emptyWallets(): PartnerWalletTotals {
-  return { earned: 0, payable: 0, withdrawable: 0 };
-}
-
-async function sumCommissionWalletsByStatus(
+async function loadPartnerWalletTotals(
   prisma: PrismaClient,
   beneficiaryUserId: string,
 ): Promise<PartnerWalletTotals> {
-  const groups = await prisma.commissionLedger.groupBy({
-    by: ["status"],
-    where: {
-      beneficiaryUserId,
-      status: { in: [...COMMISSION_WALLET_STATUSES] },
-      isSimulated: false,
-    },
-    _sum: { amount: true },
-  });
-
-  const wallets = emptyWallets();
-  for (const row of groups) {
-    const amount = decimalSumToNumber(row._sum.amount);
-    if (row.status === CommissionLedgerStatus.EARNED) wallets.earned = amount;
-    else if (row.status === CommissionLedgerStatus.PAYABLE) wallets.payable = amount;
-    else if (row.status === CommissionLedgerStatus.WITHDRAWABLE) {
-      wallets.withdrawable = amount;
-    }
-  }
-  return wallets;
+  const breakdown = await getPartnerCommissionWalletBreakdown(
+    prisma,
+    beneficiaryUserId,
+  );
+  return {
+    earned: breakdown.earned,
+    payable: breakdown.payable,
+    mature: breakdown.mature,
+    withdrawable: breakdown.netBalance,
+  };
 }
 
 function formatStrategyStatus(
@@ -153,7 +137,7 @@ export async function getPartnerMetrics(
   const acquiredIds = acquiredUsers.map((u) => u.id);
 
   const [wallets, networkAum, latestPayoutRequest] = await Promise.all([
-    sumCommissionWalletsByStatus(prisma, userId),
+    loadPartnerWalletTotals(prisma, userId),
     sumDeltaBalancesForUserIds(prisma, acquiredIds),
     getLatestPartnerPayoutRequest(prisma, userId),
   ]);
@@ -684,7 +668,7 @@ export async function getPartnerNetworkDetails(
   const networkTraderIds = [...memberIds, ...userIds];
   const [financialsByUserId, viewerCommissionWallets] = await Promise.all([
     loadUserFinancialMaps(prisma, networkTraderIds, userId),
-    sumCommissionWalletsByStatus(prisma, userId),
+    loadPartnerWalletTotals(prisma, userId),
   ]);
 
   const tree = buildPartnerNetworkTree(
@@ -712,9 +696,9 @@ export async function getPartnerNetworkDetails(
       totalRevenuePaid: aggregate.totalRevenuePaid,
       /** Viewer as beneficiary — all EARNED ledger rows (authoritative). */
       totalMemberCommissionEarned: viewerCommissionWallets.earned,
-      /** PAYABLE + WITHDRAWABLE rows for the viewer. */
+      /** PAYABLE + matured WITHDRAWABLE rows for the viewer. */
       totalMemberCommissionPayable:
-        viewerCommissionWallets.payable + viewerCommissionWallets.withdrawable,
+        viewerCommissionWallets.payable + viewerCommissionWallets.mature,
     },
   };
 }

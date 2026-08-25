@@ -7,6 +7,7 @@ import {
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
 import { randomUUID } from "crypto";
 import { isSalesMemberRole } from "./affiliateMemberService.js";
+import { sumPartnerCommissionNet } from "./commissionBalanceService.js";
 import {
   calendarPartsInTimeZone,
   DASHBOARD_PNL_DAY_TIMEZONE,
@@ -18,6 +19,12 @@ export const PAYOUT_LAST_DAY_ONLY_MSG =
 
 export const NO_WITHDRAWABLE_BALANCE_MSG =
   "No withdrawable commission balance.";
+
+export const INSUFFICIENT_NET_BALANCE_MSG =
+  "Commission balance is zero or negative after reversals — payout unavailable.";
+
+export const PAYOUT_EXCEEDS_NET_BALANCE_MSG =
+  "Matured commission exceeds signed net balance — contact support.";
 
 export const NOTHING_TO_PAY_OUT_MSG = "nothing to pay out";
 
@@ -311,6 +318,11 @@ export async function requestPartnerPayout(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
+      const signedNet = await sumPartnerCommissionNet(tx, userId);
+      if (signedNet.lte(0)) {
+        return { kind: "refused" as const, reason: "net" as const };
+      }
+
       const claimed = await tx.commissionLedger.updateMany({
         where: {
           beneficiaryUserId: userId,
@@ -325,7 +337,7 @@ export async function requestPartnerPayout(
       });
 
       if (claimed.count === 0) {
-        return null;
+        return { kind: "refused" as const, reason: "empty" as const };
       }
 
       const ledgers = await tx.commissionLedger.findMany({
@@ -338,7 +350,7 @@ export async function requestPartnerPayout(
       });
 
       if (ledgers.length === 0) {
-        return null;
+        return { kind: "refused" as const, reason: "empty" as const };
       }
 
       const amount = ledgers.reduce(
@@ -347,7 +359,11 @@ export async function requestPartnerPayout(
       );
 
       if (amount.lte(0)) {
-        return null;
+        return { kind: "refused" as const, reason: "net" as const };
+      }
+
+      if (amount.gt(signedNet)) {
+        throw new PayoutTransitionError(PAYOUT_EXCEEDS_NET_BALANCE_MSG, 409);
       }
 
       const payout = await tx.payoutRequest.create({
@@ -370,17 +386,28 @@ export async function requestPartnerPayout(
       });
 
       return {
+        kind: "ok" as const,
         payoutRequestId: payout.id,
         amount: amount.toNumber(),
       };
     });
 
-    if (!result) {
+    if (result.kind === "refused") {
+      if (result.reason === "net") {
+        return {
+          ok: false,
+          status: 409,
+          message: INSUFFICIENT_NET_BALANCE_MSG,
+        };
+      }
       return { ok: false, status: 409, message: NOTHING_TO_PAY_OUT_MSG };
     }
 
-    return { ok: true, ...result };
+    return { ok: true, payoutRequestId: result.payoutRequestId, amount: result.amount };
   } catch (err) {
+    if (err instanceof PayoutTransitionError) {
+      return { ok: false, status: err.statusCode, message: err.message };
+    }
     if (
       err instanceof PrismaClientKnownRequestError &&
       err.code === "P2002"
@@ -415,6 +442,8 @@ export type AdminPartnerPayoutRow = {
   completedAt: string | null;
   completedBy: AdminActorSummary;
   paymentReference: string | null;
+  /** Outstanding manual clawback for this partner (money already paid out). */
+  clawbackOwed: number;
   user: {
     id: string;
     name: string | null;
@@ -422,6 +451,17 @@ export type AdminPartnerPayoutRow = {
     mobile: string | null;
     address: string | null;
     panNumber: string | null;
+    role: string;
+  };
+};
+
+export type AdminPartnerClawbackRow = {
+  beneficiaryUserId: string;
+  amountOwed: number;
+  user: {
+    id: string;
+    name: string | null;
+    email: string;
     role: string;
   };
 };
@@ -445,6 +485,7 @@ const adminPayoutInclude = {
 
 function mapAdminPayoutRow(
   row: Prisma.PayoutRequestGetPayload<{ include: typeof adminPayoutInclude }>,
+  clawbackOwed = 0,
 ): AdminPartnerPayoutRow {
   return {
     id: row.id,
@@ -460,8 +501,74 @@ function mapAdminPayoutRow(
     completedAt: row.completedAt?.toISOString() ?? null,
     completedBy: row.completedBy,
     paymentReference: row.paymentReference,
+    clawbackOwed,
     user: row.user,
   };
+}
+
+async function loadClawbackOwedByPartner(
+  prisma: PrismaClient,
+  userIds: string[],
+): Promise<Map<string, number>> {
+  if (userIds.length === 0) return new Map();
+
+  const groups = await prisma.commissionLedger.groupBy({
+    by: ["beneficiaryUserId"],
+    where: {
+      beneficiaryUserId: { in: userIds },
+      needsClawback: true,
+      isSimulated: false,
+    },
+    _sum: { amount: true },
+  });
+
+  const map = new Map<string, number>();
+  for (const row of groups) {
+    const sum = row._sum.amount ?? new Prisma.Decimal(0);
+    map.set(row.beneficiaryUserId, Math.abs(sum.toNumber()));
+  }
+  return map;
+}
+
+/** Partners with outstanding manual clawback (commission paid out before reversal). */
+export async function listPartnerClawbackQueue(
+  prisma: PrismaClient,
+): Promise<AdminPartnerClawbackRow[]> {
+  const groups = await prisma.commissionLedger.groupBy({
+    by: ["beneficiaryUserId"],
+    where: { needsClawback: true, isSimulated: false },
+    _sum: { amount: true },
+  });
+
+  if (groups.length === 0) return [];
+
+  const userIds = groups.map((g) => g.beneficiaryUserId);
+  const users = await prisma.user.findMany({
+    where: { id: { in: userIds } },
+    select: { id: true, name: true, email: true, role: true },
+  });
+  const userById = new Map(users.map((u) => [u.id, u]));
+
+  const rows: AdminPartnerClawbackRow[] = [];
+  for (const row of groups) {
+    const sum = row._sum.amount ?? new Prisma.Decimal(0);
+    const amountOwed = Math.abs(sum.toNumber());
+    const user = userById.get(row.beneficiaryUserId);
+    if (!user || amountOwed <= 0) continue;
+    rows.push({
+      beneficiaryUserId: row.beneficiaryUserId,
+      amountOwed,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: String(user.role),
+      },
+    });
+  }
+
+  rows.sort((a, b) => b.amountOwed - a.amountOwed);
+  return rows;
 }
 
 /** Admin queue — actionable (PENDING, APPROVED) payout requests. */
@@ -478,7 +585,14 @@ export async function listActionablePartnerPayouts(
     orderBy: { requestedAt: "asc" },
   });
 
-  return rows.map(mapAdminPayoutRow);
+  const clawbackByUser = await loadClawbackOwedByPartner(
+    prisma,
+    rows.map((row) => row.userId),
+  );
+
+  return rows.map((row) =>
+    mapAdminPayoutRow(row, clawbackByUser.get(row.userId) ?? 0),
+  );
 }
 
 /** @deprecated Use {@link listActionablePartnerPayouts}. */

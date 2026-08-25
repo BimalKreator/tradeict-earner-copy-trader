@@ -589,6 +589,15 @@ async function insertSignedCommissionReversal(
         isSimulated: args.original.isSimulated,
       },
     });
+
+    // Take the original accrual out of claimable states — append-only history.
+    if (args.original.status !== CommissionLedgerStatus.WITHDRAWN) {
+      await tx.commissionLedger.update({
+        where: { id: args.original.id },
+        data: { status: CommissionLedgerStatus.REVERSED },
+      });
+    }
+
     return { created: true, needsClawback };
   } catch (err) {
     if (

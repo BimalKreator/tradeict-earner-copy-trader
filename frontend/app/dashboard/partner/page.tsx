@@ -46,6 +46,9 @@ import {
 type PartnerWallets = {
   earned: number;
   payable: number;
+  /** WITHDRAWABLE-status bucket — display only. */
+  mature?: number;
+  /** Signed net — gates payout; may be negative. */
   withdrawable: number;
 };
 
@@ -171,6 +174,7 @@ function WalletCard({
   icon,
   accent,
   action,
+  negative = false,
 }: {
   title: string;
   amount: number;
@@ -178,6 +182,7 @@ function WalletCard({
   icon: ReactNode;
   accent: "amber" | "sky" | "emerald";
   action?: ReactNode;
+  negative?: boolean;
 }) {
   const accentMap = {
     amber: {
@@ -210,7 +215,9 @@ function WalletCard({
             {title}
           </p>
           <p
-            className={`mt-2 text-3xl font-semibold tabular-nums tracking-tight ${accentMap.value}`}
+            className={`mt-2 text-3xl font-semibold tabular-nums tracking-tight ${
+              negative ? "text-red-300" : accentMap.value
+            }`}
           >
             {fmtUsd(amount)}
           </p>
@@ -804,9 +811,16 @@ export default function PartnerDashboardPage() {
               <WalletCard
                 title="Withdrawable Revenue"
                 amount={metrics.wallets.withdrawable}
-                description="Ready for payout. Request on the last day of each month (IST)."
+                description={
+                  metrics.wallets.withdrawable < 0
+                    ? "Net balance is negative after reversals. Contact support before requesting payout."
+                    : metrics.wallets.mature != null && metrics.wallets.mature !== metrics.wallets.withdrawable
+                      ? `${fmtUsd(metrics.wallets.mature)} matured in the unlock window, net of reversals. Request on the last day of each month (IST).`
+                      : "Ready for payout. Request on the last day of each month (IST)."
+                }
                 icon={<Wallet className="h-5 w-5" aria-hidden />}
                 accent="emerald"
+                negative={metrics.wallets.withdrawable < 0}
                 action={
                   <div className="group relative space-y-2">
                     {metrics.latestPayoutRequest &&
@@ -906,10 +920,10 @@ export default function PartnerDashboardPage() {
                   0,
               )} / ${fmtUsd(
                 metrics != null
-                  ? metrics.wallets.payable + metrics.wallets.withdrawable
+                  ? metrics.wallets.payable + (metrics.wallets.mature ?? 0)
                   : (network?.stats.totalMemberCommissionPayable ?? 0),
               )}`}
-              sub="Earned (EARNED) / Payable (PAYABLE + WITHDRAWABLE)"
+              sub="Earned (EARNED) / Payable (PAYABLE + matured WITHDRAWABLE)"
               icon={<Wallet className="h-6 w-6" aria-hidden />}
             />
           </section>

@@ -99,6 +99,7 @@ import {
   approvePartnerPayout,
   completePartnerPayout,
   listActionablePartnerPayouts,
+  listPartnerClawbackQueue,
   rejectPartnerPayout,
 } from "../services/affiliatePayoutService.js";
 import {
@@ -4232,9 +4233,12 @@ export function createAdminController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const payouts = await listActionablePartnerPayouts(prisma);
+      const [payouts, clawbacks] = await Promise.all([
+        listActionablePartnerPayouts(prisma),
+        listPartnerClawbackQueue(prisma),
+      ]);
       applyNoStoreCacheHeaders(res);
-      res.json({ payouts });
+      res.json({ payouts, clawbacks });
     } catch (err) {
       next(err);
     }

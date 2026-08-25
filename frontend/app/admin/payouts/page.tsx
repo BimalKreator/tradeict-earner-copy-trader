@@ -24,6 +24,7 @@ type PayoutRow = {
   id: string;
   amount: number;
   status: PayoutStatus;
+  clawbackOwed?: number;
   requestedAt: string;
   approvedAt: string | null;
   approvedBy: ActorSummary;
@@ -41,6 +42,17 @@ type PayoutRow = {
     mobile: string | null;
     address: string | null;
     panNumber: string | null;
+    role: string;
+  };
+};
+
+type ClawbackRow = {
+  beneficiaryUserId: string;
+  amountOwed: number;
+  user: {
+    id: string;
+    name: string | null;
+    email: string;
     role: string;
   };
 };
@@ -95,6 +107,7 @@ export default function AdminPayoutsPage() {
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
   const [payouts, setPayouts] = useState<PayoutRow[]>([]);
+  const [clawbacks, setClawbacks] = useState<ClawbackRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,8 +136,12 @@ export default function AdminPayoutsPage() {
           : `Failed to load payouts (${res.status})`;
       throw new Error(msg);
     }
-    const data = (await res.json()) as { payouts: PayoutRow[] };
+    const data = (await res.json()) as {
+      payouts?: PayoutRow[];
+      clawbacks?: ClawbackRow[];
+    };
     setPayouts(data.payouts ?? []);
+    setClawbacks(data.clawbacks ?? []);
   }, [apiBase, token]);
 
   useEffect(() => {
@@ -273,6 +290,36 @@ export default function AdminPayoutsPage() {
         </div>
       </div>
 
+      {clawbacks.length > 0 ? (
+        <section className="glass-card border border-amber-500/30 bg-amber-500/5 p-5 md:p-6">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-200">
+            Manual clawback required
+          </h2>
+          <p className="mt-1 text-sm text-white/55">
+            Commission was reversed after payout — recover these amounts outside the
+            automated payout queue.
+          </p>
+          <ul className="mt-4 divide-y divide-white/10">
+            {clawbacks.map((row) => (
+              <li
+                key={row.beneficiaryUserId}
+                className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+              >
+                <div>
+                  <p className="font-medium text-white">
+                    {row.user.name?.trim() || row.user.email}
+                  </p>
+                  <p className="text-xs text-white/45">{row.user.email}</p>
+                </div>
+                <p className="text-lg font-semibold tabular-nums text-amber-200">
+                  {fmtUsd(row.amountOwed)} owed back
+                </p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <div className="glass-card overflow-hidden border border-glassBorder">
         {loading ? (
           <div className="flex justify-center py-20">
@@ -318,6 +365,11 @@ export default function AdminPayoutsPage() {
                               {row.user.name?.trim() || "—"}
                             </p>
                             <p className="mt-0.5 text-xs text-white/45">{row.user.email}</p>
+                            {row.clawbackOwed != null && row.clawbackOwed > 0 ? (
+                              <p className="mt-1 text-xs font-medium text-amber-200">
+                                Clawback owed: {fmtUsd(row.clawbackOwed)}
+                              </p>
+                            ) : null}
                             <p className="mt-1 text-[11px] text-violet-300/80">{roleLabel}</p>
                           </div>
                         </div>
