@@ -856,23 +856,26 @@ export async function resolvePnlRecordIdsForInvoice(
 }
 
 /**
- * Move EARNED partner commissions to PAYABLE when the trader pays their invoice.
- * Matches ledger rows via `pnlRecordId` for the invoice billing month; falls back to
- * `profitDate` within the same month when no PnL rows are linked.
+ * Move EARNED partner commissions to PAYABLE when the trader pays a legacy invoice.
+ * Callers must pass the ledger row ids; an empty list is a no-op — never guess
+ * via profitDate. monthlyRevenueInvoiceId IS NULL so a legacy payment cannot
+ * promote monthly-pipeline rows.
  */
 export async function markCommissionsAsPayable(
   prisma: PrismaClient,
   invoiceId: string,
   paymentTransactionId: string | null,
+  commissionLedgerIds: readonly string[],
 ): Promise<{ updated: number }> {
+  if (commissionLedgerIds.length === 0) {
+    return { updated: 0 };
+  }
+
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
     select: {
       id: true,
       userId: true,
-      strategyId: true,
-      month: true,
-      year: true,
       status: true,
     },
   });
@@ -881,25 +884,16 @@ export async function markCommissionsAsPayable(
     return { updated: 0 };
   }
 
-  const pnlRecordIds = await resolvePnlRecordIdsForInvoice(prisma, invoice);
-  const { start, end } = invoiceMonthRange(invoice.month, invoice.year);
-
-  const where: Prisma.CommissionLedgerWhereInput = {
-    sourceUserId: invoice.userId,
-    status: CommissionLedgerStatus.EARNED,
-    invoiceId: null,
-    isSimulated: false,
-  };
-
-  if (pnlRecordIds.length > 0) {
-    where.pnlRecordId = { in: pnlRecordIds };
-  } else {
-    where.profitDate = { gte: start, lt: end };
-  }
-
   const payableAt = new Date();
   const result = await prisma.commissionLedger.updateMany({
-    where,
+    where: {
+      id: { in: [...commissionLedgerIds] },
+      sourceUserId: invoice.userId,
+      status: CommissionLedgerStatus.EARNED,
+      invoiceId: null,
+      monthlyRevenueInvoiceId: null,
+      isSimulated: false,
+    },
     data: {
       status: CommissionLedgerStatus.PAYABLE,
       payableAt,
@@ -913,6 +907,45 @@ export async function markCommissionsAsPayable(
   return { updated: result.count };
 }
 
+async function resolveLegacyPayableLedgerIds(
+  prisma: PrismaClient,
+  invoiceId: string,
+): Promise<string[]> {
+  const invoice = await prisma.invoice.findUnique({
+    where: { id: invoiceId },
+    select: {
+      id: true,
+      userId: true,
+      strategyId: true,
+      month: true,
+      year: true,
+      status: true,
+    },
+  });
+
+  if (!invoice || invoice.status !== InvoiceStatus.PAID) {
+    return [];
+  }
+
+  const pnlRecordIds = await resolvePnlRecordIdsForInvoice(prisma, invoice);
+  if (pnlRecordIds.length === 0) {
+    return [];
+  }
+
+  const ledgers = await prisma.commissionLedger.findMany({
+    where: {
+      pnlRecordId: { in: pnlRecordIds },
+      sourceUserId: invoice.userId,
+      status: CommissionLedgerStatus.EARNED,
+      invoiceId: null,
+      monthlyRevenueInvoiceId: null,
+      isSimulated: false,
+    },
+    select: { id: true },
+  });
+  return ledgers.map((row) => row.id);
+}
+
 /** Async hook after invoice PAID — must not throw to payment / billing callers. */
 export async function triggerMarkCommissionsAsPayable(
   prisma: PrismaClient,
@@ -920,10 +953,15 @@ export async function triggerMarkCommissionsAsPayable(
   paymentTransactionId: string | null,
 ): Promise<void> {
   try {
+    const commissionLedgerIds = await resolveLegacyPayableLedgerIds(
+      prisma,
+      invoiceId,
+    );
     const { updated } = await markCommissionsAsPayable(
       prisma,
       invoiceId,
       paymentTransactionId,
+      commissionLedgerIds,
     );
     if (updated > 0) {
       console.log(

@@ -1,3 +1,4 @@
+import "./emailGag.js";
 import "dotenv/config";
 import { AssertionContext } from "./assert.js";
 import {
@@ -6,15 +7,18 @@ import {
   TestRegistry,
   verifyNoTestRowLeaks,
 } from "./fixtures.js";
+import { p12PayoutLifecycleScenario } from "./scenarios/p12-payout-lifecycle.js";
 import { p12ReversalScenario } from "./scenarios/p12-reversal.js";
 import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
 import { schemaDriftScenario } from "./scenarios/schema-drift.js";
 import type { HarnessScenario, ScenarioResult } from "./types.js";
+import { waitForInflightMail } from "../../utils/emailService.js";
 
 const ALL_SCENARIOS: HarnessScenario[] = [
   schemaDriftScenario,
   p12ReversalScenario,
   p12WalletRaceScenario,
+  p12PayoutLifecycleScenario,
 ];
 
 function parseOnlyArg(argv: string[]): string | null {
@@ -87,6 +91,13 @@ async function runScenario(
 }
 
 async function main(): Promise<void> {
+  if (process.env.EMAIL_TRANSPORT !== "noop") {
+    console.error(
+      "Harness refused to start: EMAIL_TRANSPORT must be noop so tests cannot send mail",
+    );
+    process.exit(1);
+  }
+
   const only = parseOnlyArg(process.argv.slice(2));
   const selected = only
     ? ALL_SCENARIOS.filter((s) => s.name === only)
@@ -103,6 +114,7 @@ async function main(): Promise<void> {
 
   console.log(`Harness: ${selected.length} scenario(s)`);
   console.log(`Registered: ${ALL_SCENARIOS.map((s) => s.name).join(", ")}`);
+  console.log("EMAIL_TRANSPORT=noop");
 
   const prisma = createHarnessPrisma();
   const results: ScenarioResult[] = [];
@@ -115,6 +127,7 @@ async function main(): Promise<void> {
     await prisma.$disconnect();
   }
 
+  await waitForInflightMail();
   printResultsTable(results);
 
   const leaks = await (async () => {
@@ -125,6 +138,8 @@ async function main(): Promise<void> {
       await leakPrisma.$disconnect();
     }
   })();
+
+  await waitForInflightMail();
 
   if (leaks.length > 0) {
     console.error(`LEAK: ${leaks.length} TEST-P row(s) remain after cleanup:`);
@@ -142,7 +157,8 @@ async function main(): Promise<void> {
   console.log("All scenarios passed. No TEST-P leaks detected.");
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
+  await waitForInflightMail();
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });

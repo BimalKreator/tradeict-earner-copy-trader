@@ -1034,6 +1034,12 @@ model PayoutRequest {
   completedBy       User?              @relation("PayoutCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
   commissionLedgers CommissionLedger[]
 
+  // Prisma cannot express partial unique indexes. At most one PENDING payout
+  // per partner is enforced by a hand-maintained index:
+  //   "PayoutRequest_userId_pending_unique" UNIQUE (userId) WHERE status = 'PENDING'
+  // See scripts/addPayoutClaimTokenAndDecimalAmounts.sql. Do not drop or
+  // recreate it from Prisma migrate. requestPartnerPayout maps P2002 to
+  // ACTIVE_PAYOUT_EXISTS_MSG.
   @@index([userId, status])
   @@index([status, requestedAt])
   @@index([payoutClaimToken])

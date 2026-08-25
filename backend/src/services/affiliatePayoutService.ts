@@ -34,6 +34,9 @@ export const EMPTY_PAYOUT_COMPLETE_MSG =
 export const ACTIVE_PAYOUT_EXISTS_MSG =
   "An active payout request already exists for this partner";
 
+export const PAYOUT_STATUS_CONFLICT_MSG =
+  "Payout request is no longer in the expected status";
+
 const VALID_TRANSITIONS: Record<
   PayoutRequestStatus,
   ReadonlySet<PayoutRequestStatus>
@@ -105,19 +108,6 @@ function decimalToNumber(value: Prisma.Decimal | number | null | undefined): num
   return value.toNumber();
 }
 
-function assertValidPayoutTransition(
-  from: PayoutRequestStatus,
-  to: PayoutRequestStatus,
-): void {
-  const allowed = VALID_TRANSITIONS[from];
-  if (!allowed.has(to)) {
-    throw new PayoutTransitionError(
-      `Invalid payout status transition: ${from} → ${to}. ` +
-        `Allowed from ${from}: ${[...allowed].join(", ") || "none"}.`,
-    );
-  }
-}
-
 function linkedLedgerWhere(
   payoutRequestId: string,
   payoutClaimToken: string | null,
@@ -156,9 +146,66 @@ export type PayoutTransitionOpts = {
   reason?: string;
 };
 
+function isRowLockUnavailable(err: unknown): boolean {
+  if (err instanceof PrismaClientKnownRequestError) {
+    const meta = err.meta as { code?: string; message?: string } | undefined;
+    if (meta?.code === "55P03") return true;
+    if (String(meta?.message ?? "").includes("55P03")) return true;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("55P03") ||
+    message.toLowerCase().includes("could not obtain lock") ||
+    message.toLowerCase().includes("lock_not_available")
+  );
+}
+
+function allowedFromStatuses(
+  toStatus: PayoutRequestStatus,
+): PayoutRequestStatus[] {
+  return (Object.keys(VALID_TRANSITIONS) as PayoutRequestStatus[]).filter(
+    (from) => VALID_TRANSITIONS[from].has(toStatus),
+  );
+}
+
+function payoutStatusPatch(
+  toStatus: PayoutRequestStatus,
+  opts: PayoutTransitionOpts,
+  now: Date,
+): Prisma.PayoutRequestUncheckedUpdateManyInput {
+  if (toStatus === PayoutRequestStatus.APPROVED) {
+    return {
+      status: PayoutRequestStatus.APPROVED,
+      approvedAt: now,
+      approvedById: opts.adminUserId,
+      approvalReason: opts.reason?.trim() || null,
+    };
+  }
+  if (toStatus === PayoutRequestStatus.REJECTED) {
+    return {
+      status: PayoutRequestStatus.REJECTED,
+      rejectedAt: now,
+      rejectedById: opts.adminUserId,
+      rejectionReason: opts.reason?.trim() || null,
+    };
+  }
+  if (toStatus === PayoutRequestStatus.COMPLETED) {
+    return {
+      status: PayoutRequestStatus.COMPLETED,
+      completedAt: now,
+      completedById: opts.adminUserId,
+      paymentReference: opts.paymentReference?.trim() || null,
+    };
+  }
+  throw new PayoutTransitionError(`Unsupported target status: ${toStatus}`);
+}
+
 /**
  * Single entry point for PayoutRequest status changes.
  * REJECT releases claimed WITHDRAWN rows back to WITHDRAWABLE.
+ * Status write is conditional on an allowed `from` status in the same UPDATE.
+ * Concurrent transitions take FOR UPDATE NOWAIT so exactly one proceeds.
+ * Zero rows affected → 409, never a silent success.
  */
 export async function transitionPayoutRequest(
   prisma: PrismaClient,
@@ -166,49 +213,6 @@ export async function transitionPayoutRequest(
   toStatus: PayoutRequestStatus,
   opts: PayoutTransitionOpts,
 ): Promise<{ payoutRequestId: string; status: PayoutRequestStatus }> {
-  const row = await prisma.payoutRequest.findUnique({
-    where: { id: payoutRequestId },
-    select: {
-      id: true,
-      status: true,
-      payoutClaimToken: true,
-    },
-  });
-
-  if (!row) {
-    throw new PayoutNotFoundError(payoutRequestId);
-  }
-
-  assertValidPayoutTransition(row.status, toStatus);
-
-  const now = new Date();
-
-  if (toStatus === PayoutRequestStatus.APPROVED) {
-    const linkedCount = await prisma.commissionLedger.count({
-      where: linkedLedgerWhere(row.id, row.payoutClaimToken),
-    });
-    if (linkedCount === 0) {
-      console.error(
-        `[Payout] approve refused id=${payoutRequestId} — no linked ledger rows`,
-      );
-      throw new PayoutTransitionError(
-        EMPTY_PAYOUT_COMPLETE_MSG.replace("complete", "approve"),
-        409,
-      );
-    }
-
-    await prisma.payoutRequest.update({
-      where: { id: payoutRequestId },
-      data: {
-        status: PayoutRequestStatus.APPROVED,
-        approvedAt: now,
-        approvedById: opts.adminUserId,
-        approvalReason: opts.reason?.trim() || null,
-      },
-    });
-    return { payoutRequestId, status: PayoutRequestStatus.APPROVED };
-  }
-
   if (toStatus === PayoutRequestStatus.REJECTED) {
     const reason = opts.reason?.trim() ?? "";
     if (!reason) {
@@ -216,34 +220,6 @@ export async function transitionPayoutRequest(
         "rejectionReason is required when rejecting a payout",
       );
     }
-
-    await prisma.$transaction(async (tx) => {
-      const released = await releaseClaimedLedgerRows(
-        tx,
-        row.id,
-        row.payoutClaimToken,
-      );
-      if (released === 0) {
-        console.error(
-          `[Payout] reject id=${payoutRequestId} claimToken=${row.payoutClaimToken ?? "null"} — no WITHDRAWN rows released`,
-        );
-      }
-
-      await tx.payoutRequest.update({
-        where: { id: payoutRequestId },
-        data: {
-          status: PayoutRequestStatus.REJECTED,
-          rejectedAt: now,
-          rejectedById: opts.adminUserId,
-          rejectionReason: reason,
-        },
-      });
-    });
-
-    console.info(
-      `[Payout] rejected id=${payoutRequestId} by=${opts.adminUserId} reason=${reason}`,
-    );
-    return { payoutRequestId, status: PayoutRequestStatus.REJECTED };
   }
 
   if (toStatus === PayoutRequestStatus.COMPLETED) {
@@ -253,30 +229,93 @@ export async function transitionPayoutRequest(
         "paymentReference (UTR / bank txn id) is required",
       );
     }
-
-    const linkedCount = await prisma.commissionLedger.count({
-      where: linkedLedgerWhere(row.id, row.payoutClaimToken),
-    });
-    if (linkedCount === 0) {
-      console.error(
-        `[Payout] complete refused id=${payoutRequestId} claimToken=${row.payoutClaimToken ?? "null"} — no linked ledger rows`,
-      );
-      throw new PayoutTransitionError(EMPTY_PAYOUT_COMPLETE_MSG, 409);
-    }
-
-    await prisma.payoutRequest.update({
-      where: { id: payoutRequestId },
-      data: {
-        status: PayoutRequestStatus.COMPLETED,
-        completedAt: now,
-        completedById: opts.adminUserId,
-        paymentReference: ref,
-      },
-    });
-    return { payoutRequestId, status: PayoutRequestStatus.COMPLETED };
   }
 
-  throw new PayoutTransitionError(`Unsupported target status: ${toStatus}`);
+  const fromStatuses = allowedFromStatuses(toStatus);
+  if (fromStatuses.length === 0) {
+    throw new PayoutTransitionError(`Unsupported target status: ${toStatus}`);
+  }
+
+  const now = new Date();
+
+  let result: { payoutRequestId: string; status: PayoutRequestStatus };
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          status: PayoutRequestStatus;
+          payoutClaimToken: string | null;
+        }>
+      >`
+        SELECT id, status, "payoutClaimToken"
+        FROM "PayoutRequest"
+        WHERE id = ${payoutRequestId}
+        FOR UPDATE NOWAIT
+      `;
+
+      const row = locked[0];
+      if (!row) {
+        throw new PayoutNotFoundError(payoutRequestId);
+      }
+
+      const moved = await tx.payoutRequest.updateMany({
+        where: {
+          id: payoutRequestId,
+          status: { in: fromStatuses },
+        },
+        data: payoutStatusPatch(toStatus, opts, now),
+      });
+
+      if (moved.count === 0) {
+        throw new PayoutTransitionError(PAYOUT_STATUS_CONFLICT_MSG, 409);
+      }
+
+      if (
+        toStatus === PayoutRequestStatus.APPROVED ||
+        toStatus === PayoutRequestStatus.COMPLETED
+      ) {
+        const linkedCount = await tx.commissionLedger.count({
+          where: linkedLedgerWhere(row.id, row.payoutClaimToken),
+        });
+        if (linkedCount === 0) {
+          console.error(
+            `[Payout] ${toStatus.toLowerCase()} refused id=${payoutRequestId} ` +
+              `claimToken=${row.payoutClaimToken ?? "null"} — no linked ledger rows`,
+          );
+          throw new PayoutTransitionError(EMPTY_PAYOUT_COMPLETE_MSG, 409);
+        }
+      }
+
+      if (toStatus === PayoutRequestStatus.REJECTED) {
+        const released = await releaseClaimedLedgerRows(
+          tx,
+          row.id,
+          row.payoutClaimToken,
+        );
+        if (released === 0) {
+          console.error(
+            `[Payout] reject id=${payoutRequestId} claimToken=${row.payoutClaimToken ?? "null"} — no WITHDRAWN rows released`,
+          );
+        }
+      }
+
+      return { payoutRequestId, status: toStatus };
+    });
+  } catch (err) {
+    if (isRowLockUnavailable(err)) {
+      throw new PayoutTransitionError(PAYOUT_STATUS_CONFLICT_MSG, 409);
+    }
+    throw err;
+  }
+
+  if (toStatus === PayoutRequestStatus.REJECTED) {
+    console.info(
+      `[Payout] rejected id=${payoutRequestId} by=${opts.adminUserId} reason=${opts.reason?.trim() ?? ""}`,
+    );
+  }
+
+  return result;
 }
 
 export type RequestPartnerPayoutOutcome =

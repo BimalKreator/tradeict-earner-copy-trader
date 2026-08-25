@@ -2,6 +2,29 @@ import nodemailer from "nodemailer";
 
 export type OtpEmailPurpose = "Sign Up" | "Login" | "Password Reset";
 
+const inflightMailSends = new Set<Promise<unknown>>();
+
+/** True when outbound SMTP is disabled (harness sets EMAIL_TRANSPORT=noop). */
+export function isNoopEmailTransport(): boolean {
+  return process.env.EMAIL_TRANSPORT === "noop";
+}
+
+/** Wait until every sendMail started through {@link createMailTransport} settles. */
+export async function waitForInflightMail(): Promise<void> {
+  for (let i = 0; i < 10 && inflightMailSends.size > 0; i += 1) {
+    await Promise.allSettled([...inflightMailSends]);
+  }
+}
+
+function trackMailPromise(result: unknown): unknown {
+  if (result != null && typeof result === "object" && "then" in result) {
+    const pending = result as Promise<unknown>;
+    inflightMailSends.add(pending);
+    void pending.finally(() => inflightMailSends.delete(pending));
+  }
+  return result;
+}
+
 /**
  * Brevo (formerly Sendinblue) SMTP — configure via environment (same keys work with Brevo’s SMTP relay):
  * - SMTP_HOST — e.g. smtp-relay.brevo.com
@@ -11,10 +34,26 @@ export type OtpEmailPurpose = "Sign Up" | "Login" | "Password Reset";
  * - SMTP_SECURE — optional; set "true" for port 465
  * - EMAIL_FROM — optional From display (defaults to SMTP_USER)
  * - EXPERT_APPLICATION_TO — optional inbox for expert applications (defaults to support@tradeictai.com)
+ * - EMAIL_TRANSPORT=noop — json transport, no network (harness / local gag)
  *
  * Replace placeholder values in your `.env` before production (never commit real credentials).
  */
 export function createMailTransport(): nodemailer.Transporter {
+  const transport = isNoopEmailTransport()
+    ? nodemailer.createTransport({ jsonTransport: true })
+    : createSmtpTransport();
+
+  const originalSendMail = transport.sendMail.bind(transport) as (
+    mail: nodemailer.SendMailOptions,
+  ) => Promise<nodemailer.SentMessageInfo>;
+
+  transport.sendMail = ((mail: nodemailer.SendMailOptions) =>
+    trackMailPromise(originalSendMail(mail)) as Promise<nodemailer.SentMessageInfo>) as typeof transport.sendMail;
+
+  return transport;
+}
+
+function createSmtpTransport(): nodemailer.Transporter {
   const host = process.env.SMTP_HOST;
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
