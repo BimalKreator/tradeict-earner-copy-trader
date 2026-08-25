@@ -5,8 +5,9 @@ import type { RuntimeCaching } from "workbox-build";
 /** @ducanh2912/next-pwa registers Workbox via webpack; production builds must use `next build --webpack` (see package.json). */
 
 /**
- * Explicit runtime caching — replace stock defaults (extendDefaultRuntimeCaching: false).
- * Authenticated /api responses must never be stored in Cache Storage.
+ * Explicit runtime caching for @ducanh2912/next-pwa v10.
+ * MUST live under workboxOptions.runtimeCaching — a top-level key is ignored.
+ * extendDefaultRuntimeCaching: false replaces stock defaults (which NetworkFirst-cache /api as "apis").
  */
 const runtimeCaching: RuntimeCaching[] = [
   // API — NetworkOnly for every method (no cache entry, ever).
@@ -19,7 +20,6 @@ const runtimeCaching: RuntimeCaching[] = [
       }) satisfies RuntimeCaching,
   ),
 
-  // Next.js build assets
   {
     urlPattern: /\/_next\/static.+/i,
     handler: "CacheFirst",
@@ -28,8 +28,6 @@ const runtimeCaching: RuntimeCaching[] = [
       expiration: { maxEntries: 64, maxAgeSeconds: 86_400 },
     },
   },
-
-  // Fonts
   {
     urlPattern: /\.(?:eot|otf|ttc|ttf|woff|woff2)$/i,
     handler: "CacheFirst",
@@ -38,8 +36,6 @@ const runtimeCaching: RuntimeCaching[] = [
       expiration: { maxEntries: 16, maxAgeSeconds: 60 * 60 * 24 * 365 },
     },
   },
-
-  // Images
   {
     urlPattern: /\.(?:jpg|jpeg|gif|png|svg|ico|webp)$/i,
     handler: "StaleWhileRevalidate",
@@ -48,8 +44,6 @@ const runtimeCaching: RuntimeCaching[] = [
       expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 30 },
     },
   },
-
-  // PWA manifest
   {
     urlPattern: /\/manifest\.json$/i,
     handler: "StaleWhileRevalidate",
@@ -58,8 +52,6 @@ const runtimeCaching: RuntimeCaching[] = [
       expiration: { maxEntries: 2, maxAgeSeconds: 86_400 },
     },
   },
-
-  // App icons
   {
     urlPattern: /\/icon-.*\.png$/i,
     handler: "CacheFirst",
@@ -68,8 +60,6 @@ const runtimeCaching: RuntimeCaching[] = [
       expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 30 },
     },
   },
-
-  // App shell (document navigations only — not API JSON)
   {
     urlPattern: ({ request, sameOrigin }) =>
       sameOrigin && request.mode === "navigate",
@@ -85,16 +75,18 @@ const runtimeCaching: RuntimeCaching[] = [
 const withPWA = withPWAInit({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
-  // Do not cache front-end navigations beyond the explicit app-shell rule above.
   cacheOnFrontEndNav: false,
   reloadOnOnline: true,
-  // Custom list replaces stock defaults (which NetworkFirst-cached /api).
+  customWorkerSrc: "worker",
+  // PluginOptions (top-level): false = use our array instead of stock defaults.
   extendDefaultRuntimeCaching: false,
   workboxOptions: {
-    disableDevLogs: true,
+    // GenerateSWOptions — these MUST be under workboxOptions in v10.
     skipWaiting: true,
     clientsClaim: true,
+    cleanupOutdatedCaches: true,
     runtimeCaching,
+    disableDevLogs: true,
   },
 });
 
