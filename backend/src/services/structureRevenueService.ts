@@ -21,31 +21,26 @@ import {
   isInvoiceFrozen,
   transitionMonthlyRevenueInvoiceStatus,
 } from "./monthlyRevenueInvoiceLifecycleService.js";
-import { getUsdInrRate } from "./settingsService.js";
+import { getUsdInrRateOrNull } from "./settingsService.js";
 import { raiseAlert } from "../utils/systemAlert.js";
 import { finalInvoiceDelayHours } from "./billingCronService.js";
 
 const BILLING_TIMEZONE = DASHBOARD_PNL_DAY_TIMEZONE;
 const MS_PER_DAY = 86_400_000;
-const SYSTEM_SETTINGS_ID = "global";
 
 async function alertIfConfiguredUsdInrRateMissing(
   prisma: PrismaClient,
-): Promise<void> {
-  const settings = await prisma.systemSettings.findUnique({
-    where: { id: SYSTEM_SETTINGS_ID },
-    select: { usdInrRate: true },
-  });
-  const stored = settings?.usdInrRate;
-  if (stored != null && Number.isFinite(stored) && stored > 0) return;
+): Promise<boolean> {
+  const rate = await getUsdInrRateOrNull(prisma);
+  if (rate != null) return true;
   void raiseAlert({
     key: "fx-rate-missing",
     severity: "CRITICAL",
     source: "structureRevenue",
     message:
-      "USD/INR rate missing or invalid in SystemSettings — billing will use fallback rate",
-    detail: { storedRate: stored ?? null },
+      "USD/INR rate missing, invalid, or stale — invoicing is blocked until an admin sets a fresh rate",
   });
+  return false;
 }
 
 function zero(): Prisma.Decimal {
@@ -1031,10 +1026,17 @@ export async function runMonthlyRevenueInvoices(
     opts?.issue === true || (opts?.issue === undefined && periodIsPast);
   const passLabel = wantIssue ? "issue" : "compute";
 
+  let usdInrRate: number | null = null;
   if (wantIssue) {
-    await alertIfConfiguredUsdInrRateMissing(prisma);
+    const rateOk = await alertIfConfiguredUsdInrRateMissing(prisma);
+    usdInrRate = rateOk ? await getUsdInrRateOrNull(prisma) : null;
+    if (usdInrRate == null) {
+      console.warn(
+        `[StructureRevenue] monthly issue blocked — USD/INR rate unusable; ACCRUED only for this run`,
+      );
+    }
   }
-  const usdInrRate = wantIssue ? await getUsdInrRate(prisma) : null;
+  const canIssue = wantIssue && usdInrRate != null;
 
   const results: Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>> =
     {};
@@ -1065,7 +1067,7 @@ export async function runMonthlyRevenueInvoices(
 
     try {
       let priorCommission: Prisma.Decimal | null = null;
-      if (wantIssue) {
+      if (canIssue) {
         const existing = await prisma.monthlyRevenueInvoice.findUnique({
           where: {
             userId_periodYear_periodMonth: {
@@ -1089,7 +1091,7 @@ export async function runMonthlyRevenueInvoices(
       );
 
       if (
-        wantIssue &&
+        canIssue &&
         priorCommission != null &&
         !priorCommission.eq(invoice.commissionAmount)
       ) {
@@ -1100,7 +1102,7 @@ export async function runMonthlyRevenueInvoices(
       }
 
       if (
-        wantIssue &&
+        canIssue &&
         invoice.status === INVOICE_STATUS.ACCRUED &&
         !invoice.isSimulated &&
         usdInrRate != null

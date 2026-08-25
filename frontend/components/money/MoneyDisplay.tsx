@@ -4,7 +4,8 @@ import {
   fmtRateLabel,
   fmtUsdSigned,
   formatINR,
-  getUsdInrRate,
+  RATE_MISSING_MESSAGE,
+  resolveUsdInrRate,
   pnlGlyph,
   pnlToneClass,
 } from "@/lib/currency";
@@ -14,7 +15,7 @@ export type MoneyDisplayMode = "pnl" | "balance" | "neutral";
 export type MoneyDisplayProps = {
   /** USD amount; null = unknown ("—"), 0 = truly zero. */
   usd: number | null | undefined;
-  /** Live platform rate from server. */
+  /** Platform rate from server (nullable when unset). */
   rate?: number | null;
   /** Invoice-pinned rate — takes precedence when set. */
   pinnedRate?: number | null;
@@ -45,11 +46,24 @@ export function MoneyDisplay({
     );
   }
 
-  const effectiveRate = getUsdInrRate(pinnedRate ?? rate);
+  const effectiveRate = resolveUsdInrRate(pinnedRate ?? rate);
   const displayUsd = mode === "balance" ? Math.max(0, usd) : usd;
   const showPnlStyle = mode === "pnl";
   const glyph = showPnlStyle ? pnlGlyph(displayUsd) : "";
   const tone = showPnlStyle ? pnlToneClass(displayUsd) : "text-white";
+
+  if (effectiveRate == null) {
+    return (
+      <div className={`tabular-nums ${alignClass} ${className}`}>
+        <p className="text-base font-semibold leading-tight text-white/45">—</p>
+        {!usdSecondary ? (
+          <p className="mt-0.5 text-xs text-white/45">{fmtUsdSigned(displayUsd)}</p>
+        ) : null}
+        <p className="mt-0.5 text-[10px] text-amber-200/80">{RATE_MISSING_MESSAGE}</p>
+      </div>
+    );
+  }
+
   const inrText = formatINR(displayUsd, effectiveRate);
 
   return (
@@ -82,11 +96,20 @@ export function MoneyDisplayCompact({
     return <span className={`shrink-0 tabular-nums text-white/45 ${className}`}>—</span>;
   }
 
-  const effectiveRate = getUsdInrRate(pinnedRate ?? rate);
+  const effectiveRate = resolveUsdInrRate(pinnedRate ?? rate);
   const displayUsd = mode === "balance" ? Math.max(0, usd) : usd;
   const showPnlStyle = mode === "pnl";
   const glyph = showPnlStyle ? pnlGlyph(displayUsd) : "";
   const tone = showPnlStyle ? pnlToneClass(displayUsd) : "text-white";
+
+  if (effectiveRate == null) {
+    return (
+      <span className={`shrink-0 whitespace-nowrap tabular-nums text-white/45 ${className}`}>
+        —
+      </span>
+    );
+  }
+
   const inrText = formatINR(displayUsd, effectiveRate);
 
   return (

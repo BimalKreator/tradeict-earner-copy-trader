@@ -25,7 +25,7 @@ import {
   usdToInr,
   type PaymentMethodKind,
 } from "../services/paymentFeeService.js";
-import { getPgFeePercent, getUsdInrRate } from "../services/settingsService.js";
+import { getPgFeePercent, getUsdInrRate, getUsdInrRateOrNull } from "../services/settingsService.js";
 import { sendPaymentReceiptEmails } from "../utils/emailService.js";
 import {
   resolveEmailRecipientName,
@@ -122,7 +122,7 @@ export function createPaymentController(prisma: PrismaClient) {
     try {
       const [pgFeePercent, usdInrRate] = await Promise.all([
         getPgFeePercent(prisma),
-        getUsdInrRate(prisma),
+        getUsdInrRateOrNull(prisma),
       ]);
       res.json({ pgFeePercent, usdInrRate });
     } catch (err) {
@@ -843,7 +843,7 @@ export function createPaymentController(prisma: PrismaClient) {
 
       const [pgFeePercent, rate] = await Promise.all([
         getPgFeePercent(prisma),
-        getUsdInrRate(prisma),
+        getUsdInrRateOrNull(prisma),
       ]);
       res.json({
         transactions: rows.map(serializePayment),

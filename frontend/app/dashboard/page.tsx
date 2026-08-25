@@ -23,7 +23,8 @@ import {
   fmtWalletBalance,
   fmtPct,
   formatINR,
-  getUsdInrRate,
+  RATE_MISSING_MESSAGE,
+  resolveUsdInrRate,
 } from "@/lib/currency";
 import {
   parseJsonObject,
@@ -153,7 +154,7 @@ function DualCurrencyValue({
   rate?: number | null;
 }) {
   const displayUsd = balance ? Math.max(0, usd) : usd;
-  const fx = getUsdInrRate(rate);
+  const fx = resolveUsdInrRate(rate);
   return (
     <div className="mt-3">
       <p className={`text-2xl font-bold tabular-nums ${valueClass}`}>
@@ -162,7 +163,11 @@ function DualCurrencyValue({
       <p className="mt-1 text-sm text-slate-500 tabular-nums">
         {usdSecondaryLabel(displayUsd, balance)}
       </p>
-      <p className="mt-0.5 text-[10px] text-slate-600">(at ₹{fx.toLocaleString("en-IN")}/$)</p>
+      <p className="mt-0.5 text-[10px] text-slate-600">
+        {fx != null
+          ? `(at ₹${fx.toLocaleString("en-IN")}/$)`
+          : RATE_MISSING_MESSAGE}
+      </p>
     </div>
   );
 }
@@ -292,7 +297,7 @@ export default function DashboardPage() {
     0,
     wallet?.availableBalance ?? wallet?.balance ?? 0,
   );
-  const usdInrRate = getUsdInrRate(wallet?.usdInrRate);
+  const usdInrRate = resolveUsdInrRate(wallet?.usdInrRate);
 
   async function toggleCopyTrading() {
     if (!data || toggleBusy) return;

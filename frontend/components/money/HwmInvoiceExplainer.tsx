@@ -104,7 +104,7 @@ export function HwmInvoiceExplainer({
             </p>
             <p className="mt-1 text-sm text-white/70">
               <MoneyValue usd={f} />
-              {collectibleInr > 0 ? (
+              {collectibleInr != null && collectibleInr > 0 ? (
                 <span className="ml-2 text-xs text-white/45">({fmtInr(collectibleInr)} INR)</span>
               ) : null}
             </p>

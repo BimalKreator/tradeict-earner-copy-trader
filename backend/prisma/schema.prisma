@@ -721,8 +721,10 @@ model SystemSettings {
   id                  String   @id @default("global")
   pgFeePercent        Float    @default(2.36)
   allowedEmailDomains String   @default("gmail.com,yahoo.com,hotmail.com,outlook.com")
-  /** USD → INR rate for Razorpay and wallet INR display. */
-  usdInrRate          Float    @default(83)
+  /** USD → INR rate for Razorpay and wallet INR display. Null until an admin sets it. */
+  usdInrRate          Float?
+  /** When an admin last set usdInrRate — used for staleness checks. */
+  usdInrRateUpdatedAt DateTime?
   maintenanceMode     Boolean  @default(false)
   maintenanceMessage  String?
   /** Max total partner commission % of app revenue per profit event (scale-down cap). */

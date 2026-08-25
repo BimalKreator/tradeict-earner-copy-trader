@@ -4,9 +4,29 @@ const SETTINGS_ID = "global";
 const DEFAULT_PG_FEE_PERCENT = 2.36;
 const DEFAULT_ALLOWED_EMAIL_DOMAINS =
   "gmail.com,yahoo.com,hotmail.com,outlook.com";
-export const DEFAULT_USD_INR_RATE = 83;
 export const DEFAULT_MAINTENANCE_MESSAGE =
   "The platform is temporarily under maintenance. Please check back shortly.";
+
+/** Max age of an admin-set USD/INR rate before getUsdInrRate refuses it. */
+export function usdInrRateMaxAgeHours(): number {
+  const raw = process.env.USD_INR_RATE_MAX_AGE_HOURS?.trim();
+  if (raw) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 48;
+}
+
+export class MissingUsdInrRateError extends Error {
+  readonly code = "MISSING_USD_INR_RATE" as const;
+  readonly reason: "absent" | "invalid" | "stale";
+
+  constructor(reason: "absent" | "invalid" | "stale", detail: string) {
+    super(`USD/INR rate unusable (${reason}): ${detail}`);
+    this.name = "MissingUsdInrRateError";
+    this.reason = reason;
+  }
+}
 
 export type PublicPlatformConfig = {
   maintenanceMode: boolean;
@@ -23,6 +43,7 @@ export function parseAllowedEmailDomains(raw: string): string[] {
     .filter(Boolean);
 }
 
+/** Create global settings if missing — never invent a USD/INR rate. */
 async function ensureSystemSettings(prisma: PrismaClient) {
   return prisma.systemSettings.upsert({
     where: { id: SETTINGS_ID },
@@ -30,7 +51,8 @@ async function ensureSystemSettings(prisma: PrismaClient) {
       id: SETTINGS_ID,
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
-      usdInrRate: DEFAULT_USD_INR_RATE,
+      usdInrRate: null,
+      usdInrRateUpdatedAt: null,
       maintenanceMode: false,
       maintenanceMessage: null,
     },
@@ -62,7 +84,8 @@ export async function setMaintenanceSettings(
       id: SETTINGS_ID,
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
-      usdInrRate: DEFAULT_USD_INR_RATE,
+      usdInrRate: null,
+      usdInrRateUpdatedAt: null,
       maintenanceMode: args.maintenanceMode,
       maintenanceMessage: message,
     },
@@ -96,17 +119,89 @@ export async function setPgFeePercent(
       id: SETTINGS_ID,
       pgFeePercent,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
-      usdInrRate: DEFAULT_USD_INR_RATE,
+      usdInrRate: null,
+      usdInrRateUpdatedAt: null,
     },
     update: { pgFeePercent },
   });
   return row.pgFeePercent;
 }
 
+function evaluateUsdInrRate(row: {
+  usdInrRate: number | null;
+  usdInrRateUpdatedAt: Date | null;
+}):
+  | { ok: true; rate: number }
+  | { ok: false; reason: "absent" | "invalid" | "stale"; detail: string } {
+  const n = row.usdInrRate;
+  if (n == null) {
+    return {
+      ok: false,
+      reason: "absent",
+      detail: "SystemSettings.usdInrRate is null — an admin must set the rate",
+    };
+  }
+  if (!Number.isFinite(n) || n <= 0) {
+    return {
+      ok: false,
+      reason: "invalid",
+      detail: `stored rate is ${String(n)} (must be a finite number > 0)`,
+    };
+  }
+  const updatedAt = row.usdInrRateUpdatedAt;
+  if (updatedAt == null) {
+    return {
+      ok: false,
+      reason: "stale",
+      detail: "usdInrRateUpdatedAt is null — rate must be re-set by an admin",
+    };
+  }
+  const maxAgeMs = usdInrRateMaxAgeHours() * 3_600_000;
+  const ageMs = Date.now() - updatedAt.getTime();
+  if (ageMs > maxAgeMs) {
+    return {
+      ok: false,
+      reason: "stale",
+      detail: `rate last set at ${updatedAt.toISOString()} exceeds USD_INR_RATE_MAX_AGE_HOURS=${usdInrRateMaxAgeHours()}`,
+    };
+  }
+  return { ok: true, rate: n };
+}
+
+/**
+ * Required for money paths (invoicing, payments). Throws when the rate is
+ * absent, invalid, or older than USD_INR_RATE_MAX_AGE_HOURS.
+ */
 export async function getUsdInrRate(prisma: PrismaClient): Promise<number> {
   const row = await ensureSystemSettings(prisma);
-  const n = row.usdInrRate;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_USD_INR_RATE;
+  const result = evaluateUsdInrRate(row);
+  if (!result.ok) {
+    throw new MissingUsdInrRateError(result.reason, result.detail);
+  }
+  return result.rate;
+}
+
+/** Display / soft paths — never throws; returns null when rate is unusable. */
+export async function getUsdInrRateOrNull(
+  prisma: PrismaClient,
+): Promise<number | null> {
+  const row = await ensureSystemSettings(prisma);
+  const result = evaluateUsdInrRate(row);
+  return result.ok ? result.rate : null;
+}
+
+export async function getUsdInrRateMeta(prisma: PrismaClient): Promise<{
+  usdInrRate: number | null;
+  usdInrRateUpdatedAt: string | null;
+  usable: boolean;
+}> {
+  const row = await ensureSystemSettings(prisma);
+  const result = evaluateUsdInrRate(row);
+  return {
+    usdInrRate: row.usdInrRate,
+    usdInrRateUpdatedAt: row.usdInrRateUpdatedAt?.toISOString() ?? null,
+    usable: result.ok,
+  };
 }
 
 export async function setUsdInrRate(
@@ -116,6 +211,7 @@ export async function setUsdInrRate(
   if (!Number.isFinite(usdInrRate) || usdInrRate <= 0 || usdInrRate > 500) {
     throw new Error("usdInrRate must be a positive number (max 500)");
   }
+  const now = new Date();
   const row = await prisma.systemSettings.upsert({
     where: { id: SETTINGS_ID },
     create: {
@@ -123,10 +219,11 @@ export async function setUsdInrRate(
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: DEFAULT_ALLOWED_EMAIL_DOMAINS,
       usdInrRate,
+      usdInrRateUpdatedAt: now,
     },
-    update: { usdInrRate },
+    update: { usdInrRate, usdInrRateUpdatedAt: now },
   });
-  return row.usdInrRate;
+  return row.usdInrRate!;
 }
 
 export async function getAllowedEmailDomains(
@@ -151,7 +248,8 @@ export async function setAllowedEmailDomains(
       id: SETTINGS_ID,
       pgFeePercent: DEFAULT_PG_FEE_PERCENT,
       allowedEmailDomains: domains.join(","),
-      usdInrRate: DEFAULT_USD_INR_RATE,
+      usdInrRate: null,
+      usdInrRateUpdatedAt: null,
     },
     update: { allowedEmailDomains: domains.join(",") },
   });

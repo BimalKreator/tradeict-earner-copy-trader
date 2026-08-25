@@ -136,7 +136,11 @@ function buildCommissionPreview(
 export default function AdminSettingsPage() {
   const { refresh: refreshPlatformConfig } = usePlatformConfig();
   const [pgFeePercent, setPgFeePercent] = useState("2.36");
-  const [usdInrRate, setUsdInrRate] = useState("83");
+  const [usdInrRate, setUsdInrRate] = useState("");
+  const [usdInrRateUpdatedAt, setUsdInrRateUpdatedAt] = useState<string | null>(
+    null,
+  );
+  const [usdInrRateUsable, setUsdInrRateUsable] = useState(false);
   const [allowedEmailDomains, setAllowedEmailDomains] = useState(
     "gmail.com,yahoo.com,hotmail.com,outlook.com",
   );
@@ -176,7 +180,9 @@ export default function AdminSettingsPage() {
       }
       const data = (await paymentRes.json()) as {
         pgFeePercent?: number;
-        usdInrRate?: number;
+        usdInrRate?: number | null;
+        usdInrRateUpdatedAt?: string | null;
+        usdInrRateUsable?: boolean;
         allowedEmailDomains?: string;
         maintenanceMode?: boolean;
         maintenanceMessage?: string | null;
@@ -217,9 +223,17 @@ export default function AdminSettingsPage() {
       if (typeof data.pgFeePercent === "number") {
         setPgFeePercent(String(data.pgFeePercent));
       }
-      if (typeof data.usdInrRate === "number") {
+      if (typeof data.usdInrRate === "number" && data.usdInrRate > 0) {
         setUsdInrRate(String(data.usdInrRate));
+      } else {
+        setUsdInrRate("");
       }
+      setUsdInrRateUpdatedAt(
+        typeof data.usdInrRateUpdatedAt === "string"
+          ? data.usdInrRateUpdatedAt
+          : null,
+      );
+      setUsdInrRateUsable(data.usdInrRateUsable === true);
       if (typeof data.allowedEmailDomains === "string") {
         setAllowedEmailDomains(data.allowedEmailDomains);
       }
@@ -516,14 +530,29 @@ export default function AdminSettingsPage() {
                   value={usdInrRate}
                   onChange={(e) => setUsdInrRate(e.target.value)}
                   disabled={savingPayment}
-                  placeholder="e.g. 83.5"
+                  placeholder="e.g. 88.50"
                   className="mt-2 w-full rounded-lg border border-glassBorder bg-black/40 px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-primary/40"
                 />
               </label>
               <p className="text-xs text-white/45">
-                Used for Razorpay checkout, wallet INR display, and invoice USD→INR conversion.
-                No longer read from environment variables.
+                Platform rate for wallet display and for pinning INR when invoices are issued.
+                Saving updates the rate timestamp. Billing refuses a missing, non-positive, or
+                stale rate (default max age 48h via USD_INR_RATE_MAX_AGE_HOURS).
               </p>
+              {usdInrRateUpdatedAt ? (
+                <p className="text-xs text-white/55">
+                  Last set:{" "}
+                  {new Date(usdInrRateUpdatedAt).toLocaleString("en-IN", {
+                    timeZone: "Asia/Kolkata",
+                  })}
+                  {usdInrRateUsable ? "" : " — currently unusable for billing (re-save to refresh)."}
+                </p>
+              ) : (
+                <p className="text-xs text-amber-200/90">
+                  No rate on file — monthly invoice issue and money paths are blocked until you
+                  set one.
+                </p>
+              )}
               <p className="text-xs text-white/45">
                 Default fee: 2.36%. Changes apply immediately for new orders and deposits.
               </p>

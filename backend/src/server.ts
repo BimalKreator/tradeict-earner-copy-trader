@@ -290,6 +290,22 @@ app.use(
       typeof err === "object" &&
       err !== null &&
       "code" in err &&
+      (err as { code?: string }).code === "MISSING_USD_INR_RATE"
+    ) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "USD/INR rate is missing, invalid, or stale";
+      res.status(503).json({
+        error: message,
+        code: "MISSING_USD_INR_RATE",
+      });
+      return;
+    }
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
       (err as { code?: string }).code === "P2025"
     ) {
       res.status(404).json({ error: "Record not found" });

@@ -10,7 +10,8 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { COMPANY } from "@/lib/company";
-import { fmtInr, fmtUsd, usdToInr } from "@/lib/currency";
+import { fmtInr, fmtUsd, RATE_MISSING_MESSAGE, usdToInr } from "@/lib/currency";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 
 type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
@@ -56,11 +57,15 @@ function fmtDate(iso: string): string {
   }
 }
 
-function invoiceAmountInr(inv: StrategyFeeInvoice): number {
+function invoiceAmountInr(
+  inv: StrategyFeeInvoice,
+  rate: number | null,
+): number | null {
   if (typeof inv.strategyMonthlyFeeInr === "number" && inv.strategyMonthlyFeeInr > 0) {
     return inv.strategyMonthlyFeeInr;
   }
-  return Math.ceil(usdToInr(inv.amountDue));
+  const converted = usdToInr(inv.amountDue, rate);
+  return converted == null ? null : Math.ceil(converted);
 }
 
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -77,6 +82,7 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
 }
 
 export function StrategySubscriptionFees() {
+  const { rate: usdInrRate } = useUsdInrRate();
   const [invoices, setInvoices] = useState<StrategyFeeInvoice[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
   const [wallet, setWallet] = useState<WalletResponse | null>(null);
@@ -332,7 +338,7 @@ export function StrategySubscriptionFees() {
             </thead>
             <tbody className="divide-y divide-white/5">
               {payableInvoices.map((inv) => {
-                const amountInr = invoiceAmountInr(inv);
+                const amountInr = invoiceAmountInr(inv, usdInrRate);
                 const isPaying = payingId === inv.id;
                 const isRazorpayPaying = razorpayPayingId === inv.id;
                 const insufficient = walletBalance + 1e-9 < inv.amountDue;
@@ -340,8 +346,15 @@ export function StrategySubscriptionFees() {
                   <tr key={inv.id} className="text-white/85">
                     <td className="px-4 py-3">{inv.strategyTitle}</td>
                     <td className="px-4 py-3 text-right">
-                      <p className="font-semibold tabular-nums">{fmtInr(amountInr)}</p>
+                      <p className="font-semibold tabular-nums">
+                        {amountInr != null ? fmtInr(amountInr) : "—"}
+                      </p>
                       <p className="text-xs tabular-nums text-white/45">{fmtUsd(inv.amountDue)}</p>
+                      {amountInr == null ? (
+                        <p className="mt-0.5 text-[10px] text-amber-200/80">
+                          {RATE_MISSING_MESSAGE}
+                        </p>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3 tabular-nums text-white/65">{fmtDate(inv.dueDate)}</td>
                     <td className="px-4 py-3 text-right">

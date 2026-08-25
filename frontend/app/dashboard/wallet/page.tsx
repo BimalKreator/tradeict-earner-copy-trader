@@ -24,7 +24,8 @@ import {
   fmtUsd,
   formatINR,
   formatINRApprox,
-  getUsdInrRate,
+  RATE_MISSING_MESSAGE,
+  resolveUsdInrRate,
   mapPaymentStatus,
   usdToInr,
 } from "@/lib/currency";
@@ -34,10 +35,11 @@ type WalletResponse = {
   exists: boolean;
   balance: number;
   balanceUsd?: number;
-  balanceInr?: number;
+  balanceInr?: number | null;
   availableBalance?: number;
   lockedBalance?: number;
-  usdInrRate?: number;
+  usdInrRate?: number | null;
+  usdInrRateUpdatedAt?: string | null;
   pendingFees: number;
   overdueDays: number;
 };
@@ -69,7 +71,7 @@ type HistoryRow = {
   date: string;
   description: string;
   amountUsd: number;
-  inr: number;
+  inr: number | null;
   status: string;
   ledgerType?: string;
 };
@@ -141,11 +143,12 @@ function historyStatusBadge(status: string, ledgerType?: string): string {
 function mergeTransactionHistory(
   payments: PaymentHistoryRow[],
   ledger: LedgerTransactionRow[],
-  rate: number,
+  rate: number | null,
 ): HistoryRow[] {
   const paymentRows: HistoryRow[] = payments.map((tx) => {
     const usd = tx.netCredit;
-    const inr = tx.amount > 0 ? tx.amount : usdToInr(usd, rate);
+    const converted = usdToInr(usd, rate);
+    const inr = tx.amount > 0 ? tx.amount : converted;
     const label = `${tx.method} · ${tx.referenceId ? `Ref ${tx.referenceId}` : "Wallet top-up"}`;
     return {
       id: `payment-${tx.id}`,
@@ -194,6 +197,7 @@ export default function DashboardWalletPage() {
   const [ledgerTransactions, setLedgerTransactions] = useState<LedgerTransactionRow[]>([]);
   const [revenueInvoices, setRevenueInvoices] = useState<RevenueInvoiceRow[]>([]);
   const [platformRate, setPlatformRate] = useState<number | null>(null);
+  const [rateUpdatedAt, setRateUpdatedAt] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -249,7 +253,8 @@ export default function DashboardWalletPage() {
       };
 
       setWallet(w);
-      setPlatformRate(getUsdInrRate(w.usdInrRate ?? hist.usdInrRate));
+      setPlatformRate(resolveUsdInrRate(w.usdInrRate ?? hist.usdInrRate));
+      setRateUpdatedAt(w.usdInrRateUpdatedAt ?? null);
       setPaymentHistory(
         Array.isArray(hist.transactions) ? hist.transactions : [],
       );
@@ -293,7 +298,7 @@ export default function DashboardWalletPage() {
   const balanceUsd =
     wallet?.availableBalance ?? wallet?.balanceUsd ?? wallet?.balance ?? 0;
 
-  const usdInrRate = getUsdInrRate(platformRate ?? wallet?.usdInrRate);
+  const usdInrRate = resolveUsdInrRate(platformRate ?? wallet?.usdInrRate);
 
   const transactionHistory = useMemo(
     () => mergeTransactionHistory(paymentHistory, ledgerTransactions, usdInrRate),
@@ -332,7 +337,9 @@ export default function DashboardWalletPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center rounded-full border border-cyan-500/35 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-200">
-            1 USD = {usdInrRate.toLocaleString("en-IN")} INR
+            {usdInrRate != null
+              ? `1 USD = ${usdInrRate.toLocaleString("en-IN")} INR`
+              : RATE_MISSING_MESSAGE}
           </span>
         <button
           type="button"
@@ -410,11 +417,18 @@ export default function DashboardWalletPage() {
                 Exchange rate
               </p>
               <p className="mt-4 text-2xl font-semibold text-white tabular-nums">
-                1 USD = {usdInrRate.toLocaleString("en-IN")} INR
+                {usdInrRate != null
+                  ? `1 USD = ${usdInrRate.toLocaleString("en-IN")} INR`
+                  : "—"}
               </p>
               <p className="mt-3 text-sm text-white/55">
-                INR equivalents use the live platform rate from your wallet ({usdInrRate}{" "}
-                INR per USD).
+                {usdInrRate != null
+                  ? `Platform USD/INR rate set by Tradeict${
+                      rateUpdatedAt
+                        ? ` on ${new Date(rateUpdatedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`
+                        : ""
+                    }. Each invoice is charged at the rate pinned on that invoice when it was issued.`
+                  : RATE_MISSING_MESSAGE}
               </p>
             </article>
           </section>

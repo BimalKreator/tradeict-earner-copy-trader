@@ -4,7 +4,7 @@ import {
   getAllowedEmailDomains,
   getPgFeePercent,
   getPublicPlatformConfig,
-  getUsdInrRate,
+  getUsdInrRateMeta,
   setAllowedEmailDomains,
   setMaintenanceSettings,
   setPgFeePercent,
@@ -23,17 +23,19 @@ export function createSettingsController(prisma: PrismaClient) {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const [pgFeePercent, allowedEmailDomains, usdInrRate, platform] =
+      const [pgFeePercent, allowedEmailDomains, fx, platform] =
         await Promise.all([
           getPgFeePercent(prisma),
           getAllowedEmailDomains(prisma),
-          getUsdInrRate(prisma),
+          getUsdInrRateMeta(prisma),
           getPublicPlatformConfig(prisma),
         ]);
       res.json({
         pgFeePercent,
         allowedEmailDomains,
-        usdInrRate,
+        usdInrRate: fx.usdInrRate,
+        usdInrRateUpdatedAt: fx.usdInrRateUpdatedAt,
+        usdInrRateUsable: fx.usable,
         maintenanceMode: platform.maintenanceMode,
         maintenanceMessage: platform.maintenanceMessage,
       });
@@ -74,6 +76,8 @@ export function createSettingsController(prisma: PrismaClient) {
         pgFeePercent?: number;
         allowedEmailDomains?: string;
         usdInrRate?: number;
+        usdInrRateUpdatedAt?: string | null;
+        usdInrRateUsable?: boolean;
         maintenanceMode?: boolean;
         maintenanceMessage?: string | null;
       } = {
@@ -109,6 +113,9 @@ export function createSettingsController(prisma: PrismaClient) {
         }
         try {
           out.usdInrRate = await setUsdInrRate(prisma, usdInrRate);
+          const fx = await getUsdInrRateMeta(prisma);
+          out.usdInrRateUpdatedAt = fx.usdInrRateUpdatedAt;
+          out.usdInrRateUsable = fx.usable;
         } catch (err) {
           if (err instanceof Error && err.message.includes("usdInrRate")) {
             res.status(400).json({ error: err.message });

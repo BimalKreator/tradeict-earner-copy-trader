@@ -257,7 +257,7 @@ function UserFinancialCells({
   rate,
 }: {
   financials: UserFinancials;
-  rate: number;
+  rate: number | null;
 }) {
   return (
     <>
@@ -288,7 +288,7 @@ function NetworkHierarchyRow({
 }: {
   node: NetworkNode;
   defaultExpanded: boolean;
-  rate: number;
+  rate: number | null;
 }) {
   const children = node.children ?? [];
   const hasChildren = children.length > 0;
@@ -374,7 +374,7 @@ function NetworkHierarchyCard({
   defaultExpanded,
 }: {
   node: NetworkNode;
-  rate: number;
+  rate: number | null;
   defaultExpanded: boolean;
 }) {
   const children = node.children ?? [];

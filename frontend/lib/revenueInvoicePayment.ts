@@ -21,12 +21,15 @@ export function revenueInvoicePeriodLabel(inv: RevenueInvoiceRow): string {
   return formatIstMonthYear(inv.periodMonth, inv.periodYear);
 }
 
-export function revenueInvoiceCollectibleInr(inv: RevenueInvoiceRow): number {
+export function revenueInvoiceCollectibleInr(inv: RevenueInvoiceRow): number | null {
   if (inv.collectibleAmount <= 0) return 0;
   if (inv.amountInr != null && inv.commissionAmount > 0) {
     return Math.round(inv.amountInr * (inv.collectibleAmount / inv.commissionAmount));
   }
-  return Math.ceil(inv.collectibleAmount * (inv.usdInrRate ?? 83));
+  if (inv.usdInrRate != null && inv.usdInrRate > 0) {
+    return Math.ceil(inv.collectibleAmount * inv.usdInrRate);
+  }
+  return null;
 }
 
 export function isRevenueInvoicePayable(inv: RevenueInvoiceRow): boolean {

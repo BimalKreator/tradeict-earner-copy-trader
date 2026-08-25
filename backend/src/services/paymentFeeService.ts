@@ -21,13 +21,17 @@ export type FeeBreakdown = {
 };
 
 export function inrToUsd(inr: number, usdInrRate: number): number {
-  const rate = Number.isFinite(usdInrRate) && usdInrRate > 0 ? usdInrRate : 83;
-  return inr / rate;
+  if (!Number.isFinite(usdInrRate) || usdInrRate <= 0) {
+    throw new Error("usdInrRate must be a positive finite number");
+  }
+  return inr / usdInrRate;
 }
 
 export function usdToInr(usd: number, usdInrRate: number): number {
-  const rate = Number.isFinite(usdInrRate) && usdInrRate > 0 ? usdInrRate : 83;
-  return usd * rate;
+  if (!Number.isFinite(usdInrRate) || usdInrRate <= 0) {
+    throw new Error("usdInrRate must be a positive finite number");
+  }
+  return usd * usdInrRate;
 }
 
 /**

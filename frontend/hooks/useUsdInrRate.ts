@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
-import { FALLBACK_USD_INR_RATE, getUsdInrRate } from "@/lib/currency";
+import { resolveUsdInrRate } from "@/lib/currency";
 
-/** Fetches live USD→INR rate from GET /payments/pg-fee (same source as checkout). */
+/** Fetches platform USD→INR rate from GET /payments/pg-fee (null when unset/stale). */
 export function useUsdInrRate() {
-  const [rate, setRate] = useState(FALLBACK_USD_INR_RATE);
+  const [rate, setRate] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
@@ -18,11 +18,13 @@ export function useUsdInrRate() {
         headers: { Authorization: `Bearer ${token ?? ""}` },
       });
       if (res.ok) {
-        const data = (await res.json()) as { usdInrRate?: number };
-        setRate(getUsdInrRate(data.usdInrRate));
+        const data = (await res.json()) as { usdInrRate?: number | null };
+        setRate(resolveUsdInrRate(data.usdInrRate));
+      } else {
+        setRate(null);
       }
     } catch {
-      setRate(FALLBACK_USD_INR_RATE);
+      setRate(null);
     } finally {
       setLoading(false);
     }

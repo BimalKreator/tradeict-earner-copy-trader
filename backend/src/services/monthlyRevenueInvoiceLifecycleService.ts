@@ -142,7 +142,9 @@ export function revenueInvoiceCollectibleInr(row: RevenueInvoiceAmountRow): numb
   if (rate != null && rate > 0) {
     return roundInr(usdToInr(collectibleUsd, rate));
   }
-  return roundInr(usdToInr(collectibleUsd, 83));
+  throw new Error(
+    "Cannot compute collectible INR: invoice has no pinned usdInrRate/amountInr",
+  );
 }
 
 async function applyMonthlyRevenueInvoiceStatusTransition(

@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { Prisma, type PrismaClient, TransactionStatus } from "@prisma/client";
-import { getUsdInrRate } from "../services/settingsService.js";
+import { getUsdInrRateMeta } from "../services/settingsService.js";
 import { requestWalletWithdrawal } from "../services/walletWithdrawalService.js";
 
 export function createWalletController(prisma: PrismaClient) {
@@ -208,21 +208,23 @@ export function createWalletController(prisma: PrismaClient) {
           overdueDays: true,
         },
       });
-      const rate = await getUsdInrRate(prisma);
+      const fx = await getUsdInrRateMeta(prisma);
+      const rate = fx.usable ? fx.usdInrRate : null;
       const balanceUsd = wallet?.balance ?? 0;
       const lockedBalanceUsd = wallet?.lockedBalance ?? 0;
       res.json({
         exists: wallet !== null,
         balance: balanceUsd,
         balanceUsd,
-        balanceInr: balanceUsd * rate,
+        balanceInr: rate != null ? balanceUsd * rate : null,
         lockedBalance: lockedBalanceUsd,
         lockedBalanceUsd,
-        lockedBalanceInr: lockedBalanceUsd * rate,
+        lockedBalanceInr: rate != null ? lockedBalanceUsd * rate : null,
         availableBalance: balanceUsd,
         pendingFees: wallet?.pendingFees ?? 0,
         overdueDays: wallet?.overdueDays ?? 0,
         usdInrRate: rate,
+        usdInrRateUpdatedAt: fx.usdInrRateUpdatedAt,
       });
     } catch (err) {
       next(err);

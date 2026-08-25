@@ -3,7 +3,8 @@
 import { Loader2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { fmtUsd, formatINR } from "@/lib/currency";
+import { fmtUsd, formatINR, RATE_MISSING_MESSAGE } from "@/lib/currency";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
 
 export type WithdrawalRequestRow = {
   id: string;
@@ -37,6 +38,7 @@ export function ProcessWithdrawalModal({
   onSuccess,
   onError,
 }: ProcessWithdrawalModalProps) {
+  const { rate: usdInrRate } = useUsdInrRate();
   const [mounted, setMounted] = useState(false);
   const [decision, setDecision] = useState<ProcessDecision>("COMPLETED");
   const [transactionId, setTransactionId] = useState("");
@@ -148,7 +150,11 @@ export function ProcessWithdrawalModal({
               Process withdrawal
             </h2>
             <p className="mt-1 text-sm text-white/55">
-              {userLabel} · {fmtUsd(request.amount)} ({formatINR(request.amount)})
+              {userLabel} · {fmtUsd(request.amount)} (
+              {usdInrRate != null
+                ? formatINR(request.amount, usdInrRate)
+                : RATE_MISSING_MESSAGE}
+              )
             </p>
           </div>
           <button

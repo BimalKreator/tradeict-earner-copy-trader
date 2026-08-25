@@ -1,19 +1,42 @@
-/** Platform default when no server rate is available — matches backend SystemSettings. */
-export const FALLBACK_USD_INR_RATE = 83;
+/**
+ * USD ↔ INR display helpers.
+ * Never invent a rate — without a positive server/invoice rate, INR is null / "—".
+ */
 
-export function getUsdInrRate(apiRate?: number | null): number {
+export const RATE_MISSING_MESSAGE =
+  "Conversion rate not set — contact support";
+
+/** Returns a positive rate or null — never a guessed fallback. */
+export function resolveUsdInrRate(
+  apiRate?: number | null,
+): number | null {
   if (typeof apiRate === "number" && Number.isFinite(apiRate) && apiRate > 0) {
     return apiRate;
   }
-  return FALLBACK_USD_INR_RATE;
+  return null;
 }
 
-export function usdToInr(usd: number, rate?: number | null): number {
-  return usd * getUsdInrRate(rate);
+/** @deprecated Prefer {@link resolveUsdInrRate}; returns null when missing. */
+export function getUsdInrRate(apiRate?: number | null): number | null {
+  return resolveUsdInrRate(apiRate);
 }
 
-export function inrToUsdDisplay(inr: number, rate?: number | null): number {
-  return inr / getUsdInrRate(rate);
+export function usdToInr(
+  usd: number,
+  rate?: number | null,
+): number | null {
+  const r = resolveUsdInrRate(rate);
+  if (r == null || !Number.isFinite(usd)) return null;
+  return usd * r;
+}
+
+export function inrToUsdDisplay(
+  inr: number,
+  rate?: number | null,
+): number | null {
+  const r = resolveUsdInrRate(rate);
+  if (r == null || !Number.isFinite(inr)) return null;
+  return inr / r;
 }
 
 const usdFmt = new Intl.NumberFormat("en-US", {
@@ -116,12 +139,13 @@ export function fmtWalletBalance(n: number | null | undefined): string {
 /** @deprecated Use {@link fmtWalletBalance}. */
 export const fmtUsdBalance = fmtWalletBalance;
 
-export function fmtRateLabel(rate: number): string {
-  const r = getUsdInrRate(rate);
+export function fmtRateLabel(rate: number | null | undefined): string {
+  const r = resolveUsdInrRate(rate);
+  if (r == null) return "";
   return `(at ₹${r.toLocaleString("en-IN")}/$)`;
 }
 
-/** Converts USD to INR at the given (or platform) rate and formats with sign. */
+/** Converts USD to INR at the given rate and formats with sign. No rate → "—". */
 export function formatINR(
   usdValue: number | null | undefined,
   rate?: number | null,
@@ -129,7 +153,9 @@ export function formatINR(
   if (usdValue === null || usdValue === undefined || !Number.isFinite(usdValue)) {
     return "—";
   }
-  return inrSignedFmt.format(usdValue * getUsdInrRate(rate));
+  const r = resolveUsdInrRate(rate);
+  if (r == null) return "—";
+  return inrSignedFmt.format(usdValue * r);
 }
 
 /** INR equivalent with approximate prefix and pinned rate label. */
@@ -140,7 +166,8 @@ export function formatINRApprox(
   if (usdValue === null || usdValue === undefined || !Number.isFinite(usdValue)) {
     return "—";
   }
-  const r = getUsdInrRate(rate);
+  const r = resolveUsdInrRate(rate);
+  if (r == null) return RATE_MISSING_MESSAGE;
   const inr = inrSignedFmt.format(usdValue * r);
   return `≈ ${inr} ${fmtRateLabel(r)}`;
 }

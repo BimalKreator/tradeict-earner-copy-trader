@@ -9,7 +9,8 @@ import {
   ProcessWithdrawalModal,
   type WithdrawalRequestRow,
 } from "@/components/admin/wallet/ProcessWithdrawalModal";
-import { fmtUsd, formatINR } from "@/lib/currency";
+import { fmtUsd, formatINR, RATE_MISSING_MESSAGE } from "@/lib/currency";
+import { useUsdInrRate } from "@/hooks/useUsdInrRate";
 import {
   CircleDollarSign,
   Loader2,
@@ -56,6 +57,7 @@ function withdrawalStatusBadge(status: string): string {
 }
 
 export default function AdminWalletPage() {
+  const { rate: usdInrRate } = useUsdInrRate();
   const apiBase = useMemo(() => resolveApiBase(), []);
   const token =
     typeof window !== "undefined" ? localStorage.getItem("token") : null;
@@ -217,7 +219,10 @@ export default function AdminWalletPage() {
                 {fmtUsd(totalUserFunds)}
               </p>
               <p className="mt-1 text-sm tabular-nums text-white/45">
-                {formatINR(totalUserFunds)}
+                {formatINR(totalUserFunds, usdInrRate)}
+                {usdInrRate == null ? (
+                  <span className="ml-1 text-amber-200/80">· {RATE_MISSING_MESSAGE}</span>
+                ) : null}
               </p>
               <p className="mt-2 text-xs text-white/40">
                 Available {fmtUsd(summary?.totalWalletBalance ?? 0)} · Locked{" "}
@@ -238,7 +243,7 @@ export default function AdminWalletPage() {
                 {fmtUsd(summary?.totalPendingWithdrawals ?? 0)}
               </p>
               <p className="mt-1 text-sm tabular-nums text-white/45">
-                {formatINR(summary?.totalPendingWithdrawals ?? 0)}
+                {formatINR(summary?.totalPendingWithdrawals ?? 0, usdInrRate)}
               </p>
               <p className="mt-2 text-xs text-white/40">
                 {summary?.pendingWithdrawalCount ?? 0} open request
@@ -343,7 +348,7 @@ export default function AdminWalletPage() {
                             {fmtUsd(row.amount)}
                           </p>
                           <p className="mt-0.5 text-xs tabular-nums text-white/45">
-                            {formatINR(row.amount)}
+                            {formatINR(row.amount, usdInrRate)}
                           </p>
                         </td>
                         <td className="max-w-xs px-5 py-4 text-xs leading-relaxed text-white/55 sm:px-6">
