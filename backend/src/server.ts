@@ -136,6 +136,17 @@ void (async () => {
   }
 })();
 
+void (async () => {
+  try {
+    const n = await prisma.user.count({ where: { isOtpBypassed: true } });
+    if (n > 0) {
+      console.warn(`[BOOT] WARNING: ${n} account(s) have isOtpBypassed=true`);
+    }
+  } catch (err) {
+    console.error("[BOOT] isOtpBypassed count failed:", err);
+  }
+})();
+
 initBillingCronJobs(prisma);
 initDelayedInvoiceCronJobs(prisma);
 initAffiliateCommissionCronJobs(prisma);

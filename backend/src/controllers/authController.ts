@@ -26,12 +26,6 @@ import { normalizeAffiliateRoleEnum } from "../utils/roleNormalize.js";
 const OTP_TTL_MS = 10 * 60 * 1000;
 const BCRYPT_ROUNDS = 12;
 
-/** Razorpay verification team — password-only login, no OTP email. */
-const RAZORPAY_TEST_EMAIL = "test@tradeictearner.online";
-const RAZORPAY_TEST_PASSWORD = "RazorpayTest2026#";
-/** Static OTP accepted for `User.isOtpBypassed` review accounts (verify-otp fallback). */
-const OTP_BYPASS_MASTER_CODE = "123456";
-
 function generateSixDigitOtp(): string {
   return String(crypto.randomInt(100_000, 1_000_000));
 }
@@ -64,12 +58,6 @@ function issueAuthSession(
   return token;
 }
 
-function isRazorpayBypassLogin(email: string, password: string): boolean {
-  return (
-    email === RAZORPAY_TEST_EMAIL && password === RAZORPAY_TEST_PASSWORD
-  );
-}
-
 async function findUserByLoginIdentifier(
   prisma: PrismaClient,
   identifier: string,
@@ -94,32 +82,11 @@ async function findUserByLoginIdentifier(
   });
 }
 
-async function ensureRazorpayTestUser(prisma: PrismaClient) {
-  const existing = await prisma.user.findUnique({
-    where: { email: RAZORPAY_TEST_EMAIL },
-  });
-  if (existing) return existing;
-
-  const passwordHash = await bcrypt.hash(RAZORPAY_TEST_PASSWORD, BCRYPT_ROUNDS);
-  return prisma.user.create({
-    data: {
-      email: RAZORPAY_TEST_EMAIL,
-      password: passwordHash,
-      name: "Razorpay Verification",
-      mobile: "8840737660",
-      role: Role.USER,
-    },
-  });
-}
-
 export function createAuthController(prisma: PrismaClient) {
   async function rejectDisallowedEmail(
     res: Response,
     email: string,
   ): Promise<boolean> {
-    if (email.trim().toLowerCase() === RAZORPAY_TEST_EMAIL) {
-      return false;
-    }
     const allowed = await isEmailDomainAllowed(prisma, email);
     if (!allowed) {
       res.status(403).json({ error: EMAIL_DOMAIN_BLOCKED_MESSAGE });
@@ -282,7 +249,7 @@ export function createAuthController(prisma: PrismaClient) {
   }
 
   /**
-   * Step 1: verify password. Step 2: OTP sent via email (unless Razorpay test bypass).
+   * Step 1: verify password. Step 2: OTP sent via email (unless isOtpBypassed).
    */
   async function login(
     req: Request,
@@ -316,23 +283,6 @@ export function createAuthController(prisma: PrismaClient) {
       }
 
       const identifier = identifierRaw.trim();
-      const emailForBypass = identifier.includes("@")
-        ? identifier.toLowerCase()
-        : "";
-
-      if (
-        emailForBypass &&
-        isRazorpayBypassLogin(emailForBypass, password)
-      ) {
-        const user = await ensureRazorpayTestUser(prisma);
-        const token = issueAuthSession(res, user, secret);
-        res.status(200).json({
-          success: true,
-          token,
-          user: sanitizeUser(user),
-        });
-        return;
-      }
 
       const user = await findUserByLoginIdentifier(prisma, identifier);
       if (!user) {
@@ -413,14 +363,12 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
-      const bypassOtp =
-        user.isOtpBypassed && otpCode === OTP_BYPASS_MASTER_CODE;
       const storedOtpValid =
         Boolean(user.otpCode && user.otpExpiry) &&
         user.otpCode === otpCode &&
         user.otpExpiry! > new Date();
 
-      if (!bypassOtp && !storedOtpValid) {
+      if (!storedOtpValid) {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }
