@@ -37,22 +37,6 @@ export const ACTIVE_PAYOUT_EXISTS_MSG =
 export const PAYOUT_STATUS_CONFLICT_MSG =
   "Payout request is no longer in the expected status";
 
-const VALID_TRANSITIONS: Record<
-  PayoutRequestStatus,
-  ReadonlySet<PayoutRequestStatus>
-> = {
-  [PayoutRequestStatus.PENDING]: new Set([
-    PayoutRequestStatus.APPROVED,
-    PayoutRequestStatus.REJECTED,
-  ]),
-  [PayoutRequestStatus.APPROVED]: new Set([
-    PayoutRequestStatus.COMPLETED,
-    PayoutRequestStatus.REJECTED,
-  ]),
-  [PayoutRequestStatus.COMPLETED]: new Set(),
-  [PayoutRequestStatus.REJECTED]: new Set(),
-};
-
 export class PayoutTransitionError extends Error {
   readonly statusCode: number;
 
@@ -146,17 +130,23 @@ export type PayoutTransitionOpts = {
   reason?: string;
 };
 
-function assertValidPayoutTransition(
-  from: PayoutRequestStatus,
-  to: PayoutRequestStatus,
-): void {
-  const allowed = VALID_TRANSITIONS[from];
-  if (!allowed.has(to)) {
-    throw new PayoutTransitionError(
-      `Invalid payout status transition: ${from} → ${to}. ` +
-        `Allowed from ${from}: ${[...allowed].join(", ") || "none"}.`,
-    );
+function casFromStatusForTransition(
+  toStatus: PayoutRequestStatus,
+  snapshotStatus: PayoutRequestStatus,
+): PayoutRequestStatus {
+  if (toStatus === PayoutRequestStatus.APPROVED) {
+    return PayoutRequestStatus.PENDING;
   }
+  if (toStatus === PayoutRequestStatus.COMPLETED) {
+    return PayoutRequestStatus.APPROVED;
+  }
+  if (
+    snapshotStatus === PayoutRequestStatus.PENDING ||
+    snapshotStatus === PayoutRequestStatus.APPROVED
+  ) {
+    return snapshotStatus;
+  }
+  return PayoutRequestStatus.PENDING;
 }
 
 function payoutStatusPatch(
@@ -236,8 +226,7 @@ export async function transitionPayoutRequest(
     throw new PayoutNotFoundError(payoutRequestId);
   }
 
-  assertValidPayoutTransition(snapshot.status, toStatus);
-  const fromStatus = snapshot.status;
+  const fromStatus = casFromStatusForTransition(toStatus, snapshot.status);
   const now = new Date();
 
   const result = await prisma.$transaction(async (tx) => {
