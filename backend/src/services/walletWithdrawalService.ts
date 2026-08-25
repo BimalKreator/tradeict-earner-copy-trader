@@ -13,6 +13,97 @@ import {
   sendTemplateEmailAsync,
   resolveEmailRecipientName,
 } from "./emailService.js";
+import { roundInr, usdToInr } from "./paymentFeeService.js";
+import { getUsdInrRateOrNull } from "./settingsService.js";
+
+type WalletTx = Omit<
+  PrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$extends"
+>;
+
+function formatInrHoldAmount(inr: number): string {
+  return `₹${inr.toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/** Error text only — never used to authorize a balance mutation. */
+async function insufficientWithdrawalMessage(
+  tx: WalletTx,
+  prisma: PrismaClient,
+  userId: string,
+  amount: number,
+): Promise<string> {
+  const wallet = await tx.wallet.findUnique({
+    where: { userId },
+    select: { balance: true, pendingFees: true },
+  });
+  if (!wallet) {
+    return "Wallet not found. Complete a deposit before withdrawing.";
+  }
+  if (wallet.balance < amount) {
+    return "Insufficient wallet balance for this withdrawal";
+  }
+  const pendingFees = wallet.pendingFees ?? 0;
+  if (wallet.balance - pendingFees < amount) {
+    const rate = await getUsdInrRateOrNull(prisma);
+    const pendingInr =
+      rate != null ? roundInr(usdToInr(pendingFees, rate)) : pendingFees;
+    return `${formatInrHoldAmount(pendingInr)} is held against unpaid platform fees`;
+  }
+  return "Insufficient wallet balance for this withdrawal";
+}
+
+/** Atomically move funds from balance → lockedBalance when withdrawable. */
+async function lockWalletFundsForWithdrawal(
+  tx: WalletTx,
+  userId: string,
+  amount: number,
+): Promise<{ ok: true; walletId: string } | { ok: false }> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    UPDATE "Wallet"
+    SET balance = balance - ${amount},
+        "lockedBalance" = "lockedBalance" + ${amount}
+    WHERE "userId" = ${userId}
+      AND balance - COALESCE("pendingFees", 0) >= ${amount}
+    RETURNING id
+  `;
+  if (rows.length === 0) {
+    return { ok: false };
+  }
+  return { ok: true, walletId: rows[0]!.id };
+}
+
+/** Atomically debit wallet balance when funds are available (honours pendingFees). */
+async function debitWalletBalance(
+  tx: WalletTx,
+  userId: string,
+  amount: number,
+): Promise<
+  | { ok: true; walletId: string; balance: number; lockedBalance: number }
+  | { ok: false }
+> {
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; balance: number; lockedBalance: number }>
+  >`
+    UPDATE "Wallet"
+    SET balance = balance - ${amount}
+    WHERE "userId" = ${userId}
+      AND balance - COALESCE("pendingFees", 0) >= ${amount}
+    RETURNING id, balance, "lockedBalance"
+  `;
+  if (rows.length === 0) {
+    return { ok: false };
+  }
+  const row = rows[0]!;
+  return {
+    ok: true,
+    walletId: row.id,
+    balance: row.balance,
+    lockedBalance: row.lockedBalance,
+  };
+}
 
 const WITHDRAWAL_CREDIT_MESSAGE =
   "Your withdrawal request has been submitted successfully and will be credited to your saved bank account within 24 to 48 hours.";
@@ -144,20 +235,18 @@ export async function requestWalletWithdrawal(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({ where: { userId } });
-      if (!wallet) {
+      const locked = await lockWalletFundsForWithdrawal(tx, userId, amount);
+      if (!locked.ok) {
+        const message = await insufficientWithdrawalMessage(
+          tx,
+          prisma,
+          userId,
+          amount,
+        );
         return {
           ok: false as const,
           status: 400,
-          message: "Wallet not found. Complete a deposit before withdrawing.",
-        };
-      }
-
-      if (wallet.balance < amount) {
-        return {
-          ok: false as const,
-          status: 400,
-          message: "Insufficient wallet balance for this withdrawal",
+          message,
         };
       }
 
@@ -172,7 +261,7 @@ export async function requestWalletWithdrawal(
 
       const withdrawal = await tx.walletWithdrawalRequest.create({
         data: {
-          walletId: wallet.id,
+          walletId: locked.walletId,
           userId,
           amount,
           status: WalletWithdrawalStatus.PENDING,
@@ -180,14 +269,6 @@ export async function requestWalletWithdrawal(
           bankAccountNumber: user.bankAccountNumber!.trim(),
           bankIfsc: user.bankIfsc!.trim(),
           ledgerTransactionId: ledgerTransaction.id,
-        },
-      });
-
-      await tx.wallet.update({
-        where: { id: wallet.id },
-        data: {
-          balance: { decrement: amount },
-          lockedBalance: { increment: amount },
         },
       });
 
@@ -324,34 +405,6 @@ export async function processWalletWithdrawalRequest(
         };
       }
 
-      if (request.status !== WalletWithdrawalStatus.PENDING) {
-        return {
-          ok: false as const,
-          status: 400,
-          message: "Withdrawal request is not pending",
-        };
-      }
-
-      const wallet = await tx.wallet.findUnique({
-        where: { id: request.walletId },
-      });
-
-      if (!wallet) {
-        return {
-          ok: false as const,
-          status: 404,
-          message: "Wallet not found",
-        };
-      }
-
-      if (wallet.lockedBalance < request.amount) {
-        return {
-          ok: false as const,
-          status: 400,
-          message: "Wallet locked balance is insufficient for this withdrawal",
-        };
-      }
-
       const nextStatus =
         action === "COMPLETED"
           ? WalletWithdrawalStatus.COMPLETED
@@ -362,28 +415,50 @@ export async function processWalletWithdrawalRequest(
           ? TransactionStatus.COMPLETED
           : TransactionStatus.REJECTED;
 
-      if (action === "COMPLETED") {
-        await tx.wallet.update({
-          where: { id: wallet.id },
-          data: { lockedBalance: { decrement: request.amount } },
-        });
-      } else {
-        await tx.wallet.update({
-          where: { id: wallet.id },
-          data: {
-            lockedBalance: { decrement: request.amount },
-            balance: { increment: request.amount },
-          },
-        });
+      const walletRows =
+        action === "COMPLETED"
+          ? await tx.$queryRaw<Array<{ id: string }>>`
+              UPDATE "Wallet"
+              SET "lockedBalance" = "lockedBalance" - ${request.amount}
+              WHERE id = ${request.walletId}
+                AND "lockedBalance" >= ${request.amount}
+              RETURNING id
+            `
+          : await tx.$queryRaw<Array<{ id: string }>>`
+              UPDATE "Wallet"
+              SET "lockedBalance" = "lockedBalance" - ${request.amount},
+                  balance = balance + ${request.amount}
+              WHERE id = ${request.walletId}
+                AND "lockedBalance" >= ${request.amount}
+              RETURNING id
+            `;
+
+      if (walletRows.length === 0) {
+        return {
+          ok: false as const,
+          status: 400,
+          message: "Wallet locked balance is insufficient for this withdrawal",
+        };
       }
 
-      const withdrawal = await tx.walletWithdrawalRequest.update({
-        where: { id: request.id },
+      const statusUpdated = await tx.walletWithdrawalRequest.updateMany({
+        where: {
+          id: request.id,
+          status: WalletWithdrawalStatus.PENDING,
+        },
         data: {
           status: nextStatus,
           transactionId: bankTransactionId || null,
           adminRemarks: adminRemarks || null,
         },
+      });
+
+      if (statusUpdated.count === 0) {
+        throw new Error("Withdrawal request is not pending");
+      }
+
+      const withdrawal = await tx.walletWithdrawalRequest.findUniqueOrThrow({
+        where: { id: request.id },
       });
 
       if (request.ledgerTransactionId) {
@@ -408,6 +483,12 @@ export async function processWalletWithdrawalRequest(
       },
     };
   } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message === "Withdrawal request is not pending"
+    ) {
+      return { ok: false, status: 400, message: err.message };
+    }
     if (err instanceof Prisma.PrismaClientKnownRequestError) {
       return { ok: false, status: 400, message: err.message };
     }
@@ -459,32 +540,58 @@ export async function adjustUserWalletBalance(
 
   try {
     const outcome = await prisma.$transaction(async (tx) => {
-      const existing = await tx.wallet.findUnique({ where: { userId } });
+      let updatedWallet: { balance: number; lockedBalance: number };
 
       if (typeRaw === "REMOVE") {
-        if (!existing || existing.balance < amount) {
+        const debited = await debitWalletBalance(tx, userId, amount);
+        if (!debited.ok) {
+          const wallet = await tx.wallet.findUnique({
+            where: { userId },
+            select: { balance: true, pendingFees: true },
+          });
+          if (!wallet) {
+            return {
+              ok: false as const,
+              status: 400,
+              message: "Insufficient wallet balance for this adjustment",
+            };
+          }
+          const pendingFees = wallet.pendingFees ?? 0;
+          if (wallet.balance >= amount && wallet.balance - pendingFees < amount) {
+            const rate = await getUsdInrRateOrNull(prisma);
+            const pendingInr =
+              rate != null ? roundInr(usdToInr(pendingFees, rate)) : pendingFees;
+            return {
+              ok: false as const,
+              status: 400,
+              message: `${formatInrHoldAmount(pendingInr)} is held against unpaid platform fees`,
+            };
+          }
           return {
             ok: false as const,
             status: 400,
             message: "Insufficient wallet balance for this adjustment",
           };
         }
+        updatedWallet = {
+          balance: debited.balance,
+          lockedBalance: debited.lockedBalance,
+        };
+      } else {
+        const wallet = await tx.wallet.upsert({
+          where: { userId },
+          create: {
+            userId,
+            balance: amount,
+            lockedBalance: 0,
+            pendingFees: 0,
+            overdueDays: 0,
+          },
+          update: { balance: { increment: amount } },
+          select: { balance: true, lockedBalance: true },
+        });
+        updatedWallet = wallet;
       }
-
-      const wallet = await tx.wallet.upsert({
-        where: { userId },
-        create: {
-          userId,
-          balance: typeRaw === "ADD" ? amount : 0,
-          lockedBalance: 0,
-          pendingFees: 0,
-          overdueDays: 0,
-        },
-        update:
-          typeRaw === "ADD"
-            ? { balance: { increment: amount } }
-            : { balance: { decrement: amount } },
-      });
 
       const ledgerTransaction = await tx.transaction.create({
         data: {
@@ -494,11 +601,6 @@ export async function adjustUserWalletBalance(
           status: TransactionStatus.APPROVED,
           note: `${typeRaw}: ${reason}`,
         },
-      });
-
-      const updatedWallet = await tx.wallet.findUniqueOrThrow({
-        where: { id: wallet.id },
-        select: { balance: true, lockedBalance: true },
       });
 
       return {

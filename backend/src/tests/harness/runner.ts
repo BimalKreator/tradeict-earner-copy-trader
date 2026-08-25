@@ -7,12 +7,14 @@ import {
   verifyNoTestRowLeaks,
 } from "./fixtures.js";
 import { p12ReversalScenario } from "./scenarios/p12-reversal.js";
+import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
 import { schemaDriftScenario } from "./scenarios/schema-drift.js";
 import type { HarnessScenario, ScenarioResult } from "./types.js";
 
 const ALL_SCENARIOS: HarnessScenario[] = [
   schemaDriftScenario,
   p12ReversalScenario,
+  p12WalletRaceScenario,
 ];
 
 function parseOnlyArg(argv: string[]): string | null {

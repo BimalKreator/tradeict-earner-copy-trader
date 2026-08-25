@@ -132,6 +132,15 @@ export class TestRegistry {
       for (const userId of this.created.userIds) {
         assertNotProtectedUserId(userId);
       }
+      await prisma.walletWithdrawalRequest.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.transaction.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.wallet.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
       await prisma.user.deleteMany({
         where: { id: { in: [...this.created.userIds] } },
       });
