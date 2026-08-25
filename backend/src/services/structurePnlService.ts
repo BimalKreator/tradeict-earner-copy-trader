@@ -541,18 +541,52 @@ function evaluateStructureAttribution(
   return { status: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE, note };
 }
 
+/**
+ * Eligibility must NOT read only StructurePnl — that table is created by
+ * recomputeStructurePnlForUser, so a brand-new customer would never enter the
+ * set (chicken-and-egg). Union existing rows with active bot-linked subs and
+ * exchange accounts linked to a bot slave.
+ */
 export async function listEligibleStructurePnlUserIds(
   prisma: PrismaClient,
 ): Promise<string[]> {
-  const rows = await prisma.structurePnl.findMany({
-    where: {
-      status: "closed",
-      closedAt: { not: null },
-    },
-    select: { userId: true },
-    distinct: ["userId"],
-  });
-  return rows.map((r) => r.userId);
+  const [withRows, subs, accounts] = await Promise.all([
+    prisma.structurePnl.findMany({
+      where: {
+        status: "closed",
+        closedAt: { not: null },
+      },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    prisma.userStrategySubscription.findMany({
+      where: {
+        isActive: true,
+        botSlaveId: { not: null },
+      },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    // ExchangeAccount has no botSlaveId; use accounts linked to a bot-linked sub.
+    prisma.exchangeAccount.findMany({
+      where: {
+        subscriptions: { some: { botSlaveId: { not: null } } },
+      },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+  ]);
+
+  const withRowsSet = new Set(withRows.map((r) => r.userId));
+  const subsSet = new Set(subs.map((r) => r.userId));
+  const accountsSet = new Set(accounts.map((r) => r.userId));
+  const eligible = new Set([...withRowsSet, ...subsSet, ...accountsSet]);
+
+  console.log(
+    `[StructurePnl] eligible=${eligible.size} (withRows=${withRowsSet.size} subs=${subsSet.size} accounts=${accountsSet.size})`,
+  );
+
+  return [...eligible];
 }
 
 async function loadBillingLedgerRows(
@@ -877,10 +911,11 @@ export async function recomputeStructurePnlForUsers(
   prisma: PrismaClient,
   opts?: { userId?: string },
 ): Promise<Record<string, StructurePnlUserResult>> {
-  let userIds = await listEligibleStructurePnlUserIds(prisma);
-  if (opts?.userId) {
-    userIds = userIds.filter((id) => id === opts.userId);
-  }
+  // Admin bootstrap: do not require the user to already be on the eligible list
+  // (they may have no StructurePnl rows yet).
+  const userIds = opts?.userId
+    ? [opts.userId]
+    : await listEligibleStructurePnlUserIds(prisma);
 
   const results: Record<string, StructurePnlUserResult> = {};
   for (const userId of userIds) {

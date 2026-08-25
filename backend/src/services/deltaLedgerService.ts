@@ -401,38 +401,65 @@ type EligibleLedgerAccount = {
 };
 
 /**
- * Eligible = users with an active bot-strategy subscription.
- * Sync target = every ExchangeAccount for those users that has credentials
- * (not just the first / subscription-linked account).
- */
-/**
- * Ledger sync eligibility: any user with structure P&L rows (open or closed).
- * Ingest must not stop on pause — missing ledger rows are permanent data loss.
+ * Eligibility must NOT read only StructurePnl — that table is created by the
+ * recompute job, so a brand-new customer would never get a ledger sync
+ * (chicken-and-egg). Union existing rows (any status — looser than StructurePnl
+ * eligibility on purpose) with active bot-linked subs and exchange accounts
+ * linked to a bot slave. Ingest must not stop on pause — missing ledger rows
+ * are permanent data loss.
  */
 async function listEligibleDeltaLedgerUserIds(
   prisma: PrismaClient,
 ): Promise<string[]> {
-  const rows = await prisma.structurePnl.findMany({
-    select: { userId: true },
-    distinct: ["userId"],
-  });
-  return rows.map((r) => r.userId);
+  const [withRows, subs, accounts] = await Promise.all([
+    prisma.structurePnl.findMany({
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    prisma.userStrategySubscription.findMany({
+      where: {
+        isActive: true,
+        botSlaveId: { not: null },
+      },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    // ExchangeAccount has no botSlaveId; use accounts linked to a bot-linked sub.
+    prisma.exchangeAccount.findMany({
+      where: {
+        subscriptions: { some: { botSlaveId: { not: null } } },
+      },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+  ]);
+
+  const withRowsSet = new Set(withRows.map((r) => r.userId));
+  const subsSet = new Set(subs.map((r) => r.userId));
+  const accountsSet = new Set(accounts.map((r) => r.userId));
+  const eligible = new Set([...withRowsSet, ...subsSet, ...accountsSet]);
+
+  console.log(
+    `[DeltaLedger] eligible=${eligible.size} (withRows=${withRowsSet.size} subs=${subsSet.size} accounts=${accountsSet.size})`,
+  );
+
+  return [...eligible];
 }
 
-async function listEligibleDeltaLedgerAccounts(
+async function listDeltaLedgerAccountsForUserIds(
   prisma: PrismaClient,
+  userIds: string[],
 ): Promise<EligibleLedgerAccount[]> {
-  const eligibleUserIds = await listEligibleDeltaLedgerUserIds(prisma);
-  if (eligibleUserIds.length === 0) return [];
+  if (userIds.length === 0) return [];
 
   const users = await prisma.user.findMany({
-    where: { id: { in: eligibleUserIds } },
+    where: { id: { in: userIds } },
     select: { id: true, email: true },
   });
   const emailByUser = new Map(users.map((u) => [u.id, u.email ?? null] as const));
 
   const accounts = await prisma.exchangeAccount.findMany({
-    where: { userId: { in: eligibleUserIds } },
+    where: { userId: { in: userIds } },
     select: {
       id: true,
       userId: true,
@@ -444,16 +471,14 @@ async function listEligibleDeltaLedgerAccounts(
   });
 
   const result: EligibleLedgerAccount[] = [];
-  const usersWithCreds = new Set<string>();
   const missingCredsByUser = new Map<string, string>();
 
-  for (const userId of eligibleUserIds) {
+  for (const userId of userIds) {
     missingCredsByUser.set(userId, emailByUser.get(userId) ?? "(no email)");
   }
 
   for (const account of accounts) {
     if (!account.apiKey?.trim() || !account.apiSecret?.trim()) continue;
-    usersWithCreds.add(account.userId);
     missingCredsByUser.delete(account.userId);
     result.push({
       userId: account.userId,
@@ -476,8 +501,18 @@ async function listEligibleDeltaLedgerAccounts(
     );
   }
 
-  void usersWithCreds;
   return result;
+}
+
+/**
+ * Sync target = every ExchangeAccount for eligible users that has credentials
+ * (not just the first / subscription-linked account).
+ */
+async function listEligibleDeltaLedgerAccounts(
+  prisma: PrismaClient,
+): Promise<EligibleLedgerAccount[]> {
+  const eligibleUserIds = await listEligibleDeltaLedgerUserIds(prisma);
+  return listDeltaLedgerAccountsForUserIds(prisma, eligibleUserIds);
 }
 
 function mergeIntoCycleSummary(
@@ -587,10 +622,10 @@ export async function runDeltaLedgerSyncForUsers(
   prisma: PrismaClient,
   opts?: { userId?: string },
 ): Promise<Record<string, IngestDeltaLedgerResult>> {
-  let accounts = await listEligibleDeltaLedgerAccounts(prisma);
-  if (opts?.userId) {
-    accounts = accounts.filter((a) => a.userId === opts.userId);
-  }
+  // Admin bootstrap: sync this user even if they are not yet on the eligible list.
+  const accounts = opts?.userId
+    ? await listDeltaLedgerAccountsForUserIds(prisma, [opts.userId])
+    : await listEligibleDeltaLedgerAccounts(prisma);
 
   const userIds = new Set(accounts.map((a) => a.userId));
   const summary: DeltaLedgerCycleSummary = {
