@@ -17,6 +17,11 @@ import {
 } from "../fixtures.js";
 import type { HarnessScenario, ScenarioContext } from "../types.js";
 
+/**
+ * approve+reject from PENDING can both succeed (APPROVED→REJECTED is a valid
+ * admin path). The money-safety race is complete vs reject on APPROVED —
+ * those UPDATE predicates are mutually exclusive.
+ */
 export const p12PayoutLifecycleScenario: HarnessScenario = {
   name: "p12-payout-lifecycle",
   async run(ctx) {
@@ -78,8 +83,20 @@ export const p12PayoutLifecycleScenario: HarnessScenario = {
       "second PENDING payout for the same user is refused",
     );
 
-    const [approveResult, rejectResult] = await Promise.all([
-      approvePartnerPayout(prisma, claim.payoutRequestId, admin.id),
+    const approved = await approvePartnerPayout(
+      prisma,
+      claim.payoutRequestId,
+      admin.id,
+    );
+    assert.assert(approved.ok === true, "sequential approve succeeds");
+
+    const [completeResult, rejectResult] = await Promise.all([
+      completePartnerPayout(
+        prisma,
+        claim.payoutRequestId,
+        admin.id,
+        `${prefix}UTR-RACE`,
+      ),
       rejectPartnerPayout(
         prisma,
         claim.payoutRequestId,
@@ -88,10 +105,14 @@ export const p12PayoutLifecycleScenario: HarnessScenario = {
       ),
     ]);
 
-    const successes = [approveResult, rejectResult].filter((row) => row.ok);
-    const loser = approveResult.ok ? rejectResult : approveResult;
-    assert.equal(successes.length, 1, "exactly one of approve/reject succeeds");
-    assert.assert(loser.ok === false, "exactly one of approve/reject fails");
+    const successes = [completeResult, rejectResult].filter((row) => row.ok);
+    const loser = completeResult.ok ? rejectResult : completeResult;
+    assert.equal(
+      successes.length,
+      1,
+      "exactly one of complete/reject succeeds",
+    );
+    assert.assert(loser.ok === false, "exactly one of complete/reject fails");
     if (!loser.ok) {
       assert.equal(loser.status, 409, "losing transition returns 409");
       assert.equal(
@@ -111,25 +132,24 @@ export const p12PayoutLifecycleScenario: HarnessScenario = {
         status: true,
         payoutRequestId: true,
         payoutClaimToken: true,
-        withdrawnAt: true,
       },
     });
 
-    if (approveResult.ok) {
+    if (completeResult.ok) {
       assert.equal(
         payout.status,
-        PayoutRequestStatus.APPROVED,
-        "approve-win final payout status",
+        PayoutRequestStatus.COMPLETED,
+        "complete-win final payout status",
       );
       assert.equal(
         ledger.status,
         CommissionLedgerStatus.WITHDRAWN,
-        "approve-win ledger remains WITHDRAWN",
+        "complete-win ledger remains WITHDRAWN",
       );
       assert.equal(
         ledger.payoutRequestId,
         claim.payoutRequestId,
-        "approve-win ledger stays linked",
+        "complete-win ledger stays linked",
       );
     } else {
       assert.equal(
@@ -162,22 +182,21 @@ export const p12PayoutLifecycleScenario: HarnessScenario = {
         throw new Error("reclaim failed unexpectedly");
       }
       fixtures.trackPayoutFromClaim(reclaim.payoutRequestId);
-      const approved = await approvePartnerPayout(
+      const reapproved = await approvePartnerPayout(
         prisma,
         reclaim.payoutRequestId,
         admin.id,
       );
-      assert.assert(approved.ok === true, "sequential approve after reclaim");
+      assert.assert(reapproved.ok === true, "sequential approve after reclaim");
+      const paid = await completePartnerPayout(
+        prisma,
+        reclaim.payoutRequestId,
+        admin.id,
+        `${prefix}UTR-AFTER-REJECT`,
+      );
+      assert.assert(paid.ok === true, "complete after reclaim succeeds");
       completeTargetId = reclaim.payoutRequestId;
     }
-
-    const completed = await completePartnerPayout(
-      prisma,
-      completeTargetId,
-      admin.id,
-      `${prefix}UTR-COMPLETE`,
-    );
-    assert.assert(completed.ok === true, "complete succeeds from APPROVED");
 
     const again = await completePartnerPayout(
       prisma,

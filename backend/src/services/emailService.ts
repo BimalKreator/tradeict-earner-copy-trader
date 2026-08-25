@@ -5,6 +5,7 @@
 import {
   createMailTransport,
   getFromAddress,
+  isNoopEmailTransport,
   sendWelcomeToTeamMemberEmail,
   teamMemberRoleLabel,
   type TeamMemberRoleLabel,
@@ -72,7 +73,7 @@ export async function sendTemplateEmail<T extends EmailTemplateName>(
         : "";
 
     console.log(
-      `[emailService] Sent template=${templateName} to=${recipient}` +
+      `[emailService] ${isNoopEmailTransport() ? "noop" : "Sent"} template=${templateName} to=${recipient}` +
         (messageId ? ` messageId=${messageId}` : ""),
     );
     return true;
