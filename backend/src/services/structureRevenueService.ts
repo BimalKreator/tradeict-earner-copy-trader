@@ -1,4 +1,4 @@
-import { Prisma, SubscriptionStatus, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { guardedCron } from "../utils/cronGuard.js";
 import {
   DASHBOARD_PNL_DAY_TIMEZONE,
@@ -279,7 +279,6 @@ async function resolveUserProfitSharePct(
     where: {
       userId,
       joinedDate: { lt: monthEndExclusive },
-      status: { not: SubscriptionStatus.CANCELLED },
       strategy: botStrategySubscriptionFilter,
     },
     orderBy: { joinedDate: "desc" },
@@ -290,7 +289,6 @@ async function resolveUserProfitSharePct(
     sub = await prisma.userStrategySubscription.findFirst({
       where: {
         userId,
-        status: { not: SubscriptionStatus.CANCELLED },
         strategy: botStrategySubscriptionFilter,
       },
       orderBy: { joinedDate: "desc" },
@@ -306,8 +304,8 @@ async function resolveUserProfitSharePct(
   }
 
   const pct =
-    sub.profitShareOverride ??
     sub.profitSharePctSnapshot ??
+    sub.profitShareOverride ??
     new Prisma.Decimal(sub.strategy.profitShare);
 
   if (opts?.requirePositive && pct.lte(0)) {
@@ -397,16 +395,17 @@ async function resolveHwmBeforeForPeriod(
   const prior = previousCalendarMonth(periodYear, periodMonth);
   const priorInvoice = await prisma.monthlyRevenueInvoice.findUnique({
     where: {
-      userId_periodYear_periodMonth: {
+      userId_periodYear_periodMonth_isSimulated: {
         userId,
         periodYear: prior.year,
         periodMonth: prior.month,
+        isSimulated,
       },
     },
     select: { hwmAfter: true, isSimulated: true },
   });
 
-  if (priorInvoice && priorInvoice.isSimulated === isSimulated) {
+  if (priorInvoice) {
     return maxDec(zero(), priorInvoice.hwmAfter);
   }
 
@@ -806,16 +805,22 @@ export async function computeMonthlyRevenueInvoiceForUser(
   periodMonth: number,
   opts?: { isSimulated?: boolean },
 ): Promise<Prisma.MonthlyRevenueInvoiceGetPayload<object>> {
+  // Never inherit isSimulated from a sibling row — real and simulated are
+  // independent unique slots after 11.6.
+  const isSimulated = opts?.isSimulated ?? false;
   const existing = await prisma.monthlyRevenueInvoice.findUnique({
     where: {
-      userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
+      userId_periodYear_periodMonth_isSimulated: {
+        userId,
+        periodYear,
+        periodMonth,
+        isSimulated,
+      },
     },
   });
   if (existing && isInvoiceFrozen(existing.status)) {
     return existing;
   }
-
-  const isSimulated = opts?.isSimulated ?? existing?.isSimulated ?? false;
   let metrics: MonthlyInvoiceMetrics;
   try {
     metrics = await computeMonthlyInvoiceMetrics(
@@ -886,10 +891,16 @@ export async function computeDailyPnlSnapshotForUser(
   prisma: PrismaClient,
   userId: string,
   snapshotDate: Date,
+  opts?: { isSimulated?: boolean },
 ): Promise<Prisma.DailyPnlSnapshotGetPayload<object>> {
+  const isSimulated = opts?.isSimulated ?? false;
   const existing = await prisma.dailyPnlSnapshot.findUnique({
     where: {
-      userId_snapshotDate: { userId, snapshotDate },
+      userId_snapshotDate_isSimulated: {
+        userId,
+        snapshotDate,
+        isSimulated,
+      },
     },
   });
   if (existing) return existing;
@@ -900,6 +911,7 @@ export async function computeDailyPnlSnapshotForUser(
     userId,
     snapshotDate,
     dayEnd,
+    isSimulated,
   );
   const realizedDelta = sumStructureRealized(closedToday);
 
@@ -908,7 +920,13 @@ export async function computeDailyPnlSnapshotForUser(
     BILLING_TIMEZONE,
   );
   const prev = await prisma.dailyPnlSnapshot.findUnique({
-    where: { userId_snapshotDate: { userId, snapshotDate: prevDate } },
+    where: {
+      userId_snapshotDate_isSimulated: {
+        userId,
+        snapshotDate: prevDate,
+        isSimulated,
+      },
+    },
   });
 
   const prevCumulative = prev?.cumulativeRealized ?? zero();
@@ -943,18 +961,20 @@ export async function computeDailyPnlSnapshotForUser(
       commissionCumulative,
       openStructureCount,
       computedAt,
+      isSimulated,
     },
   });
 }
 
 export async function runDailyPnlSnapshots(
   prisma: PrismaClient,
-  opts?: { userId?: string; date?: string },
+  opts?: { userId?: string; date?: string; isSimulated?: boolean },
 ): Promise<Record<string, Prisma.DailyPnlSnapshotGetPayload<object>>> {
   let userIds = await listEligibleStructurePnlUserIds(prisma);
   if (opts?.userId) userIds = userIds.filter((id) => id === opts.userId);
 
   const snapshotDate = resolveIstSnapshotDate(opts?.date);
+  const isSimulated = opts?.isSimulated ?? false;
   const results: Record<string, Prisma.DailyPnlSnapshotGetPayload<object>> = {};
 
   for (const userId of userIds) {
@@ -963,6 +983,7 @@ export async function runDailyPnlSnapshots(
         prisma,
         userId,
         snapshotDate,
+        { isSimulated },
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -971,7 +992,7 @@ export async function runDailyPnlSnapshots(
   }
 
   console.log(
-    `[StructureRevenue] daily snapshot date=${snapshotDate.toISOString()} users=${userIds.length}`,
+    `[StructureRevenue] daily snapshot date=${snapshotDate.toISOString()} users=${userIds.length} isSimulated=${isSimulated}`,
   );
   return results;
 }
@@ -1070,10 +1091,11 @@ export async function runMonthlyRevenueInvoices(
       if (canIssue) {
         const existing = await prisma.monthlyRevenueInvoice.findUnique({
           where: {
-            userId_periodYear_periodMonth: {
+            userId_periodYear_periodMonth_isSimulated: {
               userId,
               periodYear: period.year,
               periodMonth: period.month,
+              isSimulated: false,
             },
           },
           select: { status: true, commissionAmount: true },

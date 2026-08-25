@@ -7,6 +7,8 @@ import {
   TestRegistry,
   verifyNoTestRowLeaks,
 } from "./fixtures.js";
+import { p11CancelledFinalInvoiceScenario } from "./scenarios/p11-cancelled-final-invoice.js";
+import { p11SimulationIsolationScenario } from "./scenarios/p11-simulation-isolation.js";
 import { p12PayoutLifecycleScenario } from "./scenarios/p12-payout-lifecycle.js";
 import { p12ReversalScenario } from "./scenarios/p12-reversal.js";
 import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
@@ -22,6 +24,8 @@ const ALL_SCENARIOS: HarnessScenario[] = [
   p12ReversalScenario,
   p12WalletRaceScenario,
   p12PayoutLifecycleScenario,
+  p11SimulationIsolationScenario,
+  p11CancelledFinalInvoiceScenario,
 ];
 
 function parseOnlyArg(argv: string[]): string | null {

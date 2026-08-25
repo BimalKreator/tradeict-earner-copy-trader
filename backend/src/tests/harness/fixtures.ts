@@ -132,6 +132,29 @@ export class TestRegistry {
       for (const userId of this.created.userIds) {
         assertNotProtectedUserId(userId);
       }
+      await prisma.commissionLedger.deleteMany({
+        where: {
+          OR: [
+            { sourceUserId: { in: [...this.created.userIds] } },
+            { beneficiaryUserId: { in: [...this.created.userIds] } },
+          ],
+        },
+      });
+      await prisma.monthlyRevenueInvoice.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.dailyPnlSnapshot.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.structurePnl.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.deltaLedgerEntry.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
+      await prisma.userStrategySubscription.deleteMany({
+        where: { userId: { in: [...this.created.userIds] } },
+      });
       await prisma.walletWithdrawalRequest.deleteMany({
         where: { userId: { in: [...this.created.userIds] } },
       });

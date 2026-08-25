@@ -534,7 +534,8 @@ model DailyPnlSnapshot {
 
   user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
-  @@unique([userId, snapshotDate])
+  // Real and simulated snapshots are independent chains — never share a slot.
+  @@unique([userId, snapshotDate, isSimulated])
   @@index([isSimulated])
 }
 
@@ -583,7 +584,8 @@ model MonthlyRevenueInvoice {
   user               User               @relation(fields: [userId], references: [id], onDelete: Restrict)
   commissionLedgers  CommissionLedger[]
 
-  @@unique([userId, periodYear, periodMonth])
+  // Real and simulated invoices for the same period are independent rows.
+  @@unique([userId, periodYear, periodMonth, isSimulated])
   @@index([isSimulated])
 }
 

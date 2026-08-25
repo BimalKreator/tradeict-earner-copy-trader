@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SubscriptionStatus } from "@prisma/client";
 import { guardedCron } from "../utils/cronGuard.js";
+import { raiseAlert } from "../utils/systemAlert.js";
 import {
   calendarPartsInTimeZone,
   DASHBOARD_PNL_DAY_TIMEZONE,
@@ -202,6 +203,21 @@ export async function runPendingFinalInvoiceCron(
       console.error(
         `[BillingCron] pending final invoice failed user=${user.id}: ${msg}`,
       );
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          pendingFinalInvoiceSince: null,
+          pendingFinalInvoicePeriodYear: null,
+          pendingFinalInvoicePeriodMonth: null,
+        },
+      });
+      void raiseAlert({
+        key: `final-invoice-failed:${user.id}`,
+        severity: "CRITICAL",
+        source: "billingCron",
+        message: `Final invoice permanently failed for user ${user.id}: ${msg}`,
+        detail: { userId: user.id, error: msg },
+      });
     }
   }
 

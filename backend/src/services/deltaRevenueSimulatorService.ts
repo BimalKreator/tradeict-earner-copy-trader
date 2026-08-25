@@ -186,35 +186,7 @@ async function assertSimulationSlotsFree(
   periodYear: number,
   periodMonth: number,
 ): Promise<void> {
-  const [realSnapshot, realInvoice] = await Promise.all([
-    prisma.dailyPnlSnapshot.findFirst({
-      where: { userId, snapshotDate, isSimulated: false },
-      select: { id: true },
-    }),
-    prisma.monthlyRevenueInvoice.findFirst({
-      where: {
-        userId,
-        periodYear,
-        periodMonth,
-        isSimulated: false,
-      },
-      select: { id: true },
-    }),
-  ]);
-
-  if (realSnapshot) {
-    throw new SimulationNotAllowedError(
-      `Real daily snapshot already exists for ${snapshotDate.toISOString().slice(0, 10)} — ` +
-        `pick a closedAtIst date with no real snapshot activity`,
-    );
-  }
-  if (realInvoice) {
-    throw new SimulationNotAllowedError(
-      `Real monthly invoice already exists for ${periodYear}-${String(periodMonth).padStart(2, "0")} — ` +
-        `pick a month with no real invoice row`,
-    );
-  }
-
+  // Real and simulated rows coexist after 11.6 — only clear prior SIM rows.
   await prisma.dailyPnlSnapshot.deleteMany({
     where: { userId, snapshotDate, isSimulated: true },
   });
@@ -431,10 +403,7 @@ export async function simulateDeltaRevenueStructure(
     await runDailyPnlSnapshots(prisma, {
       userId: input.userId,
       date: snapshotDate.toISOString().slice(0, 10),
-    });
-    await prisma.dailyPnlSnapshot.updateMany({
-      where: { userId: input.userId, snapshotDate },
-      data: { isSimulated: true },
+      isSimulated: true,
     });
 
     const invoice = await computeMonthlyRevenueInvoiceForUser(
@@ -444,10 +413,6 @@ export async function simulateDeltaRevenueStructure(
       istParts.month,
       { isSimulated: true },
     );
-    await prisma.monthlyRevenueInvoice.update({
-      where: { id: invoice.id },
-      data: { isSimulated: true },
-    });
 
     lastPeriod = { year: istParts.year, month: istParts.month };
   }
@@ -456,10 +421,11 @@ export async function simulateDeltaRevenueStructure(
   if (lastPeriod) {
     const inv = await prisma.monthlyRevenueInvoice.findUnique({
       where: {
-        userId_periodYear_periodMonth: {
+        userId_periodYear_periodMonth_isSimulated: {
           userId: input.userId,
           periodYear: lastPeriod.year,
           periodMonth: lastPeriod.month,
+          isSimulated: true,
         },
       },
     });

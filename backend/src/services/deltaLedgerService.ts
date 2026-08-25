@@ -234,10 +234,11 @@ async function flagLateRowIfInvoicedPeriod(
   const { year, month } = calendarPartsInTimeZone(occurredAt, BILLING_TIMEZONE);
   const invoice = await prisma.monthlyRevenueInvoice.findUnique({
     where: {
-      userId_periodYear_periodMonth: {
+      userId_periodYear_periodMonth_isSimulated: {
         userId,
         periodYear: year,
         periodMonth: month,
+        isSimulated: false,
       },
     },
     select: { id: true },

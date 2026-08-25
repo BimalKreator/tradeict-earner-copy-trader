@@ -654,11 +654,16 @@ export async function getUnbilledRevenueUsers(prisma: PrismaClient) {
       }
       const invoice = await prisma.monthlyRevenueInvoice.findUnique({
         where: {
-          userId_periodYear_periodMonth: { userId, periodYear, periodMonth },
+          userId_periodYear_periodMonth_isSimulated: {
+            userId,
+            periodYear,
+            periodMonth,
+            isSimulated: false,
+          },
         },
         select: { id: true, isSimulated: true },
       });
-      if (!invoice || invoice.isSimulated) {
+      if (!invoice) {
         missingPeriods.push({ periodYear, periodMonth });
       }
     }
