@@ -208,6 +208,14 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
       }
     }
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    try {
+      if (typeof window !== "undefined" && "caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch {
+      /* never block logout */
+    }
     setToken(null);
     setUser(null);
   }, []);
