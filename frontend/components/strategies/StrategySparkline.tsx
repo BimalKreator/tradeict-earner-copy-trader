@@ -9,15 +9,24 @@ type Props = {
   chartId?: string;
 };
 
+/** Honest empty state — never invent a curve. */
+export function NoVerifiedTrackRecord({ className = "" }: { className?: string }) {
+  return (
+    <div
+      className={`flex min-h-12 items-center justify-center rounded-lg border border-dashed border-gray-800 bg-gray-900/40 px-3 py-4 text-center text-xs text-gray-500 ${className}`}
+    >
+      No verified track record yet
+    </div>
+  );
+}
+
 export function StrategySparkline({
   values,
   className = "",
   chartId = "spark",
 }: Props) {
   if (values.length < 2) {
-    return (
-      <div className={`h-12 rounded-lg border border-gray-800 bg-gray-900/60 ${className}`} />
-    );
+    return <NoVerifiedTrackRecord className={className} />;
   }
 
   const data = values.map((v, i) => ({ i, v }));

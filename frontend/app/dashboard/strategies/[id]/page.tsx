@@ -12,7 +12,6 @@ import {
   TrendingDown,
   TrendingUp,
   Trophy,
-  Users,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -33,9 +32,10 @@ import {
 } from "recharts";
 
 import { StrategySubscriptionCheckout } from "@/components/strategies/StrategySubscriptionCheckout";
+import { NoVerifiedTrackRecord } from "@/components/strategies/StrategySparkline";
 import {
   formatPercent,
-  mockSubscriberCount,
+  hasVerifiedTrackRecord,
   resolvePerformanceMetrics,
   type StrategyPerformanceMetrics,
 } from "@/lib/strategyPerformance";
@@ -173,23 +173,25 @@ export default function StrategyPerformancePage() {
     void load();
   }, [load]);
 
-  const metrics: StrategyPerformanceMetrics = useMemo(
+  const metrics: StrategyPerformanceMetrics | null = useMemo(
     () => resolvePerformanceMetrics(strategy?.performanceMetrics),
     [strategy?.performanceMetrics],
   );
+  const hasTrackRecord = hasVerifiedTrackRecord(metrics);
 
-  const lineData = useMemo(
-    () =>
-      metrics.pnlChart.values.map((v, i) => ({
-        name: metrics.pnlChart.labels[i] ?? String(i + 1),
-        pnl: v,
-      })),
-    [metrics],
-  );
+  const lineData = useMemo(() => {
+    if (!metrics) return [];
+    return metrics.pnlChart.values.map((v, i) => ({
+      name: metrics.pnlChart.labels[i] ?? String(i + 1),
+      pnl: v,
+    }));
+  }, [metrics]);
 
   const barData = useMemo(() => {
+    if (!metrics) return [];
     const { labels, profit, loss } = metrics.maxProfitLoss;
     const len = Math.max(labels.length, profit.length, loss.length);
+    if (len === 0) return [];
     return Array.from({ length: len }, (_, i) => ({
       name: labels[i] ?? `M${i + 1}`,
       profit: profit[i] ?? 0,
@@ -197,7 +199,7 @@ export default function StrategyPerformancePage() {
     }));
   }, [metrics]);
 
-  const heatmapRows = metrics.daywiseBreakdown.heatmap;
+  const heatmapRows = metrics?.daywiseBreakdown.heatmap ?? [];
   const heatmapValues = useMemo(
     () =>
       heatmapRows.map((h) => ({
@@ -208,15 +210,14 @@ export default function StrategyPerformancePage() {
   );
   const heatmapRange = useMemo(() => heatmapDateRange(heatmapRows), [heatmapRows]);
 
-  const bs = metrics.backtestSummary;
-  const subscribers = id ? mockSubscriberCount(id) : 0;
+  const bs = metrics?.backtestSummary ?? null;
 
-  const yDomain = useMemo((): [number, number] => {
-    const vals = metrics.pnlChart.values;
-    if (vals.length === 0) return [16.5, 185];
+  const yDomain = useMemo((): [number, number] | undefined => {
+    const vals = metrics?.pnlChart.values ?? [];
+    if (vals.length < 2) return undefined;
     const pad = 8;
     return [Math.floor(Math.min(...vals) - pad), Math.ceil(Math.max(...vals) + pad)];
-  }, [metrics.pnlChart.values]);
+  }, [metrics?.pnlChart.values]);
 
   if (!id) {
     return <p className="text-sm text-gray-400">Invalid strategy link.</p>;
@@ -291,15 +292,6 @@ export default function StrategyPerformancePage() {
               {strategy.description}
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-4 text-sm text-gray-500">
-              <span className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900 px-3 py-1.5">
-                <Users className="h-4 w-4 text-primary" aria-hidden />
-                <span>
-                  <span className="font-semibold tabular-nums text-gray-200">
-                    {subscribers.toLocaleString("en-IN")}
-                  </span>{" "}
-                  active subscribers
-                </span>
-              </span>
               <span>
                 ₹{strategy.monthlyFee.toLocaleString("en-IN")}/mo · Min ₹
                 {strategy.minCapital.toLocaleString("en-IN")} · {strategy.profitShare}% profit
@@ -316,9 +308,6 @@ export default function StrategyPerformancePage() {
             </Link>
           ) : null}
         </div>
-        <p className="mt-4 text-[11px] text-gray-600">
-          Performance charts use demo backtest data when admin metrics are not uploaded yet.
-        </p>
       </section>
 
       {!inMyStrategies ? (
@@ -336,40 +325,48 @@ export default function StrategyPerformancePage() {
       {/* Backtest summary grid */}
       <section>
         <h2 className="text-lg font-semibold text-gray-100">Backtest summary</h2>
-        <p className="mt-1 text-xs text-gray-500">Historical simulation — not a guarantee of future results.</p>
-        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <StatCard icon={Calendar} label="Trading days" value={String(bs.tradingDays)} />
-          <StatCard
-            icon={Trophy}
-            label="Win %"
-            value={`${bs.winPercent}%`}
-            accent="text-emerald-400"
-          />
-          <StatCard
-            icon={Percent}
-            label="Loss %"
-            value={`${bs.lossPercent}%`}
-            accent="text-rose-400"
-          />
-          <StatCard
-            icon={Flame}
-            label="Streak"
-            value={`${bs.streakWins} wins`}
-            sub="Longest win streak"
-          />
-          <StatCard
-            icon={TrendingUp}
-            label="Avg / day"
-            value={formatPercent(bs.avgPerDay)}
-            accent="text-emerald-400"
-          />
-          <StatCard
-            icon={TrendingDown}
-            label="Max drawdown"
-            value={formatPercent(bs.maxDrawdown)}
-            accent="text-amber-400"
-          />
-        </div>
+        <p className="mt-1 text-xs text-gray-500">
+          Historical simulation — not a guarantee of future results.
+        </p>
+        {!hasTrackRecord || !bs ? (
+          <div className="mt-4">
+            <NoVerifiedTrackRecord className="py-8" />
+          </div>
+        ) : (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <StatCard icon={Calendar} label="Trading days" value={String(bs.tradingDays)} />
+            <StatCard
+              icon={Trophy}
+              label="Win %"
+              value={`${bs.winPercent}%`}
+              accent="text-emerald-400"
+            />
+            <StatCard
+              icon={Percent}
+              label="Loss %"
+              value={`${bs.lossPercent}%`}
+              accent="text-rose-400"
+            />
+            <StatCard
+              icon={Flame}
+              label="Streak"
+              value={`${bs.streakWins} wins`}
+              sub="Longest win streak"
+            />
+            <StatCard
+              icon={TrendingUp}
+              label="Avg / day"
+              value={formatPercent(bs.avgPerDay)}
+              accent="text-emerald-400"
+            />
+            <StatCard
+              icon={TrendingDown}
+              label="Max drawdown"
+              value={formatPercent(bs.maxDrawdown)}
+              accent="text-amber-400"
+            />
+          </div>
+        )}
       </section>
 
       {/* Cumulative P&L line */}
@@ -378,50 +375,56 @@ export default function StrategyPerformancePage() {
           <LineChartIcon className="h-5 w-5 text-primary" aria-hidden />
           <h2 className="text-lg font-semibold text-gray-100">Cumulative P&amp;L</h2>
         </div>
-        <p className="mt-1 text-xs text-gray-500">12-month growth (cumulative %)</p>
-        <div className="mt-6 h-[320px] w-full min-w-0">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={lineData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id={strokeGrad} x1="0" y1="0" x2="1" y2="0">
-                  <stop offset="0%" stopColor="#22c55e" />
-                  <stop offset="100%" stopColor="#3b82f6" />
-                </linearGradient>
-                <linearGradient id={fillGrad} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#22c55e" stopOpacity={0.28} />
-                  <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
-              <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
-              <YAxis
-                domain={yDomain}
-                tick={{ fill: "#6b7280", fontSize: 11 }}
-                tickFormatter={(v) => `${v}%`}
-              />
-              <Tooltip
-                {...tooltipStyles}
-                formatter={(v: number) => [`${v.toFixed(1)}%`, "Cumulative"]}
-              />
-              <Area
-                type="monotone"
-                dataKey="pnl"
-                stroke={`url(#${strokeGrad})`}
-                strokeWidth={2.5}
-                fill={`url(#${fillGrad})`}
-                dot={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="pnl"
-                stroke={`url(#${strokeGrad})`}
-                strokeWidth={2.5}
-                dot={{ r: 3, fill: "#3b82f6", strokeWidth: 0 }}
-                activeDot={{ r: 5 }}
-              />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
+        <p className="mt-1 text-xs text-gray-500">Verified growth curve when metrics are uploaded</p>
+        {!hasTrackRecord || lineData.length < 2 || !yDomain ? (
+          <div className="mt-6">
+            <NoVerifiedTrackRecord className="min-h-[200px] py-16" />
+          </div>
+        ) : (
+          <div className="mt-6 h-[320px] w-full min-w-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={lineData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id={strokeGrad} x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="#22c55e" />
+                    <stop offset="100%" stopColor="#3b82f6" />
+                  </linearGradient>
+                  <linearGradient id={fillGrad} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#22c55e" stopOpacity={0.28} />
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
+                <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                <YAxis
+                  domain={yDomain}
+                  tick={{ fill: "#6b7280", fontSize: 11 }}
+                  tickFormatter={(v) => `${v}%`}
+                />
+                <Tooltip
+                  {...tooltipStyles}
+                  formatter={(v: number) => [`${v.toFixed(1)}%`, "Cumulative"]}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="pnl"
+                  stroke={`url(#${strokeGrad})`}
+                  strokeWidth={2.5}
+                  fill={`url(#${fillGrad})`}
+                  dot={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="pnl"
+                  stroke={`url(#${strokeGrad})`}
+                  strokeWidth={2.5}
+                  dot={{ r: 3, fill: "#3b82f6", strokeWidth: 0 }}
+                  activeDot={{ r: 5 }}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </section>
 
       {/* Monthly P&L bars */}
@@ -431,19 +434,25 @@ export default function StrategyPerformancePage() {
           <h2 className="text-lg font-semibold text-gray-100">Monthly profit &amp; loss</h2>
         </div>
         <p className="mt-1 text-xs text-gray-500">Gross profit vs gross loss by month</p>
-        <div className="mt-6 h-[300px] w-full min-w-0">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
-              <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
-              <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
-              <Tooltip {...tooltipStyles} />
-              <Legend wrapperStyle={{ fontSize: "12px", color: "#9ca3af" }} />
-              <Bar dataKey="profit" name="Gross profit" fill="#22c55e" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="loss" name="Gross loss" fill="#ef4444" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        {barData.length === 0 ? (
+          <div className="mt-6">
+            <NoVerifiedTrackRecord className="min-h-[180px] py-14" />
+          </div>
+        ) : (
+          <div className="mt-6 h-[300px] w-full min-w-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgb(31 41 55)" />
+                <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
+                <Tooltip {...tooltipStyles} />
+                <Legend wrapperStyle={{ fontSize: "12px", color: "#9ca3af" }} />
+                <Bar dataKey="profit" name="Gross profit" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="loss" name="Gross loss" fill="#ef4444" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </section>
 
       {/* Daywise heatmap */}
@@ -453,27 +462,33 @@ export default function StrategyPerformancePage() {
           <h2 className="text-lg font-semibold text-gray-100">Daywise breakdown</h2>
         </div>
         <p className="mt-1 text-xs text-gray-500">Daily returns — green positive, red negative</p>
-        <div className="analytics-calendar-wrap scroll-table mt-6 overflow-x-auto">
-          <CalendarHeatmap
-            startDate={heatmapRange.start}
-            endDate={heatmapRange.end}
-            values={heatmapValues}
-            classForValue={(v) => {
-              if (!v || v.count === 0) return "color-neutral";
-              return v.count > 0 ? "color-profit" : "color-loss";
-            }}
-            titleForValue={(v) =>
-              v
-                ? `${v.date}: ${Number(v.count).toLocaleString("en-IN", {
-                    maximumFractionDigits: 2,
-                    signDisplay: "exceptZero",
-                  })}%`
-                : "No data"
-            }
-            showWeekdayLabels
-            gutterSize={3}
-          />
-        </div>
+        {heatmapValues.length === 0 ? (
+          <div className="mt-6">
+            <NoVerifiedTrackRecord className="min-h-[160px] py-12" />
+          </div>
+        ) : (
+          <div className="analytics-calendar-wrap scroll-table mt-6 overflow-x-auto">
+            <CalendarHeatmap
+              startDate={heatmapRange.start}
+              endDate={heatmapRange.end}
+              values={heatmapValues}
+              classForValue={(v) => {
+                if (!v || v.count === 0) return "color-neutral";
+                return v.count > 0 ? "color-profit" : "color-loss";
+              }}
+              titleForValue={(v) =>
+                v
+                  ? `${v.date}: ${Number(v.count).toLocaleString("en-IN", {
+                      maximumFractionDigits: 2,
+                      signDisplay: "exceptZero",
+                    })}%`
+                  : "No data"
+              }
+              showWeekdayLabels
+              gutterSize={3}
+            />
+          </div>
+        )}
       </section>
     </div>
   );

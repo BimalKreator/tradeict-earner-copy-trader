@@ -76,7 +76,10 @@ type DeltaMoneySummary = {
   cumulativeRealized: number | null;
   highWaterMark: number | null;
   thisMonthRealized: number | null;
-  unpaidRevenueShare: number;
+  /** null = invoices could not be loaded (never treat as ₹0). */
+  unpaidRevenueShare: number | null;
+  pnlLoaded: boolean;
+  invoicesLoaded: boolean;
 };
 
 type Toast = { kind: "success" | "error"; text: string } | null;
@@ -186,60 +189,121 @@ export default function DashboardPage() {
   const apiBase = resolveApiBase();
 
   const loadWallet = useCallback(async () => {
-    const res = await fetchWithTimeout(`${apiBase}/wallet/me`, {
-      headers: { Authorization: `Bearer ${token ?? ""}` },
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error(`Failed to load wallet (${res.status})`);
-    const parsed = parseWalletSummary(await res.json());
-    setWallet(parsed);
+    try {
+      const res = await fetchWithTimeout(`${apiBase}/wallet/me`, {
+        headers: { Authorization: `Bearer ${token ?? ""}` },
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        console.error("[dashboard] wallet failed", res.status);
+        setWallet(null);
+        return;
+      }
+      const parsed = parseWalletSummary(await res.json());
+      setWallet(parsed);
+    } catch (e) {
+      console.error("[dashboard] wallet load error", e);
+      setWallet(null);
+    }
   }, [token, apiBase]);
 
   const loadDeltaMoney = useCallback(async () => {
     const headers = { Authorization: `Bearer ${token ?? ""}` };
     const [pnlRes, invRes] = await Promise.all([
-      fetchWithTimeout(`${apiBase}/me/pnl/daily`, { headers, cache: "no-store" }),
-      fetchWithTimeout(`${apiBase}/me/revenue/invoices`, { headers, cache: "no-store" }),
+      fetchWithTimeout(`${apiBase}/me/pnl/daily`, {
+        headers,
+        cache: "no-store",
+      }).catch((e) => {
+        console.error("[dashboard] daily P&L fetch error", e);
+        return null;
+      }),
+      fetchWithTimeout(`${apiBase}/me/revenue/invoices`, {
+        headers,
+        cache: "no-store",
+      }).catch((e) => {
+        console.error("[dashboard] invoices fetch error", e);
+        return null;
+      }),
     ]);
-    if (!pnlRes.ok || !invRes.ok) {
-      setDeltaMoney(null);
-      return;
+
+    let cumulativeRealized: number | null = null;
+    let highWaterMark: number | null = null;
+    let thisMonthRealized: number | null = null;
+    let pnlLoaded = false;
+
+    if (pnlRes?.ok) {
+      pnlLoaded = true;
+      const pnlBody = (await pnlRes.json()) as {
+        snapshots?: Array<{
+          snapshotDate: string;
+          realizedDelta: number;
+          cumulativeRealized: number;
+          highWaterMark: number;
+        }>;
+      };
+      const snapshots = pnlBody.snapshots ?? [];
+      const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+      const { year, month } = currentIstYearMonth();
+      const monthSum = snapshots
+        .filter((s) => isUtcInstantInIstMonth(s.snapshotDate, year, month))
+        .reduce((sum, s) => sum + s.realizedDelta, 0);
+      cumulativeRealized = latest?.cumulativeRealized ?? null;
+      highWaterMark = latest?.highWaterMark ?? null;
+      thisMonthRealized =
+        snapshots.length > 0 || monthSum !== 0 ? monthSum : null;
+    } else if (pnlRes) {
+      console.error("[dashboard] daily P&L failed", pnlRes.status);
     }
-    const pnlBody = (await pnlRes.json()) as {
-      snapshots?: Array<{
-        snapshotDate: string;
-        realizedDelta: number;
-        cumulativeRealized: number;
-        highWaterMark: number;
-      }>;
-    };
-    const invBody = (await invRes.json()) as { invoices?: RevenueInvoiceRow[] };
-    const snapshots = pnlBody.snapshots ?? [];
-    const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
-    const { year, month } = currentIstYearMonth();
-    const thisMonthRealized = snapshots
-      .filter((s) => isUtcInstantInIstMonth(s.snapshotDate, year, month))
-      .reduce((sum, s) => sum + s.realizedDelta, 0);
-    const unpaidRevenueShare = (invBody.invoices ?? [])
-      .filter((inv) => inv.status === "INVOICED")
-      .reduce((sum, inv) => sum + inv.collectibleAmount, 0);
+
+    let unpaidRevenueShare: number | null = null;
+    let invoicesLoaded = false;
+    if (invRes?.ok) {
+      invoicesLoaded = true;
+      const invBody = (await invRes.json()) as {
+        invoices?: RevenueInvoiceRow[];
+      };
+      unpaidRevenueShare = (invBody.invoices ?? [])
+        .filter((inv) => inv.status === "INVOICED")
+        .reduce((sum, inv) => sum + inv.collectibleAmount, 0);
+    } else if (invRes) {
+      console.error("[dashboard] invoices failed", invRes.status);
+    }
+
     setDeltaMoney({
-      cumulativeRealized: latest?.cumulativeRealized ?? null,
-      highWaterMark: latest?.highWaterMark ?? null,
-      thisMonthRealized:
-        snapshots.length > 0 || thisMonthRealized !== 0 ? thisMonthRealized : null,
+      cumulativeRealized,
+      highWaterMark,
+      thisMonthRealized,
       unpaidRevenueShare,
+      pnlLoaded,
+      invoicesLoaded,
     });
   }, [token, apiBase]);
 
   const loadOverview = useCallback(async () => {
-    const res = await fetchWithTimeout(`${apiBase}/user/dashboard-overview`, {
-      headers: { Authorization: `Bearer ${token ?? ""}` },
-    });
-    if (!res.ok) throw new Error(`Failed to load dashboard (${res.status})`);
-    const parsed = parseDashboardOverview(await res.json());
-    if (!parsed) throw new Error("Invalid dashboard response");
-    setData(parsed);
+    try {
+      const res = await fetchWithTimeout(`${apiBase}/user/dashboard-overview`, {
+        headers: { Authorization: `Bearer ${token ?? ""}` },
+      });
+      if (!res.ok) {
+        console.error("[dashboard] overview failed", res.status);
+        setData(null);
+        setError("Couldn't load dashboard overview — retry");
+        return;
+      }
+      const parsed = parseDashboardOverview(await res.json());
+      if (!parsed) {
+        console.error("[dashboard] overview parse failed");
+        setData(null);
+        setError("Couldn't load dashboard overview — retry");
+        return;
+      }
+      setData(parsed);
+      setError(null);
+    } catch (e) {
+      console.error("[dashboard] overview load error", e);
+      setData(null);
+      setError("Couldn't load dashboard overview — retry");
+    }
   }, [token, apiBase]);
 
   const refreshApiStatus = useCallback(async () => {
@@ -269,21 +333,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void (async () => {
-      try {
-        await Promise.all([loadOverview(), loadWallet(), loadDeltaMoney()]);
-        void refreshApiStatus();
-      } catch (e) {
-        setError(
-          isFetchTimeoutError(e)
-            ? e.message
-            : e instanceof Error
-              ? e.message
-              : "Failed to load dashboard",
-        );
-      } finally {
-        setLoading(false);
-        setWalletLoading(false);
-      }
+      await Promise.all([loadOverview(), loadWallet(), loadDeltaMoney()]);
+      void refreshApiStatus();
+      setLoading(false);
+      setWalletLoading(false);
     })();
   }, [loadOverview, loadWallet, loadDeltaMoney, refreshApiStatus]);
 
@@ -463,12 +516,17 @@ export default function DashboardPage() {
           <div className="flex justify-center rounded-xl border border-slate-800 bg-slate-900 py-20">
             <Loader2 className="h-8 w-8 animate-spin text-cyan-400" />
           </div>
-        ) : data ? (
+        ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
               icon={<TrendingUp className="h-5 w-5 text-emerald-400" />}
               label="Cumulative realized P&L"
-              currencyUsd={deltaMoney?.cumulativeRealized ?? 0}
+              currencyUsd={
+                deltaMoney?.pnlLoaded
+                  ? deltaMoney.cumulativeRealized
+                  : null
+              }
+              loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
               sub={
                 <Link
                   href="/dashboard/performance"
@@ -477,27 +535,37 @@ export default function DashboardPage() {
                   View full performance →
                 </Link>
               }
-              valueClass={pnlTone(deltaMoney?.cumulativeRealized ?? 0)}
+              valueClass={pnlTone(
+                deltaMoney?.pnlLoaded ? deltaMoney.cumulativeRealized : null,
+              )}
               fxRate={usdInrRate}
             />
 
             <MetricCard
               icon={<Calendar className="h-5 w-5 text-violet-400" />}
               label="This month's realized"
-              currencyUsd={deltaMoney?.thisMonthRealized ?? 0}
+              currencyUsd={
+                deltaMoney?.pnlLoaded ? deltaMoney.thisMonthRealized : null
+              }
+              loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
               sub={
                 <span className="text-slate-500">
                   From your Delta account (IST month)
                 </span>
               }
-              valueClass={pnlTone(deltaMoney?.thisMonthRealized ?? 0)}
+              valueClass={pnlTone(
+                deltaMoney?.pnlLoaded ? deltaMoney.thisMonthRealized : null,
+              )}
               fxRate={usdInrRate}
             />
 
             <MetricCard
               icon={<Activity className="h-5 w-5 text-cyan-400" />}
               label="High-water mark"
-              currencyUsd={deltaMoney?.highWaterMark ?? 0}
+              currencyUsd={
+                deltaMoney?.pnlLoaded ? deltaMoney.highWaterMark : null
+              }
+              loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
               sub={
                 <span className="text-slate-500">
                   Lifetime best cumulative realized P&L
@@ -510,9 +578,16 @@ export default function DashboardPage() {
             <MetricCard
               icon={<CreditCard className="h-5 w-5 text-amber-400" />}
               label="Unpaid profit share"
-              currencyUsd={deltaMoney?.unpaidRevenueShare ?? 0}
+              currencyUsd={
+                deltaMoney?.invoicesLoaded
+                  ? deltaMoney.unpaidRevenueShare
+                  : null
+              }
+              loadFailed={deltaMoney == null || !deltaMoney.invoicesLoaded}
               sub={
-                (deltaMoney?.unpaidRevenueShare ?? 0) > 0 ? (
+                deltaMoney?.invoicesLoaded !== true ? (
+                  <span className="text-slate-500">Couldn&apos;t load</span>
+                ) : (deltaMoney.unpaidRevenueShare ?? 0) > 0 ? (
                   <div className="flex flex-col gap-2">
                     <span className="text-xs text-slate-500">
                       Monthly invoices from Delta pipeline
@@ -535,9 +610,11 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Wallet className="h-5 w-5 text-sky-400" />}
               label="Total Delta Balance"
-              currencyUsd={data.totalBalance}
+              currencyUsd={data ? data.totalBalance : null}
+              loadFailed={!data}
               currencyAsBalance
               sub={
+                data ? (
                 <div className="space-y-2 border-t border-slate-800/80 pt-2">
                   <BalanceSubRow
                     label="Available"
@@ -550,6 +627,9 @@ export default function DashboardPage() {
                     fxRate={usdInrRate}
                   />
                 </div>
+                ) : (
+                  <span className="text-slate-500">Couldn&apos;t load</span>
+                )
               }
               valueClass="text-white"
               fxRate={usdInrRate}
@@ -558,9 +638,12 @@ export default function DashboardPage() {
             <MetricCard
               icon={<Layers className="h-5 w-5 text-indigo-400" />}
               label="Active Strategies"
-              value={String(data.activeStrategies?.count ?? 0)}
+              value={data ? String(data.activeStrategies?.count ?? 0) : undefined}
+              loadFailed={!data}
               sub={
-                (data.activeStrategies?.count ?? 0) > 0 ? (
+                !data ? (
+                  <span className="text-slate-500">Couldn&apos;t load</span>
+                ) : (data.activeStrategies?.count ?? 0) > 0 ? (
                   <div className="space-y-1">
                     {data.activeStrategies?.daysUntilNextFee != null ? (
                       <p className="text-xs font-medium text-indigo-300/90">
@@ -585,8 +668,16 @@ export default function DashboardPage() {
             <MetricCard
               icon={<KeyRound className="h-5 w-5 text-slate-300" />}
               label="API Status"
-              value={data.apiStatus === "connected" ? "Connected" : "Disconnected"}
+              value={
+                data
+                  ? data.apiStatus === "connected"
+                    ? "Connected"
+                    : "Disconnected"
+                  : undefined
+              }
+              loadFailed={!data}
               sub={
+                data ? (
                 <StatusDot
                   connected={data.apiStatus === "connected"}
                   label={
@@ -595,17 +686,28 @@ export default function DashboardPage() {
                       : "Check API keys in settings"
                   }
                 />
+                ) : (
+                  <span className="text-slate-500">Couldn&apos;t load</span>
+                )
               }
               valueClass={
-                data.apiStatus === "connected" ? "text-emerald-400" : "text-red-400"
+                data?.apiStatus === "connected" ? "text-emerald-400" : "text-red-400"
               }
             />
 
             <MetricCard
               icon={<PlayCircle className="h-5 w-5 text-cyan-400" />}
               label="Copy Trading"
-              value={data.copyTradingActive ? "Active" : "Paused"}
+              value={
+                data
+                  ? data.copyTradingActive
+                    ? "Active"
+                    : "Paused"
+                  : undefined
+              }
+              loadFailed={!data}
               sub={
+                data ? (
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     {data.copyTradingPaused
@@ -620,11 +722,14 @@ export default function DashboardPage() {
                     onChange={() => void toggleCopyTrading()}
                   />
                 </div>
+                ) : (
+                  <span className="text-slate-500">Couldn&apos;t load</span>
+                )
               }
-              valueClass={data.copyTradingActive ? "text-emerald-400" : "text-slate-400"}
+              valueClass={data?.copyTradingActive ? "text-emerald-400" : "text-slate-400"}
             />
           </div>
-        ) : null}
+        )}
       </DashboardSection>
     </div>
   );
@@ -662,18 +767,23 @@ function MetricCard({
   sub,
   valueClass = "text-white",
   fxRate,
+  loadFailed = false,
 }: {
   icon: ReactNode;
   label: string;
   value?: string;
-  currencyUsd?: number;
+  /** number = known amount; null/undefined with loadFailed = unknown. */
+  currencyUsd?: number | null;
   currencyAsBalance?: boolean;
   secondaryValue?: ReactNode;
   sub: ReactNode;
   valueClass?: string;
   fxRate?: number | null;
+  loadFailed?: boolean;
 }) {
-  const hasCurrency = typeof currencyUsd === "number" && Number.isFinite(currencyUsd);
+  const hasCurrency =
+    typeof currencyUsd === "number" && Number.isFinite(currencyUsd);
+  const showUnknown = loadFailed || (!hasCurrency && currencyUsd === null);
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
@@ -681,7 +791,12 @@ function MetricCard({
         {icon}
         <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
       </div>
-      {hasCurrency ? (
+      {showUnknown ? (
+        <div className="mt-3">
+          <p className="text-2xl font-semibold tabular-nums text-slate-400">—</p>
+          <p className="mt-1 text-xs text-slate-500">Couldn&apos;t load</p>
+        </div>
+      ) : hasCurrency ? (
         <DualCurrencyValue
           usd={currencyUsd}
           balance={currencyAsBalance}

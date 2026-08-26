@@ -4,7 +4,6 @@ import { resolveApiBase } from "@/lib/apiBase";
 import { StrategySubscriptionCheckout } from "@/components/strategies/StrategySubscriptionCheckout";
 import { StrategySparkline } from "@/components/strategies/StrategySparkline";
 import {
-  mockSubscriberCount,
   resolvePerformanceMetrics,
 } from "@/lib/strategyPerformance";
 import {
@@ -22,7 +21,6 @@ import {
   Sparkles,
   Trash2,
   TrendingUp,
-  Users,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -418,10 +416,9 @@ export default function StrategySubscriptionLifecyclePage() {
           {strategies.map((s) => {
             const existing = subsByStrategy.get(s.id);
             const metrics = resolvePerformanceMetrics(s.performanceMetrics);
-            const sparkValues = metrics.pnlChart.values;
-            const subscribers = mockSubscriberCount(s.id);
+            const sparkValues = metrics?.pnlChart.values ?? [];
             const lastPnl =
-              sparkValues.length > 0
+              sparkValues.length >= 2
                 ? sparkValues[sparkValues.length - 1]!
                 : null;
 
@@ -432,10 +429,6 @@ export default function StrategySubscriptionLifecyclePage() {
               >
                 <div className="flex items-start justify-between gap-3">
                   <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
-                  <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gray-800 bg-gray-900 px-2.5 py-1 text-xs text-gray-300">
-                    <Users className="h-3.5 w-3.5 text-primary" aria-hidden />
-                    <span className="tabular-nums">{subscribers.toLocaleString("en-IN")}</span>
-                  </span>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm text-gray-400">{s.description}</p>
                 <div className="mt-4 text-xs text-gray-500">
@@ -446,7 +439,7 @@ export default function StrategySubscriptionLifecyclePage() {
                   <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-500">
                     <span className="inline-flex items-center gap-1">
                       <TrendingUp className="h-3 w-3" aria-hidden />
-                      12M curve
+                      Track record
                     </span>
                     {lastPnl !== null ? (
                       <span className="tabular-nums text-emerald-400">

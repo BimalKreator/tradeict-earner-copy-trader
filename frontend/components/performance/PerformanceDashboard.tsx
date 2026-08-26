@@ -15,8 +15,6 @@ import {
 } from "recharts";
 import {
   authFetch,
-  buildApiUrl,
-  formatFetchErrors,
 } from "@/lib/authFetch";
 import { RevenueInvoiceTable } from "@/components/billing/RevenueInvoiceTable";
 import { StrategySubscriptionFees } from "@/components/billing/StrategySubscriptionFees";
@@ -128,73 +126,104 @@ function SummaryCard({
   );
 }
 
+function SectionLoadError({
+  onRetry,
+  busy,
+}: {
+  onRetry: () => void;
+  busy?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-6 text-center">
+      <p className="text-sm text-amber-100">Couldn&apos;t load this — retry</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        disabled={busy}
+        className="mt-3 inline-flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-50 hover:bg-amber-500/25 disabled:opacity-50"
+      >
+        <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export function PerformanceDashboard() {
   const { rate: usdInrRate } = useUsdInrRate();
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [structures, setStructures] = useState<StructureRow[]>([]);
   const [snapshots, setSnapshots] = useState<DailySnapshot[]>([]);
   const [invoices, setInvoices] = useState<RevenueInvoice[]>([]);
   const [walletBalance, setWalletBalance] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [structuresError, setStructuresError] = useState(false);
+  const [dailyError, setDailyError] = useState(false);
+  const [invoicesError, setInvoicesError] = useState(false);
 
   const load = useCallback(async () => {
     if (!resolveApiBase()) {
-      setError("API URL is not configured.");
+      console.error("[performance] API URL is not configured");
       setLoading(false);
+      setStructuresError(true);
+      setDailyError(true);
+      setInvoicesError(true);
       return;
     }
     setLoading(true);
-    setError(null);
     try {
-      const structuresPath = "/me/structures?limit=100";
-      const dailyPath = "/me/pnl/daily";
-      const invoicesPath = "/me/revenue/invoices";
       const [sRes, pRes, iRes, wRes] = await Promise.all([
-        authFetch(structuresPath),
-        authFetch(dailyPath),
-        authFetch(invoicesPath),
+        authFetch("/me/structures?limit=100"),
+        authFetch("/me/pnl/daily"),
+        authFetch("/me/revenue/invoices"),
         authFetch("/wallet/me"),
       ]);
-      const failures: Array<{ label: string; res: Response; url: string }> = [];
+
       if (!sRes.ok) {
-        failures.push({
-          label: "structures",
-          res: sRes,
-          url: buildApiUrl(structuresPath),
-        });
-      }
-      if (!pRes.ok) {
-        failures.push({
-          label: "daily P&L",
-          res: pRes,
-          url: buildApiUrl(dailyPath),
-        });
-      }
-      if (!iRes.ok) {
-        failures.push({
-          label: "invoices",
-          res: iRes,
-          url: buildApiUrl(invoicesPath),
-        });
-      }
-      if (failures.length > 0) {
-        throw new Error(formatFetchErrors(failures));
-      }
-      const sJson = (await sRes.json()) as { structures: StructureRow[] };
-      const pJson = (await pRes.json()) as { snapshots: DailySnapshot[] };
-      const iJson = (await iRes.json()) as { invoices: RevenueInvoice[] };
-      setStructures(sJson.structures ?? []);
-      setSnapshots(pJson.snapshots ?? []);
-      setInvoices(iJson.invoices ?? []);
-      if (wRes.ok) {
-        const wJson = (await wRes.json()) as { balance?: number; balanceUsd?: number };
-        setWalletBalance(wJson.balanceUsd ?? wJson.balance ?? 0);
+        console.error("[performance] structures failed", sRes.status);
+        setStructuresError(true);
+        setStructures([]);
       } else {
+        setStructuresError(false);
+        const sJson = (await sRes.json()) as { structures: StructureRow[] };
+        setStructures(sJson.structures ?? []);
+      }
+
+      if (!pRes.ok) {
+        console.error("[performance] daily P&L failed", pRes.status);
+        setDailyError(true);
+        setSnapshots([]);
+      } else {
+        setDailyError(false);
+        const pJson = (await pRes.json()) as { snapshots: DailySnapshot[] };
+        setSnapshots(pJson.snapshots ?? []);
+      }
+
+      if (!iRes.ok) {
+        console.error("[performance] invoices failed", iRes.status);
+        setInvoicesError(true);
+        setInvoices([]);
+      } else {
+        setInvoicesError(false);
+        const iJson = (await iRes.json()) as { invoices: RevenueInvoice[] };
+        setInvoices(iJson.invoices ?? []);
+      }
+
+      if (wRes.ok) {
+        const wJson = (await wRes.json()) as {
+          balance?: number;
+          balanceUsd?: number;
+        };
+        setWalletBalance(wJson.balanceUsd ?? wJson.balance ?? null);
+      } else {
+        console.error("[performance] wallet failed", wRes.status);
         setWalletBalance(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      console.error("[performance] load failed", err);
+      setStructuresError(true);
+      setDailyError(true);
+      setInvoicesError(true);
     } finally {
       setLoading(false);
     }
@@ -236,13 +265,15 @@ export function PerformanceDashboard() {
   );
 
   const hasClosedHistory =
-    closedStructures.length > 0 ||
-    snapshots.some((s) => s.cumulativeRealized !== 0 || s.realizedDelta !== 0);
+    !dailyError &&
+    (closedStructures.length > 0 ||
+      snapshots.some((s) => s.cumulativeRealized !== 0 || s.realizedDelta !== 0));
 
   const profitSharePct = useMemo(() => {
+    if (invoicesError) return null;
     const withShare = invoices.find((inv) => inv.profitSharePct > 0);
     return withShare?.profitSharePct ?? invoices[0]?.profitSharePct ?? null;
-  }, [invoices]);
+  }, [invoices, invoicesError]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
@@ -269,22 +300,23 @@ export function PerformanceDashboard() {
         </button>
       </div>
 
-      {error ? (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-          {error}
-        </div>
-      ) : null}
-
-      <HighWaterMarkCard
-        loading={loading}
-        hasData={hasClosedHistory}
-        cumulativeRealized={latest?.cumulativeRealized ?? null}
-        highWaterMark={latest?.highWaterMark ?? null}
-        profitSharePct={profitSharePct}
-      />
+      {dailyError ? (
+        <SectionLoadError onRetry={() => void load()} busy={loading} />
+      ) : (
+        <HighWaterMarkCard
+          loading={loading}
+          hasData={hasClosedHistory}
+          cumulativeRealized={latest?.cumulativeRealized ?? null}
+          highWaterMark={latest?.highWaterMark ?? null}
+          profitSharePct={profitSharePct}
+        />
+      )}
 
       <section className="space-y-3">
         <h2 className="text-lg font-medium text-white">Summary</h2>
+        {dailyError ? (
+          <SectionLoadError onRetry={() => void load()} busy={loading} />
+        ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <SummaryCard
             title="Cumulative realized P&L"
@@ -348,6 +380,7 @@ export function PerformanceDashboard() {
             }
           />
         </div>
+        )}
       </section>
 
       <section className="space-y-3">
@@ -357,6 +390,8 @@ export function PerformanceDashboard() {
             <div className="flex h-64 items-center justify-center">
               <Loader2 className="h-8 w-8 animate-spin text-white/30" />
             </div>
+          ) : dailyError ? (
+            <SectionLoadError onRetry={() => void load()} busy={loading} />
           ) : chartData.length === 0 ? (
             <p className="py-12 text-center text-sm text-white/45">
               No daily snapshots yet. Once a structure closes, your cumulative realized P&amp;L
@@ -427,6 +462,8 @@ export function PerformanceDashboard() {
           <div className="flex justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-white/30" />
           </div>
+        ) : structuresError ? (
+          <SectionLoadError onRetry={() => void load()} busy={loading} />
         ) : structures.length === 0 ? (
           <div className="rounded-xl border border-dashed border-white/15 px-6 py-12 text-center">
             <p className="text-sm text-white/55">No bot structures recorded yet.</p>
@@ -637,12 +674,19 @@ export function PerformanceDashboard() {
       </section>
 
       <div id="invoices">
-        <RevenueInvoiceTable
-          invoices={invoices}
-          loading={loading}
-          walletBalance={walletBalance}
-          onPaid={() => void load()}
-        />
+        {invoicesError ? (
+          <section className="space-y-3">
+            <h2 className="text-lg font-medium text-white">Revenue invoices</h2>
+            <SectionLoadError onRetry={() => void load()} busy={loading} />
+          </section>
+        ) : (
+          <RevenueInvoiceTable
+            invoices={invoices}
+            loading={loading}
+            walletBalance={walletBalance}
+            onPaid={() => void load()}
+          />
+        )}
       </div>
 
       <StrategySubscriptionFees />

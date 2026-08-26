@@ -505,6 +505,8 @@ export default function PartnerDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [metricsError, setMetricsError] = useState(false);
+  const [networkError, setNetworkError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [payoutBusy, setPayoutBusy] = useState(false);
   const [toast, setToast] = useState<{ type: "ok" | "err"; text: string } | null>(
@@ -559,22 +561,28 @@ export default function PartnerDashboardPage() {
     ]);
 
     if (!metricsRes.ok) {
-      throw new Error(
-        metricsRes.status === 403
-          ? "Partner access required"
-          : `Failed to load partner metrics (${metricsRes.status})`,
-      );
-    }
-    if (!networkRes.ok) {
-      throw new Error(
-        networkRes.status === 403
-          ? "Partner access required"
-          : `Failed to load network details (${networkRes.status})`,
-      );
+      console.error("[partner] metrics failed", metricsRes.status);
+      setMetricsError(true);
+      setMetrics(null);
+      if (metricsRes.status === 403) {
+        setError("Partner access required");
+      }
+    } else {
+      setMetricsError(false);
+      setMetrics((await metricsRes.json()) as PartnerMetrics);
     }
 
-    setMetrics((await metricsRes.json()) as PartnerMetrics);
-    setNetwork((await networkRes.json()) as NetworkDetails);
+    if (!networkRes.ok) {
+      console.error("[partner] network-details failed", networkRes.status);
+      setNetworkError(true);
+      setNetwork(null);
+      if (networkRes.status === 403) {
+        setError("Partner access required");
+      }
+    } else {
+      setNetworkError(false);
+      setNetwork((await networkRes.json()) as NetworkDetails);
+    }
   }, [apiBase, token]);
 
   useEffect(() => {
@@ -786,6 +794,19 @@ export default function PartnerDashboardPage() {
       {loading ? (
         <div className="flex justify-center rounded-2xl border border-glassBorder py-24">
           <Loader2 className="h-9 w-9 animate-spin text-primary" aria-label="Loading" />
+        </div>
+      ) : metricsError && !metrics ? (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-8 text-center">
+          <p className="text-sm text-amber-100">Couldn&apos;t load this — retry</p>
+          <button
+            type="button"
+            onClick={() => void handleRefresh()}
+            disabled={refreshing}
+            className="mt-3 inline-flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            Retry
+          </button>
         </div>
       ) : metrics ? (
         <>
