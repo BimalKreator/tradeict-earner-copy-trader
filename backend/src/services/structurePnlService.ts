@@ -14,9 +14,6 @@ export const ATTRIBUTION_STATUS = {
 export type AttributionStatus =
   (typeof ATTRIBUTION_STATUS)[keyof typeof ATTRIBUTION_STATUS];
 
-/** Minimum matched billing txns for a closed leg (entry+exit cashflow + commissions). */
-const MIN_CLOSED_LEG_MATCHED_TXNS = 4;
-
 /**
  * Minimum matched txns when the leg closed via settlement (ITM expiry),
  * not a trade exit — settlement alone is enough evidence of close.
@@ -341,6 +338,50 @@ export function findMatchingLegWindows(
   return legs.filter((l) => txnMatchesLegWindowSpec(txn, l, productLegs));
 }
 
+/** Real open window (no grace): attributionFrom/openedAt .. closedAt inclusive. */
+export function isTxnInRealWindow(
+  leg: LegWindowSpec,
+  at: Date,
+): boolean {
+  if (at < resolveLegAttributionWindowStart(leg)) return false;
+  if (!leg.closedAt) return true;
+  return at.getTime() <= leg.closedAt.getTime();
+}
+
+/**
+ * Chronological grace after close — independent of a979b8c grace suppression.
+ * Used to detect the silent-award case: txn in A's grace and B's real window.
+ */
+export function isTxnInChronologicalGrace(
+  leg: LegWindowSpec,
+  at: Date,
+): boolean {
+  if (!leg.closedAt) return false;
+  const t = at.getTime();
+  const close = leg.closedAt.getTime();
+  return t > close && t <= close + LEG_CLOSE_GRACE_MS;
+}
+
+/**
+ * When findMatchingLegWindows returns a unique winner (typically B's real
+ * window), return other same-product legs that still chronologically cover
+ * the txn via grace. Non-empty ⇒ ambiguous — do not assign silently (15.4).
+ */
+export function findGraceVsRealAmbiguityPartners(
+  txn: { productId: number | null; occurredAt: Date },
+  awardedLeg: LegWindowSpec,
+  allLegs: LegWindowSpec[],
+): LegWindowSpec[] {
+  if (txn.productId == null) return [];
+  if (!isTxnInRealWindow(awardedLeg, txn.occurredAt)) return [];
+  return allLegs.filter(
+    (leg) =>
+      !isSameLeg(leg, awardedLeg) &&
+      leg.productId === txn.productId &&
+      isTxnInChronologicalGrace(leg, txn.occurredAt),
+  );
+}
+
 function legRefToWindowSpec(ref: LegRef): LegWindowSpec {
   return {
     botStructureId: ref.structure.botStructureId,
@@ -363,6 +404,8 @@ type LegTotals = {
   settlementTotal: Prisma.Decimal;
   liquidationFeeTotal: Prisma.Decimal;
   matchedTxnCount: number;
+  cashflowCount: number;
+  commissionCount: number;
   cashflowHasPositive: boolean;
   cashflowHasNegative: boolean;
   /** True when at least one settlement row was attributed to this leg. */
@@ -371,6 +414,11 @@ type LegTotals = {
   overlapConflict: boolean;
   /** Max leg count from any overlap event affecting this leg. */
   overlapLegCount: number;
+  /**
+   * Ambiguous: txn sits in this leg's chronological grace and another leg's
+   * real window — not silently assigned (15.4).
+   */
+  graceAmbiguity: boolean;
 };
 
 function emptyLegTotals(): LegTotals {
@@ -381,11 +429,14 @@ function emptyLegTotals(): LegTotals {
     settlementTotal: zeroDecimal(),
     liquidationFeeTotal: zeroDecimal(),
     matchedTxnCount: 0,
+    cashflowCount: 0,
+    commissionCount: 0,
     cashflowHasPositive: false,
     cashflowHasNegative: false,
     hasSettlement: false,
     overlapConflict: false,
     overlapLegCount: 0,
+    graceAmbiguity: false,
   };
 }
 
@@ -394,10 +445,12 @@ function applyTxnToLegTotals(totals: LegTotals, txn: LedgerRow): void {
   const tt = txn.transactionType.toLowerCase();
   if (tt === "cashflow") {
     totals.grossCashflow = totals.grossCashflow.add(txn.amount);
+    totals.cashflowCount += 1;
     if (txn.amount.greaterThan(0)) totals.cashflowHasPositive = true;
     if (txn.amount.lessThan(0)) totals.cashflowHasNegative = true;
   } else if (tt === "commission") {
     totals.commissionTotal = totals.commissionTotal.add(txn.amount);
+    totals.commissionCount += 1;
   } else if (tt === "funding") {
     totals.fundingTotal = totals.fundingTotal.add(txn.amount);
   } else if (tt === "settlement") {
@@ -456,7 +509,79 @@ type LegAttributionFailure = {
   botLegId: number;
   matchedTxnCount: number;
   reason: string;
+  /** Commission shortfall count (cashflows without a paired commission). */
+  missingCommissionCount?: number;
 };
+
+/**
+ * Structural completeness for a closed trade-exit leg: every cashflow fill
+ * must have its paired commission. Row-count thresholds are not used — a
+ * multi-fill leg can exceed any numeric minimum while still missing a fee.
+ * Keep hasBothCashflowSigns — that catches a different failure mode.
+ */
+export function evaluateLegStructuralCompleteness(totals: {
+  cashflowCount: number;
+  commissionCount: number;
+  cashflowHasPositive: boolean;
+  cashflowHasNegative: boolean;
+  hasSettlement: boolean;
+  matchedTxnCount: number;
+  overlapConflict?: boolean;
+  overlapLegCount?: number;
+  graceAmbiguity?: boolean;
+}): { ok: boolean; reason: string | null; missingCommissionCount: number } {
+  if (totals.overlapConflict) {
+    return {
+      ok: false,
+      reason: `overlap: txn matched ${totals.overlapLegCount ?? 0} legs`,
+      missingCommissionCount: 0,
+    };
+  }
+  if (totals.graceAmbiguity) {
+    return {
+      ok: false,
+      reason:
+        "grace/real ambiguity: txn in one leg's chronological grace and another's real window (not assigned)",
+      missingCommissionCount: 0,
+    };
+  }
+
+  // Settlement close: no entry+exit cashflow pair expected.
+  if (totals.hasSettlement) {
+    if (totals.matchedTxnCount < MIN_SETTLEMENT_CLOSED_MATCHED_TXNS) {
+      return {
+        ok: false,
+        reason: `settlement-closed but matchedTxnCount < ${MIN_SETTLEMENT_CLOSED_MATCHED_TXNS}`,
+        missingCommissionCount: 0,
+      };
+    }
+    return { ok: true, reason: null, missingCommissionCount: 0 };
+  }
+
+  const hasBothCashflowSigns =
+    totals.cashflowHasPositive && totals.cashflowHasNegative;
+  if (!hasBothCashflowSigns) {
+    return {
+      ok: false,
+      reason: "missing both cashflow signs (+ and -)",
+      missingCommissionCount: 0,
+    };
+  }
+
+  const missingCommissionCount = Math.max(
+    0,
+    totals.cashflowCount - totals.commissionCount,
+  );
+  if (missingCommissionCount > 0) {
+    return {
+      ok: false,
+      reason: `commission shortfall: ${totals.cashflowCount} cashflow(s) but ${totals.commissionCount} commission(s) (missing ${missingCommissionCount})`,
+      missingCommissionCount,
+    };
+  }
+
+  return { ok: true, reason: null, missingCommissionCount: 0 };
+}
 
 function evaluateClosedLegAttribution(
   totals: LegTotals,
@@ -464,46 +589,14 @@ function evaluateClosedLegAttribution(
 ): LegAttributionFailure | null {
   if (!leg.closedAt) return null;
 
-  if (totals.overlapConflict) {
-    return {
-      botLegId: leg.botLegId,
-      matchedTxnCount: totals.matchedTxnCount,
-      reason: `overlap: txn matched ${totals.overlapLegCount} legs`,
-    };
-  }
-
-  // Settlement close (e.g. ITM expiry / expire-worthless): no entry+exit
-  // cashflow pair is expected — skip the dual-sign check.
-  if (totals.hasSettlement) {
-    if (totals.matchedTxnCount < MIN_SETTLEMENT_CLOSED_MATCHED_TXNS) {
-      return {
-        botLegId: leg.botLegId,
-        matchedTxnCount: totals.matchedTxnCount,
-        reason: `settlement-closed but matchedTxnCount < ${MIN_SETTLEMENT_CLOSED_MATCHED_TXNS}`,
-      };
-    }
-    return null;
-  }
-
-  const hasBothCashflowSigns =
-    totals.cashflowHasPositive && totals.cashflowHasNegative;
-  if (!hasBothCashflowSigns) {
-    return {
-      botLegId: leg.botLegId,
-      matchedTxnCount: totals.matchedTxnCount,
-      reason: "missing both cashflow signs (+ and -)",
-    };
-  }
-
-  if (totals.matchedTxnCount < MIN_CLOSED_LEG_MATCHED_TXNS) {
-    return {
-      botLegId: leg.botLegId,
-      matchedTxnCount: totals.matchedTxnCount,
-      reason: `matchedTxnCount < ${MIN_CLOSED_LEG_MATCHED_TXNS}`,
-    };
-  }
-
-  return null;
+  const result = evaluateLegStructuralCompleteness(totals);
+  if (result.ok) return null;
+  return {
+    botLegId: leg.botLegId,
+    matchedTxnCount: totals.matchedTxnCount,
+    reason: result.reason ?? "incomplete",
+    missingCommissionCount: result.missingCommissionCount,
+  };
 }
 
 function evaluateStructureAttribution(
@@ -537,10 +630,13 @@ function evaluateStructureAttribution(
   }
 
   const note = failures
-    .map(
-      (f) =>
-        `leg ${f.botLegId}: ${f.reason} (matchedTxnCount=${f.matchedTxnCount})`,
-    )
+    .map((f) => {
+      const missing =
+        f.missingCommissionCount && f.missingCommissionCount > 0
+          ? ` missingCommissions=${f.missingCommissionCount}`
+          : "";
+      return `leg ${f.botLegId}: ${f.reason} (matchedTxnCount=${f.matchedTxnCount}${missing})`;
+    })
     .join("; ");
   return { status: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE, note };
 }
@@ -728,11 +824,81 @@ async function recomputeStructurePnlForUser(
     }
 
     const spec = matchingSpecs[0]!;
+
+    // 15.4 narrow rule: unique match under a979b8c, but another leg still has
+    // this txn in chronological grace ⇒ ambiguous; record, do not assign.
+    const gracePartners = findGraceVsRealAmbiguityPartners(
+      txn,
+      spec,
+      legWindowSpecs,
+    );
+    if (gracePartners.length > 0) {
+      const ambiguous = [spec, ...gracePartners];
+      const legIds = ambiguous.map((s) => s.botLegId);
+      console.error(
+        `[StructurePnl] GRACE_AMBIGUITY user=${userId} uuid=${txn.deltaUuid} product=${txn.productId} ` +
+          `legs=[${legIds.join(",")}] -- txn NOT counted, legs marked SUSPECT`,
+      );
+      const absAmt = txn.amount.abs();
+      const touchedStructures = new Set(
+        ambiguous.map((s) => s.botStructureId),
+      );
+      for (const botStructureId of touchedStructures) {
+        const prev = droppedByStructure.get(botStructureId) ?? zeroDecimal();
+        droppedByStructure.set(botStructureId, prev.add(absAmt));
+      }
+      for (const amb of ambiguous) {
+        const key = legKey(amb.botStructureId, amb.botLegId);
+        const totals = legTotals.get(key)!;
+        totals.graceAmbiguity = true;
+      }
+      continue;
+    }
+
     const key = legKey(spec.botStructureId, spec.botLegId);
     const totals = legTotals.get(key)!;
     applyTxnToLegTotals(totals, txn);
     matchedTxnCount += 1;
   }
+
+  // 15.3: for legs short on commissions, claim unmatched same-product
+  // commissions booked at/after close (often past grace) into dropped amount.
+  const stillUnmatched: LedgerRow[] = [];
+  const claimedUuids = new Set<string>();
+  for (const ref of allLegRefs) {
+    if (!ref.leg.closedAt) continue;
+    const key = legKey(ref.structure.botStructureId, ref.leg.botLegId);
+    const totals = legTotals.get(key)!;
+    if (totals.hasSettlement) continue;
+    const shortfall = Math.max(0, totals.cashflowCount - totals.commissionCount);
+    if (shortfall <= 0) continue;
+
+    const candidates = unmatched
+      .filter(
+        (row) =>
+          !claimedUuids.has(row.deltaUuid) &&
+          row.transactionType.toLowerCase() === "commission" &&
+          row.productId === ref.leg.productId &&
+          row.occurredAt.getTime() >= ref.leg.closedAt!.getTime(),
+      )
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime())
+      .slice(0, shortfall);
+
+    for (const row of candidates) {
+      claimedUuids.add(row.deltaUuid);
+      const prev =
+        droppedByStructure.get(ref.structure.botStructureId) ?? zeroDecimal();
+      droppedByStructure.set(
+        ref.structure.botStructureId,
+        prev.add(row.amount.abs()),
+      );
+    }
+  }
+  for (const row of unmatched) {
+    if (!claimedUuids.has(row.deltaUuid)) stillUnmatched.push(row);
+  }
+  unmatched.length = 0;
+  unmatched.push(...stillUnmatched);
 
   const unmatchedAmount = unmatched.reduce(
     (sum, row) => sum.add(row.amount),

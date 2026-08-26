@@ -1,5 +1,11 @@
 import { Prisma, Role, SubscriptionStatus } from "@prisma/client";
-import { ATTRIBUTION_STATUS } from "../../../services/structurePnlService.js";
+import {
+  ATTRIBUTION_STATUS,
+  LEG_CLOSE_GRACE_MS,
+  evaluateLegStructuralCompleteness,
+  findGraceVsRealAmbiguityPartners,
+  type LegWindowSpec,
+} from "../../../services/structurePnlService.js";
 import {
   boundedWorstCasePnl,
   computeMonthlyRevenueInvoiceForUser,
@@ -26,6 +32,8 @@ const REF_STRUCTURE_4 = {
 /**
  * 15.1 / 15.2 — suspect structures use a bounded worst-case P&L so incomplete
  * "gains" never raise the HWM, while possible losses still lower it.
+ * 15.3 / 15.4 — structural cashflow↔commission completeness; grace∩real
+ * ambiguity is recorded, never silently assigned.
  */
 export const p15SuspectAsymmetryScenario: HarnessScenario = {
   name: "p15-suspect-asymmetry",
@@ -89,6 +97,111 @@ export const p15SuspectAsymmetryScenario: HarnessScenario = {
       ref4!.attributionStatus,
       REF_STRUCTURE_4.attributionStatus,
       "reference structure 4 attributionStatus OK",
+    );
+
+    // --- 15.3 structural completeness (replaces matchedTxnCount >= 4) ---
+    const shortOneCommission = evaluateLegStructuralCompleteness({
+      cashflowCount: 3,
+      commissionCount: 2,
+      cashflowHasPositive: true,
+      cashflowHasNegative: true,
+      hasSettlement: false,
+      matchedTxnCount: 5,
+    });
+    assert.assert(!shortOneCommission.ok, "3 CF + 2 commissions → incomplete");
+    assert.equal(
+      shortOneCommission.missingCommissionCount,
+      1,
+      "missing amount recorded as 1 missing commission",
+    );
+    assert.assert(
+      (shortOneCommission.reason ?? "").includes("commission shortfall"),
+      "reason names commission shortfall",
+    );
+
+    const completeUnderOldThreshold = evaluateLegStructuralCompleteness({
+      cashflowCount: 2,
+      commissionCount: 2,
+      cashflowHasPositive: true,
+      cashflowHasNegative: true,
+      hasSettlement: false,
+      matchedTxnCount: 4,
+    });
+    assert.assert(
+      completeUnderOldThreshold.ok,
+      "2 CF + 2 commissions → complete (even though only 4 rows)",
+    );
+
+    // Exact multi-fill case the old threshold passed: 2 entry CF + 2 entry
+    // commissions + 1 exit CF = 5 rows, both signs, missing exit commission.
+    const multiFillMissingExitFee = evaluateLegStructuralCompleteness({
+      cashflowCount: 3,
+      commissionCount: 2,
+      cashflowHasPositive: true,
+      cashflowHasNegative: true,
+      hasSettlement: false,
+      matchedTxnCount: 5,
+    });
+    assert.assert(
+      !multiFillMissingExitFee.ok,
+      "multi-fill missing exit commission → incomplete (old threshold would pass)",
+    );
+    assert.equal(
+      multiFillMissingExitFee.missingCommissionCount,
+      1,
+      "exit commission shortfall recorded",
+    );
+
+    // --- 15.4 grace∩real ambiguity recorded, not silently assigned ---
+    const t0 = new Date("2026-07-12T10:00:00.000Z");
+    const legAClose = new Date(t0.getTime() + 60_000);
+    const legBOpen = new Date(legAClose.getTime() - 5_000);
+    const txnInGraceAndBReal = new Date(legAClose.getTime() + 30_000);
+    const legA: LegWindowSpec = {
+      botStructureId: 1,
+      botLegId: 101,
+      productId: 42,
+      openedAt: t0,
+      attributionFrom: null,
+      closedAt: legAClose,
+    };
+    const legB: LegWindowSpec = {
+      botStructureId: 1,
+      botLegId: 102,
+      productId: 42,
+      openedAt: legBOpen,
+      attributionFrom: null,
+      closedAt: new Date(legBOpen.getTime() + 120_000),
+    };
+    assert.assert(
+      txnInGraceAndBReal.getTime() - legAClose.getTime() < LEG_CLOSE_GRACE_MS,
+      "txn is inside A's chronological grace",
+    );
+    const gracePartners = findGraceVsRealAmbiguityPartners(
+      { productId: 42, occurredAt: txnInGraceAndBReal },
+      legB,
+      [legA, legB],
+    );
+    assert.assert(
+      gracePartners.length === 1 && gracePartners[0]!.botLegId === 101,
+      "ambiguous txn: A is grace partner when B would silently win",
+    );
+    const graceAmbEval = evaluateLegStructuralCompleteness({
+      cashflowCount: 2,
+      commissionCount: 2,
+      cashflowHasPositive: true,
+      cashflowHasNegative: true,
+      hasSettlement: false,
+      matchedTxnCount: 4,
+      graceAmbiguity: true,
+    });
+    assert.assert(
+      !graceAmbEval.ok,
+      "grace/real ambiguity marks leg incomplete (recorded, not assigned)",
+    );
+    assert.assert(
+      (graceAmbEval.reason ?? "").includes("grace/real ambiguity"),
+      "ambiguity reason is recorded on the structure path",
     );
 
     // Unit check of the bound itself
@@ -213,6 +326,53 @@ export const p15SuspectAsymmetryScenario: HarnessScenario = {
       },
     });
 
+    // 15.3/15.4 persisted row: commission shortfall + recorded ambiguity drop.
+    await prisma.structurePnl.create({
+      data: {
+        userId: user.id,
+        botStructureId: 9_150_004,
+        hedgePositionId: 9_150_004,
+        underlying: "BTC",
+        status: "closed",
+        openedAt: new Date(closedAt.getTime() - 14_400_000),
+        closedAt: new Date(closedAt.getTime() - 180_000),
+        grossCashflow: new Prisma.Decimal(50),
+        commissionTotal: new Prisma.Decimal(-1),
+        realizedPnl: new Prisma.Decimal(49),
+        attributionDroppedAmount: new Prisma.Decimal(0.42),
+        legCount: 2,
+        closedLegCount: 2,
+        matchedTxnCount: 5,
+        computedAt: new Date(),
+        attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+        attributionNote:
+          "leg 1: commission shortfall: 3 cashflow(s) but 2 commission(s) (missing 1) (matchedTxnCount=5 missingCommissions=1); grace/real ambiguity recorded",
+        isSimulated: false,
+      },
+    });
+    const shortfallRow = await prisma.structurePnl.findFirst({
+      where: { userId: user.id, botStructureId: 9_150_004 },
+      select: {
+        attributionStatus: true,
+        attributionNote: true,
+        attributionDroppedAmount: true,
+      },
+    });
+    assert.equal(
+      shortfallRow!.attributionStatus,
+      ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+      "shortfall+ambiguity structure is SUSPECT",
+    );
+    assert.assert(
+      (shortfallRow!.attributionNote ?? "").includes("commission shortfall"),
+      "missing commission named on structure note",
+    );
+    assert.assert(
+      shortfallRow!.attributionDroppedAmount != null &&
+        shortfallRow!.attributionDroppedAmount.eq(new Prisma.Decimal(0.42)),
+      "missing/ambiguous amount recorded on attributionDroppedAmount",
+    );
+
     const contribSuspectGain = structureCumulativeContribution({
       realizedPnl: new Prisma.Decimal(300),
       attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
@@ -256,8 +416,8 @@ export const p15SuspectAsymmetryScenario: HarnessScenario = {
       "billable month realized is clean +25 only",
     );
     assert.assert(
-      (invoice.suspectStructuresCount ?? 0) >= 2,
-      "both suspect structures are counted",
+      (invoice.suspectStructuresCount ?? 0) >= 3,
+      "suspect structures include shortfall/ambiguity row",
     );
     assert.assert(
       (invoice.suspectLossesCountedCount ?? 0) >= 2,
@@ -265,6 +425,7 @@ export const p15SuspectAsymmetryScenario: HarnessScenario = {
     );
 
     // Cumulative = clean +25 + bounded(-500) + open-leg(-50) = -525
+    // (shortfall row +49 with 0.42 dropped → bounded +48.58 → not a loss → excluded)
     assert.assert(
       invoice.cumulativeRealizedPnl != null,
       "cumulativeRealizedPnl is set",
