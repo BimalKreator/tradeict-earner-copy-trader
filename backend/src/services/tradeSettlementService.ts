@@ -223,6 +223,7 @@ export async function settleOpenCopyTradesForLeg(
         revenueShareAmt,
         status: TradeStatus.CLOSED,
         exitReason,
+        closedAt: new Date(),
       },
     });
     if (settled.count !== 1) {

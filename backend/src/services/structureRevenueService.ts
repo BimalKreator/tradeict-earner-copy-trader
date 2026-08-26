@@ -979,23 +979,43 @@ export async function computeDailyPnlSnapshotForUser(
   const { cumulative: cumulativeToday } = partitionStructures(closedToday);
   const realizedDelta = sumCumulativeContributions(cumulativeToday);
 
-  const prevDate = startOfDayInTimeZone(
-    new Date(snapshotDate.getTime() - MS_PER_DAY),
-    BILLING_TIMEZONE,
-  );
-  const prev = await prisma.dailyPnlSnapshot.findUnique({
+  // Most recent PRIOR snapshot (not exactly yesterday) — a missed day must
+  // never restart the chain at zero (same ?? 0 shape as the old HWM bug).
+  const prev = await prisma.dailyPnlSnapshot.findFirst({
     where: {
-      userId_snapshotDate_isSimulated: {
-        userId,
-        snapshotDate: prevDate,
-        isSimulated,
-      },
+      userId,
+      isSimulated,
+      snapshotDate: { lt: snapshotDate },
     },
+    orderBy: { snapshotDate: "desc" },
   });
 
-  const prevCumulative = prev?.cumulativeRealized ?? zero();
-  const prevHwm = prev?.highWaterMark ?? zero();
-  const prevCommissionCumulative = prev?.commissionCumulative ?? zero();
+  const dayStart = startOfDayInTimeZone(snapshotDate, BILLING_TIMEZONE);
+  let prevCumulative: Prisma.Decimal;
+  let prevHwm: Prisma.Decimal;
+  let prevCommissionCumulative: Prisma.Decimal;
+
+  if (prev) {
+    prevCumulative = prev.cumulativeRealized;
+    prevHwm = prev.highWaterMark;
+    prevCommissionCumulative = prev.commissionCumulative;
+  } else {
+    // No snapshot chain yet — seed from the same lifetime math invoices use.
+    prevCumulative = await lifetimeCumulativeRealizedToDate(
+      prisma,
+      userId,
+      dayStart,
+      isSimulated,
+    );
+    prevHwm = await runningHwmBeforeMonthStart(
+      prisma,
+      userId,
+      dayStart,
+      isSimulated,
+    );
+    prevHwm = maxDec(prevHwm, prevCumulative);
+    prevCommissionCumulative = zero();
+  }
 
   const cumulativeRealized = prevCumulative.add(realizedDelta);
   const highWaterMark = maxDec(prevHwm, cumulativeRealized);

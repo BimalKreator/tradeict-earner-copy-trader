@@ -627,11 +627,15 @@ model Trade {
   isDummy         Boolean     @default(false)
   /** Origin tag — `BOT_SYNC_LEGACY` for retired bot MTM poller rows. */
   source          String?
+  /** When status became CLOSED — billing windows on this, not createdAt. */
+  closedAt        DateTime?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @default(now()) @updatedAt
 
   user       User        @relation(fields: [userId], references: [id])
   strategy   Strategy    @relation(fields: [strategyId], references: [id])
+
+  @@index([status, closedAt])
 }
 
 /// Per-order leg registry so copy trades never mix across strategies.

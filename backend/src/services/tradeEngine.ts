@@ -1680,6 +1680,7 @@ async function recordTrade(
       ...(args.pnl != null ? { pnl: args.pnl } : {}),
       ...(args.tradingFee != null ? { tradingFee: args.tradingFee } : {}),
       ...(args.exitReason ? { exitReason: args.exitReason } : {}),
+      ...(args.status === TradeStatus.CLOSED ? { closedAt: new Date() } : {}),
     },
   });
 

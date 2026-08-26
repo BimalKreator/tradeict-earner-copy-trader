@@ -29,6 +29,13 @@ import {
 /** Trade has no isSimulated column — dummy injector sets isDummy only. */
 const excludeDummyTrades = { isDummy: false } as const;
 
+/**
+ * Legacy monthly Invoice generator (Trade rows, no HWM) is hard-disabled.
+ * Live billable strategies use MonthlyRevenueInvoice / Delta structure P&L.
+ * Count script: `npx tsx src/scripts/countLegacyNonBotSubs.ts`
+ */
+export const LEGACY_TRADE_MONTHLY_INVOICES_DISABLED = true;
+
 /** Days a generated invoice has before it goes OVERDUE and pauses the subscription. */
 const INVOICE_DUE_DAYS = 5;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -115,31 +122,11 @@ export async function getCurrentMonthBilling(
     return getBotStrategyMtdFromSnapshots(prisma, userId);
   }
 
-  const now = new Date();
-  const monthStart = startOfUtcMonth(now);
-
-  // BILLING QUERY — must always carry excludeSimulatedFilter()
-  const trades = await prisma.trade.findMany({
-    where: {
-      userId,
-      strategyId,
-      status: TradeStatus.CLOSED,
-      ...excludeLegacyBotSyncTradesWhere(),
-      ...excludeDummyTrades,
-      createdAt: { gte: monthStart, lte: now },
-    },
-    select: { tradePnl: true, pnl: true },
-  });
-
-  const cumulativePnl = trades.reduce(
-    (sum, t) => sum + realizedTradePnl(t),
-    0,
+  // 15.6: legacy Trade-row MTD has no high-water mark — must not contradict disclosure.
+  console.error(
+    `[billing] non-bot Trade MTD disabled for strategy=${strategyId} (no HWM; use Delta structure pipeline)`,
   );
-
-  const estimatedDue =
-    cumulativePnl > 0 ? cumulativePnl * (strategy.profitShare / 100) : 0;
-
-  return { cumulativePnl, estimatedDue };
+  return { cumulativePnl: 0, estimatedDue: 0 };
 }
 
 export interface CurrentMonthBillingByStrategy {
@@ -181,9 +168,6 @@ export async function getCurrentMonthBillingForUser(
     },
   });
 
-  const now = new Date();
-  const monthStart = startOfUtcMonth(now);
-
   const byStrategy: CurrentMonthBillingByStrategy[] = [];
   let totalCumulative = 0;
   let totalDue = 0;
@@ -203,38 +187,17 @@ export async function getCurrentMonthBillingForUser(
       continue;
     }
 
-    // BILLING QUERY — must always carry excludeSimulatedFilter()
-    const trades = await prisma.trade.findMany({
-      where: {
-        userId,
-        strategyId: sub.strategyId,
-        status: TradeStatus.CLOSED,
-        ...excludeLegacyBotSyncTradesWhere(),
-        ...excludeDummyTrades,
-        createdAt: { gte: monthStart, lte: now },
-      },
-      select: { tradePnl: true, pnl: true },
-    });
-
-    const cumulativePnl = trades.reduce(
-      (s, t) => s + realizedTradePnl(t),
-      0,
+    // 15.6: legacy Trade-row path has no HWM — do not estimate dues from it.
+    console.error(
+      `[billing] non-bot Trade MTD disabled for strategy=${sub.strategyId} (no HWM)`,
     );
-    const estimatedDue =
-      cumulativePnl > 0
-        ? cumulativePnl * (sub.strategy.profitShare / 100)
-        : 0;
-
     byStrategy.push({
       strategyId: sub.strategyId,
       strategyTitle: sub.strategy.title,
       profitShare: sub.strategy.profitShare,
-      cumulativePnl,
-      estimatedDue,
+      cumulativePnl: 0,
+      estimatedDue: 0,
     });
-
-    totalCumulative += cumulativePnl;
-    totalDue += estimatedDue;
   }
 
   return {
@@ -267,56 +230,31 @@ export async function getPlatformRevenueStats(
   const now = new Date();
   const monthStart = startOfUtcMonth(now);
 
-  // BILLING QUERY — must always carry excludeSimulatedFilter()
-  // nonBotStrategyWhere: bot strategies are billed via Delta pipeline (below), not Trade rows.
+  // BILLING QUERY — closedAt (not createdAt) so month-straddling trades bill once.
+  // Legacy non-bot Trade dues are not HWM-safe; only Delta commission contributes
+  // to expectedRevenue below. Trade PnL is still summed for platform visibility.
   const trades = await prisma.trade.findMany({
     where: {
       status: TradeStatus.CLOSED,
       ...excludeLegacyBotSyncTradesWhere(),
       ...excludeDummyTrades,
       strategy: nonBotStrategyWhere(),
-      createdAt: { gte: monthStart, lte: now },
+      closedAt: { gte: monthStart, lte: now },
     },
     select: { userId: true, strategyId: true, tradePnl: true, pnl: true },
   });
 
   let totalPlatformPnl = 0;
-  const perPair = new Map<string, number>();
   for (const t of trades) {
-    const realized = realizedTradePnl(t);
-    totalPlatformPnl += realized;
-    const key = `${t.userId}::${t.strategyId}`;
-    perPair.set(key, (perPair.get(key) ?? 0) + realized);
+    totalPlatformPnl += realizedTradePnl(t);
   }
 
-  const subs = await prisma.userStrategySubscription.findMany({
-    where: { status: SubscriptionStatus.ACTIVE },
-    select: {
-      userId: true,
-      strategyId: true,
-      strategy: { select: { profitShare: true, botStrategyType: true } },
-    },
-  });
-
-  let expectedRevenue = 0;
   const ist = currentIstCalendarParts(now);
-  const deltaCommission = await sumDeltaPipelineCommissionForIstMonth(
+  let expectedRevenue = await sumDeltaPipelineCommissionForIstMonth(
     prisma,
     ist.year,
     ist.month,
   );
-  expectedRevenue += deltaCommission;
-
-  for (const sub of subs) {
-    if (isBotStrategyType(sub.strategy.botStrategyType)) {
-      continue;
-    }
-    const key = `${sub.userId}::${sub.strategyId}`;
-    const cum = perPair.get(key) ?? 0;
-    if (cum > 0) {
-      expectedRevenue += cum * (sub.strategy.profitShare / 100);
-    }
-  }
 
   const deltaPnlAgg = await prisma.monthlyRevenueInvoice.aggregate({
     where: { periodYear: ist.year, periodMonth: ist.month },
@@ -386,6 +324,16 @@ export async function generateMonthlyInvoices(
     );
   }
 
+  // 15.6: this path bills max(0, month PnL) with no HWM in floats, contradicting
+  // the customer disclosure. Live strategies use MonthlyRevenueInvoice (Delta).
+  if (LEGACY_TRADE_MONTHLY_INVOICES_DISABLED) {
+    const err =
+      "generateMonthlyInvoices is hard-disabled: legacy Trade-row billing has no high-water mark. " +
+      "Bot strategies are billed via MonthlyRevenueInvoice / Delta structure P&L.";
+    console.error(`[billing] ${err}`);
+    throw new Error(err);
+  }
+
   const { start, end } = getMonthRange(month, year);
 
   const subscriptionWhere: Prisma.UserStrategySubscriptionWhereInput = {
@@ -413,7 +361,7 @@ export async function generateMonthlyInvoices(
   let skipped = 0;
 
   for (const sub of subscriptions) {
-    // BILLING QUERY — must always carry excludeSimulatedFilter()
+    // BILLING QUERY — closedAt so month-straddling trades bill in the close month.
     const trades = await prisma.trade.findMany({
       where: {
         userId: sub.userId,
@@ -421,7 +369,7 @@ export async function generateMonthlyInvoices(
         status: TradeStatus.CLOSED,
         ...excludeLegacyBotSyncTradesWhere(),
         ...excludeDummyTrades,
-        createdAt: { gte: start, lt: end },
+        closedAt: { gte: start, lt: end },
       },
       select: { tradePnl: true, pnl: true },
     });
@@ -1115,6 +1063,12 @@ export function initBillingCronJobs(prisma: PrismaClient): void {
     "billing-monthly-invoices",
     "5 0 1 * *",
     async () => {
+      if (LEGACY_TRADE_MONTHLY_INVOICES_DISABLED) {
+        console.warn(
+          "[billing] legacy monthly Trade invoices hard-disabled (15.6) — Delta MonthlyRevenueInvoice is authoritative",
+        );
+        return;
+      }
       const res = await generateMonthlyInvoices(prisma);
       console.log(
         `[billing] Monthly invoice run for ${res.year}-${String(res.month).padStart(2, "0")}: ` +

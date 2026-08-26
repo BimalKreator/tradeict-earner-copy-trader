@@ -187,6 +187,7 @@ export async function injectTrade(
       exitReason: EXIT_REASON.DUMMY_INJECT,
       clientOrderId,
       isDummy: true,
+      closedAt: new Date(),
     },
   });
 

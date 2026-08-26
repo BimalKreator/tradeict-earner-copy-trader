@@ -161,6 +161,7 @@ async function syncOneSlave(
         exitReason: 'BOT_SYNC_CLOSE',
         exitPrice: 0,
         source: TRADE_SOURCE_BOT_SYNC_LEGACY,
+        closedAt: new Date(),
         updatedAt: new Date(),
       },
     });

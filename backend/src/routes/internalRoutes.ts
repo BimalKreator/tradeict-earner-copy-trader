@@ -116,6 +116,7 @@ export function createInternalRouter(prisma: PrismaClient) {
                 status: 'CLOSED',
                 exitReason,
                 source: TRADE_SOURCE_BOT_SYNC_LEGACY,
+                closedAt: new Date(),
                 updatedAt: new Date(),
               },
             });
@@ -133,6 +134,7 @@ export function createInternalRouter(prisma: PrismaClient) {
                 status: 'CLOSED',
                 exitReason,
                 source: TRADE_SOURCE_BOT_SYNC_LEGACY,
+                closedAt: new Date(),
               },
             });
           }
