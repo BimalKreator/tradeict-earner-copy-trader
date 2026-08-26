@@ -1,7 +1,220 @@
 import type { PrismaClient } from "@prisma/client";
+import { initializeDeltaClient } from "./exchangeService.js";
 
 const BOT_BASE_URL = "http://127.0.0.1:8000";
 const BOT_TIMEOUT_MS = 10_000;
+
+/** Why Delta / bot key validation rejected a connect attempt. */
+export type DeltaKeyFailureReason =
+  | "bad_key"
+  | "ip_not_whitelisted"
+  | "read_only"
+  | "unreachable"
+  | "unknown";
+
+export type DeltaKeyValidationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: DeltaKeyFailureReason;
+      error: string;
+      status: number;
+    };
+
+/**
+ * Harness-only overrides so scenarios can mock the bot without live Delta calls.
+ * Production code paths leave this empty.
+ */
+export type BotBridgeHarnessHooks = {
+  validateDeltaKeysForTrading?: (
+    apiKey: string,
+    apiSecret: string,
+  ) => Promise<DeltaKeyValidationResult>;
+  pauseUserOnBot?: (args: { botSlaveId: number }) => Promise<BotSlaveResult>;
+  resumeUserOnBot?: (args: { botSlaveId: number }) => Promise<BotSlaveResult>;
+  updateUserCapitalOnBot?: (args: {
+    botSlaveId: number;
+    userAllocatedCapitalUsd: number;
+  }) => Promise<BotSlaveResult>;
+  closeSlaveStructure?: (args: {
+    botSlaveId: number;
+    userId: string;
+    reason: string;
+  }) => Promise<CloseSlaveStructureResult>;
+  ensureBotSlaveForSubscription?: (args: {
+    userId: string;
+    strategyId: string;
+    subscriptionId: string;
+    apiKey: string;
+    apiSecret: string;
+    userAllocatedCapitalUsd: number;
+  }) => Promise<number | null>;
+};
+
+let harnessHooks: BotBridgeHarnessHooks = {};
+
+export function installBotBridgeHarnessHooks(
+  hooks: BotBridgeHarnessHooks,
+): void {
+  harnessHooks = { ...hooks };
+}
+
+export function resetBotBridgeHarnessHooks(): void {
+  harnessHooks = {};
+}
+
+export function classifyDeltaKeyFailure(message: string): DeltaKeyFailureReason {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("ip_not_whitelisted") ||
+    lower.includes("ip_blocked") ||
+    lower.includes("ip whitelist") ||
+    lower.includes("not whitelisted")
+  ) {
+    return "ip_not_whitelisted";
+  }
+  if (
+    lower.includes("invalid_api_key") ||
+    lower.includes("invalid api key") ||
+    lower.includes("authentication") ||
+    lower.includes("signature")
+  ) {
+    return "bad_key";
+  }
+  if (
+    lower.includes("read only") ||
+    lower.includes("read-only") ||
+    lower.includes("readonly") ||
+    lower.includes("trading permission") ||
+    lower.includes("permission") ||
+    lower.includes("not authorized") ||
+    lower.includes("forbidden") ||
+    lower.includes("unauthorized")
+  ) {
+    return "read_only";
+  }
+  return "unknown";
+}
+
+export function userFacingDeltaKeyError(reason: DeltaKeyFailureReason): string {
+  switch (reason) {
+    case "bad_key":
+      return "Invalid Delta API key or secret.";
+    case "ip_not_whitelisted":
+      return "This server IP is not whitelisted for your Delta API key.";
+    case "read_only":
+      return "Delta API key is read-only — enable Trading permission.";
+    case "unreachable":
+      return "Could not reach Delta Exchange to validate API keys.";
+    default:
+      return "Delta API key validation failed.";
+  }
+}
+
+function isTradingCapabilityError(message: string): boolean {
+  const reason = classifyDeltaKeyFailure(message);
+  return (
+    reason === "bad_key" ||
+    reason === "ip_not_whitelisted" ||
+    reason === "read_only"
+  );
+}
+
+/**
+ * Auth + trading probe against Delta India.
+ * Read-only keys that can fetch balances still fail the order probe.
+ */
+async function validateDeltaKeysForTradingImpl(
+  apiKey: string,
+  apiSecret: string,
+): Promise<DeltaKeyValidationResult> {
+  const key = apiKey.trim();
+  const secret = apiSecret.trim();
+  if (!key || !secret) {
+    return {
+      ok: false,
+      reason: "bad_key",
+      error: userFacingDeltaKeyError("bad_key"),
+      status: 400,
+    };
+  }
+
+  try {
+    const exchange = initializeDeltaClient(key, secret);
+    await exchange.loadMarkets();
+    await exchange.fetchBalance();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (/aborted|econnrefused|enotfound|timed?\s*out|network/i.test(message)) {
+      return {
+        ok: false,
+        reason: "unreachable",
+        error: userFacingDeltaKeyError("unreachable"),
+        status: 502,
+      };
+    }
+    const reason = classifyDeltaKeyFailure(message);
+    return {
+      ok: false,
+      reason,
+      error: userFacingDeltaKeyError(reason),
+      status: 400,
+    };
+  }
+
+  // Orders require Trading permission. A far-from-market limit on a bogus product
+  // must not fill; permission errors mean read-only, other rejections mean the key can trade.
+  try {
+    const exchange = initializeDeltaClient(key, secret);
+    const privatePost = (
+      exchange as {
+        privatePostOrders?: (params: Record<string, unknown>) => Promise<unknown>;
+      }
+    ).privatePostOrders;
+    if (typeof privatePost !== "function") {
+      // Fallback: if CCXT path missing, treat balance success as insufficient —
+      // refuse rather than accept a key we cannot prove can trade.
+      return {
+        ok: false,
+        reason: "unknown",
+        error: "Unable to verify trading permission on this Delta key.",
+        status: 400,
+      };
+    }
+    await privatePost.call(exchange, {
+      product_id: 1,
+      size: 1,
+      side: "buy",
+      order_type: "limit_order",
+      limit_price: "0.0001",
+      time_in_force: "gtc",
+    });
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (isTradingCapabilityError(message)) {
+      const reason = classifyDeltaKeyFailure(message);
+      return {
+        ok: false,
+        reason,
+        error: userFacingDeltaKeyError(reason),
+        status: 400,
+      };
+    }
+    // invalid product / margin / price / etc. ⇒ trading endpoint accepted the auth
+    return { ok: true };
+  }
+}
+
+export async function validateDeltaKeysForTrading(
+  apiKey: string,
+  apiSecret: string,
+): Promise<DeltaKeyValidationResult> {
+  if (harnessHooks.validateDeltaKeysForTrading) {
+    return harnessHooks.validateDeltaKeysForTrading(apiKey, apiSecret);
+  }
+  return validateDeltaKeysForTradingImpl(apiKey, apiSecret);
+}
 
 /** Short label from UUID — first 8 chars */
 function shortId(id: string): string {
@@ -128,70 +341,82 @@ export async function registerUserWithBot(args: {
 
 /**
  * Pause copy trading for a user on the bot (subscription paused/cancelled).
- * Sets is_active=false on the slave account.
+ * Idempotent PATCH { is_active: false } — never uses toggle.
  */
-export async function pauseUserOnBot(args: {
+async function pauseUserOnBotImpl(args: {
   botSlaveId: number;
 }): Promise<BotSlaveResult> {
-  const result = await botFetch(
-    `/api/slave/accounts/${args.botSlaveId}/toggle`,
-    { method: "POST" },
-  );
+  const result = await botFetch(`/api/slave/accounts/${args.botSlaveId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_active: false }),
+  });
 
-  // toggle returns current state — check is_active became false
   if (result.ok && result.data && typeof result.data === "object") {
     const d = result.data as Record<string, unknown>;
-    const isActive = Boolean(d.is_active);
-    if (!isActive) {
+    if (Boolean(d.is_active) === false) {
       console.log(`[BotBridge] Paused slave botSlaveId=${args.botSlaveId}`);
-      return { success: true };
-    }
-    // Was already paused, toggled back to active — toggle again to re-pause
-    const retry = await botFetch(
-      `/api/slave/accounts/${args.botSlaveId}/toggle`,
-      { method: "POST" },
-    );
-    if (retry.ok) {
-      console.log(`[BotBridge] Re-paused slave botSlaveId=${args.botSlaveId}`);
-      return { success: true };
+      return { success: true, botSlaveId: args.botSlaveId };
     }
   }
 
-  console.error(`[BotBridge] pauseUserOnBot failed for botSlaveId=${args.botSlaveId}`);
-  return { success: false, error: "Toggle failed" };
+  if (result.ok) {
+    console.log(`[BotBridge] Paused slave botSlaveId=${args.botSlaveId}`);
+    return { success: true, botSlaveId: args.botSlaveId };
+  }
+
+  console.error(
+    `[BotBridge] pauseUserOnBot failed for botSlaveId=${args.botSlaveId}`,
+  );
+  return { success: false, error: `Pause failed (HTTP ${result.status})` };
+}
+
+export async function pauseUserOnBot(args: {
+  botSlaveId: number;
+}): Promise<BotSlaveResult> {
+  if (harnessHooks.pauseUserOnBot) {
+    return harnessHooks.pauseUserOnBot(args);
+  }
+  return pauseUserOnBotImpl(args);
 }
 
 /**
  * Resume copy trading for a user on the bot (subscription re-activated).
- * Sets is_active=true on the slave account.
+ * Idempotent PATCH { is_active: true } — never uses toggle.
  */
-export async function resumeUserOnBot(args: {
+async function resumeUserOnBotImpl(args: {
   botSlaveId: number;
 }): Promise<BotSlaveResult> {
-  // First check current state
-  const checkResult = await botFetch("/api/slave/accounts", { method: "GET" });
-  if (checkResult.ok && Array.isArray(checkResult.data)) {
-    const slave = (checkResult.data as Array<Record<string, unknown>>).find(
-      (s) => s.id === args.botSlaveId,
-    );
-    if (slave && Boolean(slave.is_active) === true) {
-      // Already active
-      return { success: true };
+  const result = await botFetch(`/api/slave/accounts/${args.botSlaveId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_active: true }),
+  });
+
+  if (result.ok && result.data && typeof result.data === "object") {
+    const d = result.data as Record<string, unknown>;
+    if (Boolean(d.is_active) === true) {
+      console.log(`[BotBridge] Resumed slave botSlaveId=${args.botSlaveId}`);
+      return { success: true, botSlaveId: args.botSlaveId };
     }
   }
 
-  const result = await botFetch(
-    `/api/slave/accounts/${args.botSlaveId}/toggle`,
-    { method: "POST" },
-  );
-
   if (result.ok) {
     console.log(`[BotBridge] Resumed slave botSlaveId=${args.botSlaveId}`);
-    return { success: true };
+    return { success: true, botSlaveId: args.botSlaveId };
   }
 
-  console.error(`[BotBridge] resumeUserOnBot failed for botSlaveId=${args.botSlaveId}`);
-  return { success: false, error: "Toggle failed" };
+  console.error(
+    `[BotBridge] resumeUserOnBot failed for botSlaveId=${args.botSlaveId}`,
+  );
+  return { success: false, error: `Resume failed (HTTP ${result.status})` };
+}
+
+export async function resumeUserOnBot(args: {
+  botSlaveId: number;
+}): Promise<BotSlaveResult> {
+  if (harnessHooks.resumeUserOnBot) {
+    return harnessHooks.resumeUserOnBot(args);
+  }
+  return resumeUserOnBotImpl(args);
 }
 
 /**
@@ -224,29 +449,41 @@ export async function removeUserFromBot(args: {
 /**
  * Update user's allocated capital on the bot (when user changes deployed capital).
  */
-export async function updateUserCapitalOnBot(args: {
+async function updateUserCapitalOnBotImpl(args: {
   botSlaveId: number;
   userAllocatedCapitalUsd: number;
 }): Promise<BotSlaveResult> {
-  const result = await botFetch(
-    `/api/slave/accounts/${args.botSlaveId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({
-        user_allocated_capital: args.userAllocatedCapitalUsd,
-      }),
-    },
-  );
+  const result = await botFetch(`/api/slave/accounts/${args.botSlaveId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      user_allocated_capital: args.userAllocatedCapitalUsd,
+    }),
+  });
 
   if (result.ok) {
     console.log(
       `[BotBridge] Updated capital botSlaveId=${args.botSlaveId} capital=$${args.userAllocatedCapitalUsd}`,
     );
-    return { success: true };
+    return { success: true, botSlaveId: args.botSlaveId };
   }
 
-  console.error(`[BotBridge] updateUserCapitalOnBot failed for botSlaveId=${args.botSlaveId}`);
-  return { success: false, error: String(result.status) };
+  console.error(
+    `[BotBridge] updateUserCapitalOnBot failed for botSlaveId=${args.botSlaveId}`,
+  );
+  return {
+    success: false,
+    error: `Capital update failed (HTTP ${result.status})`,
+  };
+}
+
+export async function updateUserCapitalOnBot(args: {
+  botSlaveId: number;
+  userAllocatedCapitalUsd: number;
+}): Promise<BotSlaveResult> {
+  if (harnessHooks.updateUserCapitalOnBot) {
+    return harnessHooks.updateUserCapitalOnBot(args);
+  }
+  return updateUserCapitalOnBotImpl(args);
 }
 
 /**
@@ -310,7 +547,7 @@ export async function onSubscriptionCreated(args: {
  * - Otherwise registers a new slave via onSubscriptionCreated.
  * Returns null on failure (non-fatal).
  */
-export async function ensureBotSlaveForSubscription(args: {
+async function ensureBotSlaveForSubscriptionImpl(args: {
   userId: string;
   strategyId: string;
   subscriptionId: string;
@@ -347,6 +584,20 @@ export async function ensureBotSlaveForSubscription(args: {
   }
 }
 
+export async function ensureBotSlaveForSubscription(args: {
+  userId: string;
+  strategyId: string;
+  subscriptionId: string;
+  apiKey: string;
+  apiSecret: string;
+  userAllocatedCapitalUsd: number;
+}): Promise<number | null> {
+  if (harnessHooks.ensureBotSlaveForSubscription) {
+    return harnessHooks.ensureBotSlaveForSubscription(args);
+  }
+  return ensureBotSlaveForSubscriptionImpl(args);
+}
+
 /**
  * Called when subscription is paused (funds insufficient, admin pause, etc.)
  */
@@ -378,7 +629,7 @@ export async function onSubscriptionCancelled(args: {
  * Close all open baskets and the hedge for a slave, then deactivate it.
  * Idempotent — safe to retry on network failure.
  */
-export async function closeSlaveStructure(args: {
+async function closeSlaveStructureImpl(args: {
   botSlaveId: number;
   userId: string;
   reason: string;
@@ -441,4 +692,15 @@ export async function closeSlaveStructure(args: {
   const counts = parseCloseCounts(result.data);
   if (counts) success.counts = counts;
   return success;
+}
+
+export async function closeSlaveStructure(args: {
+  botSlaveId: number;
+  userId: string;
+  reason: string;
+}): Promise<CloseSlaveStructureResult> {
+  if (harnessHooks.closeSlaveStructure) {
+    return harnessHooks.closeSlaveStructure(args);
+  }
+  return closeSlaveStructureImpl(args);
 }

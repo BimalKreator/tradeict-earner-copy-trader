@@ -619,75 +619,20 @@ export function createSubscriptionController(prisma: PrismaClient) {
         rawStrategyId,
       );
       const body = req.body as { deployedCapital?: unknown; multiplier?: unknown };
-      const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: { in: [...MANAGED_SUBSCRIPTION_STATUSES] } },
-        select: {
-          id: true,
-          botSlaveId: true,
-          strategy: {
-            select: {
-              baseCapital: true,
-              minCapital: true,
-              botStrategyType: true,
-            },
-          },
-        },
+      const { modifySubscriptionCapital } = await import(
+        "../services/subscriptionLifecycleService.js"
+      );
+      const result = await modifySubscriptionCapital(prisma, {
+        userId,
+        strategyId,
+        deployedCapital: body.deployedCapital,
+        multiplier: body.multiplier,
       });
-      if (!sub) return void res.status(404).json({ error: "Subscription not found" });
-
-      const baseCapital = resolveStrategyBaseCapital(sub.strategy);
-      const multiplier = parseMultiplierFromBody(body, baseCapital);
-      if (multiplier == null) {
-        return void res.status(400).json({
-          error: deployedCapitalRangeError(baseCapital),
-        });
+      if (!result.ok) {
+        return void res.status(result.status).json({ error: result.error });
       }
-
-      const newCapitalUsd =
-        parseDeployedCapital(body.deployedCapital) ??
-        deployedCapitalFromMultiplier(multiplier, baseCapital);
-
-      const updated = await prisma.userStrategySubscription.update({
-        where: { id: sub.id },
-        data: { multiplier },
-        include: {
-          strategy: { select: strategySelectPublic },
-          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
-        },
-      });
       invalidateCopySubscriberCache();
-
-      // Update bot slave capital if this is a bot-type strategy
-      if (
-        sub.botSlaveId &&
-        typeof sub.strategy.botStrategyType === "string" &&
-        sub.strategy.botStrategyType.trim()
-      ) {
-        const botSlaveIdNum = Number.parseInt(sub.botSlaveId, 10);
-        if (Number.isFinite(botSlaveIdNum)) {
-          try {
-            const { updateUserCapitalOnBot } = await import(
-              "../services/botBridgeService.js"
-            );
-            await updateUserCapitalOnBot({
-              botSlaveId: botSlaveIdNum,
-              userAllocatedCapitalUsd: newCapitalUsd,
-            });
-            console.log(
-              "[Capital] Updated bot slave capital:",
-              botSlaveIdNum,
-              newCapitalUsd,
-            );
-          } catch (botErr) {
-            console.error(
-              "[Capital] Bot slave capital update failed (non-fatal):",
-              botErr,
-            );
-          }
-        }
-      }
-
-      res.json({ subscription: updated });
+      res.json({ subscription: result.subscription });
     } catch (err) {
       next(err);
     }
@@ -703,20 +648,14 @@ export function createSubscriptionController(prisma: PrismaClient) {
         prisma,
         rawStrategyId,
       );
-      const sub = await prisma.userStrategySubscription.findFirst({
-        where: { userId, strategyId, status: SubscriptionStatus.ACTIVE },
-        select: { id: true },
-      });
-      if (!sub) return void res.status(404).json({ error: "Active subscription not found" });
-      const updated = await prisma.userStrategySubscription.update({
-        where: { id: sub.id },
-        data: { isActive: false, status: VOLUNTARY_PAUSED_STATUS },
-        include: {
-          strategy: { select: strategySelectPublic },
-          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
-        },
-      });
-      res.json({ subscription: updated });
+      const { pauseSubscriptionForUser } = await import(
+        "../services/subscriptionLifecycleService.js"
+      );
+      const result = await pauseSubscriptionForUser(prisma, { userId, strategyId });
+      if (!result.ok) {
+        return void res.status(result.status).json({ error: result.error });
+      }
+      res.json({ subscription: result.subscription });
     } catch (err) {
       next(err);
     }
@@ -745,19 +684,13 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return void res.status(403).json({ error: UNPAID_INVOICE_BLOCK_MESSAGE });
       }
 
-      const updated = await prisma.userStrategySubscription.update({
-        where: { id: sub.id },
-        data: {
-          isActive: true,
-          status: SubscriptionStatus.ACTIVE,
-          syncStatus: "PENDING",
-          syncError: null,
-        },
-        include: {
-          strategy: { select: strategySelectPublic },
-          exchangeAccount: { select: { id: true, nickname: true, exchange: true } },
-        },
-      });
+      const { resumeSubscriptionForUser } = await import(
+        "../services/subscriptionLifecycleService.js"
+      );
+      const result = await resumeSubscriptionForUser(prisma, { userId, strategyId });
+      if (!result.ok) {
+        return void res.status(result.status).json({ error: result.error });
+      }
 
       if (sub.strategy.syncActiveTrades) {
         void import("../services/tradeEngine.js")
@@ -770,7 +703,7 @@ export function createSubscriptionController(prisma: PrismaClient) {
           });
       }
 
-      res.json({ subscription: updated });
+      res.json({ subscription: result.subscription });
     } catch (err) {
       next(err);
     }

@@ -597,11 +597,13 @@ async function registerBotBridgeForSubscription(
     });
 
     if (botSlaveId != null) {
-      await prisma.$executeRaw`
-        UPDATE "UserSubscription"
-        SET "botSlaveId" = ${String(botSlaveId)}
-        WHERE id = ${subRow.id}
-      `;
+      await prisma.userStrategySubscription.update({
+        where: { id: subRow.id },
+        data: {
+          botSlaveId: String(botSlaveId),
+          exchangeAccountId: account.id,
+        },
+      });
     }
   } catch (botErr) {
     console.error("[subscribeUserToStrategy] Bot bridge error (non-fatal):", botErr);

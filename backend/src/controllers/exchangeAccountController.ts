@@ -5,6 +5,10 @@ import {
   decryptDeltaSecretOrPlain,
   normalizeStoredDeltaSecret,
 } from "../utils/encryption.js";
+import {
+  ensureBotSlaveForSubscription,
+  validateDeltaKeysForTrading,
+} from "../services/botBridgeService.js";
 
 const listSelect = {
   id: true,
@@ -12,6 +16,245 @@ const listSelect = {
   exchange: true,
   createdAt: true,
 } as const;
+
+export type ConnectExchangeAccountInput = {
+  nickname: string;
+  apiKey: string;
+  apiSecret: string;
+  exchange?: string;
+};
+
+export type ConnectExchangeAccountResult =
+  | { ok: true; status: 201; account: { id: string; nickname: string; exchange: string; createdAt: Date } }
+  | { ok: false; status: number; error: string; reason?: string };
+
+export type DisconnectExchangeAccountResult =
+  | { ok: true; status: 204 }
+  | { ok: false; status: number; error: string; body?: Record<string, unknown> };
+
+/**
+ * Validate keys (auth + trading), create ExchangeAccount, and auto-register
+ * bot slaves with botSlaveId + exchangeAccountId always persisted.
+ */
+export async function connectExchangeAccountForUser(
+  prisma: PrismaClient,
+  userId: string,
+  input: ConnectExchangeAccountInput,
+): Promise<ConnectExchangeAccountResult> {
+  const nickname = input.nickname.trim();
+  const apiKey = input.apiKey.trim();
+  const apiSecret = input.apiSecret.trim();
+  const exchange = (input.exchange?.trim() || "Delta").trim() || "Delta";
+
+  if (!nickname) {
+    return { ok: false, status: 400, error: "nickname is required" };
+  }
+  if (!apiKey || !apiSecret) {
+    return { ok: false, status: 400, error: "apiKey and apiSecret are required" };
+  }
+
+  const validation = await validateDeltaKeysForTrading(apiKey, apiSecret);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      status: validation.status,
+      error: validation.error,
+      reason: validation.reason,
+    };
+  }
+
+  const account = await prisma.exchangeAccount.create({
+    data: {
+      userId,
+      nickname,
+      exchange,
+      apiKey: normalizeStoredDeltaSecret(apiKey),
+      apiSecret: normalizeStoredDeltaSecret(apiSecret),
+    },
+    select: listSelect,
+  });
+
+  try {
+    const botSubs = await prisma.userStrategySubscription.findMany({
+      where: {
+        userId,
+        strategy: {
+          botStrategyType: { not: null },
+          botUrl: { not: null },
+        },
+      },
+      include: {
+        strategy: {
+          select: {
+            id: true,
+            botStrategyType: true,
+            botUrl: true,
+            baseCapital: true,
+            minCapital: true,
+          },
+        },
+      },
+    });
+
+    if (botSubs.length > 0) {
+      for (const sub of botSubs) {
+        const deployedCapital =
+          (typeof sub.multiplier === "number" && Number.isFinite(sub.multiplier)
+            ? sub.multiplier
+            : 1) * (sub.strategy.baseCapital ?? 300);
+
+        const botSlaveId = await ensureBotSlaveForSubscription({
+          userId,
+          strategyId: sub.strategyId,
+          subscriptionId: sub.id,
+          apiKey,
+          apiSecret,
+          userAllocatedCapitalUsd: deployedCapital,
+        });
+
+        if (botSlaveId == null) {
+          await prisma.exchangeAccount.delete({ where: { id: account.id } });
+          return {
+            ok: false,
+            status: 400,
+            error:
+              "Delta bot rejected these API keys — account was not connected.",
+            reason: "unknown",
+          };
+        }
+
+        await prisma.userStrategySubscription.update({
+          where: { id: sub.id },
+          data: {
+            botSlaveId: String(botSlaveId),
+            exchangeAccountId: account.id,
+            isActive: true,
+            status: SubscriptionStatus.ACTIVE,
+          },
+        });
+        console.log(
+          "[ExchangeAccount] Auto-registered bot slave:",
+          botSlaveId,
+          "for sub:",
+          sub.id,
+        );
+      }
+    }
+  } catch (autoRegErr) {
+    await prisma.exchangeAccount.delete({ where: { id: account.id } }).catch(() => {
+      /* best-effort rollback */
+    });
+    const msg =
+      autoRegErr instanceof Error ? autoRegErr.message : String(autoRegErr);
+    console.error("[ExchangeAccount] Auto bot registration error:", msg);
+    return {
+      ok: false,
+      status: 502,
+      error: "Failed to register trading keys with the bot — account was not connected.",
+    };
+  }
+
+  return { ok: true, status: 201, account };
+}
+
+/**
+ * Disconnect: deactivate every bot slave keyed by botSlaveId first.
+ * Refuse delete if any deactivation fails (stuck row beats live keys on bot).
+ */
+export async function disconnectExchangeAccountForUser(
+  prisma: PrismaClient,
+  userId: string,
+  accountId: string,
+): Promise<DisconnectExchangeAccountResult> {
+  const id = accountId.trim();
+  if (!id) {
+    return { ok: false, status: 400, error: "id is required" };
+  }
+
+  const existing = await prisma.exchangeAccount.findFirst({
+    where: { id, userId },
+  });
+
+  if (!existing) {
+    return { ok: false, status: 404, error: "Exchange account not found" };
+  }
+
+  // Key off botSlaveId. Auto-register historically omitted exchangeAccountId —
+  // those rows still hold live bot keys and must be deactivated on disconnect.
+  const botSubs = await prisma.userStrategySubscription.findMany({
+    where: {
+      userId,
+      status: {
+        in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAUSED_DUE_TO_FUNDS],
+      },
+      strategy: {
+        AND: [
+          { botStrategyType: { not: null } },
+          { NOT: { botStrategyType: "" } },
+        ],
+      },
+      OR: [
+        { exchangeAccountId: existing.id },
+        {
+          AND: [{ exchangeAccountId: null }, { botSlaveId: { not: null } }],
+        },
+      ],
+    },
+    select: {
+      id: true,
+      userId: true,
+      strategyId: true,
+      botSlaveId: true,
+      strategy: { select: { botStrategyType: true } },
+    },
+  });
+
+  const missingSlaveId = botSubs.filter(
+    (s) => !(typeof s.botSlaveId === "string" && s.botSlaveId.trim().length > 0),
+  );
+  if (missingSlaveId.length > 0) {
+    return {
+      ok: false,
+      status: 502,
+      error:
+        "Cannot disconnect: bot-strategy subscription is missing botSlaveId — refuse delete while the bot may still hold keys.",
+    };
+  }
+
+  const {
+    closeAndBillForBotSubscription,
+    mapCancellationBillingError,
+  } = await import("../services/cancellationBillingService.js");
+
+  for (const sub of botSubs) {
+    try {
+      await closeAndBillForBotSubscription(prisma, sub, "API_DISCONNECTED");
+    } catch (billingErr) {
+      const mapped = mapCancellationBillingError(billingErr);
+      if (mapped) {
+        return {
+          ok: false,
+          status: mapped.status,
+          error: String(mapped.body.error ?? "Bot deactivation failed"),
+          body: mapped.body,
+        };
+      }
+      const msg =
+        billingErr instanceof Error ? billingErr.message : String(billingErr);
+      return {
+        ok: false,
+        status: 502,
+        error: `Bot slave could not be deactivated — disconnect refused. ${msg}`,
+      };
+    }
+  }
+
+  await prisma.exchangeAccount.delete({
+    where: { id: existing.id },
+  });
+
+  return { ok: true, status: 204 };
+}
 
 export function createExchangeAccountController(prisma: PrismaClient) {
   async function list(
@@ -57,102 +300,22 @@ export function createExchangeAccountController(prisma: PrismaClient) {
         exchange?: unknown;
       };
 
-      const nickname =
-        typeof body.nickname === "string" ? body.nickname.trim() : "";
-      const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-      const apiSecret =
-        typeof body.apiSecret === "string" ? body.apiSecret.trim() : "";
-      const exchangeRaw =
-        typeof body.exchange === "string" ? body.exchange.trim() : "";
-      const exchange = exchangeRaw.length ? exchangeRaw : "Delta";
-
-      if (!nickname) {
-        res.status(400).json({ error: "nickname is required" });
-        return;
-      }
-      if (!apiKey || !apiSecret) {
-        res.status(400).json({ error: "apiKey and apiSecret are required" });
-        return;
-      }
-
-      const account = await prisma.exchangeAccount.create({
-        data: {
-          userId,
-          nickname,
-          exchange,
-          apiKey: normalizeStoredDeltaSecret(apiKey),
-          apiSecret: normalizeStoredDeltaSecret(apiSecret),
-        },
-        select: listSelect,
+      const result = await connectExchangeAccountForUser(prisma, userId, {
+        nickname: typeof body.nickname === "string" ? body.nickname : "",
+        apiKey: typeof body.apiKey === "string" ? body.apiKey : "",
+        apiSecret: typeof body.apiSecret === "string" ? body.apiSecret : "",
+        ...(typeof body.exchange === "string" ? { exchange: body.exchange } : {}),
       });
 
-      // Auto-register bot slaves for existing bot-type strategy subscriptions
-      try {
-        const botSubs = await prisma.userStrategySubscription.findMany({
-          where: {
-            userId,
-            strategy: {
-              botStrategyType: { not: null },
-              botUrl: { not: null },
-            },
-          },
-          include: {
-            strategy: {
-              select: {
-                id: true,
-                botStrategyType: true,
-                botUrl: true,
-                baseCapital: true,
-                minCapital: true,
-              },
-            },
-          },
+      if (!result.ok) {
+        res.status(result.status).json({
+          error: result.error,
+          ...(result.reason ? { reason: result.reason } : {}),
         });
-
-        if (botSubs.length > 0) {
-          const {
-            ensureBotSlaveForSubscription,
-          } = await import("../services/botBridgeService.js");
-
-          for (const sub of botSubs) {
-            const deployedCapital =
-              (typeof sub.multiplier === "number" && Number.isFinite(sub.multiplier)
-                ? sub.multiplier
-                : 1) * (sub.strategy.baseCapital ?? 300);
-
-            const botSlaveId = await ensureBotSlaveForSubscription({
-              userId,
-              strategyId: sub.strategyId,
-              subscriptionId: sub.id,
-              apiKey,
-              apiSecret,
-              userAllocatedCapitalUsd: deployedCapital,
-            });
-
-            if (botSlaveId != null) {
-              await prisma.$executeRaw`
-                UPDATE "UserSubscription"
-                SET "botSlaveId" = ${String(botSlaveId)}, "isActive" = true
-                WHERE id = ${sub.id}
-              `;
-              console.log(
-                "[ExchangeAccount] Auto-registered bot slave:",
-                botSlaveId,
-                "for sub:",
-                sub.id,
-              );
-            }
-          }
-        }
-      } catch (autoRegErr) {
-        // Non-fatal — account already saved
-        console.error(
-          "[ExchangeAccount] Auto bot registration error:",
-          autoRegErr,
-        );
+        return;
       }
 
-      res.status(201).json(account);
+      res.status(201).json(result.account);
     } catch (err) {
       next(err);
     }
@@ -177,63 +340,11 @@ export function createExchangeAccountController(prisma: PrismaClient) {
         return;
       }
 
-      const existing = await prisma.exchangeAccount.findFirst({
-        where: { id: id.trim(), userId },
-      });
-
-      if (!existing) {
-        res.status(404).json({ error: "Exchange account not found" });
+      const result = await disconnectExchangeAccountForUser(prisma, userId, id);
+      if (!result.ok) {
+        res.status(result.status).json(result.body ?? { error: result.error });
         return;
       }
-
-      const botSubs = await prisma.userStrategySubscription.findMany({
-        where: {
-          userId,
-          exchangeAccountId: existing.id,
-          status: {
-            in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAUSED_DUE_TO_FUNDS],
-          },
-          strategy: {
-            AND: [
-              { botStrategyType: { not: null } },
-              { NOT: { botStrategyType: "" } },
-            ],
-          },
-        },
-        select: {
-          id: true,
-          userId: true,
-          strategyId: true,
-          botSlaveId: true,
-          strategy: { select: { botStrategyType: true } },
-        },
-      });
-
-      const {
-        closeAndBillForBotSubscription,
-        mapCancellationBillingError,
-      } = await import("../services/cancellationBillingService.js");
-
-      for (const sub of botSubs) {
-        try {
-          await closeAndBillForBotSubscription(
-            prisma,
-            sub,
-            "API_DISCONNECTED",
-          );
-        } catch (billingErr) {
-          const mapped = mapCancellationBillingError(billingErr);
-          if (mapped) {
-            res.status(mapped.status).json(mapped.body);
-            return;
-          }
-          throw billingErr;
-        }
-      }
-
-      await prisma.exchangeAccount.delete({
-        where: { id: existing.id },
-      });
 
       res.status(204).send();
     } catch (err) {

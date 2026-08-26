@@ -12,6 +12,7 @@ import { p11SimulationIsolationScenario } from "./scenarios/p11-simulation-isola
 import { p12PayoutLifecycleScenario } from "./scenarios/p12-payout-lifecycle.js";
 import { p12ReversalScenario } from "./scenarios/p12-reversal.js";
 import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
+import { p13AccountLifecycleScenario } from "./scenarios/p13-account-lifecycle.js";
 import { schemaDriftScenario } from "./scenarios/schema-drift.js";
 import type { HarnessScenario, ScenarioResult } from "./types.js";
 import {
@@ -26,6 +27,7 @@ const ALL_SCENARIOS: HarnessScenario[] = [
   p12PayoutLifecycleScenario,
   p11SimulationIsolationScenario,
   p11CancelledFinalInvoiceScenario,
+  p13AccountLifecycleScenario,
 ];
 
 function parseOnlyArg(argv: string[]): string | null {
