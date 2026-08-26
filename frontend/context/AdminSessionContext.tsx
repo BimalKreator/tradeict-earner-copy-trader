@@ -10,9 +10,10 @@ import {
   type ReactNode,
 } from "react";
 import { useAuth, type AuthUser } from "@/context/AuthContext";
-import { resolveApiBase } from "@/lib/apiBase";
+import { adminFetch } from "@/lib/adminAuth";
 
-export type PlatformAdminRole = "SUPER_ADMIN" | "MANAGER" | "SUPPORT";
+/** Platform admin RBAC — SUPPORT removed; unknown roles fail closed (null). */
+export type PlatformAdminRole = "SUPER_ADMIN" | "MANAGER";
 
 export type AdminSession = {
   id: string;
@@ -26,7 +27,7 @@ type AdminSessionContextValue = {
   admin: AdminSession | null;
   error: string | null;
   refresh: () => Promise<void>;
-  /** Resolved platform RBAC tier (SUPER_ADMIN | MANAGER | SUPPORT). */
+  /** Resolved platform RBAC tier (SUPER_ADMIN | MANAGER) or null. */
   platformAdminRole: PlatformAdminRole | null;
   isPlatformAdmin: boolean;
   isSuperAdmin: boolean;
@@ -40,22 +41,25 @@ const AdminSessionContext = createContext<AdminSessionContextValue | null>(null)
 function parsePlatformAdminRole(value: unknown): PlatformAdminRole | null {
   if (typeof value !== "string") return null;
   const role = value.trim().toUpperCase();
-  if (role === "SUPER_ADMIN" || role === "MANAGER" || role === "SUPPORT") {
+  if (role === "SUPER_ADMIN" || role === "MANAGER") {
     return role;
   }
+  // Unknown / SUPPORT / missing → null (fail closed — never SUPER_ADMIN)
   return null;
 }
 
-/** Matches backend `isPlatformAdminUser`: ADMIN + non-null adminRole. */
+/** Matches backend `isPlatformAdminUser`: ADMIN + SUPER_ADMIN|MANAGER. */
 function isPlatformAdminUser(user: AuthUser | null | undefined): boolean {
-  return user?.role === "ADMIN" && user.adminRole != null;
+  return (
+    user?.role === "ADMIN" && parsePlatformAdminRole(user.adminRole) != null
+  );
 }
 
 function platformRoleFromAuthUser(
   user: AuthUser | null | undefined,
 ): PlatformAdminRole | null {
   if (!isPlatformAdminUser(user)) return null;
-  return parsePlatformAdminRole(user?.adminRole) ?? "SUPPORT";
+  return parsePlatformAdminRole(user?.adminRole);
 }
 
 function parseAdminSession(data: unknown): AdminSession | null {
@@ -67,8 +71,8 @@ function parseAdminSession(data: unknown): AdminSession | null {
 
   const role =
     parsePlatformAdminRole(admin.adminRole) ??
-    parsePlatformAdminRole(admin.role) ??
-    "SUPPORT";
+    parsePlatformAdminRole(admin.role);
+  if (!role) return null;
 
   return {
     id: admin.id,
@@ -90,7 +94,7 @@ function sessionFromAuthUser(user: AuthUser | null): AdminSession | null {
 }
 
 export function AdminSessionProvider({ children }: { children: ReactNode }) {
-  const { isLoading: authLoading, token, user, refreshUser } = useAuth();
+  const { isLoading: authLoading, user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [admin, setAdmin] = useState<AdminSession | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,17 +102,9 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     if (authLoading) return;
 
-    const bearer = token?.trim() || null;
-    if (!bearer) {
-      setAdmin(null);
-      setError("Not signed in");
-      setLoading(false);
-      return;
-    }
-
     if (!isPlatformAdminUser(user)) {
       setAdmin(null);
-      setError("Not a platform admin");
+      setError(user ? "Not a platform admin" : "Not signed in");
       setLoading(false);
       return;
     }
@@ -119,11 +115,8 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
     const fallback = sessionFromAuthUser(user);
 
     try {
-      const res = await fetch(`${resolveApiBase()}/admin/me`, {
-        headers: { Authorization: `Bearer ${bearer}` },
-        credentials: "include",
-        cache: "no-store",
-      });
+      // Cookie-only — no localStorage Bearer
+      const res = await adminFetch("/admin/me");
 
       if (res.ok) {
         const parsed = parseAdminSession(await res.json());
@@ -131,15 +124,9 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
           setAdmin(parsed);
           return;
         }
-      }
-
-      if (fallback) {
-        setAdmin(fallback);
-        if (!res.ok) {
-          setError(
-            `Using cached admin role (${fallback.role}); /admin/me returned ${res.status}`,
-          );
-        }
+        // Invalid/unknown role from API → fail closed
+        setAdmin(null);
+        setError("Admin role not recognized");
         return;
       }
 
@@ -157,12 +144,14 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
 
       throw new Error("Invalid admin session response");
     } catch (e) {
+      // Do not fall back to a privileged role on error — fail closed.
+      // Only keep fallback when it already parsed as SUPER_ADMIN|MANAGER.
       if (fallback) {
         setAdmin(fallback);
         setError(
           e instanceof Error
-            ? `Using cached admin role (${fallback.role}): ${e.message}`
-            : `Using cached admin role (${fallback.role})`,
+            ? `Using session role (${fallback.role}): ${e.message}`
+            : `Using session role (${fallback.role})`,
         );
       } else {
         setAdmin(null);
@@ -171,7 +160,7 @@ export function AdminSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [authLoading, token, user]);
+  }, [authLoading, user]);
 
   useEffect(() => {
     if (authLoading || !isPlatformAdminUser(user)) return;

@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import Link from "next/link";
 import { Eye, Mail, UserCog } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -12,12 +13,7 @@ import { useAdminSession } from "@/context/AdminSessionContext";
 
 /** Backend prefix: env, or same-origin `/api` when env is missing (typical reverse-proxy setup). */
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 type AdminUser = {
@@ -83,8 +79,7 @@ export default function AdminUsersPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/admin/users`, {
-        headers: authHeaders(),
+      const res = await fetch(`${apiBase}/admin/users`, { ...adminRequestInit(), headers: authHeaders(),
       });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data: unknown = await res.json();

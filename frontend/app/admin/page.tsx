@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   DetailRow,
   MoneyRowCard,
@@ -157,16 +158,13 @@ export default function AdminDashboardPage() {
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [alertActionId, setAlertActionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const headers = useMemo(
-    () => ({ Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` }),
-    [],
-  );
+  const headers = useMemo(() => adminAuthHeaders(), []);
 
   const loadAlerts = useCallback(async () => {
     try {
       const res = await fetch(
         `${resolveApiBase()}/admin/system/alerts?resolved=false`,
-        { headers },
+        { ...adminRequestInit(), headers },
       );
       if (!res.ok) {
         setAlertsError(`Alerts unavailable (${res.status})`);
@@ -186,7 +184,7 @@ export default function AdminDashboardPage() {
       try {
         const res = await fetch(
           `${resolveApiBase()}/admin/system/alerts/${id}/${action}`,
-          { method: "POST", headers },
+          { ...adminRequestInit(), method: "POST", headers },
         );
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -217,9 +215,9 @@ export default function AdminDashboardPage() {
     void (async () => {
       try {
         const [statsRes, cronRes, alertsRes] = await Promise.all([
-          fetch(`${resolveApiBase()}/admin/dashboard-stats`, { headers }),
-          fetch(`${resolveApiBase()}/admin/system/cron`, { headers }),
-          fetch(`${resolveApiBase()}/admin/system/alerts?resolved=false`, { headers }),
+          fetch(`${resolveApiBase()}/admin/dashboard-stats`, { ...adminRequestInit(), headers }),
+          fetch(`${resolveApiBase()}/admin/system/cron`, { ...adminRequestInit(), headers }),
+          fetch(`${resolveApiBase()}/admin/system/alerts?resolved=false`, { ...adminRequestInit(), headers }),
         ]);
         if (!statsRes.ok) throw new Error(`Request failed (${statsRes.status})`);
         setData((await statsRes.json()) as DashboardStats);

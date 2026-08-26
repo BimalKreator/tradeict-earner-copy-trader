@@ -4,6 +4,7 @@ import { Award, ExternalLink, Loader2, Save } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { SALES_TEAM_ROLE_LABELS, type SalesTeamRole } from "@/lib/roles";
 
 type TierLevel = SalesTeamRole;
@@ -48,18 +49,13 @@ function mapApiTier(row: {
   };
 }
 
-function authHeaders(token: string | null): HeadersInit {
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+function authHeaders(): HeadersInit {
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 export default function AdminTierSettingsPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const [tiers, setTiers] = useState<TierConfigForm[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -67,12 +63,8 @@ export default function AdminTierSettingsPage() {
   const [success, setSuccess] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!token) {
-      setError("Not signed in");
-      return;
-    }
     const res = await fetch(`${apiBase}/admin/tier-config`, {
-      headers: authHeaders(token),
+      headers: authHeaders(),
     });
     if (!res.ok) {
       throw new Error(`Failed to load tier config (${res.status})`);
@@ -99,7 +91,7 @@ export default function AdminTierSettingsPage() {
           }),
       ),
     );
-  }, [apiBase, token]);
+  }, [apiBase]);
 
   useEffect(() => {
     void (async () => {
@@ -127,7 +119,6 @@ export default function AdminTierSettingsPage() {
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || saving) return;
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -143,7 +134,7 @@ export default function AdminTierSettingsPage() {
 
       const res = await fetch(`${apiBase}/admin/tier-config`, {
         method: "PUT",
-        headers: authHeaders(token),
+        headers: authHeaders(),
         body: JSON.stringify(payload),
       });
       const body: unknown = await res.json().catch(() => ({}));

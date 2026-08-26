@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   AlertTriangle,
   Banknote,
@@ -121,12 +122,9 @@ function statusBadgeClasses(status: InvoiceStatus): string {
 }
 
 async function authFetch(path: string): Promise<Response> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(`${resolveApiBase()}${path}`, {
+    return fetch(`${resolveApiBase()}${path}`, {
     cache: "no-store",
-    headers: { Authorization: `Bearer ${token ?? ""}` },
-  });
+    ...adminRequestInit(), });
 }
 
 export default function AdminRevenuePage() {

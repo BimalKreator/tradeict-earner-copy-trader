@@ -4,6 +4,7 @@ import { CreateAdminModal } from "@/components/admin/CreateAdminModal";
 import { useAdminSession } from "@/context/AdminSessionContext";
 import type { PlatformAdminRole } from "@/context/AdminSessionContext";
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { Loader2, Plus, RefreshCw, Shield, UserCog } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -34,11 +35,8 @@ function roleBadgeClass(role: PlatformAdminRole): string {
     case "SUPER_ADMIN":
       return "bg-violet-500/15 text-violet-200 ring-1 ring-violet-500/35";
     case "MANAGER":
-      return "bg-sky-500/15 text-sky-200 ring-1 ring-sky-500/35";
-    case "SUPPORT":
-      return "bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/35";
     default:
-      return "bg-white/10 text-white/70 ring-1 ring-white/15";
+      return "bg-sky-500/15 text-sky-200 ring-1 ring-sky-500/35";
   }
 }
 
@@ -57,9 +55,7 @@ function statusBadgeClass(status: string): string {
 export default function AdminManagersPage() {
   const router = useRouter();
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const { loading: sessionLoading, isSuperAdmin } = useAdminSession();
 
   const [admins, setAdmins] = useState<AdminAccount[]>([]);
@@ -70,11 +66,8 @@ export default function AdminManagersPage() {
   const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback(async () => {
-    if (!token) throw new Error("Not signed in");
-
     const res = await fetch(`${apiBase}/admin/managers`, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
+      ...adminRequestInit(), cache: "no-store",
     });
 
     if (res.status === 403) {
@@ -86,7 +79,7 @@ export default function AdminManagersPage() {
 
     const data = (await res.json()) as { admins?: AdminAccount[] };
     setAdmins(Array.isArray(data.admins) ? data.admins : []);
-  }, [apiBase, token]);
+  }, [apiBase]);
 
   useEffect(() => {
     if (sessionLoading) return;
@@ -268,8 +261,6 @@ export default function AdminManagersPage() {
 
       <CreateAdminModal
         open={createOpen}
-        apiBase={apiBase}
-        token={token}
         onClose={() => setCreateOpen(false)}
         onSuccess={() => {
           setToast("Admin account created.");

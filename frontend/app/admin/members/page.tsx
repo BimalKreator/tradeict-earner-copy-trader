@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   Check,
   ClipboardList,
@@ -21,12 +22,7 @@ import { EmailManagerModal } from "@/components/admin/EmailManagerModal";
 import { useAdminProfileEdit } from "@/components/admin/useAdminProfileEdit";
 
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 type SearchUser = {
@@ -213,8 +209,7 @@ export default function AdminMembersPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${apiBase}/admin/members`, {
-        headers: authHeaders(),
+      const res = await fetch(`${apiBase}/admin/members`, { ...adminRequestInit(), headers: authHeaders(),
       });
       if (res.status === 403) {
         throw new Error("Admin access required");
@@ -239,8 +234,7 @@ export default function AdminMembersPage() {
   const loadUpgradeRequests = useCallback(async () => {
     setRequestsLoading(true);
     try {
-      const res = await fetch(`${apiBase}/admin/upgrade-requests`, {
-        headers: authHeaders(),
+      const res = await fetch(`${apiBase}/admin/upgrade-requests`, { ...adminRequestInit(), headers: authHeaders(),
       });
       if (!res.ok) throw new Error(`Failed to load requests (${res.status})`);
       const data = (await res.json()) as { requests?: UpgradeRequestRow[] };
@@ -280,7 +274,7 @@ export default function AdminMembersPage() {
         try {
           const res = await fetch(
             `${apiBase}/admin/users/search?q=${encodeURIComponent(q)}`,
-            { headers: authHeaders() },
+            { ...adminRequestInit(), headers: authHeaders() },
           );
           if (!res.ok) return;
           const data = (await res.json()) as { users?: SearchUser[] };

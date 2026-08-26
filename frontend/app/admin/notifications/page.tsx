@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { Bell, CheckCircle2, Loader2, Search, Send, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -35,42 +36,37 @@ export default function AdminNotificationsPage() {
   const searchRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const selectedIds = selectedUsers.map((u) => u.id);
 
-  const runSearch = useCallback(
-    async (query: string) => {
-      if (!token || query.length < MIN_SEARCH_LENGTH) {
-        setSearchResults([]);
-        setSearching(false);
-        return;
-      }
-      setSearching(true);
-      setSearchError(null);
-      try {
-        const params = new URLSearchParams({ q: query });
-        const res = await fetch(
-          `${resolveApiBase()}/admin/users/search?${params.toString()}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            cache: "no-store",
-          },
-        );
-        if (!res.ok) throw new Error(`Search failed (${res.status})`);
-        const data = (await res.json()) as { users?: SearchUser[] };
-        setSearchResults(Array.isArray(data.users) ? data.users : []);
-        setDropdownOpen(true);
-      } catch (e) {
-        setSearchError(e instanceof Error ? e.message : "Search failed");
-        setSearchResults([]);
-      } finally {
-        setSearching(false);
-      }
-    },
-    [token],
-  );
+  const runSearch = useCallback(async (query: string) => {
+    if (query.length < MIN_SEARCH_LENGTH) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const params = new URLSearchParams({ q: query });
+      const res = await fetch(
+        `${resolveApiBase()}/admin/users/search?${params.toString()}`,
+        {
+          ...adminRequestInit(),
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) throw new Error(`Search failed (${res.status})`);
+      const data = (await res.json()) as { users?: SearchUser[] };
+      setSearchResults(Array.isArray(data.users) ? data.users : []);
+      setDropdownOpen(true);
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : "Search failed");
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -120,11 +116,6 @@ export default function AdminNotificationsPage() {
     e.preventDefault();
     setError(null);
     setSuccess(null);
-
-    if (!token) {
-      setError("You must be logged in as admin.");
-      return;
-    }
     if (!title.trim()) {
       setError("Title is required.");
       return;
@@ -155,7 +146,7 @@ export default function AdminNotificationsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          
         },
         body: JSON.stringify(body),
       });

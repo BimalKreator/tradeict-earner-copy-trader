@@ -116,7 +116,7 @@ export function requireAdmin(prisma: PrismaClient): (
         },
       });
 
-      if (!user || !isPlatformAdminUser(user)) {
+      if (!user || !isPlatformAdminUser(user) || !user.adminRole) {
         res.status(403).json({ error: "Admin access required" });
         return;
       }
@@ -144,9 +144,10 @@ export function requireAdmin(prisma: PrismaClient): (
         }
       }
 
+      // Fail closed: only SUPER_ADMIN | MANAGER reach here (isPlatformAdminUser).
       req.admin = {
         id: user.id,
-        role: user.adminRole ?? AdminRole.SUPPORT,
+        role: user.adminRole,
         email: user.email,
         name: user.name,
       };

@@ -155,8 +155,6 @@ function filterNavItems(
   platformRole: PlatformAdminRole | null,
 ): NavItem[] {
   if (!platformRole) return [];
-  // Backend default-deny: SUPPORT has no admin panel access.
-  if (platformRole === "SUPPORT") return [];
 
   return items.filter((item) => {
     if (item.superAdminOnly) {

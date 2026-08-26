@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState, Fragment } from "react";
 import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
-import { authFetch, buildApiUrl, formatFetchError } from "@/lib/authFetch";
+import { adminFetch, buildAdminApiUrl, formatAdminFetchError } from "@/lib/adminAuth";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
 import { formatIstCalendarDate, formatIstDateTime } from "@/lib/istDates";
@@ -65,7 +65,7 @@ async function runSafeRecompute(userId: string): Promise<string> {
   ];
   const notes: string[] = [];
   for (const step of steps) {
-    const res = await authFetch(step.path, {
+    const res = await adminFetch(step.path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId }),
@@ -74,7 +74,7 @@ async function runSafeRecompute(userId: string): Promise<string> {
     if (!res.ok) {
       throw new Error(
         body.error ??
-          formatFetchError(step.label, res, buildApiUrl(step.path)),
+          formatAdminFetchError(step.label, res, buildAdminApiUrl(step.path)),
       );
     }
     notes.push(step.label);
@@ -142,9 +142,9 @@ export function AdminUserStructureBillingPanel({
     setLoadError(null);
     try {
       const path = `/admin/revenue/user/${userId}`;
-      const res = await authFetch(path);
+      const res = await adminFetch(path);
       if (!res.ok) {
-        throw new Error(formatFetchError("structures", res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError("structures", res, buildAdminApiUrl(path)));
       }
       const data = (await res.json()) as { structures: StructureSummary[] };
       setStructures(data.structures ?? []);
@@ -187,9 +187,9 @@ export function AdminUserStructureBillingPanel({
     setLedgerLoadingId(structurePnlId);
     try {
       const path = `/admin/revenue/structure/${structurePnlId}/ledger`;
-      const res = await authFetch(path);
+      const res = await adminFetch(path);
       if (!res.ok) {
-        throw new Error(formatFetchError("structure ledger", res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError("structure ledger", res, buildAdminApiUrl(path)));
       }
       const data = (await res.json()) as StructureLedgerPayload;
       setLedgerByStructure((prev) => ({ ...prev, [structurePnlId]: data }));
@@ -207,7 +207,7 @@ export function AdminUserStructureBillingPanel({
     setModalResult(null);
     try {
       const path = `/admin/users/${userId}/close-structure-and-finalise-billing`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirmation }),
@@ -225,7 +225,7 @@ export function AdminUserStructureBillingPanel({
             : "";
         const hint = body.expectedHint ? ` ${body.expectedHint}` : "";
         throw new Error(
-          (body.error ?? formatFetchError("finalise billing", res, buildApiUrl(path))) +
+          (body.error ?? formatAdminFetchError("finalise billing", res, buildAdminApiUrl(path))) +
             hint +
             extra,
         );

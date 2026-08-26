@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -19,7 +21,6 @@ type GranularSyncModalProps = {
   userLabel: string;
   masterLegs: GranularSyncMasterLeg[];
   apiBase: string;
-  authToken: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -32,7 +33,6 @@ export function GranularSyncModal({
   userLabel,
   masterLegs,
   apiBase,
-  authToken,
   onSuccess,
   onError,
 }: GranularSyncModalProps) {
@@ -83,10 +83,11 @@ export function GranularSyncModal({
 
     try {
       const res = await fetch(`${apiBase}/admin/live-trades/granular-sync`, {
+        ...adminRequestInit(),
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
+          
         },
         body: JSON.stringify(payload),
       });
@@ -125,7 +126,6 @@ export function GranularSyncModal({
     }
   }, [
     apiBase,
-    authToken,
     drafts,
     onClose,
     onError,

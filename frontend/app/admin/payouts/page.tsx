@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   Banknote,
   CheckCircle2,
@@ -103,9 +104,7 @@ function actorLabel(actor: ActorSummary): string {
 
 export default function AdminPayoutsPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const [payouts, setPayouts] = useState<PayoutRow[]>([]);
   const [clawbacks, setClawbacks] = useState<ClawbackRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -118,13 +117,8 @@ export default function AdminPayoutsPage() {
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!token) {
-      setError("Not signed in");
-      return;
-    }
     const res = await fetch(`${apiBase}/admin/payouts`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+      ...adminRequestInit(), });
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => ({}));
       const msg =
@@ -142,7 +136,7 @@ export default function AdminPayoutsPage() {
     };
     setPayouts(data.payouts ?? []);
     setClawbacks(data.clawbacks ?? []);
-  }, [apiBase, token]);
+  }, [apiBase]);
 
   useEffect(() => {
     void (async () => {
@@ -180,14 +174,13 @@ export default function AdminPayoutsPage() {
     body: Record<string, string>,
     successMsg: string,
   ) {
-    if (!token || rowBusy[id]) return;
     setRowBusy((prev) => ({ ...prev, [id]: true }));
     setError(null);
     try {
       const res = await fetch(`${apiBase}/admin/payouts/${id}/${path}`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
+          
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),

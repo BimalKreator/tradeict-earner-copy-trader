@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { Loader2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -20,17 +21,13 @@ export default function AdminDownloadsPage() {
   const [rows, setRows] = useState<DownloadFileRow[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const authHeaders = useMemo(() => {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    return { Authorization: `Bearer ${token ?? ""}` };
-  }, []);
+  const authHeaders = useMemo(() => adminAuthHeaders(), []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${resolveApiBase()}/admin/downloads`, { headers: authHeaders });
+      const res = await fetch(`${resolveApiBase()}/admin/downloads`, { ...adminRequestInit(), headers: authHeaders });
       if (!res.ok) {
         throw new Error(`Failed to load downloads (${res.status})`);
       }

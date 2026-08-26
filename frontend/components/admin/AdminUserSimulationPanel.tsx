@@ -2,7 +2,7 @@
 
 import { AlertTriangle, FlaskConical, Loader2, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { authFetch, buildApiUrl, formatFetchError } from "@/lib/authFetch";
+import { adminFetch, buildAdminApiUrl, formatAdminFetchError } from "@/lib/adminAuth";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
 import { formatIstCalendarDate } from "@/lib/istDates";
@@ -69,9 +69,9 @@ export function AdminUserSimulationPanel({ userId, onNotice, onError }: Props) {
     setLoadError(null);
     try {
       const path = `/admin/simulate/chain/${userId}`;
-      const res = await authFetch(path);
+      const res = await adminFetch(path);
       if (!res.ok) {
-        throw new Error(formatFetchError("simulation chain", res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError("simulation chain", res, buildAdminApiUrl(path)));
       }
       const data = (await res.json()) as {
         user: { allowSimulation: boolean };
@@ -95,7 +95,7 @@ export function AdminUserSimulationPanel({ userId, onNotice, onError }: Props) {
     setTogglingAllow(true);
     try {
       const path = `/admin/users/${userId}/allow-simulation`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ allowSimulation: !allowSimulation }),
@@ -140,7 +140,7 @@ export function AdminUserSimulationPanel({ userId, onNotice, onError }: Props) {
         body.closedAtIst = closedAtIst.trim();
       }
 
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -166,7 +166,7 @@ export function AdminUserSimulationPanel({ userId, onNotice, onError }: Props) {
     setPurging(true);
     try {
       const path = "/admin/simulate/purge";
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),

@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { SALES_TEAM_ROLE_LABELS, type SalesTeamRole } from "@/lib/roles";
 
 type ReferralStatus = "PENDING" | "APPROVED" | "REJECTED";
@@ -58,18 +59,13 @@ function statusBadgeClass(status: ReferralStatus): string {
   return "bg-amber-500/15 text-amber-200 ring-amber-500/30";
 }
 
-function authHeaders(token: string | null): HeadersInit {
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+function authHeaders(): HeadersInit {
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 export default function AdminReferralRequestsPage() {
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const [requests, setRequests] = useState<ReferralRequestRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,14 +75,10 @@ export default function AdminReferralRequestsPage() {
   const [actionId, setActionId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!token) {
-      setError("Not signed in");
-      return;
-    }
     const qs =
       statusFilter !== "ALL" ? `?status=${encodeURIComponent(statusFilter)}` : "";
     const res = await fetch(`${apiBase}/admin/referral-requests${qs}`, {
-      headers: authHeaders(token),
+      headers: authHeaders(),
     });
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => ({}));
@@ -101,7 +93,7 @@ export default function AdminReferralRequestsPage() {
     }
     const data = (await res.json()) as { requests: ReferralRequestRow[] };
     setRequests(data.requests ?? []);
-  }, [apiBase, statusFilter, token]);
+  }, [apiBase, statusFilter]);
 
   useEffect(() => {
     void (async () => {
@@ -134,7 +126,6 @@ export default function AdminReferralRequestsPage() {
   }
 
   async function patchStatus(id: string, status: "APPROVED" | "REJECTED") {
-    if (!token || actionId) return;
     setActionId(id);
     setError(null);
     try {
@@ -142,7 +133,7 @@ export default function AdminReferralRequestsPage() {
         `${apiBase}/admin/referral-requests/${encodeURIComponent(id)}`,
         {
           method: "PATCH",
-          headers: authHeaders(token),
+          headers: authHeaders(),
           body: JSON.stringify({ status }),
         },
       );

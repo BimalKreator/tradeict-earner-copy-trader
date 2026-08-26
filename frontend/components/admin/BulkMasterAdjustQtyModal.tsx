@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Layers, Loader2, Shield, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -13,7 +15,6 @@ type BulkMasterAdjustQtyModalProps = {
   target: BulkMasterAdjustQtyTarget | null;
   onClose: () => void;
   apiBase: string;
-  authToken: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -23,7 +24,6 @@ export function BulkMasterAdjustQtyModal({
   target,
   onClose,
   apiBase,
-  authToken,
   onSuccess,
   onError,
 }: BulkMasterAdjustQtyModalProps) {
@@ -55,10 +55,11 @@ export function BulkMasterAdjustQtyModal({
 
       try {
         const res = await fetch(`${apiBase}/admin/live-trades/bulk-adjust-master`, {
+        ...adminRequestInit(),
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${authToken}`,
+            
           },
           body: JSON.stringify({
             strategyId: target.strategyId,
@@ -102,7 +103,6 @@ export function BulkMasterAdjustQtyModal({
     [
       adjustmentInput,
       apiBase,
-      authToken,
       onClose,
       onError,
       onSuccess,

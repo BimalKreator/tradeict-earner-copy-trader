@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   AdjustWalletFundsModal,
   type WalletUserRow,
@@ -59,9 +60,7 @@ function withdrawalStatusBadge(status: string): string {
 export default function AdminWalletPage() {
   const { rate: usdInrRate } = useUsdInrRate();
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const [tab, setTab] = useState<TabId>("withdrawals");
   const [summary, setSummary] = useState<WalletSummary | null>(null);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequestRow[]>([]);
@@ -79,25 +78,19 @@ export default function AdminWalletPage() {
   const [adjustTarget, setAdjustTarget] = useState<WalletUserRow | null>(null);
 
   const load = useCallback(async () => {
-    if (!token) {
-      throw new Error("Not signed in");
-    }
 
     const withdrawalQuery =
       statusFilter === "ALL" ? "" : `?status=${encodeURIComponent(statusFilter)}`;
 
     const [summaryRes, withdrawalsRes, usersRes] = await Promise.all([
       fetch(`${apiBase}/admin/wallet/summary`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
+        ...adminRequestInit(), cache: "no-store",
       }),
       fetch(`${apiBase}/admin/wallet/withdrawals${withdrawalQuery}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
+        ...adminRequestInit(), cache: "no-store",
       }),
       fetch(`${apiBase}/admin/wallet/users`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
+        ...adminRequestInit(), cache: "no-store",
       }),
     ]);
 
@@ -117,7 +110,7 @@ export default function AdminWalletPage() {
     setSummary(summaryData);
     setWithdrawals(withdrawalsData.items ?? []);
     setWalletUsers(usersData.users ?? []);
-  }, [apiBase, statusFilter, token]);
+  }, [apiBase, statusFilter]);
 
   useEffect(() => {
     void (async () => {
@@ -459,8 +452,6 @@ export default function AdminWalletPage() {
       <ProcessWithdrawalModal
         open={processTarget !== null}
         request={processTarget}
-        apiBase={apiBase}
-        token={token}
         onClose={() => setProcessTarget(null)}
         onSuccess={(message) => void handleMutationSuccess(message)}
         onError={(message) => setError(message)}
@@ -469,8 +460,6 @@ export default function AdminWalletPage() {
       <AdjustWalletFundsModal
         open={adjustTarget !== null}
         user={adjustTarget}
-        apiBase={apiBase}
-        token={token}
         onClose={() => setAdjustTarget(null)}
         onSuccess={(message) => void handleMutationSuccess(message)}
         onError={(message) => setError(message)}

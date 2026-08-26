@@ -21,12 +21,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import {
-  authFetch,
-  buildApiUrl,
-  formatFetchError,
-  formatFetchErrors,
-} from "@/lib/authFetch";
+import { adminFetch, buildAdminApiUrl, formatAdminFetchError, formatFetchErrors } from "@/lib/adminAuth";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
 import {
@@ -231,22 +226,22 @@ export function AdminDeltaRevenueDashboard() {
       const overviewPath = `/admin/revenue/overview?year=${period.year}&month=${period.month}`;
       const healthPath = "/admin/revenue/health";
       const [ovRes, hRes] = await Promise.all([
-        authFetch(overviewPath),
-        authFetch(healthPath),
+        adminFetch(overviewPath),
+        adminFetch(healthPath),
       ]);
       const failures: Array<{ label: string; res: Response; url: string }> = [];
       if (!ovRes.ok) {
         failures.push({
           label: "overview",
           res: ovRes,
-          url: buildApiUrl(overviewPath),
+          url: buildAdminApiUrl(overviewPath),
         });
       }
       if (!hRes.ok) {
         failures.push({
           label: "health",
           res: hRes,
-          url: buildApiUrl(healthPath),
+          url: buildAdminApiUrl(healthPath),
         });
       }
       if (failures.length > 0) {
@@ -276,9 +271,9 @@ export function AdminDeltaRevenueDashboard() {
     setDetailLoading(true);
     try {
       const detailPath = `/admin/revenue/user/${userId}`;
-      const res = await authFetch(detailPath);
+      const res = await adminFetch(detailPath);
       if (!res.ok) {
-        throw new Error(formatFetchError("user detail", res, buildApiUrl(detailPath)));
+        throw new Error(formatAdminFetchError("user detail", res, buildAdminApiUrl(detailPath)));
       }
       const data = (await res.json()) as UserDetail;
       setDetail(data);
@@ -323,13 +318,13 @@ export function AdminDeltaRevenueDashboard() {
           ? { profitShareOverride: null }
           : { profitShareOverride: parseFloat(val) };
       const overridePath = `/admin/revenue/user/${selectedUserId}/profit-share`;
-      const res = await authFetch(overridePath, {
+      const res = await adminFetch(overridePath, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        throw new Error(formatFetchError("profit share", res, buildApiUrl(overridePath)));
+        throw new Error(formatAdminFetchError("profit share", res, buildAdminApiUrl(overridePath)));
       }
       await loadDetail(selectedUserId);
       await loadOverview();
@@ -361,9 +356,9 @@ export function AdminDeltaRevenueDashboard() {
         kind === "commissions"
           ? `/admin/revenue/invoice/${invoiceId}/commissions`
           : `/admin/revenue/invoice/${invoiceId}/ledger`;
-      const res = await authFetch(path);
+      const res = await adminFetch(path);
       if (!res.ok) {
-        throw new Error(formatFetchError(kind, res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError(kind, res, buildAdminApiUrl(path)));
       }
       const data: unknown = await res.json();
       setInvoiceSidePanel({ invoiceId, kind, loading: false, error: null, data });
@@ -388,9 +383,9 @@ export function AdminDeltaRevenueDashboard() {
     setStructureLedgerLoading(structurePnlId);
     try {
       const path = `/admin/revenue/structure/${structurePnlId}/ledger`;
-      const res = await authFetch(path);
+      const res = await adminFetch(path);
       if (!res.ok) {
-        throw new Error(formatFetchError("structure ledger", res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError("structure ledger", res, buildAdminApiUrl(path)));
       }
       const data = (await res.json()) as StructureLedgerPayload;
       setStructureLedgers((prev) => ({ ...prev, [structurePnlId]: data }));
@@ -409,7 +404,7 @@ export function AdminDeltaRevenueDashboard() {
     setInvoiceActionResult(null);
     try {
       const path = `/admin/revenue/invoice/${voidModal.invoice.id}/status`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -424,7 +419,7 @@ export function AdminDeltaRevenueDashboard() {
       };
       if (!res.ok) {
         throw new Error(
-          (body.error ?? formatFetchError("void", res, buildApiUrl(path))) +
+          (body.error ?? formatAdminFetchError("void", res, buildAdminApiUrl(path))) +
             (body.expectedHint ? ` ${body.expectedHint}` : ""),
         );
       }
@@ -445,7 +440,7 @@ export function AdminDeltaRevenueDashboard() {
     setInvoiceActionResult(null);
     try {
       const path = `/admin/revenue/invoice/${creditModal.invoice.id}/credit-note`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -460,7 +455,7 @@ export function AdminDeltaRevenueDashboard() {
       };
       if (!res.ok) {
         throw new Error(
-          (body.error ?? formatFetchError("credit note", res, buildApiUrl(path))) +
+          (body.error ?? formatAdminFetchError("credit note", res, buildAdminApiUrl(path))) +
             (body.expectedHint ? ` ${body.expectedHint}` : ""),
         );
       }

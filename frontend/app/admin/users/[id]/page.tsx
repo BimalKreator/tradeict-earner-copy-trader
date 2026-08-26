@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -157,6 +158,8 @@ export default function AdminUserDetails({
   const [billingReady, setBillingReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteModalError, setDeleteModalError] = useState<string | null>(null);
   const [flushing, setFlushing] = useState(false);
   const [flushModalOpen, setFlushModalOpen] = useState(false);
   const [flushModalError, setFlushModalError] = useState<string | null>(null);
@@ -202,11 +205,7 @@ export default function AdminUserDetails({
     null,
   );
 
-  const authHeaders = useMemo(() => {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    return { Authorization: `Bearer ${token ?? ""}` };
-  }, []);
+  const authHeaders = useMemo(() => adminAuthHeaders(), []);
 
   async function loadAll(): Promise<void> {
     if (!userId) return;
@@ -214,17 +213,16 @@ export default function AdminUserDetails({
     setError(null);
     try {
       const results = await Promise.allSettled([
-        fetch(`${resolveApiBase()}/admin/users/${userId}/management`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/balance`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/strategies`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/trades`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/transactions`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/change-requests`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/users/${userId}/arbitrage-withdrawals`, {
-          headers: authHeaders,
+        fetch(`${resolveApiBase()}/admin/users/${userId}/management`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/balance`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/strategies`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/trades`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/transactions`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/change-requests`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users/${userId}/arbitrage-withdrawals`, { ...adminRequestInit(), headers: authHeaders,
         }),
-        fetch(`${resolveApiBase()}/admin/users`, { headers: authHeaders }),
-        fetch(`${resolveApiBase()}/admin/members`, { headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/users`, { ...adminRequestInit(), headers: authHeaders }),
+        fetch(`${resolveApiBase()}/admin/members`, { ...adminRequestInit(), headers: authHeaders }),
       ]);
 
       const mgRes = results[0].status === "fulfilled" ? results[0].value : null;
@@ -781,23 +779,37 @@ export default function AdminUserDetails({
     }
   }
 
-  async function deleteUser(): Promise<void> {
-    const ok = window.confirm(
-      "Permanently delete this user and all related data? This cannot be undone.",
-    );
-    if (!ok) return;
+  async function runDeleteUser(confirmation: string): Promise<void> {
+    if (!user?.email) return;
     setDeleting(true);
+    setDeleteModalError(null);
     setError(null);
     setNotice(null);
     try {
       const res = await fetch(`${resolveApiBase()}/admin/users/${userId}`, {
         method: "DELETE",
-        headers: authHeaders,
+        ...adminRequestInit({
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ confirmation }),
+        }),
       });
-      if (!res.ok) throw new Error("Failed to delete user.");
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          expectedHint?: string;
+        };
+        throw new Error(
+          errBody.expectedHint ?? errBody.error ?? "Failed to delete user.",
+        );
+      }
       router.push("/admin/users");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete user.");
+      const msg = e instanceof Error ? e.message : "Failed to delete user.";
+      setDeleteModalError(msg);
+      setError(msg);
     } finally {
       setDeleting(false);
     }
@@ -1427,8 +1439,11 @@ export default function AdminUserDetails({
                 </button>
                 <button
                   type="button"
-                  onClick={() => void deleteUser()}
-                  disabled={deleting}
+                  onClick={() => {
+                    setDeleteModalError(null);
+                    setDeleteModalOpen(true);
+                  }}
+                  disabled={deleting || !user?.email}
                   className="rounded-lg border border-red-600/55 bg-red-600/20 px-3 py-2 text-xs font-medium text-red-100 hover:bg-red-600/30 disabled:opacity-60"
                 >
                   {deleting ? "Deleting..." : "Delete User"}
@@ -1461,6 +1476,22 @@ export default function AdminUserDetails({
           if (!flushing) setFlushModalOpen(false);
         }}
         onConfirm={(confirmation) => void runFlushTrades(confirmation)}
+      />
+
+      <ConfirmDestructiveModal
+        open={deleteModalOpen}
+        title={`Delete user ${user?.name?.trim() || user?.email || ""}`}
+        description={`Permanently delete ${user?.email ?? "this user"} and all related data. This cannot be undone.`}
+        expectedConfirmation={user?.email ?? ""}
+        customerEmail={user?.email ?? ""}
+        confirmationLabel="Type the user email to confirm deletion"
+        confirmButtonText="Delete user permanently"
+        busy={deleting}
+        error={deleteModalError}
+        onClose={() => {
+          if (!deleting) setDeleteModalOpen(false);
+        }}
+        onConfirm={(confirmation) => void runDeleteUser(confirmation)}
       />
 
 

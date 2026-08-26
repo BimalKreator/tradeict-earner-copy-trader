@@ -1,17 +1,13 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConfirmDestructiveModal } from "@/components/admin/ConfirmDestructiveModal";
 import { Loader2, TestTube2, Trash2 } from "lucide-react";
 
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 type MinimalUser = { id: string; email: string };
@@ -77,8 +73,7 @@ export default function AdminInjectTradePage() {
   const loadUsers = useCallback(async () => {
     setLoadingUsers(true);
     try {
-      const res = await fetch(`${apiBase}/admin/users/list`, {
-        headers: authHeaders(),
+      const res = await fetch(`${apiBase}/admin/users/list`, { ...adminRequestInit(), headers: authHeaders(),
       });
       if (!res.ok) throw new Error(`Failed to load users (${res.status})`);
       const data: unknown = await res.json();

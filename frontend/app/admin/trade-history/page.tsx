@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { ExitReasonBadge } from "@/components/trades/ExitReasonBadge";
 import { AlertTriangle, History, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -78,10 +79,7 @@ export default function AdminTradeHistoryPage() {
   const [flushingAll, setFlushingAll] = useState(false);
   const [flushSuccess, setFlushSuccess] = useState<string | null>(null);
 
-  const headers = useMemo(
-    () => ({ Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` }),
-    [],
-  );
+  const headers = useMemo(() => adminAuthHeaders(), []);
 
   const load = useCallback(
     async (silent: boolean) => {

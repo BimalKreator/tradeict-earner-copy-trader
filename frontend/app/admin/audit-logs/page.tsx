@@ -3,6 +3,7 @@
 import { AuditLogDetailsModal } from "@/components/admin/AuditLogDetailsModal";
 import { useAdminSession } from "@/context/AdminSessionContext";
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { Eye, FileSearch, Loader2, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -58,9 +59,7 @@ function fmtDate(iso: string): string {
 export default function AdminAuditLogsPage() {
   const router = useRouter();
   const apiBase = useMemo(() => resolveApiBase(), []);
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const { loading: sessionLoading, canViewAuditLogs } = useAdminSession();
 
   const [items, setItems] = useState<AuditLogRow[]>([]);
@@ -89,8 +88,6 @@ export default function AdminAuditLogsPage() {
       page: number,
       filters?: { adminEmail?: string; action?: string },
     ) => {
-      if (!token) throw new Error("Not signed in");
-
       const adminEmail = filters?.adminEmail ?? appliedAdminEmail;
       const action = filters?.action ?? appliedAction;
 
@@ -106,8 +103,7 @@ export default function AdminAuditLogsPage() {
       }
 
       const res = await fetch(`${apiBase}/admin/audit-logs?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
+        ...adminRequestInit(), cache: "no-store",
       });
 
       if (res.status === 403) {
@@ -126,7 +122,7 @@ export default function AdminAuditLogsPage() {
         setPagination(data.pagination);
       }
     },
-    [apiBase, appliedAction, appliedAdminEmail, pagination.pageSize, token],
+    [apiBase, appliedAction, appliedAdminEmail, pagination.pageSize],
   );
 
   useEffect(() => {
@@ -196,8 +192,7 @@ export default function AdminAuditLogsPage() {
           pageSize: String(pagination.pageSize),
         });
         const res = await fetch(`${apiBase}/admin/audit-logs?${params}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store",
+          ...adminRequestInit(), cache: "no-store",
         });
         if (!res.ok) throw new Error(`Failed to load audit logs (${res.status})`);
         const data = (await res.json()) as {

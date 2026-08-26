@@ -15,9 +15,12 @@ import {
 import {
   clearAuthCookie,
   extractAccessToken,
+  setAdminAuthCookie,
   setAuthCookie,
+  signAdminAuthToken,
   signAuthToken,
 } from "../utils/authToken.js";
+import { isPlatformAdminUser } from "../utils/platformAdmin.js";
 import {
   bumpUserTokenVersion,
   consumeLoginOtp,
@@ -55,19 +58,31 @@ function sanitizeUser(user: {
 
 function issueAuthSession(
   res: Response,
-  user: { id: string; email: string; role: Role; tokenVersion: number },
+  user: {
+    id: string;
+    email: string;
+    role: Role;
+    adminRole?: import("@prisma/client").AdminRole | null;
+    tokenVersion: number;
+  },
   secret: string,
 ): string {
-  const token = signAuthToken(
-    {
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-      tokenVersion: user.tokenVersion,
-    },
-    secret,
-  );
+  const payload = {
+    sub: user.id,
+    email: user.email,
+    role: user.role,
+    tokenVersion: user.tokenVersion,
+  };
+  const token = signAuthToken(payload, secret);
   setAuthCookie(res, token);
+
+  // Separate short-TTL admin cookie — do not silently reuse the 30d customer cookie.
+  if (isPlatformAdminUser(user)) {
+    const adminToken = signAdminAuthToken(payload, secret);
+    setAdminAuthCookie(res, adminToken);
+    return adminToken;
+  }
+
   return token;
 }
 

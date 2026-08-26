@@ -4,13 +4,12 @@ import { Loader2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PlatformAdminRole } from "@/context/AdminSessionContext";
+import { adminFetch } from "@/lib/adminAuth";
 
-const ADMIN_ROLES: PlatformAdminRole[] = ["SUPER_ADMIN", "MANAGER", "SUPPORT"];
+const ADMIN_ROLES: PlatformAdminRole[] = ["SUPER_ADMIN", "MANAGER"];
 
 type CreateAdminModalProps = {
   open: boolean;
-  apiBase: string;
-  token: string | null;
   onClose: () => void;
   onSuccess: () => void;
   onError: (message: string) => void;
@@ -18,8 +17,6 @@ type CreateAdminModalProps = {
 
 export function CreateAdminModal({
   open,
-  apiBase,
-  token,
   onClose,
   onSuccess,
   onError,
@@ -58,20 +55,13 @@ export function CreateAdminModal({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token) {
-      setFormError("Not signed in");
-      return;
-    }
 
     setFormError(null);
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiBase}/admin/managers`, {
+      const res = await adminFetch("/admin/managers", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: email.trim(),
           password,
@@ -102,25 +92,10 @@ export function CreateAdminModal({
   }
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="create-admin-title"
-    >
-      <button
-        type="button"
-        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-        aria-label="Close"
-        onClick={() => {
-          if (!submitting) onClose();
-        }}
-      />
-      <div className="relative z-10 w-full max-w-md rounded-xl border border-glassBorder bg-background/95 p-6 shadow-2xl backdrop-blur">
-        <div className="flex items-start justify-between gap-3">
-          <h2 id="create-admin-title" className="text-lg font-semibold text-white">
-            Create admin
-          </h2>
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-glassBorder bg-[#12141c] shadow-2xl">
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+          <h2 className="text-base font-semibold text-white">Create admin</h2>
           <button
             type="button"
             onClick={onClose}
@@ -128,107 +103,93 @@ export function CreateAdminModal({
             className="rounded-lg p-1.5 text-white/50 hover:bg-white/10 hover:text-white disabled:opacity-50"
             aria-label="Close"
           >
-            <X className="h-5 w-5" aria-hidden />
+            <X className="h-4 w-4" />
           </button>
         </div>
-
-        <form onSubmit={(e) => void handleSubmit(e)} className="mt-5 space-y-4">
+        <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4 px-5 py-4">
           <div>
-            <label
-              htmlFor="admin-email"
-              className="block text-xs font-medium uppercase tracking-wider text-white/45"
-            >
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-white/45">
               Email
             </label>
             <input
-              id="admin-email"
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               disabled={submitting}
-              className="mt-2 w-full rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-primary/50 focus:outline-none"
+              className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2.5 text-sm text-white"
             />
           </div>
-
           <div>
-            <label
-              htmlFor="admin-password"
-              className="block text-xs font-medium uppercase tracking-wider text-white/45"
-            >
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-white/45">
               Password
             </label>
             <input
-              id="admin-password"
               type="password"
               required
               minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               disabled={submitting}
-              className="mt-2 w-full rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-primary/50 focus:outline-none"
+              className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2.5 text-sm text-white"
             />
           </div>
-
           <div>
-            <label
-              htmlFor="admin-name"
-              className="block text-xs font-medium uppercase tracking-wider text-white/45"
-            >
-              Name (optional)
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-white/45">
+              Name
             </label>
             <input
-              id="admin-name"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={submitting}
-              className="mt-2 w-full rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-primary/50 focus:outline-none"
+              className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2.5 text-sm text-white"
             />
           </div>
-
           <div>
-            <label
-              htmlFor="admin-role"
-              className="block text-xs font-medium uppercase tracking-wider text-white/45"
-            >
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-white/45">
               Role
             </label>
             <select
-              id="admin-role"
               value={adminRole}
-              onChange={(e) => setAdminRole(e.target.value as PlatformAdminRole)}
+              onChange={(e) =>
+                setAdminRole(e.target.value as PlatformAdminRole)
+              }
               disabled={submitting}
-              className="mt-2 w-full rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-primary/50 focus:outline-none"
+              className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2.5 text-sm text-white"
             >
               {ADMIN_ROLES.map((role) => (
-                <option key={role} value={role} className="bg-slate-900">
-                  {role.replace(/_/g, " ")}
+                <option key={role} value={role}>
+                  {role}
                 </option>
               ))}
             </select>
           </div>
-
           {formError ? (
-            <p className="text-sm text-red-300" role="alert">
+            <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
               {formError}
             </p>
           ) : null}
-
-          <button
-            type="submit"
-            disabled={submitting}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white hover:bg-primary/90 disabled:opacity-50"
-          >
-            {submitting ? (
-              <>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="rounded-xl border border-white/15 px-4 py-2 text-sm text-white/70 hover:bg-white/5 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                Creating…
-              </>
-            ) : (
-              "Create admin"
-            )}
-          </button>
+              ) : null}
+              Create
+            </button>
+          </div>
         </form>
       </div>
     </div>,

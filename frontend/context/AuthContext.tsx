@@ -24,8 +24,8 @@ export type AuthUser = {
   name: string | null;
   /** USER | ADMIN | EXECUTIVE | MANAGER | SENIOR_MANAGER */
   role: string;
-  /** Platform RBAC tier (`SUPER_ADMIN` | `MANAGER` | `SUPPORT`) when user is a platform admin. */
-  adminRole?: "SUPER_ADMIN" | "MANAGER" | "SUPPORT";
+  /** Platform RBAC tier (`SUPER_ADMIN` | `MANAGER`) when user is a platform admin. */
+  adminRole?: "SUPER_ADMIN" | "MANAGER";
   mobile?: string | null;
   address?: string | null;
   panNumber?: string | null;
@@ -71,10 +71,14 @@ function parsePlatformAdminRole(
 ): AuthUser["adminRole"] | undefined {
   if (typeof value !== "string") return undefined;
   const role = value.trim().toUpperCase();
-  if (role === "SUPER_ADMIN" || role === "MANAGER" || role === "SUPPORT") {
+  if (role === "SUPER_ADMIN" || role === "MANAGER") {
     return role;
   }
   return undefined;
+}
+
+function isPlatformAdminAuthUser(user: AuthUser | null | undefined): boolean {
+  return user?.role === "ADMIN" && user.adminRole != null;
 }
 
 function parseAuthUser(data: unknown): AuthUser | null {
@@ -147,7 +151,12 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
       const me = await fetchMe(stored);
       if (me) {
         setUser(me);
-        setToken(stored || null);
+        if (isPlatformAdminAuthUser(me)) {
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+          setToken(null);
+        } else {
+          setToken(stored || null);
+        }
       } else {
         if (stored) localStorage.removeItem(TOKEN_STORAGE_KEY);
         setToken(null);
@@ -169,6 +178,18 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
   const setSession = useCallback(
     (newToken: string, sessionUser?: AuthUser | null) => {
       const trimmed = newToken.trim();
+      const nextUser = sessionUser ?? null;
+
+      // Platform admins authenticate via short-TTL httpOnly admin cookie only —
+      // never persist their JWT in localStorage (XSS blast radius).
+      if (nextUser && isPlatformAdminAuthUser(nextUser)) {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        setToken(null);
+        setUser(nextUser);
+        setIsLoading(false);
+        return;
+      }
+
       if (trimmed) {
         localStorage.setItem(TOKEN_STORAGE_KEY, trimmed);
         setToken(trimmed);
@@ -177,7 +198,13 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
         setUser(sessionUser);
       } else if (trimmed) {
         void fetchMe(trimmed).then((me) => {
-          if (me) setUser(me);
+          if (me) {
+            if (isPlatformAdminAuthUser(me)) {
+              localStorage.removeItem(TOKEN_STORAGE_KEY);
+              setToken(null);
+            }
+            setUser(me);
+          }
         });
       }
       setIsLoading(false);
@@ -190,7 +217,12 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
     const me = await fetchMe(stored);
     if (me) {
       setUser(me);
-      setToken(stored || null);
+      if (isPlatformAdminAuthUser(me)) {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        setToken(null);
+      } else {
+        setToken(stored || null);
+      }
     }
   }, [fetchMe]);
 

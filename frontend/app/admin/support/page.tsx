@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -21,19 +22,15 @@ export default function AdminSupportPage() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"ALL" | TicketStatus>("ALL");
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const load = useCallback(async () => {
-    if (!token) return;
     setLoading(true);
     setError(null);
     try {
       const q =
         statusFilter === "ALL" ? "" : `?status=${statusFilter}`;
       const res = await fetch(`${resolveApiBase()}/admin/tickets${q}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
       if (res.status === 403) {
         setError("Admin access required");
         return;
@@ -46,7 +43,7 @@ export default function AdminSupportPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, statusFilter]);
+  }, [ statusFilter]);
 
   useEffect(() => {
     void load();

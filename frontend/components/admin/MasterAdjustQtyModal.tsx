@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Loader2, Shield, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -15,7 +17,6 @@ type MasterAdjustQtyModalProps = {
   target: MasterAdjustQtyTarget | null;
   onClose: () => void;
   apiBase: string;
-  authToken: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -25,7 +26,6 @@ export function MasterAdjustQtyModal({
   target,
   onClose,
   apiBase,
-  authToken,
   onSuccess,
   onError,
 }: MasterAdjustQtyModalProps) {
@@ -57,10 +57,11 @@ export function MasterAdjustQtyModal({
 
       try {
         const res = await fetch(`${apiBase}/admin/live-trades/adjust-master`, {
+        ...adminRequestInit(),
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${authToken}`,
+            
           },
           body: JSON.stringify({
             strategyId: target.strategyId,
@@ -98,7 +99,6 @@ export function MasterAdjustQtyModal({
     [
       adjustmentInput,
       apiBase,
-      authToken,
       onClose,
       onError,
       onSuccess,

@@ -42,6 +42,7 @@ import {
   type BulkMasterAdjustQtyTarget,
 } from "@/components/admin/BulkMasterAdjustQtyModal";
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 
 type LiveRow = {
   entryTime: string | null;
@@ -113,10 +114,7 @@ function BtcUsdLiveTicker() {
           `${base}/admin/strategies/future-hedge/market?t=${Date.now()}`,
           {
             cache: "no-store",
-            headers: {
-              Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
-            },
-          },
+            ...adminRequestInit(), },
         );
         if (!res.ok || cancelled) return;
         const data: unknown = await res.json();
@@ -1105,8 +1103,7 @@ function RiskManagementPanel({
         {
           method: "PATCH",
           headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify(body),
         },
@@ -1611,8 +1608,7 @@ export default function AdminLiveTradesPage() {
         `${base}/admin/live-trades/grouped?t=${Date.now()}`,
         {
           cache: "no-store",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+          headers: {
             "Cache-Control": "no-cache",
             Pragma: "no-cache",
           },
@@ -1706,8 +1702,7 @@ export default function AdminLiveTradesPage() {
         const res = await fetch(`${base}/admin/trades/close-manual`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify(args),
         });
@@ -1749,8 +1744,7 @@ export default function AdminLiveTradesPage() {
         const res = await fetch(`${base}/admin/live-trades/close-all`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({ strategyId, confirmation }),
         });
@@ -1812,8 +1806,7 @@ export default function AdminLiveTradesPage() {
         const res = await fetch(`${base}/admin/live-trades/sync-all-followers`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({ strategyId, confirmation }),
         });
@@ -1871,10 +1864,7 @@ export default function AdminLiveTradesPage() {
         `${base}/admin/trades?status=OPEN&strategyType=bot&limit=200&t=${Date.now()}`,
         {
           cache: "no-store",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
-          },
-        },
+          ...adminRequestInit(), },
       );
       if (!res.ok) return;
       const body = (await res.json()) as {
@@ -2161,12 +2151,7 @@ export default function AdminLiveTradesPage() {
           userId={granularSyncModal.userId}
           userLabel={granularSyncModal.userLabel}
           masterLegs={granularSyncModal.masterLegs}
-          apiBase={resolveApiBase()}
-          authToken={
-            typeof window !== "undefined"
-              ? localStorage.getItem("token") ?? ""
-              : ""
-          }
+          apiBase={resolveApiBase()}
           onSuccess={(message) => {
             setToast(message);
             setError(null);
@@ -2180,12 +2165,7 @@ export default function AdminLiveTradesPage() {
         open={adjustQtyTarget != null}
         target={adjustQtyTarget}
         onClose={() => setAdjustQtyTarget(null)}
-        apiBase={resolveApiBase()}
-        authToken={
-          typeof window !== "undefined"
-            ? localStorage.getItem("token") ?? ""
-            : ""
-        }
+        apiBase={resolveApiBase()}
         onSuccess={(message) => {
           setToast(message);
           setError(null);
@@ -2198,12 +2178,7 @@ export default function AdminLiveTradesPage() {
         open={bulkAdjustTarget != null}
         target={bulkAdjustTarget}
         onClose={() => setBulkAdjustTarget(null)}
-        apiBase={resolveApiBase()}
-        authToken={
-          typeof window !== "undefined"
-            ? localStorage.getItem("token") ?? ""
-            : ""
-        }
+        apiBase={resolveApiBase()}
         onSuccess={(message) => {
           setToast(message);
           setError(null);
@@ -2216,12 +2191,7 @@ export default function AdminLiveTradesPage() {
         open={masterAdjustTarget != null}
         target={masterAdjustTarget}
         onClose={() => setMasterAdjustTarget(null)}
-        apiBase={resolveApiBase()}
-        authToken={
-          typeof window !== "undefined"
-            ? localStorage.getItem("token") ?? ""
-            : ""
-        }
+        apiBase={resolveApiBase()}
         onSuccess={(message) => {
           setToast(message);
           setError(null);
@@ -2234,12 +2204,7 @@ export default function AdminLiveTradesPage() {
         open={bulkMasterAdjustTarget != null}
         target={bulkMasterAdjustTarget}
         onClose={() => setBulkMasterAdjustTarget(null)}
-        apiBase={resolveApiBase()}
-        authToken={
-          typeof window !== "undefined"
-            ? localStorage.getItem("token") ?? ""
-            : ""
-        }
+        apiBase={resolveApiBase()}
         onSuccess={(message) => {
           setToast(message);
           setError(null);

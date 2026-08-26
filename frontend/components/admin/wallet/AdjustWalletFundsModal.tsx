@@ -1,8 +1,9 @@
 "use client";
 
 import { Loader2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { adminFetch } from "@/lib/adminAuth";
 import { fmtUsd } from "@/lib/currency";
 
 export type WalletUserRow = {
@@ -18,18 +19,25 @@ type AdjustType = "ADD" | "REMOVE";
 type AdjustWalletFundsModalProps = {
   open: boolean;
   user: WalletUserRow | null;
-  apiBase: string;
-  token: string | null;
   onClose: () => void;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
 
+function confirmationPhrase(
+  type: AdjustType,
+  amount: number,
+  email: string,
+): string {
+  const amt = amount.toFixed(2);
+  return type === "ADD"
+    ? `ADD ${amt} to ${email.trim()}`
+    : `REMOVE ${amt} from ${email.trim()}`;
+}
+
 export function AdjustWalletFundsModal({
   open,
   user,
-  apiBase,
-  token,
   onClose,
   onSuccess,
   onError,
@@ -38,6 +46,7 @@ export function AdjustWalletFundsModal({
   const [adjustType, setAdjustType] = useState<AdjustType>("ADD");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -50,6 +59,7 @@ export function AdjustWalletFundsModal({
     setAdjustType("ADD");
     setAmount("");
     setReason("");
+    setConfirmation("");
     setFormError(null);
   }, [open, user?.id]);
 
@@ -62,15 +72,20 @@ export function AdjustWalletFundsModal({
     };
   }, [open]);
 
-  if (!open || !user || !mounted) return null;
-
   const parsedAmount = Number(amount);
   const amountValid = Number.isFinite(parsedAmount) && parsedAmount > 0;
-  const maxRemove = Math.max(0, user.balance);
+  const maxRemove = user ? Math.max(0, user.balance) : 0;
+
+  const expectedConfirmation = useMemo(() => {
+    if (!user || !amountValid) return "";
+    return confirmationPhrase(adjustType, parsedAmount, user.email);
+  }, [adjustType, amountValid, parsedAmount, user]);
+
+  if (!open || !user || !mounted) return null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || !user) return;
+    if (!user) return;
 
     setFormError(null);
     if (!amountValid) {
@@ -82,24 +97,28 @@ export function AdjustWalletFundsModal({
       return;
     }
     if (adjustType === "REMOVE" && parsedAmount > maxRemove + 1e-9) {
-      setFormError(`Cannot remove more than available balance (${fmtUsd(maxRemove)}).`);
+      setFormError(
+        `Cannot remove more than available balance (${fmtUsd(maxRemove)}).`,
+      );
+      return;
+    }
+    if (confirmation.trim() !== expectedConfirmation) {
+      setFormError(`Type exactly: ${expectedConfirmation}`);
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await fetch(
-        `${apiBase}/admin/wallet/users/${encodeURIComponent(user.id)}/adjust`,
+      const res = await adminFetch(
+        `/admin/wallet/users/${encodeURIComponent(user.id)}/adjust`,
         {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             amount: parsedAmount,
             type: adjustType,
             reason: reason.trim(),
+            confirmation: confirmation.trim(),
           }),
         },
       );
@@ -111,7 +130,13 @@ export function AdjustWalletFundsModal({
           "error" in body &&
           typeof (body as { error?: unknown }).error === "string"
             ? (body as { error: string }).error
-            : `Adjustment failed (${res.status})`;
+            : typeof body === "object" &&
+                body !== null &&
+                "expectedHint" in body &&
+                typeof (body as { expectedHint?: unknown }).expectedHint ===
+                  "string"
+              ? (body as { expectedHint: string }).expectedHint
+              : `Adjustment failed (${res.status})`;
         throw new Error(msg);
       }
       onSuccess(
@@ -128,6 +153,7 @@ export function AdjustWalletFundsModal({
   }
 
   const userLabel = user.name?.trim() || user.email;
+  const isRemove = adjustType === "REMOVE";
 
   return createPortal(
     <div
@@ -179,7 +205,7 @@ export function AdjustWalletFundsModal({
                   adjustType === type
                     ? type === "ADD"
                       ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100"
-                      : "border-red-500/40 bg-red-500/15 text-red-100"
+                      : "border-red-500/50 bg-red-600/20 text-red-100 ring-1 ring-red-500/40"
                     : "border-glassBorder text-white/65 hover:bg-white/[0.04]"
                 }`}
               >
@@ -188,14 +214,28 @@ export function AdjustWalletFundsModal({
                   name="adjustType"
                   value={type}
                   checked={adjustType === type}
-                  onChange={() => setAdjustType(type)}
+                  onChange={() => {
+                    setAdjustType(type);
+                    setConfirmation("");
+                  }}
                   disabled={submitting}
                   className="sr-only"
                 />
-                {type === "ADD" ? "Add" : "Remove"}
+                {type === "ADD" ? "Add funds" : "Remove funds"}
               </label>
             ))}
           </fieldset>
+
+          {isRemove ? (
+            <p className="rounded-lg border border-red-500/35 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+              You are about to <strong>REMOVE</strong> funds from this customer&apos;s
+              wallet. This moves real money and cannot be undone from this screen.
+            </p>
+          ) : (
+            <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+              You are about to <strong>ADD</strong> funds to this customer&apos;s wallet.
+            </p>
+          )}
 
           <div>
             <label
@@ -211,7 +251,10 @@ export function AdjustWalletFundsModal({
               step="0.01"
               max={adjustType === "REMOVE" ? maxRemove : undefined}
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setConfirmation("");
+              }}
               disabled={submitting}
               className="mt-2 w-full rounded-lg border border-glassBorder bg-white/[0.04] px-3 py-2.5 text-sm text-white tabular-nums placeholder:text-white/30 focus:border-primary/50 focus:outline-none"
             />
@@ -235,6 +278,39 @@ export function AdjustWalletFundsModal({
             />
           </div>
 
+          <div>
+            <label
+              htmlFor="adjust-confirm"
+              className="block text-xs font-medium uppercase tracking-wider text-white/45"
+            >
+              Type to confirm
+            </label>
+            {expectedConfirmation ? (
+              <p className="mt-1 font-mono text-xs text-white/70">
+                {expectedConfirmation}
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-white/40">
+                Enter a valid amount to see the confirmation phrase.
+              </p>
+            )}
+            <input
+              id="adjust-confirm"
+              type="text"
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              disabled={submitting || !expectedConfirmation}
+              autoComplete="off"
+              spellCheck={false}
+              className={`mt-2 w-full rounded-lg border bg-white/[0.04] px-3 py-2.5 font-mono text-sm text-white placeholder:text-white/30 focus:outline-none ${
+                isRemove
+                  ? "border-red-500/40 focus:border-red-400/60"
+                  : "border-glassBorder focus:border-primary/50"
+              }`}
+              placeholder={expectedConfirmation || "Confirmation phrase"}
+            />
+          </div>
+
           {formError ? (
             <p className="text-sm text-red-300" role="alert">
               {formError}
@@ -252,16 +328,26 @@ export function AdjustWalletFundsModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
-              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary/90 disabled:opacity-50"
+              disabled={
+                submitting ||
+                !expectedConfirmation ||
+                confirmation.trim() !== expectedConfirmation
+              }
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 ${
+                isRemove
+                  ? "bg-red-600 hover:bg-red-500"
+                  : "bg-emerald-600 hover:bg-emerald-500"
+              }`}
             >
               {submitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                   Saving…
                 </>
+              ) : isRemove ? (
+                "Remove funds"
               ) : (
-                "Apply adjustment"
+                "Add funds"
               )}
             </button>
           </div>

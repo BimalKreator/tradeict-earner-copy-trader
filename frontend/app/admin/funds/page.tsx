@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -43,18 +44,9 @@ export default function AdminFundsPage() {
   } | null>(null);
   const [adminReason, setAdminReason] = useState("");
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const load = useCallback(async () => {
     setError(null);
-    if (!token) {
-      setUnauthorized(true);
-      setForbidden(false);
-      setLoading(false);
-      setItems([]);
-      return;
-    }
 
     setLoading(true);
     setUnauthorized(false);
@@ -62,8 +54,7 @@ export default function AdminFundsPage() {
 
     try {
       const res = await fetch(`${resolveApiBase()}/admin/deposits`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
 
       if (res.status === 401) {
         setUnauthorized(true);
@@ -103,7 +94,7 @@ export default function AdminFundsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- on-mount fetch is a legitimate effect side-effect
@@ -111,24 +102,21 @@ export default function AdminFundsPage() {
   }, [load]);
 
   async function handleApproveAction(id: string, action: "APPROVED" | "REJECTED", reason: string) {
-    const t = token ?? localStorage.getItem("token");
-    if (!t) {
-      setUnauthorized(true);
-      return;
-    }
-
     const key = action === "APPROVED" ? "approve" : "reject";
     setRowAction((prev) => ({ ...prev, [id]: key }));
 
     try {
-      const res = await fetch(`${resolveApiBase()}/admin/deposits/${id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${t}`,
-        },
-        body: JSON.stringify({ status: action, adminReason: reason.trim() || null }),
-      });
+      const res = await fetch(
+        `${resolveApiBase()}/admin/deposits/${id}`,
+        adminRequestInit({
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: action,
+            adminReason: reason.trim() || null,
+          }),
+        }),
+      );
 
       const body: unknown = await res.json().catch(() => ({}));
       if (!res.ok) {

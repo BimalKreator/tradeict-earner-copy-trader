@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -48,7 +50,7 @@ export function AdminProfileEditModal({
     try {
       const res = await fetch(
         `${apiBase}/admin/users/${encodeURIComponent(userId)}/profile`,
-        { headers: authHeaders() },
+        { ...adminRequestInit(), headers: authHeaders() },
       );
       const body = (await res.json().catch(() => ({}))) as {
         error?: string;

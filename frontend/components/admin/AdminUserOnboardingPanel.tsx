@@ -8,7 +8,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { authFetch, buildApiUrl, formatFetchError } from "@/lib/authFetch";
+import { adminFetch, buildAdminApiUrl, formatAdminFetchError } from "@/lib/adminAuth";
 import { resolveApiBase } from "@/lib/apiBase";
 import { fmtUsd } from "@/lib/currency";
 import {
@@ -120,9 +120,9 @@ export function AdminUserOnboardingPanel({
       setLoadError(null);
       try {
         const path = `/admin/users/${userId}/onboarding`;
-        const res = await authFetch(path);
+        const res = await adminFetch(path);
         if (!res.ok) {
-          throw new Error(formatFetchError("onboarding", res, buildApiUrl(path)));
+          throw new Error(formatAdminFetchError("onboarding", res, buildAdminApiUrl(path)));
         }
         const payload = (await res.json()) as OnboardingPayload;
         setData(payload);
@@ -181,13 +181,13 @@ export function AdminUserOnboardingPanel({
     setActivatingAccount(true);
     try {
       const path = `/admin/users/${userId}/status`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "ACTIVE" }),
       });
       if (!res.ok) {
-        throw new Error(formatFetchError("activate account", res, buildApiUrl(path)));
+        throw new Error(formatAdminFetchError("activate account", res, buildAdminApiUrl(path)));
       }
       onNotice?.("Account activated.");
       await loadOnboarding(true);
@@ -207,7 +207,7 @@ export function AdminUserOnboardingPanel({
     setSavingKeys(true);
     try {
       const path = `/admin/users/${userId}/api-keys`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -221,7 +221,7 @@ export function AdminUserOnboardingPanel({
         connectionTest?: { success?: boolean; error?: string | null };
       };
       if (!res.ok) {
-        throw new Error(body.error ?? formatFetchError("save API keys", res, buildApiUrl(path)));
+        throw new Error(body.error ?? formatAdminFetchError("save API keys", res, buildAdminApiUrl(path)));
       }
       if (body.connectionTest?.success) {
         onNotice?.("Delta API keys saved and connection verified.");
@@ -258,14 +258,14 @@ export function AdminUserOnboardingPanel({
         body.profitSharePct = Number(subscribeProfitShare);
       }
       const path = `/admin/users/${userId}/subscribe`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const payload = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
-        throw new Error(payload.error ?? formatFetchError("subscribe", res, buildApiUrl(path)));
+        throw new Error(payload.error ?? formatAdminFetchError("subscribe", res, buildAdminApiUrl(path)));
       }
       onNotice?.("Customer subscribed to strategy.");
       await loadOnboarding(true);
@@ -291,14 +291,14 @@ export function AdminUserOnboardingPanel({
     setSavingCapital(true);
     try {
       const path = `/admin/strategies/${encodeURIComponent(sub.strategyId)}/subscribers/${encodeURIComponent(userId)}`;
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ deployedCapital: deployed }),
       });
       const payload = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
-        throw new Error(payload.error ?? formatFetchError("capital", res, buildApiUrl(path)));
+        throw new Error(payload.error ?? formatAdminFetchError("capital", res, buildAdminApiUrl(path)));
       }
       onNotice?.("Capital allocation updated.");
       await loadOnboarding(true);
@@ -314,7 +314,7 @@ export function AdminUserOnboardingPanel({
     try {
       const path = `/admin/revenue/user/${userId}/profit-share`;
       const val = profitShareDraft.trim();
-      const res = await authFetch(path, {
+      const res = await adminFetch(path, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -324,7 +324,7 @@ export function AdminUserOnboardingPanel({
       const payload = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
         throw new Error(
-          payload.error ?? formatFetchError("profit share", res, buildApiUrl(path)),
+          payload.error ?? formatAdminFetchError("profit share", res, buildAdminApiUrl(path)),
         );
       }
       onNotice?.("Profit share override saved.");
@@ -341,23 +341,23 @@ export function AdminUserOnboardingPanel({
     setEnablingCopy(true);
     try {
       const copyPath = `/admin/users/${userId}/copy-trading`;
-      const copyRes = await authFetch(copyPath, {
+      const copyRes = await adminFetch(copyPath, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paused: false }),
       });
       if (!copyRes.ok) {
-        throw new Error(formatFetchError("copy trading", copyRes, buildApiUrl(copyPath)));
+        throw new Error(formatAdminFetchError("copy trading", copyRes, buildAdminApiUrl(copyPath)));
       }
       if (sub && !sub.isActive) {
         const subPath = `/admin/strategies/${encodeURIComponent(sub.strategyId)}/subscribers/${encodeURIComponent(userId)}`;
-        const subRes = await authFetch(subPath, {
+        const subRes = await adminFetch(subPath, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ isActive: true }),
         });
         if (!subRes.ok) {
-          throw new Error(formatFetchError("deploy subscription", subRes, buildApiUrl(subPath)));
+          throw new Error(formatAdminFetchError("deploy subscription", subRes, buildAdminApiUrl(subPath)));
         }
       }
       onNotice?.("Copy trading enabled.");

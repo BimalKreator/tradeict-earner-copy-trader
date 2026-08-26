@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { Loader2, Plus, RefreshCw, Tag, ToggleLeft, ToggleRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -27,21 +28,13 @@ export default function AdminCouponsPage() {
   const [bulkCount, setBulkCount] = useState("5");
   const [bulkPrefix, setBulkPrefix] = useState("TICT");
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const load = useCallback(async () => {
     setError(null);
-    if (!token) {
-      setForbidden(true);
-      setLoading(false);
-      return;
-    }
     setLoading(true);
     try {
       const res = await fetch(`${resolveApiBase()}/admin/coupons`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
       if (res.status === 403) {
         setForbidden(true);
         return;
@@ -54,7 +47,7 @@ export default function AdminCouponsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -69,7 +62,7 @@ export default function AdminCouponsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          
         },
         body: JSON.stringify({
           code,
@@ -96,7 +89,7 @@ export default function AdminCouponsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          
         },
         body: JSON.stringify({
           count: Number(bulkCount),
@@ -119,8 +112,7 @@ export default function AdminCouponsPage() {
     try {
       const res = await fetch(`${resolveApiBase()}/admin/coupons/${id}/toggle`, {
         method: "PATCH",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
       if (!res.ok) throw new Error("Toggle failed");
       await load();
     } catch (e) {

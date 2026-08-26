@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Loader2, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -17,7 +19,6 @@ type AdjustQtyModalProps = {
   target: AdjustQtyTarget | null;
   onClose: () => void;
   apiBase: string;
-  authToken: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -27,7 +28,6 @@ export function AdjustQtyModal({
   target,
   onClose,
   apiBase,
-  authToken,
   onSuccess,
   onError,
 }: AdjustQtyModalProps) {
@@ -66,10 +66,11 @@ export function AdjustQtyModal({
 
     try {
       const res = await fetch(`${apiBase}/admin/live-trades/adjust-follower-qty`, {
+        ...adminRequestInit(),
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
+          
         },
         body: JSON.stringify(payload),
       });
@@ -107,7 +108,6 @@ export function AdjustQtyModal({
   }, [
     adjustmentInput,
     apiBase,
-    authToken,
     onClose,
     onError,
     onSuccess,

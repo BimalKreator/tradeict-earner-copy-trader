@@ -64,6 +64,7 @@ import {
   CONFIRM_CLOSE_ALL_POSITIONS,
   CONFIRM_SYNC_ALL_FOLLOWERS,
   requireTypedConfirmation,
+  walletAdjustConfirmationPhrase,
 } from "../utils/requireTypedConfirmation.js";
 import {
   buildTimestampTag,
@@ -4210,9 +4211,23 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
+      const target = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, email: true },
+      });
+      if (!target) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      if (!requireTypedConfirmation(req, res, target.email)) {
+        return;
+      }
+
       await prisma.user.delete({ where: { id } });
       auditFromRequest(prisma, req, "DELETE_USER", "User", id, {
         deletedUserId: id,
+        deletedEmail: target.email,
       });
       res.status(204).send();
     } catch (err) {
@@ -4755,10 +4770,48 @@ export function createAdminController(prisma: PrismaClient) {
         return;
       }
 
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const amountRaw = body.amount;
+      const amount =
+        typeof amountRaw === "number"
+          ? amountRaw
+          : typeof amountRaw === "string"
+            ? Number(amountRaw)
+            : NaN;
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: "amount must be a positive number" });
+        return;
+      }
+
+      const typeRaw =
+        typeof body.type === "string" ? body.type.trim().toUpperCase() : "";
+      if (typeRaw !== "ADD" && typeRaw !== "REMOVE") {
+        res.status(400).json({ error: "type must be ADD or REMOVE" });
+        return;
+      }
+
+      const target = await prisma.user.findUnique({
+        where: { id: userId.trim() },
+        select: { id: true, email: true },
+      });
+      if (!target) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
+      const expected = walletAdjustConfirmationPhrase(
+        typeRaw,
+        amount,
+        target.email,
+      );
+      if (!requireTypedConfirmation(req, res, expected)) {
+        return;
+      }
+
       const outcome = await adjustUserWalletBalance(
         prisma,
         userId.trim(),
-        (req.body ?? {}) as Record<string, unknown>,
+        body,
       );
       if (!outcome.ok) {
         res.status(outcome.status).json({ error: outcome.message });

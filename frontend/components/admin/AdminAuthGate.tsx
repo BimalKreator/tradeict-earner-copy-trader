@@ -5,11 +5,13 @@ import { useEffect, useState } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth } from "@/context/AuthContext";
 
-/** Matches backend `isPlatformAdminUser`: ADMIN + non-null adminRole. */
+/** Matches backend `isPlatformAdminUser`: ADMIN + SUPER_ADMIN|MANAGER. */
 function isPlatformAdminUser(
   user: { role: string; adminRole?: string | null } | null,
 ): boolean {
-  return user?.role === "ADMIN" && user.adminRole != null;
+  if (user?.role !== "ADMIN" || !user.adminRole) return false;
+  const role = user.adminRole.trim().toUpperCase();
+  return role === "SUPER_ADMIN" || role === "MANAGER";
 }
 
 export function AdminAuthGate({

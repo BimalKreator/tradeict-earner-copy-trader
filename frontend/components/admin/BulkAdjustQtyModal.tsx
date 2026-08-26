@@ -1,5 +1,7 @@
 "use client";
 
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
+
 import { Layers, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -15,7 +17,6 @@ type BulkAdjustQtyModalProps = {
   target: BulkAdjustQtyTarget | null;
   onClose: () => void;
   apiBase: string;
-  authToken: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -25,7 +26,6 @@ export function BulkAdjustQtyModal({
   target,
   onClose,
   apiBase,
-  authToken,
   onSuccess,
   onError,
 }: BulkAdjustQtyModalProps) {
@@ -56,10 +56,11 @@ export function BulkAdjustQtyModal({
 
     try {
       const res = await fetch(`${apiBase}/admin/live-trades/bulk-adjust-follower`, {
+        ...adminRequestInit(),
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
+          
         },
         body: JSON.stringify({
           userId: target.userId,
@@ -100,7 +101,6 @@ export function BulkAdjustQtyModal({
   }, [
     adjustmentInput,
     apiBase,
-    authToken,
     onClose,
     onError,
     onSuccess,

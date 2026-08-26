@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import {
   ChevronDown,
   ChevronRight,
@@ -13,9 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return adminAuthHeaders({ "Content-Type": "application/json" });
 }
 
 type NetworkNode = {
@@ -240,11 +239,8 @@ export default function AdminNetworkPage() {
   const [loadSucceeded, setLoadSucceeded] = useState(false);
 
   const load = useCallback(async () => {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    if (!token) throw new Error("Not signed in");
-
     const res = await fetch(`${apiBase}/admin/network-tree`, {
+      ...adminRequestInit(),
       headers: authHeaders(),
     });
     if (!res.ok) {

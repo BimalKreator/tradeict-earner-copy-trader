@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -53,17 +54,13 @@ export default function AdminSupportTicketPage() {
   const [closing, setClosing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
+  
   const load = useCallback(async () => {
-    if (!token || !ticketId) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${resolveApiBase()}/admin/tickets/${ticketId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
       if (!res.ok) throw new Error(`Failed (${res.status})`);
       setData((await res.json()) as TicketDetailResponse);
     } catch (e) {
@@ -71,7 +68,7 @@ export default function AdminSupportTicketPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, ticketId]);
+  }, [ ticketId]);
 
   useEffect(() => {
     void load();
@@ -85,7 +82,6 @@ export default function AdminSupportTicketPage() {
 
   async function sendReply(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || !reply.trim() || data?.ticket.status === "CLOSED") return;
     setSending(true);
     setError(null);
     try {
@@ -93,7 +89,7 @@ export default function AdminSupportTicketPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          
         },
         body: JSON.stringify({ message: reply.trim() }),
       });
@@ -111,13 +107,11 @@ export default function AdminSupportTicketPage() {
   }
 
   async function closeTicket() {
-    if (!token || !confirm("Close this ticket for the user?")) return;
     setClosing(true);
     try {
       const res = await fetch(`${resolveApiBase()}/admin/tickets/${ticketId}/close`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+        ...adminRequestInit(), });
       const body = (await res.json().catch(() => ({}))) as {
         error?: string;
       } & TicketDetailResponse;

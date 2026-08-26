@@ -1,6 +1,7 @@
 "use client";
 
 import { resolveApiBase } from "@/lib/apiBase";
+import { adminAuthHeaders, adminRequestInit } from "@/lib/adminAuth";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Save, Shield, UsersRound } from "lucide-react";
 import { usePlatformConfig } from "@/context/PlatformConfigContext";
@@ -166,14 +167,11 @@ export default function AdminSettingsPage() {
     setLoading(true);
     setError(null);
     try {
-      const token = localStorage.getItem("token");
       const [paymentRes, partnerRes] = await Promise.all([
         fetch(`${resolveApiBase()}/admin/settings/payment`, {
-          headers: { Authorization: `Bearer ${token ?? ""}` },
-        }),
+          ...adminRequestInit(), }),
         fetch(`${resolveApiBase()}/admin/settings/partner-commission`, {
-          headers: { Authorization: `Bearer ${token ?? ""}` },
-        }),
+          ...adminRequestInit(), }),
       ]);
       if (!paymentRes.ok) {
         throw new Error(`Failed to load settings (${paymentRes.status})`);
@@ -268,11 +266,10 @@ export default function AdminSettingsPage() {
     else if (kind === "security") setSavingSecurity(true);
     else setSavingMaintenance(true);
     try {
-      const token = localStorage.getItem("token");
       const res = await fetch(`${resolveApiBase()}/admin/settings/payment`, {
         method: "PUT",
         headers: {
-          Authorization: `Bearer ${token ?? ""}`,
+          
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
@@ -385,11 +382,10 @@ export default function AdminSettingsPage() {
       if (preview.validationError) {
         throw new Error(preview.validationError);
       }
-      const token = localStorage.getItem("token");
       const res = await fetch(`${resolveApiBase()}/admin/settings/partner-commission`, {
         method: "PUT",
         headers: {
-          Authorization: `Bearer ${token ?? ""}`,
+          
           "Content-Type": "application/json",
         },
         body: JSON.stringify(parsed),

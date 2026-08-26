@@ -30,3 +30,20 @@ export const CONFIRM_CLOSE_ALL_POSITIONS = "CLOSE ALL POSITIONS";
 export const CONFIRM_SYNC_ALL_FOLLOWERS = "SYNC ALL FOLLOWERS";
 export const CONFIRM_CLEAR_DUMMY_TRADES = "CLEAR DUMMY TRADES";
 export const CONFIRM_INJECT_TEST_TRADE = "INJECT TEST TRADE";
+
+/**
+ * Typed confirmation for admin wallet ADD/REMOVE.
+ * Amount is always two decimal places; email is the customer account email.
+ */
+export function walletAdjustConfirmationPhrase(
+  type: "ADD" | "REMOVE",
+  amountUsd: number,
+  email: string,
+): string {
+  const amt = Number(amountUsd).toFixed(2);
+  const trimmedEmail = email.trim();
+  if (type === "ADD") {
+    return `ADD ${amt} to ${trimmedEmail}`;
+  }
+  return `REMOVE ${amt} from ${trimmedEmail}`;
+}
