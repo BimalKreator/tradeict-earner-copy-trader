@@ -510,13 +510,17 @@ function evaluateStructureAttribution(
   structure: BotStructure,
   legTotals: Map<string, LegTotals>,
 ): { status: AttributionStatus | null; note: string | null } {
-  const isClosed =
-    structure.status === "closed" &&
-    structure.legs.length > 0 &&
-    structure.legs.every((leg) => leg.closedAt != null);
-
-  if (!isClosed) {
+  if (structure.status !== "closed" || structure.legs.length === 0) {
     return { status: null, note: null };
+  }
+
+  const openLegs = structure.legs.filter((leg) => leg.closedAt == null);
+  if (openLegs.length > 0) {
+    const ids = openLegs.map((l) => l.botLegId).join(",");
+    return {
+      status: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
+      note: `closed structure has open leg(s): [${ids}]`,
+    };
   }
 
   const failures: LegAttributionFailure[] = [];
@@ -685,6 +689,8 @@ async function recomputeStructurePnlForUser(
   const legWindowSpecs = allLegRefs.map(legRefToWindowSpec);
   const unmatched: LedgerRow[] = [];
   let matchedTxnCount = 0;
+  /** Absolute amount of overlap-refused rows, keyed by botStructureId. */
+  const droppedByStructure = new Map<number, Prisma.Decimal>();
 
   for (const txn of ledgerRows) {
     if (txn.productId == null) continue;
@@ -701,6 +707,14 @@ async function recomputeStructurePnlForUser(
         `[StructurePnl] OVERLAP user=${userId} uuid=${txn.deltaUuid} product=${txn.productId} ` +
           `legs=[${legIds.join(",")}] -- txn NOT counted, legs marked SUSPECT`,
       );
+      const absAmt = txn.amount.abs();
+      const touchedStructures = new Set(
+        matchingSpecs.map((s) => s.botStructureId),
+      );
+      for (const botStructureId of touchedStructures) {
+        const prev = droppedByStructure.get(botStructureId) ?? zeroDecimal();
+        droppedByStructure.set(botStructureId, prev.add(absAmt));
+      }
       for (const spec of matchingSpecs) {
         const key = legKey(spec.botStructureId, spec.botLegId);
         const totals = legTotals.get(key)!;
@@ -845,8 +859,10 @@ async function recomputeStructurePnlForUser(
     const allLegsClosed =
       structure.legs.length > 0 &&
       structure.legs.every((leg) => leg.closedAt != null);
+    // Closed structures always get a realized figure (including stuck open-leg
+    // cases). Open structures stay null. Never null-and-forget a closed loss.
     const structureRealized =
-      structure.status === "closed" && allLegsClosed
+      structure.status === "closed"
         ? structGross
             .add(structCommission)
             .add(structFunding)
@@ -854,7 +870,7 @@ async function recomputeStructurePnlForUser(
             .add(structLiquidationFee)
         : null;
 
-    if (structureRealized != null) {
+    if (structureRealized != null && allLegsClosed) {
       closedStructures += 1;
       realizedTotal += structureRealized.toNumber();
     }
@@ -877,6 +893,12 @@ async function recomputeStructurePnlForUser(
       ? (attribution.status ?? ATTRIBUTION_STATUS.OK)
       : attribution.status;
 
+    const droppedAbs =
+      droppedByStructure.get(structure.botStructureId) ?? zeroDecimal();
+    const attributionDroppedAmount = droppedAbs.greaterThan(0)
+      ? droppedAbs
+      : null;
+
     await prisma.structurePnl.update({
       where: { id: structureRow.id },
       data: {
@@ -888,6 +910,7 @@ async function recomputeStructurePnlForUser(
         computedAt,
         attributionStatus,
         attributionNote: attribution.note,
+        attributionDroppedAmount,
       },
     });
   }

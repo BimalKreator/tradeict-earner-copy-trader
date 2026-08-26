@@ -96,6 +96,55 @@ function isSuspectAttribution(status: string | null): boolean {
 }
 
 /**
+ * Bounded worst case for RULE 9: take the computed figure and subtract the
+ * absolute dropped/unattributable amount (least favourable to us).
+ * Example: computed +300 with 800 dropped → bounded -500 → treat as loss.
+ */
+export function boundedWorstCasePnl(
+  realizedPnl: Prisma.Decimal,
+  attributionDroppedAmount: Prisma.Decimal | null | undefined,
+): Prisma.Decimal {
+  const dropped = attributionDroppedAmount ?? zero();
+  const absDropped = dropped.abs();
+  return realizedPnl.sub(absDropped);
+}
+
+/**
+ * Amount that flows into cumulative / HWM for one closed structure.
+ * Clean rows: full realizedPnl. Suspect rows: bounded worst case, and only
+ * when that bound is a loss (never raise HWM on an incomplete "gain").
+ */
+export function structureCumulativeContribution(row: {
+  realizedPnl: Prisma.Decimal | null;
+  attributionStatus: string | null;
+  attributionDroppedAmount?: Prisma.Decimal | null;
+}): Prisma.Decimal | null {
+  if (row.realizedPnl == null) return null;
+  if (!isSuspectAttribution(row.attributionStatus)) {
+    return row.realizedPnl;
+  }
+  const bounded = boundedWorstCasePnl(
+    row.realizedPnl,
+    row.attributionDroppedAmount,
+  );
+  if (bounded.lessThan(0)) return bounded;
+  return null;
+}
+
+function sumCumulativeContributions(
+  rows: Array<{
+    realizedPnl: Prisma.Decimal | null;
+    attributionStatus: string | null;
+    attributionDroppedAmount?: Prisma.Decimal | null;
+  }>,
+): Prisma.Decimal {
+  return rows.reduce((sum, row) => {
+    const c = structureCumulativeContribution(row);
+    return c == null ? sum : sum.add(c);
+  }, zero());
+}
+
+/**
  * Billable = not explicitly SUSPECT.
  * Prisma `NOT status = X` excludes NULLs in SQL — so include NULL explicitly.
  */
@@ -113,10 +162,13 @@ function billableStructuresFilter(): Prisma.StructurePnlWhereInput {
 }
 
 /**
- * Cumulative / HWM = billable rows, plus SUSPECT losses (asymmetric rule).
+ * Cumulative / HWM candidate set = clean rows plus all SUSPECT with a realized
+ * figure. Sign / bound classification happens in JS (cannot express dropped
+ * amount in a Prisma where filter).
  */
 function cumulativeStructuresFilter(): Prisma.StructurePnlWhereInput {
   return {
+    realizedPnl: { not: null },
     OR: [
       { attributionStatus: null },
       {
@@ -126,7 +178,6 @@ function cumulativeStructuresFilter(): Prisma.StructurePnlWhereInput {
       },
       {
         attributionStatus: ATTRIBUTION_STATUS.SUSPECT_INCOMPLETE,
-        realizedPnl: { lt: 0 },
       },
     ],
   };
@@ -137,6 +188,7 @@ type ClosedStructureRow = {
   botStructureId: number;
   realizedPnl: Prisma.Decimal | null;
   attributionStatus: string | null;
+  attributionDroppedAmount: Prisma.Decimal | null;
 };
 
 async function structuresClosedInIstWindow(
@@ -160,6 +212,7 @@ async function structuresClosedInIstWindow(
       botStructureId: true,
       realizedPnl: true,
       attributionStatus: true,
+      attributionDroppedAmount: true,
     },
   });
 }
@@ -186,17 +239,17 @@ function partitionStructures(rows: ClosedStructureRow[]): {
     }
 
     const suspect = isSuspectAttribution(row.attributionStatus);
-    const pnl = row.realizedPnl;
-    const isLoss = pnl != null && pnl.lessThan(0);
+    const contribution = structureCumulativeContribution(row);
 
     if (suspect) {
       suspectCount += 1;
-      if (isLoss) {
+      if (contribution != null && contribution.lessThan(0)) {
         cumulative.push(row);
         suspectLossesCountedCount += 1;
-        suspectLossesCountedAmount = suspectLossesCountedAmount.add(pnl);
+        suspectLossesCountedAmount =
+          suspectLossesCountedAmount.add(contribution);
       }
-      // suspect gains: excluded from billable AND cumulative
+      // Suspect that remains a gain even after bounding: excluded from both.
       continue;
     }
 
@@ -351,15 +404,21 @@ async function runningHwmBeforeMonthStart(
       closedAt: { lt: monthStart },
       realizedPnl: { not: null },
     },
-    select: { closedAt: true, realizedPnl: true },
+    select: {
+      closedAt: true,
+      realizedPnl: true,
+      attributionStatus: true,
+      attributionDroppedAmount: true,
+    },
     orderBy: { closedAt: "asc" },
   });
 
   let cumulative = zero();
   let hwm = zero();
   for (const row of structures) {
-    if (row.realizedPnl == null) continue;
-    cumulative = cumulative.add(row.realizedPnl);
+    const contribution = structureCumulativeContribution(row);
+    if (contribution == null) continue;
+    cumulative = cumulative.add(contribution);
     hwm = maxDec(hwm, cumulative);
   }
   return hwm;
@@ -380,9 +439,13 @@ async function lifetimeCumulativeRealizedToDate(
       closedAt: { lt: periodEndExclusive },
       realizedPnl: { not: null },
     },
-    select: { realizedPnl: true },
+    select: {
+      realizedPnl: true,
+      attributionStatus: true,
+      attributionDroppedAmount: true,
+    },
   });
-  return sumStructureRealized(rows);
+  return sumCumulativeContributions(rows);
 }
 
 async function resolveHwmBeforeForPeriod(
@@ -913,7 +976,8 @@ export async function computeDailyPnlSnapshotForUser(
     dayEnd,
     isSimulated,
   );
-  const realizedDelta = sumStructureRealized(closedToday);
+  const { cumulative: cumulativeToday } = partitionStructures(closedToday);
+  const realizedDelta = sumCumulativeContributions(cumulativeToday);
 
   const prevDate = startOfDayInTimeZone(
     new Date(snapshotDate.getTime() - MS_PER_DAY),

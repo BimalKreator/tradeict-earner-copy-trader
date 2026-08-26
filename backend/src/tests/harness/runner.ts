@@ -15,6 +15,7 @@ import { p12WalletRaceScenario } from "./scenarios/p12-wallet-race.js";
 import { p13AccountLifecycleScenario } from "./scenarios/p13-account-lifecycle.js";
 import { p14AuthScenario } from "./scenarios/p14-auth.js";
 import { p14AdminGuardsScenario } from "./scenarios/p14-admin-guards.js";
+import { p15SuspectAsymmetryScenario } from "./scenarios/p15-suspect-asymmetry.js";
 import { schemaDriftScenario } from "./scenarios/schema-drift.js";
 import type { HarnessScenario, ScenarioResult } from "./types.js";
 import {
@@ -32,6 +33,7 @@ const ALL_SCENARIOS: HarnessScenario[] = [
   p13AccountLifecycleScenario,
   p14AuthScenario,
   p14AdminGuardsScenario,
+  p15SuspectAsymmetryScenario,
 ];
 
 function parseOnlyArg(argv: string[]): string | null {

@@ -26,6 +26,7 @@ export type AttributionHealthStructure = {
   realizedPnl: number | null;
   attributionStatus: string | null;
   attributionNote: string | null;
+  attributionDroppedAmount: number | null;
   openedAt: string;
   closedAt: string | null;
   legs: AttributionHealthLeg[];
@@ -82,6 +83,8 @@ export async function getAttributionHealthForUser(
       realizedPnl: structure.realizedPnl?.toNumber() ?? null,
       attributionStatus: structure.attributionStatus,
       attributionNote: structure.attributionNote,
+      attributionDroppedAmount:
+        structure.attributionDroppedAmount?.toNumber() ?? null,
       openedAt: structure.openedAt.toISOString(),
       closedAt: structure.closedAt?.toISOString() ?? null,
       legs: structure.legs.map((leg) => {

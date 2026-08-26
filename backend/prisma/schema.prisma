@@ -485,6 +485,11 @@ model StructurePnl {
   /** OK = complete entry+exit attribution; SUSPECT_INCOMPLETE = billing blocked. */
   attributionStatus  String?
   attributionNote    String?
+  /**
+   * Absolute amount of ledger rows refused / unattributable for this structure
+   * (e.g. overlap). Used to bound worst-case P&L for RULE 9 HWM asymmetry.
+   */
+  attributionDroppedAmount Decimal? @db.Decimal(24, 10)
   isSimulated        Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Restrict)
