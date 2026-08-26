@@ -2,8 +2,12 @@ import type { PrismaClient } from "@prisma/client";
 
 const SETTINGS_ID = "global";
 const DEFAULT_PG_FEE_PERCENT = 2.36;
+/**
+ * Signup-only allowlist default. Narrowing this list MUST NEVER lock out an
+ * existing account — login, verify-otp, and password reset do not consult it.
+ */
 const DEFAULT_ALLOWED_EMAIL_DOMAINS =
-  "gmail.com,yahoo.com,hotmail.com,outlook.com";
+  "gmail.com,googlemail.com,yahoo.com,yahoo.co.in,yahoo.co.uk,hotmail.com,hotmail.co.uk,outlook.com,outlook.in,live.com,msn.com,icloud.com,me.com,mac.com,proton.me,protonmail.com,aol.com,zoho.com,yandex.com,gmx.com,mail.com,rediffmail.com";
 export const DEFAULT_MAINTENANCE_MESSAGE =
   "The platform is temporarily under maintenance. Please check back shortly.";
 
@@ -256,6 +260,7 @@ export async function setAllowedEmailDomains(
   return row.allowedEmailDomains;
 }
 
+/** Signup gate only. Never use this to refuse login or password reset. */
 export async function isEmailDomainAllowed(
   prisma: PrismaClient,
   email: string,

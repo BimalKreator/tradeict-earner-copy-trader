@@ -45,13 +45,37 @@ export function authCookieOptions(): {
   };
 }
 
+export type AuthTokenPayload = {
+  sub: string;
+  email: string;
+  role?: string;
+  tokenVersion: number;
+};
+
 export function signAuthToken(
-  payload: { sub: string; email: string; role?: string },
+  payload: AuthTokenPayload,
   secret: string,
 ): string {
   return jwt.sign(payload, secret, {
     expiresIn: JWT_EXPIRES_IN,
   } as SignOptions);
+}
+
+export function extractAccessToken(req: {
+  headers: { authorization?: unknown };
+  cookies?: Record<string, string | undefined>;
+}): string | null {
+  const raw = req.headers.authorization;
+  const authHeader = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    const t = authHeader.slice("Bearer ".length).trim();
+    if (t) return t;
+  }
+  const fromCookie = req.cookies?.[AUTH_COOKIE_NAME];
+  if (typeof fromCookie === "string" && fromCookie.trim()) {
+    return fromCookie.trim();
+  }
+  return null;
 }
 
 export function setAuthCookie(res: Response, token: string): void {

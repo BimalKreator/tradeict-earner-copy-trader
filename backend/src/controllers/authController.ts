@@ -14,9 +14,17 @@ import {
 } from "../services/emailService.js";
 import {
   clearAuthCookie,
+  extractAccessToken,
   setAuthCookie,
   signAuthToken,
 } from "../utils/authToken.js";
+import {
+  bumpUserTokenVersion,
+  consumeLoginOtp,
+  consumeResetOtp,
+  storeLoginOtp,
+  storeResetOtp,
+} from "../services/userAuthService.js";
 import {
   incrementAffiliateDirectAcquiredCount,
   resolveAffiliateUserIdByReferralCode,
@@ -47,11 +55,16 @@ function sanitizeUser(user: {
 
 function issueAuthSession(
   res: Response,
-  user: { id: string; email: string; role: Role },
+  user: { id: string; email: string; role: Role; tokenVersion: number },
   secret: string,
 ): string {
   const token = signAuthToken(
-    { sub: user.id, email: user.email, role: user.role },
+    {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      tokenVersion: user.tokenVersion,
+    },
     secret,
   );
   setAuthCookie(res, token);
@@ -83,6 +96,10 @@ async function findUserByLoginIdentifier(
 }
 
 export function createAuthController(prisma: PrismaClient) {
+  /**
+   * SIGNUP ONLY. Never call from login, verify-otp, or password reset —
+   * narrowing the domain list must not lock out an existing account.
+   */
   async function rejectDisallowedEmail(
     res: Response,
     email: string,
@@ -290,8 +307,6 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
-      if (await rejectDisallowedEmail(res, user.email)) return;
-
       const passwordOk = await bcrypt.compare(password, user.password);
       if (!passwordOk) {
         res.status(401).json({ error: "Invalid email or password" });
@@ -309,13 +324,7 @@ export function createAuthController(prisma: PrismaClient) {
       }
 
       const otpCode = generateSixDigitOtp();
-      const otpExpiry = new Date(Date.now() + OTP_TTL_MS);
-
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { otpCode, otpExpiry },
-      });
-
+      await storeLoginOtp(prisma, user.id, otpCode);
       await sendOtpEmail(user.email, otpCode, "Login");
 
       res.status(200).json({
@@ -349,8 +358,6 @@ export function createAuthController(prisma: PrismaClient) {
       const email = body.email.trim().toLowerCase();
       const otpCode = body.otpCode.trim();
 
-      if (await rejectDisallowedEmail(res, email)) return;
-
       const secret = process.env.JWT_SECRET;
       if (!secret) {
         res.status(500).json({ error: "JWT_SECRET is not configured" });
@@ -363,39 +370,60 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
-      const storedOtpValid =
-        Boolean(user.otpCode && user.otpExpiry) &&
-        user.otpCode === otpCode &&
-        user.otpExpiry! > new Date();
-
-      if (!storedOtpValid) {
+      const consumed = await consumeLoginOtp(prisma, user.id, otpCode);
+      if (consumed !== "ok") {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }
 
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          otpCode: null,
-          otpExpiry: null,
-        },
-      });
+      const fresh = await prisma.user.findUnique({ where: { id: user.id } });
+      if (!fresh) {
+        res.status(401).json({ error: "Invalid or expired OTP" });
+        return;
+      }
 
-      const token = issueAuthSession(res, user, secret);
+      const token = issueAuthSession(res, fresh, secret);
 
       res.status(200).json({
         success: true,
         token,
-        user: sanitizeUser(user),
+        user: sanitizeUser(fresh),
       });
     } catch (err) {
       next(err);
     }
   }
 
-  async function logout(_req: Request, res: Response): Promise<void> {
-    clearAuthCookie(res);
-    res.status(200).json({ ok: true });
+  async function logout(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const secret = process.env.JWT_SECRET;
+      const token = extractAccessToken(req);
+      if (secret && token) {
+        try {
+          const decoded = jwt.verify(token, secret);
+          if (
+            typeof decoded === "object" &&
+            decoded !== null &&
+            typeof (decoded as { sub?: unknown }).sub === "string"
+          ) {
+            await bumpUserTokenVersion(
+              prisma,
+              (decoded as { sub: string }).sub,
+            );
+          }
+        } catch {
+          // Expired or invalid token — still clear the cookie.
+        }
+      }
+      clearAuthCookie(res);
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
   }
 
   async function forgotPassword(
@@ -413,16 +441,8 @@ export function createAuthController(prisma: PrismaClient) {
 
       const user = await prisma.user.findUnique({ where: { email } });
       if (user) {
-        if (await rejectDisallowedEmail(res, email)) return;
-
         const otpCode = generateSixDigitOtp();
-        const otpExpiry = new Date(Date.now() + OTP_TTL_MS);
-
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { otpCode, otpExpiry },
-        });
-
+        await storeResetOtp(prisma, user.id, otpCode);
         await sendOtpEmail(email, otpCode, "Password Reset");
       }
 
@@ -471,15 +491,14 @@ export function createAuthController(prisma: PrismaClient) {
         return;
       }
 
-      if (await rejectDisallowedEmail(res, email)) return;
-
       const user = await prisma.user.findUnique({ where: { email } });
-      if (!user || !user.otpCode || !user.otpExpiry) {
+      if (!user) {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }
 
-      if (user.otpCode !== otp || user.otpExpiry <= new Date()) {
+      const consumed = await consumeResetOtp(prisma, user.id, otp);
+      if (consumed !== "ok") {
         res.status(401).json({ error: "Invalid or expired OTP" });
         return;
       }
@@ -490,8 +509,10 @@ export function createAuthController(prisma: PrismaClient) {
         where: { id: user.id },
         data: {
           password: passwordHash,
-          otpCode: null,
-          otpExpiry: null,
+          loginOtpHash: null,
+          loginOtpExpiry: null,
+          loginOtpAttempts: 0,
+          tokenVersion: { increment: 1 },
         },
       });
 

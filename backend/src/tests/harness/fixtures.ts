@@ -318,12 +318,17 @@ export class TestFixtureFactory {
     private readonly registry: TestRegistry,
   ) {}
 
-  mintUserToken(userId: string, email: string, role: Role): string {
+  mintUserToken(
+    userId: string,
+    email: string,
+    role: Role,
+    tokenVersion = 0,
+  ): string {
     const secret = process.env.JWT_SECRET?.trim();
     if (!secret) {
       throw new Error("JWT_SECRET is required to mint harness tokens");
     }
-    return signAuthToken({ sub: userId, email, role }, secret);
+    return signAuthToken({ sub: userId, email, role, tokenVersion }, secret);
   }
 
   async createTestUser(prefix: string, role: Role): Promise<{
@@ -343,7 +348,7 @@ export class TestFixtureFactory {
         name: marker,
         role,
       },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, tokenVersion: true },
     });
     this.registry.trackUser(user.id);
 
@@ -362,7 +367,12 @@ export class TestFixtureFactory {
       id: user.id,
       email: user.email,
       marker,
-      token: this.mintUserToken(user.id, user.email, user.role),
+      token: this.mintUserToken(
+        user.id,
+        user.email,
+        user.role,
+        user.tokenVersion,
+      ),
     };
   }
 

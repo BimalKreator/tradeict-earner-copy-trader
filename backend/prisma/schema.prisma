@@ -199,8 +199,19 @@ model User {
   isOtpBypassed                Boolean @default(false)
   /** Admin-granted permission to run Delta revenue pipeline simulations. */
   allowSimulation              Boolean @default(false)
-  otpCode       String?
-  otpExpiry     DateTime?
+  /**
+   * Incremented on logout and password reset. JWTs embed this value;
+   * authMiddleware rejects a mismatch (401).
+   */
+  tokenVersion                 Int      @default(0)
+  /** bcrypt hash of the login OTP (never store the six-digit code in the clear). */
+  loginOtpHash                 String?
+  loginOtpExpiry               DateTime?
+  loginOtpAttempts             Int      @default(0)
+  /** bcrypt hash of the password-reset OTP — distinct from login OTP. */
+  resetOtpHash                 String?
+  resetOtpExpiry               DateTime?
+  resetOtpAttempts             Int      @default(0)
   telegramChatId       String?              @unique
   telegramLinkToken    String?              @unique
   telegramLinkExpires  DateTime?

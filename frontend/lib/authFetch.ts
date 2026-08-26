@@ -31,6 +31,7 @@ export async function authFetch(
     url,
     {
       ...init,
+      credentials: "include",
       cache: init?.cache ?? "no-store",
       headers: {
         ...(init?.headers ?? {}),

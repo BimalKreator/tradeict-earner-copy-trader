@@ -1,22 +1,60 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import type { PrismaClient } from "@prisma/client";
-import { AdminRole, Role, UserStatus } from "@prisma/client";
-import { AUTH_COOKIE_NAME } from "../utils/authToken.js";
+import { AdminRole, UserStatus } from "@prisma/client";
+import { extractAccessToken } from "../utils/authToken.js";
 import { isPlatformAdminUser } from "../utils/platformAdmin.js";
 
-function extractBearerToken(req: Request): string | null {
-  const authHeader = req.headers.authorization;
-  if (authHeader?.startsWith("Bearer ")) {
-    const t = authHeader.slice("Bearer ".length).trim();
-    if (t) return t;
+function tokenVersionFromPayload(decoded: object): number {
+  const raw = (decoded as { tokenVersion?: unknown }).tokenVersion;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  return 0;
+}
+
+export type AccessTokenInspection =
+  | { ok: true; userId: string }
+  | { ok: false; status: number; error: string };
+
+export async function inspectAccessToken(
+  prisma: PrismaClient,
+  token: string,
+): Promise<AccessTokenInspection> {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    return { ok: false, status: 500, error: "JWT_SECRET is not configured" };
   }
-  const cookies = req.cookies as Record<string, string | undefined> | undefined;
-  const fromCookie = cookies?.[AUTH_COOKIE_NAME];
-  if (typeof fromCookie === "string" && fromCookie.trim()) {
-    return fromCookie.trim();
+
+  try {
+    const decoded = jwt.verify(token, secret);
+    if (
+      typeof decoded !== "object" ||
+      decoded === null ||
+      typeof (decoded as { sub?: unknown }).sub !== "string"
+    ) {
+      return { ok: false, status: 401, error: "Invalid token payload" };
+    }
+
+    const userId = (decoded as { sub: string }).sub;
+    const claimedVersion = tokenVersionFromPayload(decoded);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, status: true, tokenVersion: true },
+    });
+
+    if (!user) {
+      return { ok: false, status: 401, error: "User not found" };
+    }
+    if (claimedVersion !== user.tokenVersion) {
+      return { ok: false, status: 401, error: "Invalid or expired token" };
+    }
+    if (user.status !== UserStatus.ACTIVE) {
+      return { ok: false, status: 403, error: "Account suspended" };
+    }
+
+    return { ok: true, userId };
+  } catch {
+    return { ok: false, status: 401, error: "Invalid or expired token" };
   }
-  return null;
 }
 
 /**
@@ -30,48 +68,20 @@ export function authenticateJwt(prisma: PrismaClient): (
   next: NextFunction,
 ) => void {
   return async (req, res, next) => {
-    const token = extractBearerToken(req);
+    const token = extractAccessToken(req);
     if (!token) {
       res.status(401).json({ error: "Missing or invalid Authorization header" });
       return;
     }
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      res.status(500).json({ error: "JWT_SECRET is not configured" });
+
+    const result = await inspectAccessToken(prisma, token);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
       return;
     }
 
-    try {
-      const decoded = jwt.verify(token, secret);
-      if (
-        typeof decoded !== "object" ||
-        decoded === null ||
-        typeof (decoded as { sub?: unknown }).sub !== "string"
-      ) {
-        res.status(401).json({ error: "Invalid token payload" });
-        return;
-      }
-
-      const userId = (decoded as { sub: string }).sub;
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { id: true, status: true },
-      });
-
-      if (!user) {
-        res.status(401).json({ error: "User not found" });
-        return;
-      }
-      if (user.status !== UserStatus.ACTIVE) {
-        res.status(403).json({ error: "Account suspended" });
-        return;
-      }
-
-      req.userId = userId;
-      next();
-    } catch {
-      res.status(401).json({ error: "Invalid or expired token" });
-    }
+    req.userId = result.userId;
+    next();
   };
 }
 
@@ -113,7 +123,7 @@ export function requireAdmin(prisma: PrismaClient): (
 
       const secret = process.env.JWT_SECRET;
       if (secret) {
-        const token = extractBearerToken(req);
+        const token = extractAccessToken(req);
         if (token) {
           try {
             const decoded = jwt.verify(token, secret);
