@@ -1,0 +1,17 @@
+{
+  "_todo": "When public/screenshot-mobile-1.png and public/screenshot-desktop-1.png exist, add the screenshots array below to public/manifest.json (do not reference missing files — Chrome install UI breaks on 404).",
+  "screenshots": [
+    {
+      "src": "/screenshot-mobile-1.png",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow"
+    },
+    {
+      "src": "/screenshot-desktop-1.png",
+      "sizes": "1920x1080",
+      "type": "image/png",
+      "form_factor": "wide"
+    }
+  ]
+}
