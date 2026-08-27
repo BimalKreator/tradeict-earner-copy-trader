@@ -6,6 +6,7 @@ import { BrandLogo } from "@/components/BrandLogo";
 import { useAdminSession, type PlatformAdminRole } from "@/context/AdminSessionContext";
 import { useAuth } from "@/context/AuthContext";
 import {
+  Award,
   Banknote,
   BarChart3,
   Bell,
@@ -29,7 +30,6 @@ import {
   Users,
   UsersRound,
   Wallet,
-  Award,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -51,71 +51,80 @@ type NavGroup = {
   items: NavItem[];
 };
 
+/** Single top link — not inside a collapsible group. */
+const overviewItem: NavItem = {
+  href: "/admin",
+  label: "Overview",
+  icon: LayoutDashboard,
+};
+
+/** Six collapsible groups (Overview is separate). */
 const navGroups: NavGroup[] = [
   {
-    id: "overview",
-    label: "Overview",
-    items: [{ href: "/admin", label: "Dashboard", icon: LayoutDashboard }],
-  },
-  {
-    id: "trading",
-    label: "Trading & Operations",
-    items: [
-      { href: "/admin/live-trades", label: "Live Trades", icon: Radio },
-      { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
-      { href: "/admin/dex-arbitrage", label: "Dex Arbitrage", icon: GitCompare },
-      { href: "/admin/strategies", label: "Strategies", icon: LineChart },
-    ],
-  },
-  {
-    id: "users",
-    label: "User Management",
+    id: "people",
+    label: "People",
     items: [
       { href: "/admin/users", label: "Users", icon: Users },
       { href: "/admin/members", label: "Members", icon: UsersRound },
-      { href: "/admin/referral-requests", label: "Referral Requests", icon: Inbox },
-      { href: "/admin/tier-settings", label: "Tier Settings", icon: Award },
-      { href: "/admin/network", label: "Network Tree", icon: GitBranch },
-    ],
-  },
-  {
-    id: "financials",
-    label: "Financials",
-    items: [
-      { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
-      { href: "/admin/revenue-delta", label: "Revenue (Delta)", icon: ShieldCheck },
-      { href: "/admin/payouts", label: "Payouts", icon: Banknote },
-      { href: "/admin/wallet", label: "Wallet Management", icon: CircleDollarSign },
-      { href: "/admin/funds", label: "Funds", icon: Wallet },
-      { href: "/admin/coupons", label: "Coupons", icon: Tag },
-    ],
-  },
-  {
-    id: "system",
-    label: "System",
-    items: [
       {
         href: "/admin/managers",
         label: "Managers",
         icon: Shield,
         superAdminOnly: true,
       },
+      { href: "/admin/network", label: "Network Tree", icon: GitBranch },
+      { href: "/admin/referral-requests", label: "Referral Requests", icon: Inbox },
+    ],
+  },
+  {
+    id: "money",
+    label: "Money",
+    items: [
+      { href: "/admin/revenue", label: "Revenue Analytics", icon: Download },
+      { href: "/admin/revenue-delta", label: "Revenue (Delta)", icon: ShieldCheck },
+      { href: "/admin/wallet", label: "Wallet Management", icon: CircleDollarSign },
+      { href: "/admin/funds", label: "Funds", icon: Wallet },
+      { href: "/admin/payouts", label: "Payouts", icon: Banknote },
+    ],
+  },
+  {
+    id: "trading",
+    label: "Trading",
+    items: [
+      { href: "/admin/live-trades", label: "Live Trades", icon: Radio },
+      { href: "/admin/trade-history", label: "Trade History", icon: BarChart3 },
+      { href: "/admin/strategies", label: "Strategies", icon: LineChart },
+      { href: "/admin/dex-arbitrage", label: "Dex Arbitrage", icon: GitCompare },
+    ],
+  },
+  {
+    id: "growth",
+    label: "Growth",
+    items: [
+      { href: "/admin/coupons", label: "Coupons", icon: Tag },
+      { href: "/admin/tier-settings", label: "Tier Settings", icon: Award },
+    ],
+  },
+  {
+    id: "support",
+    label: "Support",
+    items: [
+      { href: "/admin/support", label: "Support", icon: MessageSquare },
+      { href: "/admin/notifications", label: "Notifications", icon: Bell },
+      { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
+    ],
+  },
+  {
+    id: "system",
+    label: "System",
+    items: [
+      { href: "/admin/settings", label: "Settings", icon: Settings },
       {
         href: "/admin/audit-logs",
         label: "Audit Logs",
         icon: FileSearch,
         managerOrAbove: true,
       },
-      { href: "/admin/support", label: "Support", icon: MessageSquare },
-      { href: "/admin/notifications", label: "Notifications", icon: Bell },
-      { href: "/admin/downloads", label: "Downloads", icon: FolderOpen },
-      { href: "/admin/settings", label: "Settings", icon: Settings },
-    ],
-  },
-  {
-    id: "debug",
-    label: "Debug Tools",
-    items: [
       {
         href: "/admin/debug/inject-trade",
         label: "Inject Trade",
@@ -134,15 +143,6 @@ function isLinkActive(pathname: string, href: string): boolean {
 
 function groupHasActive(pathname: string, items: NavItem[]): boolean {
   return items.some((item) => isLinkActive(pathname, item.href));
-}
-
-function buildInitialExpanded(pathname: string): Record<string, boolean> {
-  const state: Record<string, boolean> = {};
-  for (const group of navGroups) {
-    state[group.id] =
-      group.id === "overview" || groupHasActive(pathname, group.items);
-  }
-  return state;
 }
 
 type AdminSidebarProps = {
@@ -167,11 +167,24 @@ function filterNavItems(
   });
 }
 
+function navLinkClass(active: boolean): string {
+  return `block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+    active
+      ? "bg-primary/15 text-primary ring-1 ring-primary/40"
+      : "text-white/70 hover:bg-white/5 hover:text-white"
+  }`;
+}
+
 export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { logout } = useAuth();
   const { platformAdminRole } = useAdminSession();
+
+  const showOverview = useMemo(
+    () => filterNavItems([overviewItem], platformAdminRole).length > 0,
+    [platformAdminRole],
+  );
 
   const visibleNavGroups = useMemo(
     () =>
@@ -184,21 +197,15 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
     [platformAdminRole],
   );
 
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
-    buildInitialExpanded(pathname),
-  );
+  /**
+   * Manual open/close overrides only — never persisted.
+   * Cleared on route change so open state follows the active path (SSR-safe).
+   */
+  const [manualOpen, setManualOpen] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    setExpanded((prev) => {
-      const next = { ...prev };
-      for (const group of visibleNavGroups) {
-        if (groupHasActive(pathname, group.items)) {
-          next[group.id] = true;
-        }
-      }
-      return next;
-    });
-  }, [pathname, visibleNavGroups]);
+    setManualOpen({});
+  }, [pathname]);
 
   async function handleLogout() {
     onClose();
@@ -206,8 +213,15 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
     router.replace("/login");
   }
 
-  function toggleGroup(id: string) {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  function toggleGroup(id: string, currentlyOpen: boolean) {
+    setManualOpen((prev) => ({ ...prev, [id]: !currentlyOpen }));
+  }
+
+  function isGroupOpen(group: NavGroup): boolean {
+    if (manualOpen[group.id] !== undefined) {
+      return manualOpen[group.id]!;
+    }
+    return groupHasActive(pathname, group.items);
   }
 
   return (
@@ -232,15 +246,28 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
       </div>
 
       <nav className="flex flex-1 flex-col gap-2 overflow-y-auto overscroll-contain pr-0.5">
+        {showOverview ? (
+          <Link
+            href={overviewItem.href}
+            onClick={onClose}
+            className={navLinkClass(isLinkActive(pathname, overviewItem.href))}
+          >
+            <span className="inline-flex items-center gap-2">
+              <LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden />
+              <span className="truncate">{overviewItem.label}</span>
+            </span>
+          </Link>
+        ) : null}
+
         {visibleNavGroups.map((group) => {
-          const isOpen = expanded[group.id] ?? false;
+          const isOpen = isGroupOpen(group);
           const activeInGroup = groupHasActive(pathname, group.items);
 
           return (
             <div key={group.id} className="min-w-0">
               <button
                 type="button"
-                onClick={() => toggleGroup(group.id)}
+                onClick={() => toggleGroup(group.id, isOpen)}
                 aria-expanded={isOpen}
                 className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-[11px] font-semibold uppercase tracking-wider transition hover:bg-white/[0.04] ${
                   activeInGroup ? "text-primary/90" : "text-white/40"
@@ -264,11 +291,7 @@ export function AdminSidebar({ isMobileOpen, onClose }: AdminSidebarProps) {
                         <Link
                           href={href}
                           onClick={onClose}
-                          className={`block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                            active
-                              ? "bg-primary/15 text-primary ring-1 ring-primary/40"
-                              : "text-white/70 hover:bg-white/5 hover:text-white"
-                          }`}
+                          className={navLinkClass(active)}
                         >
                           <span className="inline-flex items-center gap-2">
                             <Icon className="h-4 w-4 shrink-0" aria-hidden />
