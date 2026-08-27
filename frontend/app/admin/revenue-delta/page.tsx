@@ -7,6 +7,8 @@ const REVENUE_DELTA_OPS = {
   snapshot: "/admin/revenue/snapshot",
   invoice: "/admin/revenue/invoice",
   structurePnlRecompute: "/admin/structure-pnl/recompute",
+  /** Typed confirmation when issue: true on POST revenue/invoice */
+  issueConfirmation: "ISSUE INVOICE",
 } as const;
 
 export default function AdminRevenueDeltaPage() {

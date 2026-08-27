@@ -68,6 +68,9 @@ import {
   CONFIRM_INJECT_TEST_TRADE,
   requireTypedConfirmation,
 } from "../utils/requireTypedConfirmation.js";
+
+/** Typed confirmation when admin explicitly issues monthly invoices (ACCRUED → INVOICED). */
+const CONFIRM_ISSUE_INVOICE = "ISSUE INVOICE";
 import {
   getDeltaRestPauseStatus,
   setDeltaRestApiManualPause,
@@ -440,6 +443,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
         userId?: unknown;
         year?: unknown;
         month?: unknown;
+        issue?: unknown;
       };
       const userId =
         typeof body.userId === "string" && body.userId.trim().length > 0
@@ -458,23 +462,40 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
             ? parseInt(body.month, 10)
             : undefined;
 
-      const results = await runMonthlyRevenueInvoices(
-        prisma,
-        userId || year != null || month != null
+      let issue: boolean | undefined;
+      if (typeof body.issue === "boolean") {
+        issue = body.issue;
+      } else if (body.issue === undefined || body.issue === null) {
+        issue = undefined;
+      } else {
+        res.status(400).json({ error: "issue must be a boolean when provided" });
+        return;
+      }
+
+      if (issue === true) {
+        if (!requireTypedConfirmation(req, res, CONFIRM_ISSUE_INVOICE)) {
+          return;
+        }
+      }
+
+      const runOpts =
+        userId || year != null || month != null || issue !== undefined
           ? {
               ...(userId ? { userId } : {}),
               ...(year != null && Number.isFinite(year) ? { year } : {}),
               ...(month != null && Number.isFinite(month) ? { month } : {}),
+              ...(issue !== undefined ? { issue } : {}),
             }
-          : undefined,
-      );
+          : undefined;
+
+      const { results, issued } = await runMonthlyRevenueInvoices(prisma, runOpts);
 
       if (userId && Object.keys(results).length === 0) {
         res.status(404).json({ error: "User not eligible for monthly invoice" });
         return;
       }
 
-      res.json({ ok: true, results });
+      res.json({ ok: true, results, issued });
     } catch (err) {
       next(err);
     }

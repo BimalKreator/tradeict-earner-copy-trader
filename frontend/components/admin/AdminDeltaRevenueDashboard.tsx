@@ -171,6 +171,7 @@ const DEFAULT_OPS_PATHS = {
   snapshot: "/admin/revenue/snapshot",
   invoice: "/admin/revenue/invoice",
   structurePnlRecompute: "/admin/structure-pnl/recompute",
+  issueConfirmation: "ISSUE INVOICE",
 } as const;
 
 const OPS_TIMEOUT_MS = 120_000;
@@ -179,6 +180,7 @@ type OpsPaths = {
   snapshot: string;
   invoice: string;
   structurePnlRecompute: string;
+  issueConfirmation: string;
 };
 
 type OpsBusy =
@@ -201,7 +203,10 @@ function summarizeOpsResults(
 async function postAdminOps(
   path: string,
   body: Record<string, unknown>,
-): Promise<{ ok: true; results: Record<string, unknown> } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; results: Record<string, unknown>; issued?: number }
+  | { ok: false; error: string }
+> {
   const res = await adminFetch(
     path,
     {
@@ -213,17 +218,24 @@ async function postAdminOps(
   );
   const payload = (await res.json().catch(() => ({}))) as {
     error?: string;
+    expectedHint?: string;
     results?: Record<string, unknown>;
+    issued?: number;
   };
   if (!res.ok) {
     return {
       ok: false,
       error:
-        payload.error ??
-        formatAdminFetchError("ops", res, buildAdminApiUrl(path)),
+        (payload.error ??
+          formatAdminFetchError("ops", res, buildAdminApiUrl(path))) +
+        (payload.expectedHint ? ` ${payload.expectedHint}` : ""),
     };
   }
-  return { ok: true, results: payload.results ?? {} };
+  return {
+    ok: true,
+    results: payload.results ?? {},
+    ...(typeof payload.issued === "number" ? { issued: payload.issued } : {}),
+  };
 }
 
 export function AdminDeltaRevenueDashboard({
@@ -288,6 +300,9 @@ export function AdminDeltaRevenueDashboard({
   const [opsInvoiceUserId, setOpsInvoiceUserId] = useState("");
   const [opsInvoiceYear, setOpsInvoiceYear] = useState(period.year);
   const [opsInvoiceMonth, setOpsInvoiceMonth] = useState(period.month);
+  const [opsIssueAlso, setOpsIssueAlso] = useState(false);
+  const [issueConfirmOpen, setIssueConfirmOpen] = useState(false);
+  const [issueConfirmError, setIssueConfirmError] = useState<string | null>(null);
   const [opsStructureUserId, setOpsStructureUserId] = useState("");
 
   useEffect(() => {
@@ -475,34 +490,70 @@ export function AdminDeltaRevenueDashboard({
     year?: number;
     month?: number;
     busyKey?: OpsBusy;
+    /** When set, forces issue flag (row actions = compute only). */
+    issue?: boolean;
+    confirmation?: string;
   }) {
     const userId = (opts?.userId ?? opsInvoiceUserId).trim();
     const year = opts?.year ?? opsInvoiceYear;
     const month = opts?.month ?? opsInvoiceMonth;
-    if (!userId && !opts?.userId) {
+    const wantIssue = opts?.issue ?? opsIssueAlso;
+
+    if (wantIssue && !opts?.confirmation) {
+      setIssueConfirmError(null);
+      setIssueConfirmOpen(true);
+      return;
+    }
+
+    if (!userId && !opts?.userId && !wantIssue) {
       const ok = window.confirm(
         `Compute monthly invoice for all users (${formatIstMonthYear(month, year)})?`,
       );
       if (!ok) return;
     }
+
     setOpsBusy(opts?.busyKey ?? "invoice");
     setOpsMessage(null);
     setOpsError(null);
+    setIssueConfirmError(null);
     try {
-      const body: Record<string, unknown> = { year, month };
+      const body: Record<string, unknown> = {
+        year,
+        month,
+        issue: wantIssue,
+      };
       if (userId) body.userId = userId;
+      if (wantIssue && opts?.confirmation) {
+        body.confirmation = opts.confirmation;
+      }
       const result = await postAdminOps(opsPaths.invoice, body);
       if (!result.ok) {
-        setOpsError(result.error);
+        if (issueConfirmOpen) {
+          setIssueConfirmError(result.error);
+        } else {
+          setOpsError(result.error);
+        }
         return;
       }
-      setOpsMessage(
-        summarizeOpsResults("Invoice", result.results, "processed"),
+      const processed = summarizeOpsResults(
+        "Invoice",
+        result.results,
+        "processed",
       );
+      const issuedMsg =
+        typeof result.issued === "number"
+          ? ` · ${result.issued} invoice${result.issued === 1 ? "" : "s"} issued (ACCRUED → INVOICED)`
+          : wantIssue
+            ? " · issue requested"
+            : "";
+      setOpsMessage(`${processed}${issuedMsg}`);
+      setIssueConfirmOpen(false);
       await loadOverview();
       if (userId && selectedUserId === userId) await loadDetail(userId);
     } catch (err) {
-      setOpsError(err instanceof Error ? err.message : "Invoice compute failed");
+      const msg = err instanceof Error ? err.message : "Invoice compute failed";
+      if (issueConfirmOpen) setIssueConfirmError(msg);
+      else setOpsError(msg);
     } finally {
       setOpsBusy(null);
     }
@@ -1368,6 +1419,21 @@ export function AdminDeltaRevenueDashboard({
                 ))}
               </select>
             </label>
+            <label className="flex items-start gap-2 text-xs text-white/70">
+              <input
+                type="checkbox"
+                checked={opsIssueAlso}
+                onChange={(e) => setOpsIssueAlso(e.target.checked)}
+                disabled={opsBusy != null}
+                className="mt-0.5 rounded border-white/30"
+              />
+              <span>
+                Also issue (ACCRUED → INVOICED)
+                <span className="mt-0.5 block text-[11px] text-white/40">
+                  Freezes INR amount and USD/INR rate; creates partner commissions.
+                </span>
+              </span>
+            </label>
             <button
               type="button"
               disabled={opsBusy != null}
@@ -1377,7 +1443,7 @@ export function AdminDeltaRevenueDashboard({
               {opsBusy === "invoice" ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : null}
-              Compute invoice
+              {opsIssueAlso ? "Compute & issue invoice" : "Compute invoice"}
             </button>
           </div>
 
@@ -1569,6 +1635,7 @@ export function AdminDeltaRevenueDashboard({
                             year: period.year,
                             month: period.month,
                             busyKey: `row-invoice:${u.userId}`,
+                            issue: false,
                           });
                         }}
                         className="rounded border border-[#0A84FF]/40 bg-[#0A84FF]/15 px-2 py-1 text-[10px] text-sky-100 disabled:opacity-50"
@@ -1606,6 +1673,37 @@ export function AdminDeltaRevenueDashboard({
           No eligible bot-strategy users or no invoices for this period yet.
         </p>
       ) : null}
+
+      <ConfirmDestructiveModal
+        open={issueConfirmOpen}
+        title="Issue monthly invoice"
+        description={
+          "Issuing freezes the INR amount and the USD/INR rate, and creates partner commissions. " +
+          "This cannot be undone except by voiding the invoice. " +
+          `Period: ${formatIstMonthYear(opsInvoiceMonth, opsInvoiceYear)}` +
+          (opsInvoiceUserId.trim()
+            ? ` · user ${userOptions.find((u) => u.userId === opsInvoiceUserId)?.label ?? opsInvoiceUserId}`
+            : " · all eligible users") +
+          `. Type ${opsPaths.issueConfirmation} to confirm.`
+        }
+        expectedConfirmation={opsPaths.issueConfirmation}
+        confirmationLabel={`Type exactly: ${opsPaths.issueConfirmation}`}
+        confirmButtonText="Issue invoice"
+        busy={opsBusy === "invoice"}
+        error={issueConfirmError}
+        onClose={() => {
+          if (opsBusy !== "invoice") {
+            setIssueConfirmOpen(false);
+            setIssueConfirmError(null);
+          }
+        }}
+        onConfirm={(confirmation) => {
+          void runComputeInvoice({
+            issue: true,
+            confirmation,
+          });
+        }}
+      />
     </div>
   );
 }

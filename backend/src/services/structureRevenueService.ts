@@ -1117,7 +1117,10 @@ export async function runMonthlyRevenueInvoices(
     /** When true, ACCRUED→INVOICED. When false, compute only. When omitted, issue if period is past (admin default). */
     issue?: boolean;
   },
-): Promise<Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>>> {
+): Promise<{
+  results: Record<string, Prisma.MonthlyRevenueInvoiceGetPayload<object>>;
+  issued: number;
+}> {
   let userIds = await listEligibleStructurePnlUserIds(prisma);
   if (opts?.userId) userIds = userIds.filter((id) => id === opts.userId);
 
@@ -1235,7 +1238,7 @@ export async function runMonthlyRevenueInvoices(
   console.log(
     `[StructureRevenue] monthly pass=${passLabel} users=${userIds.length} refreshed=${refreshed} skipped=${skipped} issued=${issued}`,
   );
-  return results;
+  return { results, issued };
 }
 
 /** Cron for ISSUE pass: midnight on the 1st + FINAL_INVOICE_DELAY_HOURS (IST). */
