@@ -1,0 +1,6 @@
+
+# stray files from terminal paste accidents
+FETCH_HEAD
+frontend/next
+frontend/frontend@*
+*_trade_logs.txt
