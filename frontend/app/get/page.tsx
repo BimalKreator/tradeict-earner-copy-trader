@@ -37,18 +37,33 @@ export default function GetInstallPage() {
             <h2 className="text-lg font-semibold text-white">Android</h2>
           </div>
 
-          <a
-            href={COMPANY.PLAY_STORE_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex w-full items-center justify-center rounded-xl bg-white px-5 py-3.5 text-sm font-semibold text-slate-900 transition hover:bg-white/90"
-          >
-            Get it on Google Play
-          </a>
+          <div className="space-y-4">
+            {COMPANY.PLAY_STORE_LIVE ? (
+              <>
+                <a
+                  href={COMPANY.PLAY_STORE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex w-full items-center justify-center rounded-xl bg-white px-5 py-3.5 text-sm font-semibold text-slate-900 transition hover:bg-white/90"
+                >
+                  Get it on Google Play
+                </a>
 
-          <div className="space-y-3 border-t border-white/10 pt-4">
-            <p className="text-sm text-white/60">Or install directly from your browser</p>
-            <InstallDirectButton />
+                <div className="space-y-3 border-t border-white/10 pt-4">
+                  <p className="text-sm text-white/60">
+                    Or install directly from your browser
+                  </p>
+                  <InstallDirectButton />
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm leading-relaxed text-white/70">
+                  Install directly from your browser — no download required.
+                </p>
+                <InstallDirectButton />
+              </>
+            )}
           </div>
         </section>
 

@@ -13,4 +13,6 @@ export const COMPANY = {
   supportPhoneTel: "+918840737660",
   /** Google Play listing — update when the app is published. */
   PLAY_STORE_URL: "https://play.google.com/store/apps/details?id=online.tradeictearner.twa",
+  /** Set true only after the Play Store listing is publicly visible. */
+  PLAY_STORE_LIVE: false,
 } as const;

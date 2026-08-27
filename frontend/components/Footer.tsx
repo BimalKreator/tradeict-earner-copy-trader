@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ChevronDown } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { COMPANY } from "@/lib/company";
 
 const complianceLinks = [
@@ -162,6 +162,11 @@ export function Footer() {
     partner: false,
     policies: false,
   });
+  const [copyrightYear, setCopyrightYear] = useState(() => new Date().getFullYear());
+
+  useEffect(() => {
+    setCopyrightYear(new Date().getFullYear());
+  }, []);
 
   function toggleSection(id: FooterSectionId) {
     setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -229,7 +234,7 @@ export function Footer() {
         </div>
 
         <p className="border-t border-white/10 pt-6 text-center text-xs text-white/40">
-          {COMPANY.legalName} © 2025. All rights reserved. Payments processed via authorized
+          {COMPANY.legalName} © {copyrightYear}. All rights reserved. Payments processed via authorized
           payment partners (e.g. Razorpay). Trading involves substantial risk of loss.
         </p>
       </div>
