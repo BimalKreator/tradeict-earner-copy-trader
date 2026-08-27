@@ -1,4 +1,8 @@
+"use client";
+
 import Link from "next/link";
+import { ChevronDown } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { COMPANY } from "@/lib/company";
 
 const complianceLinks = [
@@ -15,100 +19,212 @@ const additionalLegal = [
   { href: "/legal/cookies", label: "Cookies Policy" },
 ] as const;
 
+type FooterSectionId = "support" | "partner" | "policies";
+
+function CompanyBlock() {
+  return (
+    <div className="space-y-3">
+      <p className="text-lg font-semibold text-white">
+        <span className="text-cyan-400">{COMPANY.productName}</span>
+      </p>
+      <p className="text-sm leading-relaxed text-white/55">{COMPANY.address}</p>
+      <p className="text-sm text-white/60">
+        GSTIN: <span className="font-mono text-white/80">{COMPANY.gstin}</span>
+      </p>
+    </div>
+  );
+}
+
+function SupportLinks() {
+  return (
+    <ul className="space-y-2 text-sm">
+      <li>
+        <a
+          href={`mailto:${COMPANY.supportEmail}`}
+          className="text-white/70 transition hover:text-cyan-300"
+        >
+          {COMPANY.supportEmail}
+        </a>
+      </li>
+      <li>
+        <a
+          href={`tel:${COMPANY.supportPhoneTel}`}
+          className="text-white/70 transition hover:text-cyan-300"
+        >
+          {COMPANY.supportPhone}
+        </a>
+      </li>
+      <li>
+        <a
+          href={COMPANY.domain}
+          className="text-white/70 transition hover:text-cyan-300"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {COMPANY.domain.replace(/^https?:\/\//, "")}
+        </a>
+      </li>
+    </ul>
+  );
+}
+
+function PartnerLinks() {
+  return (
+    <ul className="space-y-2">
+      <li>
+        <Link
+          href="/experts"
+          className="text-sm font-medium text-cyan-400/90 underline-offset-2 transition hover:text-cyan-300 hover:underline"
+        >
+          Become an Expert Trader
+        </Link>
+      </li>
+    </ul>
+  );
+}
+
+function PoliciesLinks() {
+  return (
+    <>
+      <ul className="space-y-2">
+        {complianceLinks.map(({ href, label }) => (
+          <li key={href}>
+            <Link
+              href={href}
+              className="text-sm text-white/70 underline-offset-2 transition hover:text-cyan-300 hover:underline"
+            >
+              {label}
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-white/10 pt-3">
+        {additionalLegal.map(({ href, label }) => (
+          <li key={href}>
+            <Link
+              href={href}
+              className="text-xs text-white/45 transition hover:text-white/70"
+            >
+              {label}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function FooterAccordionSection({
+  id,
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  id: FooterSectionId;
+  title: string;
+  open: boolean;
+  onToggle: (id: FooterSectionId) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-b border-white/10 last:border-b-0">
+      <button
+        type="button"
+        id={`footer-${id}-trigger`}
+        aria-expanded={open}
+        aria-controls={`footer-${id}-panel`}
+        onClick={() => onToggle(id)}
+        className="flex w-full items-center justify-between gap-3 py-3 text-left"
+      >
+        <span className="text-xs font-semibold uppercase tracking-wider text-white/45">
+          {title}
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-white/45 transition-transform duration-200 ${
+            open ? "rotate-180" : "rotate-0"
+          }`}
+          aria-hidden
+        />
+      </button>
+      {open ? (
+        <div id={`footer-${id}-panel`} role="region" aria-labelledby={`footer-${id}-trigger`}>
+          <div className="pb-4">{children}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function Footer() {
+  const [openSections, setOpenSections] = useState<Record<FooterSectionId, boolean>>({
+    support: false,
+    partner: false,
+    policies: false,
+  });
+
+  function toggleSection(id: FooterSectionId) {
+    setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
   return (
     <footer className="mt-auto border-t border-white/10 bg-slate-950/90 px-4 py-10 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-6xl space-y-8">
-        <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-4">
+        <div className="sm:hidden">
+          <CompanyBlock />
+        </div>
+
+        <div className="sm:hidden">
+          <FooterAccordionSection
+            id="support"
+            title="Support"
+            open={openSections.support}
+            onToggle={toggleSection}
+          >
+            <SupportLinks />
+          </FooterAccordionSection>
+          <FooterAccordionSection
+            id="partner"
+            title="Partner With Us"
+            open={openSections.partner}
+            onToggle={toggleSection}
+          >
+            <PartnerLinks />
+          </FooterAccordionSection>
+          <FooterAccordionSection
+            id="policies"
+            title="Policies"
+            open={openSections.policies}
+            onToggle={toggleSection}
+          >
+            <PoliciesLinks />
+          </FooterAccordionSection>
+        </div>
+
+        <div className="hidden gap-8 sm:grid md:grid-cols-2 lg:grid-cols-4">
           <div className="space-y-3 lg:col-span-1">
-            <p className="text-lg font-semibold text-white">
-              <span className="text-cyan-400">{COMPANY.productName}</span>
-            </p>
-            <p className="text-sm font-medium text-white/80">{COMPANY.legalName}</p>
-            <p className="text-sm leading-relaxed text-white/55">{COMPANY.address}</p>
-            <p className="text-sm text-white/60">
-              GSTIN: <span className="font-mono text-white/80">{COMPANY.gstin}</span>
-            </p>
+            <CompanyBlock />
           </div>
 
           <div className="space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-white/45">
               Support
             </p>
-            <ul className="space-y-2 text-sm">
-              <li>
-                <a
-                  href={`mailto:${COMPANY.supportEmail}`}
-                  className="text-white/70 transition hover:text-cyan-300"
-                >
-                  {COMPANY.supportEmail}
-                </a>
-              </li>
-              <li>
-                <a
-                  href={`tel:${COMPANY.supportPhoneTel}`}
-                  className="text-white/70 transition hover:text-cyan-300"
-                >
-                  {COMPANY.supportPhone}
-                </a>
-              </li>
-              <li>
-                <a
-                  href={COMPANY.domain}
-                  className="text-white/70 transition hover:text-cyan-300"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {COMPANY.domain.replace(/^https?:\/\//, "")}
-                </a>
-              </li>
-            </ul>
+            <SupportLinks />
           </div>
 
           <nav aria-label="Partner with us" className="space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-white/45">
               Partner With Us
             </p>
-            <ul className="space-y-2">
-              <li>
-                <Link
-                  href="/experts"
-                  className="text-sm font-medium text-cyan-400/90 underline-offset-2 transition hover:text-cyan-300 hover:underline"
-                >
-                  Become an Expert Trader
-                </Link>
-              </li>
-            </ul>
+            <PartnerLinks />
           </nav>
 
           <nav aria-label="Legal and policies" className="space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-white/45">
               Policies
             </p>
-            <ul className="space-y-2">
-              {complianceLinks.map(({ href, label }) => (
-                <li key={href}>
-                  <Link
-                    href={href}
-                    className="text-sm text-white/70 underline-offset-2 transition hover:text-cyan-300 hover:underline"
-                  >
-                    {label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-            <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-white/10 pt-3">
-              {additionalLegal.map(({ href, label }) => (
-                <li key={href}>
-                  <Link
-                    href={href}
-                    className="text-xs text-white/45 transition hover:text-white/70"
-                  >
-                    {label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
+            <PoliciesLinks />
           </nav>
         </div>
 
