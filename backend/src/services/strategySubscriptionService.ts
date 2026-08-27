@@ -431,10 +431,16 @@ export async function createStrategySubscriptionWithPaymentMode(
   return result;
 }
 
-/** Outstanding invoices that should block deploy / resume. */
+/**
+ * Outstanding invoices that should block deploy / resume.
+ * - REVENUE_SHARE (profit share): any PENDING or OVERDUE blocks (earnings).
+ * - STRATEGY_FEE: only overdue — OVERDUE status, or PENDING with dueDate already past.
+ *   Not-yet-due pay-later STRATEGY_FEE must NOT block (30-day trade window).
+ */
 export function blockingUnpaidInvoiceWhere(
   userId: string,
   strategyId: string,
+  now: Date = new Date(),
 ): Prisma.InvoiceWhereInput {
   return {
     userId,
@@ -446,7 +452,13 @@ export function blockingUnpaidInvoiceWhere(
       },
       {
         kind: InvoiceKind.STRATEGY_FEE,
-        status: InvoiceStatus.OVERDUE,
+        OR: [
+          { status: InvoiceStatus.OVERDUE },
+          {
+            status: InvoiceStatus.PENDING,
+            dueDate: { lt: now },
+          },
+        ],
       },
     ],
   };

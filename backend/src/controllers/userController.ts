@@ -14,6 +14,18 @@ import {
   startOfUtcMonth,
   computeTodaysPnl,
 } from "../services/dashboardMetricsService.js";
+
+/** True when the user has at least one subscription engines will copy for (isActive). */
+async function userHasDeployedSubscription(
+  prisma: PrismaClient,
+  userId: string,
+): Promise<boolean> {
+  const row = await prisma.userStrategySubscription.findFirst({
+    where: { userId, isActive: true },
+    select: { id: true },
+  });
+  return row != null;
+}
 import {
   getUserArbitrageDashboardMetrics,
   getArbitrageBaseCapital,
@@ -286,8 +298,11 @@ export function createUserController(prisma: PrismaClient) {
         await probeAndCacheDeltaApiStatus(userId, creds);
       })();
 
+      const hasDeployed = await userHasDeployedSubscription(prisma, userId);
       const copyTradingActive =
-        !userRow?.copyTradingPaused && apiStatus === "connected";
+        !(userRow?.copyTradingPaused ?? false) &&
+        apiStatus === "connected" &&
+        hasDeployed;
 
       const capitalBase =
         capital.totalBalance > 0
@@ -466,10 +481,12 @@ export function createUserController(prisma: PrismaClient) {
 
       const creds = await resolveUserDeltaCreds(prisma, userId);
       const apiStatus = await probeAndCacheDeltaApiStatus(userId, creds);
+      const hasDeployed = await userHasDeployedSubscription(prisma, userId);
 
       res.json({
         copyTradingPaused: user.copyTradingPaused,
-        copyTradingActive: !user.copyTradingPaused && apiStatus === "connected",
+        copyTradingActive:
+          !user.copyTradingPaused && apiStatus === "connected" && hasDeployed,
         apiStatus,
       });
     } catch (err) {
@@ -495,12 +512,15 @@ export function createUserController(prisma: PrismaClient) {
         where: { id: userId },
         select: { copyTradingPaused: true },
       });
+      const hasDeployed = await userHasDeployedSubscription(prisma, userId);
 
       res.json({
         apiStatus,
         copyTradingPaused: userRow?.copyTradingPaused ?? false,
         copyTradingActive:
-          !(userRow?.copyTradingPaused ?? false) && apiStatus === "connected",
+          !(userRow?.copyTradingPaused ?? false) &&
+          apiStatus === "connected" &&
+          hasDeployed,
         checkedAt: new Date().toISOString(),
       });
     } catch (err) {

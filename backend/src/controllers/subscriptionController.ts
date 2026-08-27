@@ -632,7 +632,17 @@ export function createSubscriptionController(prisma: PrismaClient) {
         return void res.status(result.status).json({ error: result.error });
       }
       invalidateCopySubscriberCache();
-      res.json({ subscription: result.subscription });
+      const subscription = result.subscription as {
+        isActive?: boolean;
+      };
+      const notice =
+        subscription.isActive === false
+          ? "Saved. Deploy this strategy to start copy trading."
+          : undefined;
+      res.json({
+        subscription: result.subscription,
+        ...(notice ? { notice, message: notice } : {}),
+      });
     } catch (err) {
       next(err);
     }

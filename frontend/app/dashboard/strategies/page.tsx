@@ -40,6 +40,7 @@ type ExchangeAccountOption = { id: string; nickname: string; exchange: string };
 type SubscriptionRow = {
   id: string;
   status: string;
+  isActive: boolean;
   multiplier: number;
   joinedDate: string;
   strategy: Strategy;
@@ -99,13 +100,25 @@ function fmtUsdSigned(n: number): string {
 function pausedLike(status: string): boolean {
   return status.toUpperCase() !== "ACTIVE";
 }
-function badge(status: string): string {
-  return pausedLike(status)
-    ? "border-amber-500/40 bg-amber-500/15 text-amber-100"
-    : "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
-}
-function statusLabel(status: string): string {
-  return pausedLike(status) ? "Inactive" : "Deployed";
+
+/** Badge reflects engine truth (isActive), not subscription status alone. */
+function subscriptionBadge(sub: SubscriptionRow): { label: string; className: string } {
+  if (sub.isActive === true) {
+    return {
+      label: "Deployed",
+      className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
+    };
+  }
+  if (!pausedLike(sub.status)) {
+    return {
+      label: "Subscribed — Not Deployed",
+      className: "border-amber-500/40 bg-amber-500/15 text-amber-100",
+    };
+  }
+  return {
+    label: "Inactive",
+    className: "border-amber-500/40 bg-amber-500/15 text-amber-100",
+  };
 }
 
 function dedupeSubscriptions(rows: SubscriptionRow[]): SubscriptionRow[] {
@@ -237,7 +250,11 @@ export default function StrategySubscriptionLifecyclePage() {
       headers: authHeaders,
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const payload = (await res.json().catch(() => ({}))) as { error?: string };
+    const payload = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      notice?: string;
+      message?: string;
+    };
     if (!res.ok) throw new Error(payload.error ?? `Request failed (${res.status})`);
     return payload;
   }
@@ -247,7 +264,11 @@ export default function StrategySubscriptionLifecyclePage() {
       headers: authHeaders,
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const payload = (await res.json().catch(() => ({}))) as { error?: string };
+    const payload = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      notice?: string;
+      message?: string;
+    };
     if (!res.ok) throw new Error(payload.error ?? `Request failed (${res.status})`);
     return payload;
   }
@@ -313,10 +334,15 @@ export default function StrategySubscriptionLifecyclePage() {
         });
         setToast("Strategy deployed");
       } else if (modal.kind === "modify") {
-        await patch(`/subscriptions/${modal.sub.strategy.id}/modify`, {
-          deployedCapital: capital,
-        });
-        setToast("Capital allocation updated");
+        const payload = await patch(
+          `/subscriptions/${modal.sub.strategy.id}/modify`,
+          { deployedCapital: capital },
+        );
+        setToast(
+          payload.notice ??
+            payload.message ??
+            "Capital allocation updated",
+        );
       }
       setModal(null);
       await load();
@@ -488,18 +514,21 @@ export default function StrategySubscriptionLifecyclePage() {
           ) : (
             dedupedSubs.map((sub) => {
               const isPaused = pausedLike(sub.status);
+              const isDeployed = sub.isActive === true;
+              const needsDeploy = !isDeployed && !isPaused;
               const configured = Boolean(sub.exchangeAccount);
               const botPowered = isBotStrategy(sub.strategy);
               const openTrade = botPowered
                 ? openTradeByStrategyId.get(sub.strategy.id)
                 : undefined;
               const livePnl = openTrade ? tradePnlValue(openTrade) : 0;
+              const badgeInfo = subscriptionBadge(sub);
               return (
                 <article key={sub.id} className="glass-card border border-glassBorder p-5">
                   <div className="flex items-center justify-between gap-3">
                     <h3 className="text-lg font-semibold text-white">{sub.strategy.title}</h3>
-                    <span className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge(sub.status)}`}>
-                      {statusLabel(sub.status)}
+                    <span className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badgeInfo.className}`}>
+                      {badgeInfo.label}
                     </span>
                   </div>
                   <p className="mt-2 text-sm text-white/60">{sub.strategy.description}</p>
@@ -580,7 +609,7 @@ export default function StrategySubscriptionLifecyclePage() {
                   ) : null}
 
                   <div className="mt-5 flex flex-wrap gap-2">
-                    {isPaused && !configured ? (
+                    {needsDeploy || (isPaused && !configured) ? (
                       <button type="button" onClick={() => openDeploy(sub)} className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white">
                         Deploy
                       </button>

@@ -318,9 +318,7 @@ export default function DashboardPage() {
       const apiStatus =
         body.apiStatus === "connected" ? "connected" : "disconnected";
       const copyTradingPaused = body.copyTradingPaused === true;
-      const copyTradingActive =
-        body.copyTradingActive === true ||
-        (!copyTradingPaused && apiStatus === "connected");
+      const copyTradingActive = body.copyTradingActive === true;
       setData((prev) =>
         prev
           ? { ...prev, apiStatus, copyTradingPaused, copyTradingActive }
@@ -702,7 +700,9 @@ export default function DashboardPage() {
                 data
                   ? data.copyTradingActive
                     ? "Active"
-                    : "Paused"
+                    : data.copyTradingPaused
+                      ? "Paused"
+                      : "Not deployed"
                   : undefined
               }
               loadFailed={!data}
@@ -712,13 +712,18 @@ export default function DashboardPage() {
                   <span className="text-xs text-slate-500">
                     {data.copyTradingPaused
                       ? "Paused globally"
-                      : data.apiStatus !== "connected"
-                        ? "Connect API to resume"
-                        : "Mirroring master trades"}
+                      : data.copyTradingActive
+                        ? "Mirroring master trades"
+                        : data.apiStatus !== "connected"
+                          ? "Connect API to resume"
+                          : "Deploy a strategy to start"}
                   </span>
                   <ToggleSwitch
-                    checked={!data.copyTradingPaused}
-                    disabled={toggleBusy}
+                    checked={data.copyTradingActive}
+                    disabled={
+                      toggleBusy ||
+                      (!data.copyTradingActive && !data.copyTradingPaused)
+                    }
                     onChange={() => void toggleCopyTrading()}
                   />
                 </div>
