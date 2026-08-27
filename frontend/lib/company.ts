@@ -11,4 +11,6 @@ export const COMPANY = {
   supportEmail: "support@tradeictai.com",
   supportPhone: "+91 8840737660",
   supportPhoneTel: "+918840737660",
+  /** Google Play listing — update when the app is published. */
+  PLAY_STORE_URL: "https://play.google.com/store/apps/details?id=PLACEHOLDER",
 } as const;
