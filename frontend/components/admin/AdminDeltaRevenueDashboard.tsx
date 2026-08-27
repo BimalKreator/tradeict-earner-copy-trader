@@ -167,7 +167,70 @@ function canCreditNote(status: string): boolean {
   return status === "INVOICED" || status === "PAID";
 }
 
-export function AdminDeltaRevenueDashboard() {
+const DEFAULT_OPS_PATHS = {
+  snapshot: "/admin/revenue/snapshot",
+  invoice: "/admin/revenue/invoice",
+  structurePnlRecompute: "/admin/structure-pnl/recompute",
+} as const;
+
+const OPS_TIMEOUT_MS = 120_000;
+
+type OpsPaths = {
+  snapshot: string;
+  invoice: string;
+  structurePnlRecompute: string;
+};
+
+type OpsBusy =
+  | null
+  | "snapshot"
+  | "invoice"
+  | "structure"
+  | `row-invoice:${string}`;
+
+function summarizeOpsResults(
+  label: string,
+  results: Record<string, unknown> | undefined,
+  verb: string,
+): string {
+  const n = results ? Object.keys(results).length : 0;
+  const userWord = n === 1 ? "user" : "users";
+  return `${label}: ${n} ${userWord} ${verb}`;
+}
+
+async function postAdminOps(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: true; results: Record<string, unknown> } | { ok: false; error: string }> {
+  const res = await adminFetch(
+    path,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    OPS_TIMEOUT_MS,
+  );
+  const payload = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    results?: Record<string, unknown>;
+  };
+  if (!res.ok) {
+    return {
+      ok: false,
+      error:
+        payload.error ??
+        formatAdminFetchError("ops", res, buildAdminApiUrl(path)),
+    };
+  }
+  return { ok: true, results: payload.results ?? {} };
+}
+
+export function AdminDeltaRevenueDashboard({
+  opsPaths = DEFAULT_OPS_PATHS,
+}: {
+  opsPaths?: OpsPaths;
+} = {}) {
   const [period, setPeriod] = useState(defaultPeriod);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -217,6 +280,20 @@ export function AdminDeltaRevenueDashboard() {
   const [structureLedgerLoading, setStructureLedgerLoading] = useState<string | null>(
     null,
   );
+  const [opsBusy, setOpsBusy] = useState<OpsBusy>(null);
+  const [opsMessage, setOpsMessage] = useState<string | null>(null);
+  const [opsError, setOpsError] = useState<string | null>(null);
+  const [opsSnapshotUserId, setOpsSnapshotUserId] = useState("");
+  const [opsSnapshotDate, setOpsSnapshotDate] = useState("");
+  const [opsInvoiceUserId, setOpsInvoiceUserId] = useState("");
+  const [opsInvoiceYear, setOpsInvoiceYear] = useState(period.year);
+  const [opsInvoiceMonth, setOpsInvoiceMonth] = useState(period.month);
+  const [opsStructureUserId, setOpsStructureUserId] = useState("");
+
+  useEffect(() => {
+    setOpsInvoiceYear(period.year);
+    setOpsInvoiceMonth(period.month);
+  }, [period.year, period.month]);
 
   const loadOverview = useCallback(async () => {
     if (!resolveApiBase()) return;
@@ -297,6 +374,24 @@ export function AdminDeltaRevenueDashboard() {
     [health],
   );
 
+  const userOptions = useMemo(() => {
+    const byId = new Map<string, { userId: string; label: string }>();
+    for (const u of users) {
+      byId.set(u.userId, {
+        userId: u.userId,
+        label: u.email || u.name || u.userId.slice(0, 8),
+      });
+    }
+    for (const h of health) {
+      if (byId.has(h.userId)) continue;
+      byId.set(h.userId, {
+        userId: h.userId,
+        label: h.email ?? h.userId.slice(0, 8),
+      });
+    }
+    return [...byId.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [users, health]);
+
   const chartData = useMemo(
     () =>
       (detail?.snapshots ?? []).map((s) => ({
@@ -343,6 +438,104 @@ export function AdminDeltaRevenueDashboard() {
       setError(err instanceof Error ? err.message : "Safe recompute failed");
     } finally {
       setSafeRecomputeUserId(null);
+    }
+  }
+
+  async function runSnapshot() {
+    const userId = opsSnapshotUserId.trim();
+    if (!userId) {
+      const ok = window.confirm("Run snapshot for all users?");
+      if (!ok) return;
+    }
+    setOpsBusy("snapshot");
+    setOpsMessage(null);
+    setOpsError(null);
+    try {
+      const body: Record<string, unknown> = {};
+      if (userId) body.userId = userId;
+      if (opsSnapshotDate.trim()) body.date = opsSnapshotDate.trim();
+      const result = await postAdminOps(opsPaths.snapshot, body);
+      if (!result.ok) {
+        setOpsError(result.error);
+        return;
+      }
+      setOpsMessage(
+        summarizeOpsResults("Snapshot", result.results, "processed"),
+      );
+      await loadOverview();
+    } catch (err) {
+      setOpsError(err instanceof Error ? err.message : "Snapshot failed");
+    } finally {
+      setOpsBusy(null);
+    }
+  }
+
+  async function runComputeInvoice(opts?: {
+    userId?: string;
+    year?: number;
+    month?: number;
+    busyKey?: OpsBusy;
+  }) {
+    const userId = (opts?.userId ?? opsInvoiceUserId).trim();
+    const year = opts?.year ?? opsInvoiceYear;
+    const month = opts?.month ?? opsInvoiceMonth;
+    if (!userId && !opts?.userId) {
+      const ok = window.confirm(
+        `Compute monthly invoice for all users (${formatIstMonthYear(month, year)})?`,
+      );
+      if (!ok) return;
+    }
+    setOpsBusy(opts?.busyKey ?? "invoice");
+    setOpsMessage(null);
+    setOpsError(null);
+    try {
+      const body: Record<string, unknown> = { year, month };
+      if (userId) body.userId = userId;
+      const result = await postAdminOps(opsPaths.invoice, body);
+      if (!result.ok) {
+        setOpsError(result.error);
+        return;
+      }
+      setOpsMessage(
+        summarizeOpsResults("Invoice", result.results, "processed"),
+      );
+      await loadOverview();
+      if (userId && selectedUserId === userId) await loadDetail(userId);
+    } catch (err) {
+      setOpsError(err instanceof Error ? err.message : "Invoice compute failed");
+    } finally {
+      setOpsBusy(null);
+    }
+  }
+
+  async function runStructureRecompute() {
+    const userId = opsStructureUserId.trim();
+    if (!userId) {
+      const ok = window.confirm("Recompute structure P&L for all users?");
+      if (!ok) return;
+    }
+    setOpsBusy("structure");
+    setOpsMessage(null);
+    setOpsError(null);
+    try {
+      const body: Record<string, unknown> = {};
+      if (userId) body.userId = userId;
+      const result = await postAdminOps(opsPaths.structurePnlRecompute, body);
+      if (!result.ok) {
+        setOpsError(result.error);
+        return;
+      }
+      setOpsMessage(
+        summarizeOpsResults("Structure P&L", result.results, "recomputed"),
+      );
+      await loadOverview();
+      if (userId && selectedUserId === userId) await loadDetail(userId);
+    } catch (err) {
+      setOpsError(
+        err instanceof Error ? err.message : "Structure P&L recompute failed",
+      );
+    } finally {
+      setOpsBusy(null);
     }
   }
 
@@ -1060,6 +1253,169 @@ export function AdminDeltaRevenueDashboard() {
         </div>
       ) : null}
 
+      <section className="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-medium text-white">Operations</h2>
+          <p className="mt-1 text-xs text-white/45">
+            Manually run daily snapshot, monthly invoice compute, or structure P&amp;L
+            recompute when cron has not caught up.
+          </p>
+        </div>
+
+        {opsMessage ? (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+            {opsMessage}
+          </div>
+        ) : null}
+        {opsError ? (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {opsError}
+          </div>
+        ) : null}
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="space-y-2 rounded-lg border border-white/10 p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-white/50">
+              Run daily snapshot
+            </p>
+            <label className="block text-xs text-white/45">
+              User (optional)
+              <select
+                value={opsSnapshotUserId}
+                onChange={(e) => setOpsSnapshotUserId(e.target.value)}
+                disabled={opsBusy != null}
+                className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+              >
+                <option value="">All eligible users</option>
+                {userOptions.map((u) => (
+                  <option key={u.userId} value={u.userId}>
+                    {u.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-xs text-white/45">
+              Date (optional, blank = previous IST day)
+              <input
+                type="date"
+                value={opsSnapshotDate}
+                onChange={(e) => setOpsSnapshotDate(e.target.value)}
+                disabled={opsBusy != null}
+                className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={opsBusy != null}
+              onClick={() => void runSnapshot()}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#0A84FF] px-3 py-2 text-sm text-white disabled:opacity-50"
+            >
+              {opsBusy === "snapshot" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              Run snapshot
+            </button>
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-white/10 p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-white/50">
+              Compute monthly invoice
+            </p>
+            <div className="flex gap-2">
+              <label className="block flex-1 text-xs text-white/45">
+                Year
+                <input
+                  type="number"
+                  value={opsInvoiceYear}
+                  onChange={(e) =>
+                    setOpsInvoiceYear(parseInt(e.target.value, 10) || period.year)
+                  }
+                  disabled={opsBusy != null}
+                  className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+                />
+              </label>
+              <label className="block flex-1 text-xs text-white/45">
+                Month
+                <select
+                  value={opsInvoiceMonth}
+                  onChange={(e) =>
+                    setOpsInvoiceMonth(parseInt(e.target.value, 10))
+                  }
+                  disabled={opsBusy != null}
+                  className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+                >
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="block text-xs text-white/45">
+              User (optional)
+              <select
+                value={opsInvoiceUserId}
+                onChange={(e) => setOpsInvoiceUserId(e.target.value)}
+                disabled={opsBusy != null}
+                className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+              >
+                <option value="">All eligible users</option>
+                {userOptions.map((u) => (
+                  <option key={u.userId} value={u.userId}>
+                    {u.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={opsBusy != null}
+              onClick={() => void runComputeInvoice()}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#0A84FF] px-3 py-2 text-sm text-white disabled:opacity-50"
+            >
+              {opsBusy === "invoice" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              Compute invoice
+            </button>
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-white/10 p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-white/50">
+              Recompute structure P&amp;L
+            </p>
+            <label className="block text-xs text-white/45">
+              User (optional)
+              <select
+                value={opsStructureUserId}
+                onChange={(e) => setOpsStructureUserId(e.target.value)}
+                disabled={opsBusy != null}
+                className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-sm text-white"
+              >
+                <option value="">All eligible users</option>
+                {userOptions.map((u) => (
+                  <option key={u.userId} value={u.userId}>
+                    {u.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={opsBusy != null}
+              onClick={() => void runStructureRecompute()}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#0A84FF] px-3 py-2 text-sm text-white disabled:opacity-50"
+            >
+              {opsBusy === "structure" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              Recompute structures
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section className="rounded-xl border border-white/10 overflow-hidden">
         <h2 className="border-b border-white/10 bg-white/[0.03] px-4 py-3 text-sm font-medium text-white">
           Pipeline health
@@ -1181,6 +1537,7 @@ export function AdminDeltaRevenueDashboard() {
                   <th className="px-4 py-2">Share</th>
                   <th className="px-4 py-2">Commission</th>
                   <th className="px-4 py-2">Status</th>
+                  <th className="px-4 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
@@ -1201,6 +1558,28 @@ export function AdminDeltaRevenueDashboard() {
                     <td className="px-4 py-2 tabular-nums">{u.profitSharePct.toFixed(1)}%</td>
                     <td className="px-4 py-2 tabular-nums">{fmtUsd(u.commissionAmount)}</td>
                     <td className="px-4 py-2">{u.invoiceStatus}</td>
+                    <td className="px-4 py-2">
+                      <button
+                        type="button"
+                        disabled={opsBusy != null}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void runComputeInvoice({
+                            userId: u.userId,
+                            year: period.year,
+                            month: period.month,
+                            busyKey: `row-invoice:${u.userId}`,
+                          });
+                        }}
+                        className="rounded border border-[#0A84FF]/40 bg-[#0A84FF]/15 px-2 py-1 text-[10px] text-sky-100 disabled:opacity-50"
+                      >
+                        {opsBusy === `row-invoice:${u.userId}` ? (
+                          <Loader2 className="inline h-3 w-3 animate-spin" />
+                        ) : (
+                          "Recompute"
+                        )}
+                      </button>
+                    </td>
                   </tr>
                 ))}
                 <tr className="bg-white/[0.04] font-medium text-white">
@@ -1213,7 +1592,7 @@ export function AdminDeltaRevenueDashboard() {
                   <td className="px-4 py-2 tabular-nums">{fmtUsd(totals.billableProfit)}</td>
                   <td className="px-4 py-2" />
                   <td className="px-4 py-2 tabular-nums">{fmtUsd(totals.commissionAmount)}</td>
-                  <td className="px-4 py-2" />
+                  <td className="px-4 py-2" colSpan={2} />
                 </tr>
               </tbody>
             </table>

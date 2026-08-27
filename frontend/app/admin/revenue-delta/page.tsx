@@ -1,5 +1,14 @@
+"use client";
+
 import { AdminDeltaRevenueDashboard } from "@/components/admin/AdminDeltaRevenueDashboard";
 
+/** Admin ops endpoints used by the Operations panel. */
+const REVENUE_DELTA_OPS = {
+  snapshot: "/admin/revenue/snapshot",
+  invoice: "/admin/revenue/invoice",
+  structurePnlRecompute: "/admin/structure-pnl/recompute",
+} as const;
+
 export default function AdminRevenueDeltaPage() {
-  return <AdminDeltaRevenueDashboard />;
+  return <AdminDeltaRevenueDashboard opsPaths={REVENUE_DELTA_OPS} />;
 }
