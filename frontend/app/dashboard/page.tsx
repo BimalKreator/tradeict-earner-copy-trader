@@ -525,6 +525,7 @@ export default function DashboardPage() {
                   : null
               }
               loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
+              emptyLabel="No trades yet"
               sub={
                 <Link
                   href="/dashboard/performance"
@@ -546,6 +547,7 @@ export default function DashboardPage() {
                 deltaMoney?.pnlLoaded ? deltaMoney.thisMonthRealized : null
               }
               loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
+              emptyLabel="No trades this month"
               sub={
                 <span className="text-slate-500">
                   From your Delta account (IST month)
@@ -564,6 +566,7 @@ export default function DashboardPage() {
                 deltaMoney?.pnlLoaded ? deltaMoney.highWaterMark : null
               }
               loadFailed={deltaMoney == null || !deltaMoney.pnlLoaded}
+              emptyLabel="No trades yet"
               sub={
                 <span className="text-slate-500">
                   Lifetime best cumulative realized P&L
@@ -773,11 +776,12 @@ function MetricCard({
   valueClass = "text-white",
   fxRate,
   loadFailed = false,
+  emptyLabel,
 }: {
   icon: ReactNode;
   label: string;
   value?: string;
-  /** number = known amount; null/undefined with loadFailed = unknown. */
+  /** number = known amount; null = empty/unknown (not zero). */
   currencyUsd?: number | null;
   currencyAsBalance?: boolean;
   secondaryValue?: ReactNode;
@@ -785,10 +789,13 @@ function MetricCard({
   valueClass?: string;
   fxRate?: number | null;
   loadFailed?: boolean;
+  /** Shown when load succeeded but currencyUsd is null (no data yet). */
+  emptyLabel?: string;
 }) {
   const hasCurrency =
     typeof currencyUsd === "number" && Number.isFinite(currencyUsd);
-  const showUnknown = loadFailed || (!hasCurrency && currencyUsd === null);
+  const showEmpty =
+    !loadFailed && !hasCurrency && currencyUsd === null && Boolean(emptyLabel);
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-lg shadow-black/20">
@@ -796,10 +803,15 @@ function MetricCard({
         {icon}
         <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
       </div>
-      {showUnknown ? (
+      {loadFailed ? (
         <div className="mt-3">
           <p className="text-2xl font-semibold tabular-nums text-slate-400">—</p>
-          <p className="mt-1 text-xs text-slate-500">Couldn&apos;t load</p>
+          <p className="mt-1 text-xs text-slate-500">Couldn&apos;t load — retry</p>
+        </div>
+      ) : showEmpty ? (
+        <div className="mt-3">
+          <p className="text-2xl font-semibold tabular-nums text-slate-400">—</p>
+          <p className="mt-1 text-xs text-slate-500">{emptyLabel}</p>
         </div>
       ) : hasCurrency ? (
         <DualCurrencyValue
