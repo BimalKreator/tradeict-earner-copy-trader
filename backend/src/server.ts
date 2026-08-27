@@ -78,21 +78,25 @@ const PORT = parseInt(process.env.PORT ?? '4000', 10);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function parseAllowedOrigins(): string[] {
-  const raw = process.env.ALLOWED_ORIGINS?.trim();
-  if (!raw) {
-    console.warn(
-      "[BOOT] ALLOWED_ORIGINS is not set — defaulting to http://localhost:3000",
-    );
-    return ["http://localhost:3000"];
-  }
-  return raw
+function getAllowedOrigins(): string[] {
+  const list = (process.env.ALLOWED_ORIGINS ?? "")
     .split(",")
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
+
+  if (list.length > 0) return list;
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("ALLOWED_ORIGINS must be set in production");
+  }
+
+  console.warn(
+    "[BOOT] ALLOWED_ORIGINS is not set — defaulting to http://localhost:3000",
+  );
+  return ["http://localhost:3000"];
 }
 
-const allowedOrigins = parseAllowedOrigins();
+const allowedOrigins = getAllowedOrigins();
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -191,7 +195,13 @@ const app = express();
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS: origin not allowed"));
+    },
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
