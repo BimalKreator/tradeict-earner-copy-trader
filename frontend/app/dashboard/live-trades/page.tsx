@@ -11,6 +11,11 @@ import {
   TrendingUp,
 } from "lucide-react";
 import Link from "next/link";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
 
 const LIVE_TRADES_REFRESH_MS = 8_000;
 const BOT_TRADES_REFRESH_MS = 30_000;
@@ -53,7 +58,8 @@ type BotOpenTrade = {
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
-  maximumFractionDigits: 6,
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
 });
 
 const usdPnlFmt = new Intl.NumberFormat("en-US", {
@@ -286,67 +292,102 @@ function UserPositionsTable({ rows }: { rows: LiveRow[] }) {
           Live data from your linked Delta account
         </p>
       </div>
-      <div className="scroll-table overflow-x-auto">
-        <table className="w-full min-w-[560px] text-left text-sm">
-          <thead className="border-b border-glassBorder bg-white/[0.03]">
-            <tr>
-              <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                Token
-              </th>
-              <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                Side
-              </th>
-              <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                Qty
-              </th>
-              <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                Entry price
-              </th>
-              <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                Mark price
-              </th>
-              <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
-                Live PnL
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
+      <ResponsiveMoneyTable
+        table={
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-glassBorder bg-white/[0.03]">
               <tr>
-                <td
-                  colSpan={6}
-                  className="px-4 py-10 text-center text-sm text-white/50"
-                >
-                  No open positions on your account for this strategy yet. Positions
-                  will appear here once copy execution completes.
-                </td>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Token
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Side
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Qty
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Entry price
+                </th>
+                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  Mark price
+                </th>
+                <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
+                  Live PnL
+                </th>
               </tr>
-            ) : (
-              rows.map((r, i) => {
-                const rowPnlPositive = r.livePnl > 0;
-                const rowPnlNegative = r.livePnl < 0;
-                return (
-                  <tr
-                    key={`${r.token}-${r.side}-${i}`}
-                    className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="px-4 py-10 text-center text-sm text-white/50"
                   >
-                    <td className="px-3 py-3 font-medium text-white sm:px-4">
-                      {r.token}
-                    </td>
-                    <td className="px-3 py-3 sm:px-4">
-                      <SideBadge side={r.side} />
-                    </td>
-                    <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
-                      {fmtQty(r.size)}
-                    </td>
-                    <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
-                      {fmtPrice(r.entryPrice)}
-                    </td>
-                    <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
-                      {fmtPrice(r.markPrice)}
-                    </td>
-                    <td
-                      className={`px-3 py-3 text-right tabular-nums font-semibold sm:px-4 ${
+                    No open positions on your account for this strategy yet.
+                    Positions will appear here once copy execution completes.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r, i) => {
+                  const rowPnlPositive = r.livePnl > 0;
+                  const rowPnlNegative = r.livePnl < 0;
+                  return (
+                    <tr
+                      key={`${r.token}-${r.side}-${i}`}
+                      className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                    >
+                      <td className="px-3 py-3 font-medium text-white sm:px-4">
+                        {r.token}
+                      </td>
+                      <td className="px-3 py-3 sm:px-4">
+                        <SideBadge side={r.side} />
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtQty(r.size)}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtPrice(r.entryPrice)}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtPrice(r.markPrice)}
+                      </td>
+                      <td
+                        className={`px-3 py-3 text-right tabular-nums font-semibold sm:px-4 ${
+                          rowPnlPositive
+                            ? "text-emerald-400"
+                            : rowPnlNegative
+                              ? "text-red-400"
+                              : "text-white/70"
+                        }`}
+                      >
+                        {fmtPnl(r.livePnl)}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        }
+        cards={
+          rows.length === 0 ? (
+            <div className="px-4 py-10 text-center text-sm text-white/50">
+              No open positions on your account for this strategy yet. Positions
+              will appear here once copy execution completes.
+            </div>
+          ) : (
+            rows.map((r, i) => {
+              const rowPnlPositive = r.livePnl > 0;
+              const rowPnlNegative = r.livePnl < 0;
+              return (
+                <MoneyRowCard
+                  key={`${r.token}-${r.side}-${i}`}
+                  primary={r.token}
+                  secondary={<SideBadge side={r.side} />}
+                  amount={
+                    <span
+                      className={`tabular-nums text-sm font-semibold ${
                         rowPnlPositive
                           ? "text-emerald-400"
                           : rowPnlNegative
@@ -355,14 +396,43 @@ function UserPositionsTable({ rows }: { rows: LiveRow[] }) {
                       }`}
                     >
                       {fmtPnl(r.livePnl)}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+                    </span>
+                  }
+                  details={
+                    <div className="divide-y divide-white/5">
+                      <DetailRow label="Qty" value={fmtQty(r.size)} />
+                      <DetailRow
+                        label="Entry price"
+                        value={fmtPrice(r.entryPrice)}
+                      />
+                      <DetailRow
+                        label="Mark price"
+                        value={fmtPrice(r.markPrice)}
+                      />
+                      <DetailRow
+                        label="Live PnL"
+                        value={
+                          <span
+                            className={`tabular-nums font-semibold ${
+                              rowPnlPositive
+                                ? "text-emerald-400"
+                                : rowPnlNegative
+                                  ? "text-red-400"
+                                  : "text-white/70"
+                            }`}
+                          >
+                            {fmtPnl(r.livePnl)}
+                          </span>
+                        }
+                      />
+                    </div>
+                  }
+                />
+              );
+            })
+          )
+        }
+      />
     </div>
   );
 }
@@ -455,57 +525,106 @@ function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
       </div>
 
       <div className="overflow-hidden rounded-xl border border-glassBorder">
-        <div className="scroll-table overflow-x-auto">
-          <table className="w-full min-w-[520px] text-left text-sm">
-            <thead className="border-b border-glassBorder bg-white/[0.03]">
-              <tr>
-                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                  Symbol
-                </th>
-                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                  Entry Price
-                </th>
-                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                  Current P&amp;L
-                </th>
-                <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                  Status
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.length === 0 ? (
+        <ResponsiveMoneyTable
+          table={
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-glassBorder bg-white/[0.03]">
                 <tr>
-                  <td
-                    colSpan={4}
-                    className="px-4 py-10 text-center text-sm text-white/50"
-                  >
-                    No active trade
-                  </td>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    Symbol
+                  </th>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    Entry Price
+                  </th>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    Current P&amp;L
+                  </th>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    Status
+                  </th>
                 </tr>
-              ) : (
-                trades.map((t) => {
-                  const pnl =
-                    Number.isFinite(t.tradePnl) && t.tradePnl !== 0
-                      ? t.tradePnl
-                      : typeof t.pnl === "number" && Number.isFinite(t.pnl)
-                        ? t.pnl
-                        : t.tradePnl;
-                  const positive = pnl > 0;
-                  const negative = pnl < 0;
-                  return (
-                    <tr
-                      key={t.id}
-                      className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+              </thead>
+              <tbody>
+                {trades.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="px-4 py-10 text-center text-sm text-white/50"
                     >
-                      <td className="px-3 py-3 font-medium text-white sm:px-4">
-                        {t.symbol || "—"}
-                      </td>
-                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
-                        {fmtPrice(t.entryPrice)}
-                      </td>
-                      <td
-                        className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${
+                      No active trade
+                    </td>
+                  </tr>
+                ) : (
+                  trades.map((t) => {
+                    const pnl =
+                      Number.isFinite(t.tradePnl) && t.tradePnl !== 0
+                        ? t.tradePnl
+                        : typeof t.pnl === "number" && Number.isFinite(t.pnl)
+                          ? t.pnl
+                          : t.tradePnl;
+                    const positive = pnl > 0;
+                    const negative = pnl < 0;
+                    return (
+                      <tr
+                        key={t.id}
+                        className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                      >
+                        <td className="px-3 py-3 font-medium text-white sm:px-4">
+                          {t.symbol || "—"}
+                        </td>
+                        <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                          {fmtPrice(t.entryPrice)}
+                        </td>
+                        <td
+                          className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${
+                            positive
+                              ? "text-emerald-400"
+                              : negative
+                                ? "text-red-400"
+                                : "text-white/70"
+                          }`}
+                        >
+                          {fmtPnl(pnl)}
+                        </td>
+                        <td className="px-3 py-3 sm:px-4">
+                          <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                            {t.status || "OPEN"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          }
+          cards={
+            trades.length === 0 ? (
+              <div className="px-4 py-10 text-center text-sm text-white/50">
+                No active trade
+              </div>
+            ) : (
+              trades.map((t) => {
+                const pnl =
+                  Number.isFinite(t.tradePnl) && t.tradePnl !== 0
+                    ? t.tradePnl
+                    : typeof t.pnl === "number" && Number.isFinite(t.pnl)
+                      ? t.pnl
+                      : t.tradePnl;
+                const positive = pnl > 0;
+                const negative = pnl < 0;
+                return (
+                  <MoneyRowCard
+                    key={t.id}
+                    primary={t.symbol || "—"}
+                    secondary={
+                      <span className="tabular-nums">
+                        Entry {fmtPrice(t.entryPrice)}
+                      </span>
+                    }
+                    amount={
+                      <span
+                        className={`tabular-nums text-sm font-semibold ${
                           positive
                             ? "text-emerald-400"
                             : negative
@@ -514,19 +633,44 @@ function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
                         }`}
                       >
                         {fmtPnl(pnl)}
-                      </td>
-                      <td className="px-3 py-3 sm:px-4">
-                        <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
-                          {t.status || "OPEN"}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      </span>
+                    }
+                    status={
+                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                        {t.status || "OPEN"}
+                      </span>
+                    }
+                    details={
+                      <div className="divide-y divide-white/5">
+                        <DetailRow
+                          label="Entry Price"
+                          value={fmtPrice(t.entryPrice)}
+                        />
+                        <DetailRow
+                          label="Current P&L"
+                          value={
+                            <span
+                              className={`tabular-nums font-semibold ${
+                                positive
+                                  ? "text-emerald-400"
+                                  : negative
+                                    ? "text-red-400"
+                                    : "text-white/70"
+                              }`}
+                            >
+                              {fmtPnl(pnl)}
+                            </span>
+                          }
+                        />
+                        <DetailRow label="Status" value={t.status || "OPEN"} />
+                      </div>
+                    }
+                  />
+                );
+              })
+            )
+          }
+        />
       </div>
     </section>
   );

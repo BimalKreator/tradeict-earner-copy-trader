@@ -13,6 +13,11 @@ import { COMPANY } from "@/lib/company";
 import { fmtInr, fmtUsd, RATE_MISSING_MESSAGE, usdToInr } from "@/lib/currency";
 import { useUsdInrRate } from "@/hooks/useUsdInrRate";
 import { openRazorpayCheckout } from "@/lib/razorpay";
+import {
+  DetailRow,
+  MoneyRowCard,
+  ResponsiveMoneyTable,
+} from "@/components/money/MoneyRowCard";
 
 type InvoiceStatus = "PENDING" | "PAID" | "OVERDUE";
 
@@ -326,44 +331,127 @@ export function StrategySubscriptionFees() {
       )}
 
       {payableInvoices.length > 0 ? (
-        <div className="overflow-x-auto rounded-xl border border-white/10">
-          <table className="w-full min-w-[640px] text-left text-sm">
-            <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase text-white/40">
-              <tr>
-                <th className="px-4 py-3">Strategy</th>
-                <th className="px-4 py-3 text-right">Amount</th>
-                <th className="px-4 py-3">Due</th>
-                <th className="px-4 py-3 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {payableInvoices.map((inv) => {
-                const amountInr = invoiceAmountInr(inv, usdInrRate);
-                const isPaying = payingId === inv.id;
-                const isRazorpayPaying = razorpayPayingId === inv.id;
-                const insufficient = walletBalance + 1e-9 < inv.amountDue;
-                return (
-                  <tr key={inv.id} className="text-white/85">
-                    <td className="px-4 py-3">{inv.strategyTitle}</td>
-                    <td className="px-4 py-3 text-right">
-                      <p className="font-semibold tabular-nums">
+        <div className="overflow-hidden rounded-xl border border-white/10">
+          <ResponsiveMoneyTable
+            table={
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase text-white/40">
+                  <tr>
+                    <th className="px-4 py-3">Strategy</th>
+                    <th className="px-4 py-3 text-right">Amount</th>
+                    <th className="px-4 py-3">Due</th>
+                    <th className="px-4 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {payableInvoices.map((inv) => {
+                    const amountInr = invoiceAmountInr(inv, usdInrRate);
+                    const isPaying = payingId === inv.id;
+                    const isRazorpayPaying = razorpayPayingId === inv.id;
+                    const insufficient = walletBalance + 1e-9 < inv.amountDue;
+                    return (
+                      <tr key={inv.id} className="text-white/85">
+                        <td className="px-4 py-3">{inv.strategyTitle}</td>
+                        <td className="px-4 py-3 text-right">
+                          <p className="font-semibold tabular-nums">
+                            {amountInr != null ? fmtInr(amountInr) : "—"}
+                          </p>
+                          <p className="text-xs tabular-nums text-white/45">
+                            {fmtUsd(inv.amountDue)}
+                          </p>
+                          {amountInr == null ? (
+                            <p className="mt-0.5 text-[10px] text-amber-200/80">
+                              {RATE_MISSING_MESSAGE}
+                            </p>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-white/65">
+                          {fmtDate(inv.dueDate)}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex flex-col items-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void payWithRazorpay(inv)}
+                              disabled={isRazorpayPaying || isPaying}
+                              className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-white hover:bg-primary/90 disabled:opacity-50"
+                            >
+                              {isRazorpayPaying ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Processing…
+                                </>
+                              ) : (
+                                <>
+                                  <CreditCard className="h-3.5 w-3.5" />
+                                  Pay Now
+                                </>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void payFromWallet(inv)}
+                              disabled={isPaying || isRazorpayPaying || insufficient}
+                              className={`text-[10px] font-medium uppercase tracking-wide ${
+                                insufficient
+                                  ? "text-white/35"
+                                  : "text-white/55 hover:text-white/80"
+                              }`}
+                            >
+                              {isPaying ? "Wallet…" : "Use wallet"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            }
+            cards={payableInvoices.map((inv) => {
+              const amountInr = invoiceAmountInr(inv, usdInrRate);
+              const isPaying = payingId === inv.id;
+              const isRazorpayPaying = razorpayPayingId === inv.id;
+              const insufficient = walletBalance + 1e-9 < inv.amountDue;
+              return (
+                <MoneyRowCard
+                  key={inv.id}
+                  primary={inv.strategyTitle}
+                  secondary={
+                    <span className="tabular-nums">Due {fmtDate(inv.dueDate)}</span>
+                  }
+                  amount={
+                    <span className="text-right">
+                      <span className="block font-semibold tabular-nums text-white">
                         {amountInr != null ? fmtInr(amountInr) : "—"}
-                      </p>
-                      <p className="text-xs tabular-nums text-white/45">{fmtUsd(inv.amountDue)}</p>
+                      </span>
+                      <span className="block text-xs tabular-nums text-white/45">
+                        {fmtUsd(inv.amountDue)}
+                      </span>
+                    </span>
+                  }
+                  details={
+                    <div className="divide-y divide-white/5">
+                      <DetailRow
+                        label="Amount (INR)"
+                        value={amountInr != null ? fmtInr(amountInr) : "—"}
+                      />
+                      <DetailRow
+                        label="Amount (USD)"
+                        value={fmtUsd(inv.amountDue)}
+                      />
                       {amountInr == null ? (
-                        <p className="mt-0.5 text-[10px] text-amber-200/80">
+                        <p className="py-1.5 text-[10px] text-amber-200/80">
                           {RATE_MISSING_MESSAGE}
                         </p>
                       ) : null}
-                    </td>
-                    <td className="px-4 py-3 tabular-nums text-white/65">{fmtDate(inv.dueDate)}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex flex-col items-end gap-2">
+                      <DetailRow label="Due" value={fmtDate(inv.dueDate)} />
+                      <div className="flex flex-col items-stretch gap-2 pt-3">
                         <button
                           type="button"
                           onClick={() => void payWithRazorpay(inv)}
                           disabled={isRazorpayPaying || isPaying}
-                          className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-white hover:bg-primary/90 disabled:opacity-50"
+                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white hover:bg-primary/90 disabled:opacity-50"
                         >
                           {isRazorpayPaying ? (
                             <>
@@ -381,19 +469,21 @@ export function StrategySubscriptionFees() {
                           type="button"
                           onClick={() => void payFromWallet(inv)}
                           disabled={isPaying || isRazorpayPaying || insufficient}
-                          className={`text-[10px] font-medium uppercase tracking-wide ${
-                            insufficient ? "text-white/35" : "text-white/55 hover:text-white/80"
+                          className={`text-center text-[10px] font-medium uppercase tracking-wide ${
+                            insufficient
+                              ? "text-white/35"
+                              : "text-white/55 hover:text-white/80"
                           }`}
                         >
                           {isPaying ? "Wallet…" : "Use wallet"}
                         </button>
                       </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    </div>
+                  }
+                />
+              );
+            })}
+          />
         </div>
       ) : invoices.some((i) => i.status === "PAID") ? (
         <p className="text-sm text-white/45">
