@@ -1,0 +1,277 @@
+========== BASKET / TRADE #39 — SUMMARY FROM DB ==========
+{
+  "id": 39,
+  "account_id": 1,
+  "underlying": "BTC",
+  "expiry_date": "2026-08-16",
+  "status": "active",
+  "entry_time": "2026-08-15 17:17:24.422507",
+  "exit_time": null,
+  "total_premium_collected": 271.0,
+  "profit_target_usd": 0.01,
+  "stoploss_usd": 0.03,
+  "trigger_mode": "flat",
+  "realized_pnl": -0.02,
+  "exit_reason": null,
+  "notes": "auto_trade",
+  "monitoring_starts_at": "2026-08-15 22:49:24.422513",
+  "basket_number": 39,
+  "initial_max_profit": 0.271,
+  "tp_pct": 5.0,
+  "sl_pct": 10.0,
+  "slippage_pct": 3.0,
+  "universal_sl_pct": 220.0,
+  "in_conversion_mode": 0,
+  "conversion_hedge_product_id": null,
+  "conversion_hedge_order_id": null,
+  "conversion_hedge_entry_price": null,
+  "conversion_hedge_symbol": null,
+  "conversion_triggered_leg": null,
+  "cumulative_entry_spread_usd": 0.03531005799999999,
+  "adjustment_count": 1,
+  "is_demo": 0
+}
+
+--- LEGS ---
+{
+  "id": 112,
+  "trade_id": 39,
+  "leg_type": "call",
+  "strike": 63600.0,
+  "symbol": "C-BTC-63600-160826",
+  "product_id": 146494,
+  "initial_premium": 12.0,
+  "trigger_premium": 12.0,
+  "quantity": 10,
+  "entry_time": "2026-08-15 17:17:24.422507",
+  "exit_time": "2026-08-15 17:19:48.711149",
+  "exit_premium": 14.0,
+  "status": "closed",
+  "realized_pnl": -0.02,
+  "entry_fee_usd": 0.004956,
+  "exit_fee_usd": 0.005782,
+  "delta_at_entry": 0.08093431,
+  "delta_order_id": "1474126314",
+  "exit_order_id": "1474128719",
+  "is_bot_managed": 1,
+  "trigger_baseline_premium": 12.0,
+  "delta_sl_order_id": null,
+  "sl_trigger_price": 28.35,
+  "is_long": 0,
+  "order_sent_price": 12.88802554,
+  "entry_spread_usd": 0.008880255399999993
+}
+{
+  "id": 113,
+  "trade_id": 39,
+  "leg_type": "put",
+  "strike": 62600.0,
+  "symbol": "P-BTC-62600-160826",
+  "product_id": 146483,
+  "initial_premium": 15.1,
+  "trigger_premium": 15.2,
+  "quantity": 10,
+  "entry_time": "2026-08-15 17:17:24.422507",
+  "exit_time": "2026-08-15 17:19:44.910397",
+  "exit_premium": 15.2,
+  "status": "closed",
+  "realized_pnl": -0.0009999999999999966,
+  "entry_fee_usd": 0.0062363,
+  "exit_fee_usd": 0.0062776,
+  "delta_at_entry": 0.09093499,
+  "delta_order_id": "1474126355",
+  "exit_order_id": "1474128758",
+  "is_bot_managed": 1,
+  "trigger_baseline_premium": 15.2,
+  "delta_sl_order_id": null,
+  "sl_trigger_price": 34.63,
+  "is_long": 0,
+  "order_sent_price": 15.74298026,
+  "entry_spread_usd": 0.0064298025999999986
+}
+{
+  "id": 114,
+  "trade_id": 39,
+  "leg_type": "call",
+  "strike": 63400.0,
+  "symbol": "C-BTC-63400-160826",
+  "product_id": 146495,
+  "initial_premium": 30.0,
+  "trigger_premium": 30.0,
+  "quantity": 10,
+  "entry_time": "2026-08-15 17:19:48.711149",
+  "exit_time": null,
+  "exit_premium": null,
+  "status": "open",
+  "realized_pnl": null,
+  "entry_fee_usd": 0.01239,
+  "exit_fee_usd": null,
+  "delta_at_entry": null,
+  "delta_order_id": "1474128773",
+  "exit_order_id": null,
+  "is_bot_managed": 1,
+  "trigger_baseline_premium": 30.0,
+  "delta_sl_order_id": null,
+  "sl_trigger_price": 66.0,
+  "is_long": 0,
+  "order_sent_price": 32.0,
+  "entry_spread_usd": 0.02
+}
+
+--- ADJUSTMENTS ---
+{
+  "id": 18,
+  "trade_id": 39,
+  "leg_type": "call",
+  "trigger_pct_reached": 116.66666666666667,
+  "old_strike": 63600.0,
+  "old_exit_premium": 14.0,
+  "new_strike": 63400.0,
+  "new_entry_premium": 30.0,
+  "timestamp": "2026-08-15 17:19:48.711149",
+  "time_remaining_hours": 18.669729548055557,
+  "slab_used": "slab_12h",
+  "decision_type": "ADJUSTED"
+}
+
+--- SLAVE TRADES ---
+{
+  "id": 27,
+  "slave_account_id": 2,
+  "name": "earner_5dc0105f_bd8e7d98",
+  "earner_user_id": "5dc0105f-938a-4853-aa5e-a9372d134e60",
+  "status": "closed",
+  "actual_quantity": 5,
+  "call_fill_price": 12.0,
+  "put_fill_price": 15.1,
+  "last_mtm": -0.0463,
+  "call_order_id": "1474126407",
+  "put_order_id": "1474126420",
+  "created_at": "2026-08-15 17:17:30.790422",
+  "last_updated": "2026-08-15 22:49:39.119414"
+}
+{
+  "id": 28,
+  "slave_account_id": 3,
+  "name": "earner_6882624c_bd8e7d98",
+  "earner_user_id": "6882624c-e6fd-4cc8-8885-5f7a9e7afad7",
+  "status": "closed",
+  "actual_quantity": 6,
+  "call_fill_price": 12.0,
+  "put_fill_price": 15.1,
+  "last_mtm": -0.0463,
+  "call_order_id": "1474126496",
+  "put_order_id": "1474126512",
+  "created_at": "2026-08-15 17:17:37.461806",
+  "last_updated": "2026-08-15 22:49:39.575326"
+}
+
+========== ACTIVITY LOG LINES (Trade#39 / Trade 39) ==========
+2026-08-15 19:17:24 | INFO | Trade 39 locked: initial_max_profit=0.271 TP=0.01 (5.0%) SL=0.03 (10.0%) — will NOT change on adjustments
+2026-08-15 19:17:24 | INFO | [ENTRY_GUARD_PASS] Trade#39 @ 22:47:24 IST | stage=tracker_confirmed | source=auto
+2026-08-15 19:17:26 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:47:26 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=14.0 | call_pct_to_trigger=111.1 | put_current=15.2 | put_pct_to_trigger=95.9 | action=HOLD
+2026-08-15 19:17:54 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:47:54 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:17:58 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:47:58 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=14.0 | call_pct_to_trigger=111.1 | put_current=15.2 | put_pct_to_trigger=95.9 | action=HOLD
+2026-08-15 19:18:24 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:48:24 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:18:31 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:48:31 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=13.0 | call_pct_to_trigger=103.2 | put_current=15.2 | put_pct_to_trigger=95.9 | action=HOLD
+2026-08-15 19:18:54 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:48:54 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:19:05 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:49:05 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=14.0 | call_pct_to_trigger=111.1 | put_current=15.2 | put_pct_to_trigger=95.9 | action=HOLD
+2026-08-15 19:19:37 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:49:37 IST | call_offer=14.0 | call_baseline=12.0 | call_trigger_at=12.6 | call_ratio_pct=116.7 | put_offer=15.2 | put_baseline=15.1 | put_trigger_at=15.86 | put_ratio_pct=100.7
+2026-08-15 19:19:37 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:49:37 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=14.0 | call_pct_to_trigger=111.1 | put_current=15.2 | put_pct_to_trigger=95.9 | action=ADJUST_call
+2026-08-15 19:19:37 | WARNING | [DECISION_TRIGGER] Trade#39 @ 22:49:37 IST | leg=call | trigger_pct=105.0 | net_mtm=-0.0463 | decision=ADJUST | reason=Net MTM negative — adjusting
+2026-08-15 19:19:41 | WARNING | [ADJUSTMENT_START] Trade#39 @ 22:49:41 IST | triggered_leg=call | old_strike=63600.0 | old_premium=12.0 | target_new_premium=15.2
+2026-08-15 19:19:41 | DEBUG | [PREMIUM_COVER_LOSS_TARGET] Trade#39 @ 22:49:41 IST | triggered_entry=12.0 | triggered_current_offer=14.0 | realized_loss_premium=2.0 | other_leg_offer=15.2 | cover_target=15.2 | mode=premium_cover_loss
+2026-08-15 19:19:41 | DEBUG | [ADJUSTMENT_TARGET_PREMIUM] Trade#39 @ 22:49:41 IST | final_target=15.2 | override_used=True | other_leg_offer=15.2
+2026-08-15 19:19:41 | DEBUG | [NEW_STRIKE_SELECTED] Trade#39 @ 22:49:41 IST | selected_premium=30.9811 | other_leg_offer=15.2 | method=above_offer | selected_strike=63400.0
+2026-08-15 19:19:42 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:42 IST | stage=pre_close | leg=call | product_id=146494 | exists=True
+2026-08-15 19:19:44 | ERROR | [EMERGENCY_CLOSE] Trade#39 @ 22:49:44 IST | closing=put | missing=call
+2026-08-15 19:19:44 | ERROR | [INTEGRITY_NAKED] Trade#39 @ 22:49:44 IST | closing=put | missing=call
+2026-08-15 19:19:45 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:45 IST | stage=post_close | leg=call | product_id=146494 | still_exists=False
+2026-08-15 19:19:48 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:48 IST | stage=post_entry | symbol=C-BTC-63400-160826 | product_id=146495 | exists=True
+2026-08-15 19:19:48 | WARNING | [BASELINE_RESET] Trade#39 @ 22:49:48 IST | leg=put | old=15.1 | new=15.2 | source=offer
+2026-08-15 19:19:48 | DEBUG | [ADJUSTMENT_COUNT_UPDATED] Trade#39 @ 22:49:48 IST | new_count=1 | max_allowed=3
+2026-08-15 19:19:48 | ERROR | [ADJUSTMENT_FAIL] Trade#39 @ 22:49:48 IST | leg=call | error=Instance <Leg at 0x771e1c39a450> is not bound to a Session; attribute refresh operation cannot proceed (Background on this error at: https://sqlalche.me/e/20/bhk3) | is_partial=False
+2026-08-15 19:20:20 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:50:20 IST | call_offer=32.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=106.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:20:20 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:50:20 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=32.0 | call_pct_to_trigger=101.6 | put_current=15.2 | put_pct_to_trigger=95.2 | action=ADJUST_call
+2026-08-15 19:20:20 | WARNING | [DECISION_TRIGGER] Trade#39 @ 22:50:20 IST | leg=call | trigger_pct=105.0 | net_mtm=-0.0917 | decision=ADJUST | reason=Net MTM negative — adjusting
+2026-08-15 19:20:20 | WARNING | [ADJUSTMENT_START] Trade#39 @ 22:50:20 IST | triggered_leg=call | old_strike=63400.0 | old_premium=30.0 | target_new_premium=15.2
+2026-08-15 19:20:21 | ERROR | [ADJUSTMENT_FAIL] Trade#39 @ 22:50:21 IST | leg=call | error=Open bot-managed call/put legs not found for trade 39 | is_partial=False
+2026-08-15 19:20:52 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:50:52 IST | call_offer=31.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=103.3 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:20:52 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:50:52 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=31.0 | call_pct_to_trigger=98.4 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:21:30 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:51:30 IST | call_offer=26.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=86.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:21:30 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:51:30 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=26.0 | call_pct_to_trigger=82.5 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:22:01 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:52:01 IST | call_offer=26.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=86.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:22:01 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:52:01 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=26.0 | call_pct_to_trigger=82.5 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:22:40 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:52:40 IST | call_offer=25.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=83.3 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:22:40 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:52:40 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=25.0 | call_pct_to_trigger=79.4 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:23:11 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:53:11 IST | call_offer=26.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=86.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:23:11 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:53:11 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=26.0 | call_pct_to_trigger=82.5 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:23:49 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:53:49 IST | call_offer=26.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=86.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:23:49 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:53:49 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=26.0 | call_pct_to_trigger=82.5 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:24:25 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:54:25 IST | call_offer=25.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=83.3 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:24:25 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:54:25 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=25.0 | call_pct_to_trigger=79.4 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:25:03 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:55:03 IST | call_offer=25.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=83.3 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:25:03 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:55:03 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=25.0 | call_pct_to_trigger=79.4 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:25:34 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:55:34 IST | call_offer=26.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=86.7 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:25:34 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:55:34 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=26.0 | call_pct_to_trigger=82.5 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+2026-08-15 19:26:13 | DEBUG | [TRIGGER_CALC] Trade#39 @ 22:56:13 IST | call_offer=27.0 | call_baseline=30.0 | call_trigger_at=31.5 | call_ratio_pct=90.0 | put_offer=15.2 | put_baseline=0.0 | put_trigger_at=0.0 | put_ratio_pct=0.0
+2026-08-15 19:26:13 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:56:13 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=27.0 | call_pct_to_trigger=85.7 | put_current=15.2 | put_pct_to_trigger=95.2 | action=HOLD
+
+========== FULL Trade#39 LOG COUNT ==========
+Total matching lines: 101
+
+========== KEY EVENTS (entry / adjust / exit / slave / error) ==========
+2026-08-15 19:17:24 | INFO | Trade 39 locked: initial_max_profit=0.271 TP=0.01 (5.0%) SL=0.03 (10.0%) — will NOT change on adjustments
+2026-08-15 19:17:24 | INFO | [ENTRY_GUARD_PASS] Trade#39 @ 22:47:24 IST | stage=tracker_confirmed | source=auto
+2026-08-15 19:17:25 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:47:25 IST | call_symbol=C-BTC-63600-160826 | put_symbol=P-BTC-62600-160826 | call_premium=14.0 | put_premium=15.2 | call_entry=12.0 | put_entry=15.1 | call_open=True | put_open=True | is_settling=True | is_demo=False
+2026-08-15 19:17:26 | DEBUG | [PNL_CHECK] Trade#39 @ 22:47:26 IST | realized_pnl=0.0 | delta_upnl=-0.021 | call_upnl=-0.02 | put_upnl=-0.001 | gross_mtm=-0.021 | gross_mtm_for_stoploss=-0.0057 | cumulative_entry_spread=0.0153 | fees_paid=0.0112 | est_exit_fees=0.0121 | expected_exit_spread_usd=0.0015 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0463 | total_pnl=-0.021 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-210.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:17:54 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:47:54 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:17:58 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:47:58 IST | call_symbol=C-BTC-63600-160826 | put_symbol=P-BTC-62600-160826 | call_premium=14.0 | put_premium=15.2 | call_entry=12.0 | put_entry=15.1 | call_open=True | put_open=True | is_settling=True | is_demo=False
+2026-08-15 19:17:58 | DEBUG | [PNL_CHECK] Trade#39 @ 22:47:58 IST | realized_pnl=0.0 | delta_upnl=-0.021 | call_upnl=-0.02 | put_upnl=-0.001 | gross_mtm=-0.021 | gross_mtm_for_stoploss=-0.0057 | cumulative_entry_spread=0.0153 | fees_paid=0.0112 | est_exit_fees=0.0121 | expected_exit_spread_usd=0.0015 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0463 | total_pnl=-0.021 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-210.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:18:24 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:48:24 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:18:31 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:48:31 IST | call_symbol=C-BTC-63600-160826 | put_symbol=P-BTC-62600-160826 | call_premium=13.0 | put_premium=15.2 | call_entry=12.0 | put_entry=15.1 | call_open=True | put_open=True | is_settling=True | is_demo=False
+2026-08-15 19:18:31 | DEBUG | [PNL_CHECK] Trade#39 @ 22:48:31 IST | realized_pnl=0.0 | delta_upnl=-0.011 | call_upnl=-0.01 | put_upnl=-0.001 | gross_mtm=-0.011 | gross_mtm_for_stoploss=0.0043 | cumulative_entry_spread=0.0153 | fees_paid=0.0112 | est_exit_fees=0.0116 | expected_exit_spread_usd=0.0014 | slippage_pct=3.0 | slippage_amount=0.0003 | net_mtm=-0.0356 | total_pnl=-0.011 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-110.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:18:54 | ERROR | [ENTRY_GUARD_BLOCK] Trade#39 @ 22:48:54 IST | source=auto | guard=settling | underlying=BTC | monitoring_starts_at=2026-08-15T22:49:24.422513+05:30
+2026-08-15 19:19:04 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:49:04 IST | call_symbol=C-BTC-63600-160826 | put_symbol=P-BTC-62600-160826 | call_premium=14.0 | put_premium=15.2 | call_entry=12.0 | put_entry=15.1 | call_open=True | put_open=True | is_settling=True | is_demo=False
+2026-08-15 19:19:05 | DEBUG | [PNL_CHECK] Trade#39 @ 22:49:05 IST | realized_pnl=0.0 | delta_upnl=-0.021 | call_upnl=-0.02 | put_upnl=-0.001 | gross_mtm=-0.021 | gross_mtm_for_stoploss=-0.0057 | cumulative_entry_spread=0.0153 | fees_paid=0.0112 | est_exit_fees=0.0121 | expected_exit_spread_usd=0.0015 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0463 | total_pnl=-0.021 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-210.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:19:37 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:49:37 IST | call_symbol=C-BTC-63600-160826 | put_symbol=P-BTC-62600-160826 | call_premium=14.0 | put_premium=15.2 | call_entry=12.0 | put_entry=15.1 | call_open=True | put_open=True | is_settling=False | is_demo=False
+2026-08-15 19:19:37 | DEBUG | [PNL_CHECK] Trade#39 @ 22:49:37 IST | realized_pnl=0.0 | delta_upnl=-0.021 | call_upnl=-0.02 | put_upnl=-0.001 | gross_mtm=-0.021 | gross_mtm_for_stoploss=-0.0057 | cumulative_entry_spread=0.0153 | fees_paid=0.0112 | est_exit_fees=0.0121 | expected_exit_spread_usd=0.0015 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0463 | total_pnl=-0.021 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-210.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:19:37 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:49:37 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=12.6 | put_trigger_at=15.86 | call_current=14.0 | call_pct_to_trigger=111.1 | put_current=15.2 | put_pct_to_trigger=95.9 | action=ADJUST_call
+2026-08-15 19:19:37 | WARNING | [DECISION_TRIGGER] Trade#39 @ 22:49:37 IST | leg=call | trigger_pct=105.0 | net_mtm=-0.0463 | decision=ADJUST | reason=Net MTM negative — adjusting
+2026-08-15 19:19:41 | WARNING | [ADJUSTMENT_START] Trade#39 @ 22:49:41 IST | triggered_leg=call | old_strike=63600.0 | old_premium=12.0 | target_new_premium=15.2
+2026-08-15 19:19:41 | DEBUG | [PREMIUM_COVER_LOSS_TARGET] Trade#39 @ 22:49:41 IST | triggered_entry=12.0 | triggered_current_offer=14.0 | realized_loss_premium=2.0 | other_leg_offer=15.2 | cover_target=15.2 | mode=premium_cover_loss
+2026-08-15 19:19:41 | DEBUG | [ADJUSTMENT_TARGET_PREMIUM] Trade#39 @ 22:49:41 IST | final_target=15.2 | override_used=True | other_leg_offer=15.2
+2026-08-15 19:19:42 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:42 IST | stage=pre_close | leg=call | product_id=146494 | exists=True
+2026-08-15 19:19:44 | ERROR | [EMERGENCY_CLOSE] Trade#39 @ 22:49:44 IST | closing=put | missing=call
+2026-08-15 19:19:44 | ERROR | [INTEGRITY_NAKED] Trade#39 @ 22:49:44 IST | closing=put | missing=call
+2026-08-15 19:19:45 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:45 IST | stage=post_close | leg=call | product_id=146494 | still_exists=False
+2026-08-15 19:19:48 | INFO | [ADJUSTMENT_DELTA_VERIFY] Trade#39 @ 22:49:48 IST | stage=post_entry | symbol=C-BTC-63400-160826 | product_id=146495 | exists=True
+2026-08-15 19:19:48 | WARNING | [BASELINE_RESET] Trade#39 @ 22:49:48 IST | leg=put | old=15.1 | new=15.2 | source=offer
+2026-08-15 19:19:48 | DEBUG | [ADJUSTMENT_COUNT_UPDATED] Trade#39 @ 22:49:48 IST | new_count=1 | max_allowed=3
+2026-08-15 19:19:48 | ERROR | [ADJUSTMENT_FAIL] Trade#39 @ 22:49:48 IST | leg=call | error=Instance <Leg at 0x771e1c39a450> is not bound to a Session; attribute refresh operation cannot proceed (Background on this error at: https://sqlalche.me/e/20/bhk3) | is_partial=False
+2026-08-15 19:20:19 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:50:19 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=32.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:20:20 | DEBUG | [PNL_CHECK] Trade#39 @ 22:50:20 IST | realized_pnl=-0.02 | delta_upnl=-0.02 | call_upnl=-0.02 | put_upnl=0.0 | gross_mtm=-0.04 | gross_mtm_for_stoploss=-0.0047 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0132 | expected_exit_spread_usd=0.0016 | slippage_pct=3.0 | slippage_amount=0.0012 | net_mtm=-0.0917 | total_pnl=-0.04 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-400.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:20:20 | DEBUG | [TRIGGER_CHECK] Trade#39 @ 22:50:20 IST | trigger_mode=flat | trigger_pct=105.0 | call_trigger_pct=105.0 | put_trigger_pct=105.0 | call_trigger_at=31.5 | put_trigger_at=15.96 | call_current=32.0 | call_pct_to_trigger=101.6 | put_current=15.2 | put_pct_to_trigger=95.2 | action=ADJUST_call
+2026-08-15 19:20:20 | WARNING | [DECISION_TRIGGER] Trade#39 @ 22:50:20 IST | leg=call | trigger_pct=105.0 | net_mtm=-0.0917 | decision=ADJUST | reason=Net MTM negative — adjusting
+2026-08-15 19:20:20 | WARNING | [ADJUSTMENT_START] Trade#39 @ 22:50:20 IST | triggered_leg=call | old_strike=63400.0 | old_premium=30.0 | target_new_premium=15.2
+2026-08-15 19:20:21 | ERROR | [ADJUSTMENT_FAIL] Trade#39 @ 22:50:21 IST | leg=call | error=Open bot-managed call/put legs not found for trade 39 | is_partial=False
+2026-08-15 19:20:52 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:50:52 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=31.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:20:52 | DEBUG | [PNL_CHECK] Trade#39 @ 22:50:52 IST | realized_pnl=-0.02 | delta_upnl=-0.01 | call_upnl=-0.01 | put_upnl=0.0 | gross_mtm=-0.03 | gross_mtm_for_stoploss=0.0053 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0128 | expected_exit_spread_usd=0.0015 | slippage_pct=3.0 | slippage_amount=0.0009 | net_mtm=-0.0809 | total_pnl=-0.03 | profit_target=0.01 | stoploss=0.03 | pnl_pct=-300.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:21:30 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:51:30 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=26.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:21:30 | DEBUG | [PNL_CHECK] Trade#39 @ 22:51:30 IST | realized_pnl=-0.02 | delta_upnl=0.04 | call_upnl=0.04 | put_upnl=0.0 | gross_mtm=0.02 | gross_mtm_for_stoploss=0.0553 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0107 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0283 | total_pnl=0.02 | profit_target=0.01 | stoploss=0.03 | pnl_pct=200.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:22:01 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:52:01 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=26.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:22:01 | DEBUG | [PNL_CHECK] Trade#39 @ 22:52:01 IST | realized_pnl=-0.02 | delta_upnl=0.04 | call_upnl=0.04 | put_upnl=0.0 | gross_mtm=0.02 | gross_mtm_for_stoploss=0.0553 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0107 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0283 | total_pnl=0.02 | profit_target=0.01 | stoploss=0.03 | pnl_pct=200.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:22:39 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:52:39 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=25.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:22:40 | DEBUG | [PNL_CHECK] Trade#39 @ 22:52:40 IST | realized_pnl=-0.02 | delta_upnl=0.05 | call_upnl=0.05 | put_upnl=0.0 | gross_mtm=0.03 | gross_mtm_for_stoploss=0.0653 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0103 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0009 | net_mtm=-0.0181 | total_pnl=0.03 | profit_target=0.01 | stoploss=0.03 | pnl_pct=300.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:23:10 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:53:10 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=26.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:23:11 | DEBUG | [PNL_CHECK] Trade#39 @ 22:53:11 IST | realized_pnl=-0.02 | delta_upnl=0.04 | call_upnl=0.04 | put_upnl=0.0 | gross_mtm=0.02 | gross_mtm_for_stoploss=0.0553 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0107 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0283 | total_pnl=0.02 | profit_target=0.01 | stoploss=0.03 | pnl_pct=200.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:23:48 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:53:48 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=26.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:23:49 | DEBUG | [PNL_CHECK] Trade#39 @ 22:53:49 IST | realized_pnl=-0.02 | delta_upnl=0.04 | call_upnl=0.04 | put_upnl=0.0 | gross_mtm=0.02 | gross_mtm_for_stoploss=0.0553 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0107 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0283 | total_pnl=0.02 | profit_target=0.01 | stoploss=0.03 | pnl_pct=200.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:24:24 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:54:24 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=25.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:24:25 | DEBUG | [PNL_CHECK] Trade#39 @ 22:54:25 IST | realized_pnl=-0.02 | delta_upnl=0.05 | call_upnl=0.05 | put_upnl=0.0 | gross_mtm=0.03 | gross_mtm_for_stoploss=0.0653 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0103 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0009 | net_mtm=-0.0181 | total_pnl=0.03 | profit_target=0.01 | stoploss=0.03 | pnl_pct=300.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:25:02 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:55:02 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=27.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:25:03 | DEBUG | [PNL_CHECK] Trade#39 @ 22:55:03 IST | realized_pnl=-0.02 | delta_upnl=0.05 | call_upnl=0.05 | put_upnl=0.0 | gross_mtm=0.03 | gross_mtm_for_stoploss=0.0653 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0103 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0009 | net_mtm=-0.0181 | total_pnl=0.03 | profit_target=0.01 | stoploss=0.03 | pnl_pct=300.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:25:33 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:55:33 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=26.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:25:34 | DEBUG | [PNL_CHECK] Trade#39 @ 22:55:34 IST | realized_pnl=-0.02 | delta_upnl=0.04 | call_upnl=0.04 | put_upnl=0.0 | gross_mtm=0.02 | gross_mtm_for_stoploss=0.0553 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0107 | expected_exit_spread_usd=0.0013 | slippage_pct=3.0 | slippage_amount=0.0006 | net_mtm=-0.0283 | total_pnl=0.02 | profit_target=0.01 | stoploss=0.03 | pnl_pct=200.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
+2026-08-15 19:26:12 | DEBUG | [MONITOR_TICK] Trade#39 @ 22:56:12 IST | call_symbol=C-BTC-63400-160826 | put_symbol=P-BTC-62600-160826 | call_premium=27.0 | put_premium=15.2 | call_entry=30.0 | put_entry=15.1 | call_open=True | put_open=False | is_settling=False | is_demo=False
+2026-08-15 19:26:13 | DEBUG | [PNL_CHECK] Trade#39 @ 22:56:13 IST | realized_pnl=-0.02 | delta_upnl=0.03 | call_upnl=0.03 | put_upnl=0.0 | gross_mtm=0.01 | gross_mtm_for_stoploss=0.0453 | cumulative_entry_spread=0.0353 | fees_paid=0.0356 | est_exit_fees=0.0112 | expected_exit_spread_usd=0.0014 | slippage_pct=3.0 | slippage_amount=0.0003 | net_mtm=-0.0384 | total_pnl=0.01 | profit_target=0.01 | stoploss=0.03 | pnl_pct=100.0 | will_exit_profit=False | will_exit_stoploss=False | mtm_source=delta_position | contract_value=0.001
