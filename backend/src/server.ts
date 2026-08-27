@@ -200,7 +200,9 @@ app.use(
         callback(null, true);
         return;
       }
-      callback(new Error("CORS: origin not allowed"));
+      const err = new Error("CORS: origin not allowed") as Error & { status?: number };
+      err.status = 403;
+      callback(err);
     },
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -321,7 +323,16 @@ app.use(
       res.status(404).json({ error: "Record not found" });
       return;
     }
-    res.status(500).json({ error: "Internal server error" });
+    const status =
+      typeof err === "object" &&
+      err !== null &&
+      "status" in err &&
+      typeof (err as { status?: number }).status === "number"
+        ? (err as { status: number }).status
+        : 500;
+    const message =
+      err instanceof Error ? err.message : "Internal server error";
+    res.status(status).json({ error: message });
   },
 );
 
