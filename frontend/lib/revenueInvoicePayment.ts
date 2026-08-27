@@ -1,21 +1,8 @@
-import { resolveApiBase } from "@/lib/apiBase";
+import { authFetch } from "@/lib/authFetch";
 import { COMPANY } from "@/lib/company";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 import { formatIstMonthYear } from "@/lib/istDates";
-
-async function authFetch(path: string, init?: RequestInit): Promise<Response> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-  return fetch(`${resolveApiBase()}${path}`, {
-    ...init,
-    cache: "no-store",
-    headers: {
-      ...(init?.headers ?? {}),
-      Authorization: `Bearer ${token ?? ""}`,
-    },
-  });
-}
 
 export function revenueInvoicePeriodLabel(inv: RevenueInvoiceRow): string {
   return formatIstMonthYear(inv.periodMonth, inv.periodYear);

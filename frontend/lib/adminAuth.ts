@@ -29,6 +29,7 @@ export function buildAdminApiUrl(path: string): string {
 /**
  * Shared admin HTTP helper — one place for cookie credentials.
  * Do not attach Authorization from localStorage.
+ * 401 responses trigger central session-expiry redirect (via fetchWithTimeout).
  */
 export async function adminFetch(
   path: string,

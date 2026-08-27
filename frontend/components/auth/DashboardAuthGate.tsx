@@ -14,8 +14,8 @@ export function DashboardAuthGate({
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
-    const redirect = encodeURIComponent(pathname || "/dashboard");
-    router.replace(`/login?redirect=${redirect}`);
+    const next = encodeURIComponent(pathname || "/dashboard");
+    router.replace(`/login?next=${next}`);
   }, [isLoading, isAuthenticated, pathname, router]);
 
   if (isLoading) {

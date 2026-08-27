@@ -7,6 +7,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth, type AuthUser } from "@/context/AuthContext";
+import {
+  consumeSessionExpiredMessage,
+  resetSessionExpiryRedirectFlag,
+  safePostLoginNext,
+} from "@/lib/sessionExpiry";
 
 type Step = "credentials" | "otp";
 
@@ -16,11 +21,6 @@ type LoginSuccessBody = {
   user: { id: string; email: string; name: string | null; role: string };
 };
 
-function safePostLoginRedirect(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/dashboard";
-  return raw;
-}
-
 function persistSessionAndRedirect(
   token: string,
   sessionUser: AuthUser | null,
@@ -28,6 +28,7 @@ function persistSessionAndRedirect(
   router: ReturnType<typeof useRouter>,
   redirectTo: string,
 ): void {
+  resetSessionExpiryRedirectFlag();
   setSession(token, sessionUser);
   router.push(redirectTo);
 }
@@ -37,7 +38,10 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const { isLoading, isAuthenticated, setSession } = useAuth();
   const registeredSuccess = searchParams.get("registered") === "1";
-  const redirectTo = safePostLoginRedirect(searchParams.get("redirect"));
+  // Prefer ?next= (session expiry / auth gate); keep ?redirect= for older links.
+  const redirectTo = safePostLoginNext(
+    searchParams.get("next") ?? searchParams.get("redirect"),
+  );
 
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
@@ -53,6 +57,13 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    setSessionExpiredNotice(consumeSessionExpiredMessage());
+  }, []);
 
   if (isLoading || isAuthenticated) {
     return <AuthLoadingScreen message="Loading session…" />;
@@ -218,6 +229,12 @@ function LoginForm() {
         {registeredSuccess && step === "credentials" && (
           <div className="mb-6 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
             Account created successfully. Sign in with your email, password, and the OTP we send you.
+          </div>
+        )}
+
+        {sessionExpiredNotice && step === "credentials" && (
+          <div className="mb-6 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            {sessionExpiredNotice}
           </div>
         )}
 

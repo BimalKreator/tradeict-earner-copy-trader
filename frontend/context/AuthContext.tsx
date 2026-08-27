@@ -11,6 +11,7 @@ import {
 } from "react";
 import { resolveApiBase } from "@/lib/apiBase";
 import { clearOriginCaches } from "@/lib/clearOriginCaches";
+import { SESSION_EXPIRED_EVENT } from "@/lib/sessionExpiry";
 import {
   normalizeSalesTeamRole,
   type SalesTeamRole,
@@ -174,6 +175,19 @@ export function AuthProvider({ children }: Readonly<{ children: ReactNode }>) {
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      setToken(null);
+      setUser(null);
+      setIsLoading(false);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    };
+  }, []);
 
   const setSession = useCallback(
     (newToken: string, sessionUser?: AuthUser | null) => {

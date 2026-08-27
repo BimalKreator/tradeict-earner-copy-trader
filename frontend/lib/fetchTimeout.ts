@@ -1,3 +1,5 @@
+import { handleApiUnauthorized } from "./sessionExpiry";
+
 export class FetchTimeoutError extends Error {
   readonly timeoutMs: number;
 
@@ -10,8 +12,15 @@ export class FetchTimeoutError extends Error {
 
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
+function requestUrlString(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
 /**
  * fetch() with AbortController timeout. Prefer this (or authFetch) over bare fetch.
+ * Central 401 handling: expired session → single-flight redirect to /login?next=.
  */
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
@@ -31,10 +40,14 @@ export async function fetchWithTimeout(
 
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, {
+    const res = await fetch(input, {
       ...init,
       signal: controller.signal,
     });
+    if (res.status === 401) {
+      handleApiUnauthorized(requestUrlString(input));
+    }
+    return res;
   } catch (err) {
     if (
       (err instanceof DOMException && err.name === "AbortError") ||

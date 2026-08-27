@@ -19,6 +19,10 @@ export function authHeaders(): HeadersInit {
   return { Authorization: `Bearer ${token ?? ""}` };
 }
 
+/**
+ * Cookie + Bearer authenticated fetch via {@link fetchWithTimeout}.
+ * 401 responses trigger central session-expiry redirect (see sessionExpiry.ts).
+ */
 export async function authFetch(
   path: string,
   init?: RequestInit,
