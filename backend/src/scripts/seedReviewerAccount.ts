@@ -24,13 +24,15 @@ import {
   isEmailDomainAllowed,
   parseAllowedEmailDomains,
 } from "../services/settingsService.js";
-import { resolvePrimaryStrategy } from "../services/futureHedgeService.js";
 import { invalidateCopySubscriberCache } from "../services/strategySubscriptionService.js";
 import { resolveStrategyBaseCapital } from "../utils/subscriptionCapital.js";
 import {
   MAX_SUBSCRIPTION_MULTIPLIER,
   MIN_SUBSCRIPTION_MULTIPLIER,
 } from "../constants/subscription.js";
+
+/** Customer-facing copy strategy — must match production botStrategyType. */
+const CUSTOMER_FACING_BOT_STRATEGY_TYPE = "short_strangle";
 
 /** Same rounds as authController (do not import from there — keep this script self-contained). */
 const BCRYPT_ROUNDS = 12;
@@ -192,7 +194,23 @@ async function main(): Promise<void> {
       );
     }
 
-    const strategy = await resolvePrimaryStrategy(prisma);
+    const strategy = await prisma.strategy.findFirst({
+      where: { botStrategyType: CUSTOMER_FACING_BOT_STRATEGY_TYPE },
+      select: {
+        id: true,
+        title: true,
+        profitShare: true,
+        baseCapital: true,
+        minCapital: true,
+      },
+    });
+    if (!strategy) {
+      abort(
+        `No customer-facing strategy with botStrategyType='${CUSTOMER_FACING_BOT_STRATEGY_TYPE}'. ` +
+          `Refusing to subscribe the reviewer to Future Hedge or any other strategy.`,
+      );
+    }
+
     const baseCapital = resolveStrategyBaseCapital(strategy);
     let multiplier =
       Math.round((REVIEWER_DEPLOYED_CAPITAL_USD / baseCapital) * 1e6) / 1e6;

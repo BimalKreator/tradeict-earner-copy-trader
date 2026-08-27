@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { useAuth } from "@/context/AuthContext";
+import { storeSessionExpiredMessage } from "@/lib/sessionExpiry";
 
 export function DashboardAuthGate({
   children,
@@ -14,6 +15,7 @@ export function DashboardAuthGate({
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
+    storeSessionExpiredMessage();
     const next = encodeURIComponent(pathname || "/dashboard");
     router.replace(`/login?next=${next}`);
   }, [isLoading, isAuthenticated, pathname, router]);

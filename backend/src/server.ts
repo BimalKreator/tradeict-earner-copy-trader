@@ -126,8 +126,21 @@ void (async () => {
       );
     }
     console.log(
-      `[BOOT] Primary strategy: "${legacy.primaryStrategyTitle}" (${legacy.primaryStrategyId})`,
+      `[BOOT] Hedge engine strategy: "${legacy.primaryStrategyTitle}" (${legacy.primaryStrategyId})`,
     );
+    const customerFacing = await prisma.strategy.findFirst({
+      where: { botStrategyType: "short_strangle" },
+      select: { id: true, title: true },
+    });
+    if (customerFacing) {
+      console.log(
+        `[BOOT] Customer-facing strategy: "${customerFacing.title}" (${customerFacing.id})`,
+      );
+    } else {
+      console.warn(
+        `[BOOT] Customer-facing strategy: none found (botStrategyType='short_strangle')`,
+      );
+    }
     const dup = await consolidateDuplicateFutureHedgeStrategies(prisma);
     if (dup.removed > 0) {
       console.log(

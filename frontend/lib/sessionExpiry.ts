@@ -36,6 +36,16 @@ export function consumeSessionExpiredMessage(): string | null {
   }
 }
 
+/** Persist the shared session-expired banner message (DashboardAuthGate + 401 interceptor). */
+export function storeSessionExpiredMessage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(SESSION_EXPIRED_STORAGE_KEY, SESSION_EXPIRED_MESSAGE);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function isAuthEndpointExemptFromSessionExpiry(url: string): boolean {
   try {
     const pathname = new URL(url, "http://localhost").pathname;
@@ -51,11 +61,7 @@ function clearClientAuthArtifacts(): void {
   } catch {
     /* ignore */
   }
-  try {
-    sessionStorage.setItem(SESSION_EXPIRED_STORAGE_KEY, SESSION_EXPIRED_MESSAGE);
-  } catch {
-    /* ignore */
-  }
+  storeSessionExpiredMessage();
   try {
     window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
   } catch {
