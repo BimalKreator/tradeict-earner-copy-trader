@@ -16,10 +16,10 @@ export function RouteErrorView({
   return (
     <div className="flex min-h-[50vh] flex-col items-center justify-center px-4 py-16 text-center">
       <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/90 p-8 shadow-xl">
-        <h1 className="text-xl font-semibold text-white">Kuch galat ho gaya</h1>
+        <h1 className="text-xl font-semibold text-white">Something went wrong</h1>
         <p className="mt-3 text-sm leading-relaxed text-slate-400">
-          Page load karte waqt koi unexpected error aaya. Dobara try karein ya
-          dashboard par wapas jayein.
+          An unexpected error occurred while loading this page. Please try again or return to the
+          dashboard.
         </p>
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center">
           <button
