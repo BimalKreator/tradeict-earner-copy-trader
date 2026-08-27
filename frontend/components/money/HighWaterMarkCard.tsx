@@ -12,16 +12,26 @@ type HighWaterMarkCardProps = {
   cumulativeRealized: number | null;
   highWaterMark: number | null;
   profitSharePct: number | null;
+  /** Platform USD→INR rate from useUsdInrRate (null when unset). */
+  rate?: number | null;
   loading?: boolean;
   hasData?: boolean;
 };
 
-function MoneyStack({ label, usd }: { label: string; usd: number }) {
+function MoneyStack({
+  label,
+  usd,
+  rate,
+}: {
+  label: string;
+  usd: number;
+  rate?: number | null;
+}) {
   return (
     <div>
       <p className="text-xs uppercase tracking-wide text-white/45">{label}</p>
       <p className="mt-1 text-lg font-semibold tabular-nums text-white">{fmtUsd(usd)}</p>
-      <p className="text-xs tabular-nums text-white/45">{formatINRApprox(usd)}</p>
+      <p className="text-xs tabular-nums text-white/45">{formatINRApprox(usd, rate)}</p>
     </div>
   );
 }
@@ -30,6 +40,7 @@ export function HighWaterMarkCard({
   cumulativeRealized,
   highWaterMark,
   profitSharePct,
+  rate = null,
   loading = false,
   hasData = false,
 }: HighWaterMarkCardProps) {
@@ -107,9 +118,9 @@ export function HighWaterMarkCard({
       </div>
 
       <div className="space-y-4">
-        <MoneyStack label="Total profit so far" usd={cumulative} />
-        <MoneyStack label="Your best ever" usd={hwm} />
-        {inDrawdown ? <MoneyStack label="Fee-free zone" usd={gap} /> : null}
+        <MoneyStack label="Total profit so far" usd={cumulative} rate={rate} />
+        <MoneyStack label="Your best ever" usd={hwm} rate={rate} />
+        {inDrawdown ? <MoneyStack label="Fee-free zone" usd={gap} rate={rate} /> : null}
       </div>
 
       <div className="space-y-2 border-t border-white/10 pt-4 text-sm leading-relaxed text-white/70">

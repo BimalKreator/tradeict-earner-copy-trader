@@ -538,6 +538,7 @@ export default function DashboardWalletPage() {
             invoices={revenueInvoices}
             loading={loading}
             walletBalance={balanceUsd}
+            rate={usdInrRate}
             onPaid={() => {
               setRefreshing(true);
               void loadAll(true);

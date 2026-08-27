@@ -19,6 +19,8 @@ type RevenueInvoiceTableProps = {
   invoices: RevenueInvoiceRow[];
   loading?: boolean;
   walletBalance?: number | null;
+  /** Platform USD→INR rate for approx INR when invoice has no pinned rate. */
+  rate?: number | null;
   showDisclosure?: boolean;
   title?: string;
   onPaid?: () => void;
@@ -29,6 +31,7 @@ export function RevenueInvoiceTable({
   invoices,
   loading = false,
   walletBalance = null,
+  rate = null,
   showDisclosure = true,
   title = "Profit share invoices",
   onPaid,
@@ -137,6 +140,7 @@ export function RevenueInvoiceTable({
                 <HwmInvoiceExplainer
                   key={inv.id}
                   invoice={inv}
+                  rate={rate}
                   payable={payable}
                   isWalletPaying={isPaying}
                   isRazorpayPaying={isRazorpayPaying}

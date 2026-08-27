@@ -309,6 +309,7 @@ export function PerformanceDashboard() {
           cumulativeRealized={latest?.cumulativeRealized ?? null}
           highWaterMark={latest?.highWaterMark ?? null}
           profitSharePct={profitSharePct}
+          rate={usdInrRate}
         />
       )}
 
@@ -684,6 +685,7 @@ export function PerformanceDashboard() {
             invoices={invoices}
             loading={loading}
             walletBalance={walletBalance}
+            rate={usdInrRate}
             onPaid={() => void load()}
           />
         )}

@@ -10,6 +10,8 @@ import type { RevenueInvoiceRow } from "@/lib/revenueInvoiceTypes";
 type HwmInvoiceExplainerProps = {
   invoice: RevenueInvoiceRow;
   payable: boolean;
+  /** Platform USD→INR rate; invoice.usdInrRate wins when set. */
+  rate?: number | null;
   onPayRazorpay?: () => void;
   onPayWallet?: () => void;
   isRazorpayPaying?: boolean;
@@ -17,12 +19,20 @@ type HwmInvoiceExplainerProps = {
   walletInsufficient?: boolean;
 };
 
-function MoneyValue({ usd, prefix = "" }: { usd: number; prefix?: string }) {
+function MoneyValue({
+  usd,
+  rate,
+  prefix = "",
+}: {
+  usd: number;
+  rate?: number | null;
+  prefix?: string;
+}) {
   const signed = prefix ? `${prefix}${fmtUsd(Math.abs(usd))}` : fmtUsd(usd);
   return (
     <span className="tabular-nums">
       <span className="font-medium text-white">{signed}</span>
-      <span className="ml-1 text-xs text-white/45">{formatINRApprox(usd)}</span>
+      <span className="ml-1 text-xs text-white/45">{formatINRApprox(usd, rate)}</span>
     </span>
   );
 }
@@ -52,6 +62,7 @@ function CalcRow({
 export function HwmInvoiceExplainer({
   invoice,
   payable,
+  rate = null,
   onPayRazorpay,
   onPayWallet,
   isRazorpayPaying = false,
@@ -70,6 +81,7 @@ export function HwmInvoiceExplainer({
   const cumulativeEnd = invoice.cumulativeRealizedPnl ?? z;
   const gapBelowBest = Math.max(0, y - cumulativeEnd);
   const collectibleInr = revenueInvoiceCollectibleInr(invoice);
+  const displayRate = invoice.usdInrRate ?? rate;
 
   const summarySentence =
     b === 0 ? (
@@ -103,7 +115,7 @@ export function HwmInvoiceExplainer({
               {formatIstMonthYear(invoice.periodMonth, invoice.periodYear)}
             </p>
             <p className="mt-1 text-sm text-white/70">
-              <MoneyValue usd={f} />
+              <MoneyValue usd={f} rate={displayRate} />
               {collectibleInr != null && collectibleInr > 0 ? (
                 <span className="ml-2 text-xs text-white/45">({fmtInr(collectibleInr)} INR)</span>
               ) : null}
@@ -154,17 +166,17 @@ export function HwmInvoiceExplainer({
             <CalcRow
               label="Profit booked this month"
               fieldHint="realizedPnl"
-              value={<MoneyValue usd={x} prefix="+" />}
+              value={<MoneyValue usd={x} rate={displayRate} prefix="+" />}
             />
             <CalcRow
               label="Your previous best"
               fieldHint="hwmBefore"
-              value={<MoneyValue usd={y} />}
+              value={<MoneyValue usd={y} rate={displayRate} />}
             />
             <CalcRow
               label="New high reached"
               fieldHint="hwmAfter"
-              value={<MoneyValue usd={z} />}
+              value={<MoneyValue usd={z} rate={displayRate} />}
             />
           </div>
           <div className="my-3 border-t border-dashed border-white/15" />
@@ -172,7 +184,7 @@ export function HwmInvoiceExplainer({
             <CalcRow
               label="Charged only on"
               fieldHint="billableProfit"
-              value={<MoneyValue usd={b} />}
+              value={<MoneyValue usd={b} rate={displayRate} />}
             />
             <CalcRow
               label="Our share"
@@ -182,7 +194,7 @@ export function HwmInvoiceExplainer({
             <CalcRow
               label="Your fee"
               fieldHint="commissionAmount"
-              value={<MoneyValue usd={f} />}
+              value={<MoneyValue usd={f} rate={displayRate} />}
             />
           </div>
           <p className="mt-4 text-sm leading-relaxed text-white/65">{summarySentence}</p>
