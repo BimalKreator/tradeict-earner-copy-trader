@@ -30,8 +30,7 @@ No other admin nav links found in `AdminHeader.tsx`.
 | `/admin/notifications` | `frontend/app/admin/notifications/page.tsx` | Broadcast in-app notifications to all/active/specific users. | Audience picker + title/message compose (no historical table on page). | Yes — System → Notifications | - |
 | `/admin/downloads` | `frontend/app/admin/downloads/page.tsx` | Manage downloadable files exposed to users. | DownloadFile rows (name, type, status, path). | Yes — System → Downloads | - |
 | `/admin/settings` | `frontend/app/admin/settings/page.tsx` | Platform config: USD/INR rate, partner commission rates, previews. | FX rate settings + partner commission % matrix / preview chains. | Yes — System → Settings | `/admin/tier-settings` (partner economics; different tables) |
-| `/admin/debug/inject-trade` | `frontend/app/admin/debug/inject-trade/page.tsx` | Super-admin tool to inject dummy trades / clear dummy PnL for testing. | User picker + inject/clear results (dummy Trade / PnL / commissions). | Yes — Debug Tools → Inject Trade (`superAdminOnly`) | `/admin/debug/inject_trade` (alias redirect) |
-| `/admin/debug/inject_trade` | `frontend/app/admin/debug/inject_trade/page.tsx` | Legacy underscore URL; redirects to hyphenated inject-trade. | None (immediate `redirect`). | No | `/admin/debug/inject-trade` |
+| `/admin/debug/inject-trade` | `frontend/app/admin/debug/inject-trade/page.tsx` | Super-admin tool to inject dummy trades / clear dummy PnL for testing. | User picker + inject/clear results (dummy Trade / PnL / commissions). | Yes — Debug Tools → Inject Trade (`superAdminOnly`) | - |
 
 ## ORPHAN ROUTES
 
@@ -42,6 +41,5 @@ Pages with **no** entry in `AdminSidebar` `navGroups` (reachable only via in-pag
 | `/admin/users/[id]` | Link from `/admin/users` | Detail orphan relative to sidebar |
 | `/admin/strategies/[id]` | Link from `/admin/strategies` | Detail orphan relative to sidebar |
 | `/admin/support/[id]` | Link from `/admin/support` | Detail orphan relative to sidebar |
-| `/admin/debug/inject_trade` | Direct URL / old bookmarks | Redirect-only alias; not linked in nav |
 
 All other listed routes appear as direct `href` entries in `AdminSidebar.tsx`.
