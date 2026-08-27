@@ -16,5 +16,8 @@ export default defineConfig({
     // `DATABASE_URL` targets a pooler (e.g. Supabase + PgBouncer). Use `DATABASE_URL` in
     // your app with the database driver / Prisma adapter at runtime.
     url: env("DIRECT_URL"),
+    // Optional — only for `prisma migrate diff --from-migrations` / `migrate dev`. Prisma creates
+    // and drops this database automatically; do not store real data here. Undefined at runtime is OK.
+    shadowDatabaseUrl: process.env.SHADOW_DATABASE_URL,
   },
 });
