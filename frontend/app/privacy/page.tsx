@@ -29,7 +29,7 @@ export default function PrivacyPage() {
           <p>
             {COMPANY.legalName}
             <br />
-            {COMPANY.address}
+            {COMPANY.addressFull}
             <br />
             Email: {COMPANY.supportEmail} · Phone: {COMPANY.supportPhone}
           </p>

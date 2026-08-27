@@ -111,7 +111,7 @@ export default function RefundPage() {
         <section className="space-y-4">
           <h2>7. Contact</h2>
           <p>
-            {COMPANY.legalName} · {COMPANY.address}
+            {COMPANY.legalName} · {COMPANY.addressFull}
             <br />
             Email:{" "}
             <a href={`mailto:${COMPANY.supportEmail}`} className="text-cyan-400 hover:underline">

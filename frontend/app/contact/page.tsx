@@ -37,7 +37,7 @@ export default function ContactPage() {
               <DetailRow label="Legal name">
                 <span className="text-white">{COMPANY.legalName}</span>
               </DetailRow>
-              <DetailRow label="Registered address">{COMPANY.address}</DetailRow>
+              <DetailRow label="Registered address">{COMPANY.addressFull}</DetailRow>
               <DetailRow label="GSTIN">
                 <span className="font-mono text-white/90">{COMPANY.gstin}</span>
               </DetailRow>

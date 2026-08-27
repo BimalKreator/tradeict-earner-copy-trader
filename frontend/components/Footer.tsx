@@ -27,7 +27,7 @@ function CompanyBlock() {
       <p className="text-lg font-semibold text-white">
         <span className="text-cyan-400">{COMPANY.productName}</span>
       </p>
-      <p className="text-sm leading-relaxed text-white/55">{COMPANY.address}</p>
+      <p className="text-sm leading-relaxed text-white/55">{COMPANY.addressShort}</p>
       <p className="text-sm text-white/60">
         GSTIN: <span className="font-mono text-white/80">{COMPANY.gstin}</span>
       </p>

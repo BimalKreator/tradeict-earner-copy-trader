@@ -143,7 +143,7 @@ export default function TermsPage() {
           <p>
             {COMPANY.legalName}
             <br />
-            {COMPANY.address}
+            {COMPANY.addressFull}
             <br />
             Email:{" "}
             <a href={`mailto:${COMPANY.supportEmail}`} className="text-cyan-400 hover:underline">
