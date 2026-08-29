@@ -46,10 +46,10 @@ import {
 type PartnerWallets = {
   earned: number;
   payable: number;
-  /** WITHDRAWABLE-status bucket — display only. */
-  mature?: number;
-  /** Signed net — gates payout; may be negative. */
+  /** WITHDRAWABLE-status bucket — amount available to request for payout. */
   withdrawable: number;
+  /** Signed net — gates payout; may be negative. */
+  netBalanceGate: number;
 };
 
 type PartnerMetrics = {
@@ -833,15 +833,15 @@ export default function PartnerDashboardPage() {
                 title="Withdrawable Revenue"
                 amount={metrics.wallets.withdrawable}
                 description={
-                  metrics.wallets.withdrawable < 0
-                    ? "Net balance is negative after reversals. Contact support before requesting payout."
-                    : metrics.wallets.mature != null && metrics.wallets.mature !== metrics.wallets.withdrawable
-                      ? `${fmtUsd(metrics.wallets.mature)} matured in the unlock window, net of reversals. Request on the last day of each month (IST).`
-                      : "Ready for payout. Request on the last day of each month (IST)."
+                  metrics.wallets.netBalanceGate <= 0
+                    ? "Commission balance is zero or negative after reversals."
+                    : metrics.wallets.withdrawable > 0
+                      ? `${fmtUsd(metrics.wallets.withdrawable)} matured in the unlock window, net of reversals. Request on the last day of each month (IST).`
+                      : "Ready for payout once commissions mature through the 30-day unlock window. Request on the last day of each month (IST)."
                 }
                 icon={<Wallet className="h-5 w-5" aria-hidden />}
                 accent="emerald"
-                negative={metrics.wallets.withdrawable < 0}
+                negative={metrics.wallets.netBalanceGate < 0}
                 action={
                   <div className="group relative space-y-2">
                     {metrics.latestPayoutRequest &&
@@ -887,9 +887,11 @@ export default function PartnerDashboardPage() {
                           : metrics.latestPayoutRequest?.status === "PENDING" ||
                               metrics.latestPayoutRequest?.status === "APPROVED"
                             ? "An active payout request is already in progress"
-                            : metrics.wallets.withdrawable <= 0
-                              ? "No withdrawable balance"
-                              : undefined
+                            : metrics.wallets.netBalanceGate <= 0
+                              ? "Commission balance is zero or negative after reversals"
+                              : metrics.wallets.withdrawable <= 0
+                                ? "No withdrawable balance"
+                                : undefined
                       }
                       className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-emerald-100 ring-1 ring-emerald-500/35 transition hover:bg-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-40"
                     >
@@ -905,7 +907,9 @@ export default function PartnerDashboardPage() {
                           : metrics.latestPayoutRequest?.status === "PENDING" ||
                               metrics.latestPayoutRequest?.status === "APPROVED"
                             ? "Payout already in progress"
-                            : "No withdrawable balance yet"}
+                            : metrics.wallets.netBalanceGate <= 0
+                              ? "Commission balance is zero or negative after reversals."
+                              : "No withdrawable balance yet"}
                       </p>
                     ) : null}
                   </div>
@@ -941,7 +945,7 @@ export default function PartnerDashboardPage() {
                   0,
               )} / ${fmtUsd(
                 metrics != null
-                  ? metrics.wallets.payable + (metrics.wallets.mature ?? 0)
+                  ? metrics.wallets.payable + metrics.wallets.withdrawable
                   : (network?.stats.totalMemberCommissionPayable ?? 0),
               )}`}
               sub="Earned (EARNED) / Payable (PAYABLE + matured WITHDRAWABLE)"

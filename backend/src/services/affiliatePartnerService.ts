@@ -24,10 +24,10 @@ import {
 export type PartnerWalletTotals = {
   earned: number;
   payable: number;
-  /** WITHDRAWABLE-status bucket — display only. */
-  mature: number;
-  /** Signed net over all non-simulated rows — gates payout; may be negative. */
+  /** WITHDRAWABLE-status bucket — amount available to request for payout. */
   withdrawable: number;
+  /** Signed net over all non-simulated rows — gates payout; may be negative. */
+  netBalanceGate: number;
 };
 
 export type PartnerMetrics = {
@@ -74,8 +74,8 @@ async function loadPartnerWalletTotals(
   return {
     earned: breakdown.earned,
     payable: breakdown.payable,
-    mature: breakdown.mature,
-    withdrawable: breakdown.netBalance,
+    withdrawable: breakdown.mature,
+    netBalanceGate: breakdown.netBalance,
   };
 }
 
@@ -158,6 +158,7 @@ export async function getPartnerMetrics(
     canRequestPayout:
       payoutWindow.canRequestPayout &&
       wallets.withdrawable > 0 &&
+      wallets.netBalanceGate > 0 &&
       !hasActivePayout,
     canRequestPayoutUntil: payoutWindow.canRequestPayoutUntil,
     latestPayoutRequest,
@@ -698,7 +699,7 @@ export async function getPartnerNetworkDetails(
       totalMemberCommissionEarned: viewerCommissionWallets.earned,
       /** PAYABLE + matured WITHDRAWABLE rows for the viewer. */
       totalMemberCommissionPayable:
-        viewerCommissionWallets.payable + viewerCommissionWallets.mature,
+        viewerCommissionWallets.payable + viewerCommissionWallets.withdrawable,
     },
   };
 }
