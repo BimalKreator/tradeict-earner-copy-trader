@@ -31,3 +31,4 @@
 
 - **2026-08-27:** E2E started; E2 subscription/deploy blockers found and fixed through 29 Aug.
 - **2026-08-29:** E5 partner commission chain verified; E5-BUG-a shipped; E6 stopped — live Razorpay, no test keys.
+- **2026-09-03 (W2 — wings / Structure P&L):** Live screenshot check — bot Structure P&L (net) **-$0.2457** is correct vs Delta gross UPL **~$1.36**. Delta shows only open-leg gross UPL (hedge ~+$0.93 + basket ~+$0.41); bot nets hedge fees/spread, crystallized adj-1 loss **-$0.9740**, entry spread, fees, est exit. Wings LONG P&L verified: CALL `($337-$172.10)×4×0.001=+0.6596`, PUT `($70-$120)×4×0.001=-0.1953`. W2 stage effectively passed live.

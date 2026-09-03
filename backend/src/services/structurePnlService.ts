@@ -1,5 +1,11 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { excludeSimulatedFilter } from "./simulatedDataFilters.js";
+import {
+  computeBasketNetCredit,
+  countBasketLegs,
+  expectedBasketCommissionRows,
+  normalizeStructureForWings,
+} from "./structureWings.js";
 
 const BOT_BASE_URL = "http://127.0.0.1:8000";
 const BOT_TIMEOUT_MS = 10_000;
@@ -70,6 +76,7 @@ type BotStructure = {
 type LedgerRow = {
   deltaUuid: string;
   productId: number | null;
+  productSymbol: string | null;
   transactionType: string;
   amount: Prisma.Decimal;
   occurredAt: Date;
@@ -419,6 +426,9 @@ type LegTotals = {
    * real window — not silently assigned (15.4).
    */
   graceAmbiguity: boolean;
+  /** Earliest cashflow amount (entry premium credit or wing debit). */
+  firstCashflowAmount: Prisma.Decimal | null;
+  firstCashflowAt: Date | null;
 };
 
 function emptyLegTotals(): LegTotals {
@@ -437,6 +447,8 @@ function emptyLegTotals(): LegTotals {
     overlapConflict: false,
     overlapLegCount: 0,
     graceAmbiguity: false,
+    firstCashflowAmount: null,
+    firstCashflowAt: null,
   };
 }
 
@@ -448,6 +460,13 @@ function applyTxnToLegTotals(totals: LegTotals, txn: LedgerRow): void {
     totals.cashflowCount += 1;
     if (txn.amount.greaterThan(0)) totals.cashflowHasPositive = true;
     if (txn.amount.lessThan(0)) totals.cashflowHasNegative = true;
+    if (
+      totals.firstCashflowAt == null ||
+      txn.occurredAt.getTime() < totals.firstCashflowAt.getTime()
+    ) {
+      totals.firstCashflowAt = txn.occurredAt;
+      totals.firstCashflowAmount = txn.amount;
+    }
   } else if (tt === "commission") {
     totals.commissionTotal = totals.commissionTotal.add(txn.amount);
     totals.commissionCount += 1;
@@ -704,6 +723,7 @@ async function loadBillingLedgerRows(
   return rows.map((row) => ({
     deltaUuid: row.deltaUuid,
     productId: row.productId,
+    productSymbol: row.productSymbol,
     transactionType: row.transactionType,
     amount: row.amount,
     occurredAt: row.occurredAt,
@@ -764,8 +784,14 @@ async function recomputeStructurePnlForUser(
   prisma: PrismaClient,
   userId: string,
 ): Promise<StructurePnlUserResult> {
-  const structures = await fetchBotStructures(userId);
+  const fetched = await fetchBotStructures(userId);
   const ledgerRows = await loadBillingLedgerRows(prisma, userId);
+
+  // 4-leg condor: heal open wings on closed baskets + discover missing
+  // BASKET_WING_* from nearby BUY cashflows so they are explained.
+  const structures: BotStructure[] = fetched.map((s) =>
+    normalizeStructureForWings(s, ledgerRows),
+  );
 
   const allLegRefs: LegRef[] = [];
   for (const structure of structures) {
@@ -1053,6 +1079,32 @@ async function recomputeStructurePnlForUser(
       };
     }
 
+    const basketCounts = countBasketLegs(structure.legs);
+    const firstCashflowByLegKey = new Map<string, Prisma.Decimal>();
+    structure.legs.forEach((leg, index) => {
+      const totals =
+        legTotals.get(legKey(structure.botStructureId, leg.botLegId)) ??
+        emptyLegTotals();
+      if (totals.firstCashflowAmount != null) {
+        firstCashflowByLegKey.set(String(index), totals.firstCashflowAmount);
+      }
+    });
+    const netCredit = computeBasketNetCredit({
+      legs: structure.legs,
+      firstCashflowByLegKey,
+      legKey: (index) => String(index),
+    });
+    if (basketCounts.wings > 0) {
+      console.log(
+        `[StructurePnl] structure=${structure.botStructureId} ` +
+          `basket_legs=${basketCounts.totalBasket} ` +
+          `(shorts=${basketCounts.shorts} wings=${basketCounts.wings}) ` +
+          `expected_commissions=${expectedBasketCommissionRows(basketCounts.totalBasket)} ` +
+          `net_credit=${netCredit.toFixed(10)} ` +
+          `(shorts_premium − wing_premium)`,
+      );
+    }
+
     // Closed structures must always persist OK or SUSPECT — never NULL.
     const isClosedStructure = structure.status === "closed";
     const attributionStatus = isClosedStructure
@@ -1061,6 +1113,8 @@ async function recomputeStructurePnlForUser(
 
     const droppedAbs =
       droppedByStructure.get(structure.botStructureId) ?? zeroDecimal();
+    // Wings now sit inside leg windows → their cashflows match, so they no
+    // longer inflate unmatched / overlap drops. Phase 15 suspect rules unchanged.
     const attributionDroppedAmount = droppedAbs.greaterThan(0)
       ? droppedAbs
       : null;
