@@ -10,17 +10,22 @@ import { Prisma } from "@prisma/client";
 /** Wing entry must land within this skew of the basket shorts' opens. */
 export const WING_ENTRY_MAX_SKEW_MS = 60_000;
 
-export const STRUCTURE_LEG_ROLE = {
+export type StructureLegRole =
+  | "BASKET_CALL"
+  | "BASKET_PUT"
+  | "BASKET_WING_CALL"
+  | "BASKET_WING_PUT"
+  | "HEDGE_CALL"
+  | "HEDGE_PUT";
+
+export const STRUCTURE_LEG_ROLE: { readonly [K in StructureLegRole]: K } = {
   BASKET_CALL: "BASKET_CALL",
   BASKET_PUT: "BASKET_PUT",
   BASKET_WING_CALL: "BASKET_WING_CALL",
   BASKET_WING_PUT: "BASKET_WING_PUT",
   HEDGE_CALL: "HEDGE_CALL",
   HEDGE_PUT: "HEDGE_PUT",
-} as const;
-
-export type StructureLegRole =
-  (typeof STRUCTURE_LEG_ROLE)[keyof typeof STRUCTURE_LEG_ROLE];
+};
 
 export type WingAwareLeg = {
   botLegId: number;
@@ -183,15 +188,19 @@ function pickBasketSeq(structure: WingAwareStructure): number | null {
 export function discoverWingLegsFromLedger<T extends WingAwareStructure>(
   structure: T,
   ledger: WingLedgerHint[],
-): T {
+): Omit<T, "legs"> & { legs: WingAwareLeg[] } {
   const shorts = shortLegs(structure).filter((l) =>
     isBasketShortRole(l.legRole),
   );
-  if (shorts.length < 2) return structure;
+  if (shorts.length < 2) {
+    return structure as Omit<T, "legs"> & { legs: WingAwareLeg[] };
+  }
 
   const needCall = !hasWingRole(structure, STRUCTURE_LEG_ROLE.BASKET_WING_CALL);
   const needPut = !hasWingRole(structure, STRUCTURE_LEG_ROLE.BASKET_WING_PUT);
-  if (!needCall && !needPut) return structure;
+  if (!needCall && !needPut) {
+    return structure as Omit<T, "legs"> & { legs: WingAwareLeg[] };
+  }
 
   const knownProducts = productIdsInStructure(structure);
   const shortOpenTimes = shorts.map((l) => l.openedAt.getTime());
@@ -284,7 +293,9 @@ export function discoverWingLegsFromLedger<T extends WingAwareStructure>(
   if (needCall) maybeAdd("call", STRUCTURE_LEG_ROLE.BASKET_WING_CALL);
   if (needPut) maybeAdd("put", STRUCTURE_LEG_ROLE.BASKET_WING_PUT);
 
-  if (added.length === 0) return structure;
+  if (added.length === 0) {
+    return structure as Omit<T, "legs"> & { legs: WingAwareLeg[] };
+  }
   return { ...structure, legs: [...structure.legs, ...added] };
 }
 
@@ -311,7 +322,7 @@ function inferWingClosedAt(
 export function normalizeStructureForWings<T extends WingAwareStructure>(
   structure: T,
   ledger: WingLedgerHint[],
-): T {
+): Omit<T, "legs"> & { legs: WingAwareLeg[] } {
   const healed = healOpenWingLegsOnClosedStructure(structure);
   return discoverWingLegsFromLedger(healed, ledger);
 }
