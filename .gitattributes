@@ -1,0 +1,2 @@
+# Treat SQL as text; LF so Prisma migrations stay portable (no UTF-8 BOM).
+*.sql text eol=lf
