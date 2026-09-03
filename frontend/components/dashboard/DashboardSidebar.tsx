@@ -12,7 +12,7 @@ import {
 
 export function DashboardSidebar() {
   const pathname = usePathname();
-  const { isSalesTeamMember } = useAuth();
+  const { isSalesTeamMember, user } = useAuth();
   const [hash, setHash] = useState("");
 
   useEffect(() => {
@@ -22,7 +22,10 @@ export function DashboardSidebar() {
     return () => window.removeEventListener("hashchange", syncHash);
   }, [pathname]);
 
-  const groups = visibleDashboardNavGroups(isSalesTeamMember);
+  const groups = visibleDashboardNavGroups(
+    isSalesTeamMember,
+    user?.arbAccess === true,
+  );
 
   return (
     <aside className="glass-card hidden h-screen w-64 shrink-0 flex-col border border-glassBorder p-6 md:sticky md:top-0 md:flex">

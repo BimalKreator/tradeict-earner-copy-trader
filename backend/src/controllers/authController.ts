@@ -46,6 +46,7 @@ function sanitizeUser(user: {
   email: string;
   name: string | null;
   role: Role;
+  arbAccess?: boolean;
 }) {
   const role = normalizeAffiliateRoleEnum(user.role) ?? user.role;
   return {
@@ -53,6 +54,7 @@ function sanitizeUser(user: {
     email: user.email,
     name: user.name,
     role,
+    arbAccess: user.arbAccess === true,
   };
 }
 

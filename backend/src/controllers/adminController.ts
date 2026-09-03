@@ -2814,6 +2814,43 @@ export function createAdminController(prisma: PrismaClient) {
     }
   }
 
+  async function patchUserArbAccess(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = String(req.params.id ?? "").trim();
+      if (!userId) {
+        res.status(400).json({ error: "User id is required" });
+        return;
+      }
+      const body = req.body as { arbAccess?: unknown };
+      if (typeof body.arbAccess !== "boolean") {
+        res.status(400).json({ error: "arbAccess must be a boolean" });
+        return;
+      }
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { arbAccess: body.arbAccess },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          arbAccess: true,
+        },
+      });
+      res.json({
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        arbAccess: user.arbAccess,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async function patchUserCryptoArbitrageEnabled(
     req: Request,
     res: Response,
@@ -5109,6 +5146,7 @@ export function createAdminController(prisma: PrismaClient) {
     getUserCryptoArbitrage,
     patchUserCryptoArbitrageEnabled,
     patchUserOtpBypass,
+    patchUserArbAccess,
     patchUserCryptoArbitrageBalance,
     patchUserCryptoArbitrageAllocation,
     listUserArbitrageWithdrawals,

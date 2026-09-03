@@ -27,6 +27,8 @@ export type AuthUser = {
   role: string;
   /** Platform RBAC tier (`SUPER_ADMIN` | `MANAGER`) when user is a platform admin. */
   adminRole?: "SUPER_ADMIN" | "MANAGER";
+  /** Admin-granted access to Dex Arbitrage customer pages. */
+  arbAccess?: boolean;
   mobile?: string | null;
   address?: string | null;
   panNumber?: string | null;
@@ -95,6 +97,7 @@ function parseAuthUser(data: unknown): AuthUser | null {
     name: typeof row.name === "string" ? row.name : null,
     role,
     ...(adminRole ? { adminRole } : {}),
+    arbAccess: row.arbAccess === true,
     mobile: typeof row.mobile === "string" ? row.mobile : null,
     address: typeof row.address === "string" ? row.address : null,
     panNumber: typeof row.panNumber === "string" ? row.panNumber : null,

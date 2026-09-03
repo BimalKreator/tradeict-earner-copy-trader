@@ -1,11 +1,25 @@
 import type { LucideIcon } from "lucide-react";
-import { Bot, IndianRupee, Menu, Receipt, Users } from "lucide-react";
+import {
+  ArrowLeftRight,
+  Bot,
+  IndianRupee,
+  Menu,
+  Receipt,
+  Users,
+} from "lucide-react";
 
-export type DashboardNavGroupId = "money" | "bot" | "bill" | "refer" | "account";
+export type DashboardNavGroupId =
+  | "money"
+  | "bot"
+  | "bill"
+  | "refer"
+  | "arbitrage"
+  | "account";
 
 export type DashboardNavLink = {
   href: string;
   label: string;
+  arbAccessOnly?: boolean;
 };
 
 export type DashboardNavGroup = {
@@ -15,6 +29,7 @@ export type DashboardNavGroup = {
   tabIcon: LucideIcon;
   links: DashboardNavLink[];
   salesTeamOnly?: boolean;
+  arbAccessOnly?: boolean;
 };
 
 export const DASHBOARD_NAV_GROUPS: DashboardNavGroup[] = [
@@ -59,6 +74,17 @@ export const DASHBOARD_NAV_GROUPS: DashboardNavGroup[] = [
     links: [{ href: "/dashboard/partner", label: "Partner dashboard" }],
   },
   {
+    id: "arbitrage",
+    label: "Arbitrage",
+    tabHref: "/dashboard/dex-arbitrage",
+    tabIcon: ArrowLeftRight,
+    arbAccessOnly: true,
+    links: [
+      { href: "/dashboard/dex-arbitrage", label: "Dex Arbitrage" },
+      { href: "/dashboard/arbitrage-trades", label: "Arbitrage Trades" },
+    ],
+  },
+  {
     id: "account",
     label: "Account",
     tabHref: "/dashboard/settings",
@@ -71,8 +97,15 @@ export const DASHBOARD_NAV_GROUPS: DashboardNavGroup[] = [
   },
 ];
 
-export function visibleDashboardNavGroups(isSalesTeamMember: boolean): DashboardNavGroup[] {
-  return DASHBOARD_NAV_GROUPS.filter((g) => !g.salesTeamOnly || isSalesTeamMember);
+export function visibleDashboardNavGroups(
+  isSalesTeamMember: boolean,
+  arbAccess = false,
+): DashboardNavGroup[] {
+  return DASHBOARD_NAV_GROUPS.filter((g) => {
+    if (g.salesTeamOnly && !isSalesTeamMember) return false;
+    if (g.arbAccessOnly && !arbAccess) return false;
+    return true;
+  });
 }
 
 function pathnameMatchesLink(pathname: string, href: string): boolean {
@@ -86,6 +119,12 @@ export function resolveActiveNavGroup(
   hash: string,
 ): DashboardNavGroupId {
   if (pathname.startsWith("/dashboard/partner")) return "refer";
+  if (
+    pathname.startsWith("/dashboard/dex-arbitrage") ||
+    pathname.startsWith("/dashboard/arbitrage-trades")
+  ) {
+    return "arbitrage";
+  }
   if (
     pathname.startsWith("/dashboard/live-trades") ||
     pathname.startsWith("/dashboard/strategies")

@@ -184,6 +184,8 @@ model User {
   copyTradingPaused  Boolean             @default(false)
   /** Crypto arbitrage bot enabled for this user. */
   cryptoArbitrageEnabled       Boolean @default(false)
+  /** Admin-granted access to Dex Arbitrage / Arbitrage Trades customer dashboard pages. */
+  arbAccess                    Boolean @default(false)
   /** Simulated / platform crypto arbitrage balance (USDT). */
   cryptoBalance                Float   @default(0.0)
   /** Percent of cryptoBalance allocated per arbitrage trade. */

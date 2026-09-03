@@ -11,7 +11,7 @@ import {
 
 export function BottomTabBar() {
   const pathname = usePathname();
-  const { isSalesTeamMember } = useAuth();
+  const { isSalesTeamMember, user } = useAuth();
   const [hash, setHash] = useState("");
 
   useEffect(() => {
@@ -21,7 +21,10 @@ export function BottomTabBar() {
     return () => window.removeEventListener("hashchange", syncHash);
   }, [pathname]);
 
-  const groups = visibleDashboardNavGroups(isSalesTeamMember);
+  const groups = visibleDashboardNavGroups(
+    isSalesTeamMember,
+    user?.arbAccess === true,
+  );
   const activeGroup = resolveActiveNavGroup(pathname, hash);
 
   return (

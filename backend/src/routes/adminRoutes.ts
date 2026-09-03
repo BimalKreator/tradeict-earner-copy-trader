@@ -584,6 +584,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           status: true,
           copyTradingPaused: true,
           cryptoArbitrageEnabled: true,
+          arbAccess: true,
           cryptoBalance: true,
           cryptoCapitalPerTradePercent: true,
           deltaBalanceDisplayOffset: true,
@@ -634,6 +635,7 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
           status: user.status,
           copyTradingPaused: user.copyTradingPaused,
           cryptoArbitrageEnabled: user.cryptoArbitrageEnabled,
+          arbAccess: user.arbAccess,
           cryptoBalance: user.cryptoBalance,
           cryptoCapitalPerTradePercent: user.cryptoCapitalPerTradePercent,
           balanceDisplayOffset: user.deltaBalanceDisplayOffset,
@@ -739,6 +741,11 @@ export function createAdminRoutes(prisma: PrismaClient): Router {
     "/users/:id/otp-bypass",
     superAdminOnly,
     adminController.patchUserOtpBypass,
+  );
+
+  router.patch(
+    "/users/:id/arb-access",
+    adminController.patchUserArbAccess,
   );
 
   router.patch("/users/:id/status", async (req, res, next) => {

@@ -203,6 +203,7 @@ export function createUserController(prisma: PrismaClient) {
           role: true,
           adminRole: true,
           status: true,
+          arbAccess: true,
           acquiredById: true,
           acquiredBy: {
             select: {

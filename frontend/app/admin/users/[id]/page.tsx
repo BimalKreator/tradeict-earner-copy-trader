@@ -31,6 +31,7 @@ type UserState = {
   status: "ACTIVE" | "SUSPENDED" | string;
   copyTradingPaused?: boolean;
   cryptoArbitrageEnabled?: boolean;
+  arbAccess?: boolean;
   cryptoBalance?: number;
   cryptoCapitalPerTradePercent?: number;
   balanceDisplayOffset?: number;
@@ -172,6 +173,8 @@ export default function AdminUserDetails({
   const [tradeEndDate, setTradeEndDate] = useState("");
   const [exporting, setExporting] = useState(false);
   const [cryptoArbitrageEnabledDraft, setCryptoArbitrageEnabledDraft] = useState(false);
+  const [arbAccessDraft, setArbAccessDraft] = useState(false);
+  const [savingArbAccess, setSavingArbAccess] = useState(false);
   const [cryptoBalanceDraft, setCryptoBalanceDraft] = useState(0);
   const [cryptoBalanceAdjustment, setCryptoBalanceAdjustment] = useState("");
   const [cryptoAllocationDraft, setCryptoAllocationDraft] = useState("10");
@@ -300,6 +303,7 @@ export default function AdminUserDetails({
       setStatusDraft(mg.user.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE");
       setCopyTradingPausedDraft(Boolean(mg.user.copyTradingPaused));
       setCryptoArbitrageEnabledDraft(Boolean(mg.user.cryptoArbitrageEnabled));
+      setArbAccessDraft(Boolean(mg.user.arbAccess));
       setCryptoBalanceDraft(
         typeof mg.user.cryptoBalance === "number" && Number.isFinite(mg.user.cryptoBalance)
           ? mg.user.cryptoBalance
@@ -529,6 +533,40 @@ export default function AdminUserDetails({
       });
     } finally {
       setSavingBalanceOffset(false);
+    }
+  }
+
+  async function saveArbAccess(): Promise<void> {
+    setSavingArbAccess(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(
+        `${resolveApiBase()}/admin/users/${userId}/arb-access`,
+        {
+          method: "PATCH",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ arbAccess: arbAccessDraft }),
+        },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? "Failed to update arbitrage access.");
+      }
+      const body = (await res.json()) as { arbAccess?: boolean };
+      setArbAccessDraft(body.arbAccess === true);
+      setUser((prev) =>
+        prev ? { ...prev, arbAccess: body.arbAccess === true } : prev,
+      );
+      setNotice(
+        body.arbAccess
+          ? "Dex Arbitrage dashboard access granted."
+          : "Dex Arbitrage dashboard access revoked.",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update arbitrage access.");
+    } finally {
+      setSavingArbAccess(false);
     }
   }
 
@@ -1569,6 +1607,40 @@ export default function AdminUserDetails({
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                 ) : null}
                 {savingBalanceOffset ? "Saving…" : "Save Offset"}
+              </button>
+            </div>
+
+            <div className="space-y-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.03] p-4">
+              <h2 className="text-lg font-semibold text-white">
+                Dex Arbitrage Page Access
+              </h2>
+              <p className="text-sm text-white/55">
+                When enabled, this customer sees Dex Arbitrage and Arbitrage Trades
+                in their dashboard sidebar and can open those pages.
+              </p>
+              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border border-glassBorder bg-black/30 px-4 py-3">
+                <span className="text-sm text-white/80">Arbitrage Access</span>
+                <span className="relative inline-flex h-6 w-11 shrink-0 items-center">
+                  <input
+                    type="checkbox"
+                    checked={arbAccessDraft}
+                    onChange={(e) => setArbAccessDraft(e.target.checked)}
+                    className="peer sr-only"
+                  />
+                  <span className="absolute inset-0 rounded-full bg-slate-700 transition peer-checked:bg-violet-600" />
+                  <span className="absolute left-0.5 h-5 w-5 rounded-full bg-white transition peer-checked:translate-x-5" />
+                </span>
+              </label>
+              <button
+                type="button"
+                onClick={() => void saveArbAccess()}
+                disabled={savingArbAccess}
+                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+              >
+                {savingArbAccess ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                {savingArbAccess ? "Saving…" : "Save Arbitrage Access"}
               </button>
             </div>
 
