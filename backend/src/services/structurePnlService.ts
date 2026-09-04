@@ -159,6 +159,7 @@ function zeroDecimal(): Prisma.Decimal {
 async function botFetch(
   path: string,
   options: RequestInit = {},
+  logUserId?: string,
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
   try {
     const controller = new AbortController();
@@ -180,7 +181,12 @@ async function botFetch(
     }
     return { ok: res.ok, status: res.status, data };
   } catch (err) {
-    console.error(`[StructurePnl] bot fetch ${path} failed:`, err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[StructurePnl] bot fetch failed` +
+        `${logUserId != null ? ` user=${logUserId}` : ""}` +
+        ` path=${path} status=0 error=${msg}`,
+    );
     return { ok: false, status: 0, data: null };
   }
 }
@@ -230,6 +236,14 @@ function parseBotStructure(raw: Record<string, unknown>): BotStructure | null {
   );
   const openedAt = parseDate(raw.opened_at);
   if (botStructureId === null || hedgePositionId === null || !openedAt) {
+    const missing: string[] = [];
+    if (botStructureId === null) missing.push("botStructureId");
+    if (hedgePositionId === null) missing.push("hedgePositionId");
+    if (!openedAt) missing.push("openedAt");
+    const rowId = raw.id ?? raw.structure_id ?? raw.bot_structure_id ?? "unknown";
+    console.warn(
+      `[StructurePnl] parseBotStructure dropped id=${String(rowId)} missing=${missing.join(",")}`,
+    );
     return null;
   }
 
@@ -256,11 +270,16 @@ function parseBotStructure(raw: Record<string, unknown>): BotStructure | null {
 }
 
 async function fetchBotStructures(userId: string): Promise<BotStructure[]> {
-  const result = await botFetch(
-    `/api/structures?earner_user_id=${encodeURIComponent(userId)}`,
-    { method: "GET" },
-  );
-  if (!result.ok || result.data == null) return [];
+  const path = `/api/structures?earner_user_id=${encodeURIComponent(userId)}`;
+  const result = await botFetch(path, { method: "GET" }, userId);
+  if (!result.ok || result.data == null) {
+    console.warn(
+      `[StructurePnl] fetchBotStructures empty` +
+        ` user=${userId} path=${path} status=${result.status}` +
+        ` ok=${result.ok} dataNull=${result.data == null}`,
+    );
+    return [];
+  }
 
   const payload = result.data;
   const rows = Array.isArray(payload)
@@ -269,12 +288,43 @@ async function fetchBotStructures(userId: string): Promise<BotStructure[]> {
       ? ((payload as Record<string, unknown>).structures as unknown[])
       : [];
 
+  console.log(
+    `[StructurePnl] fetchBotStructures raw user=${userId} rows=${rows.length}`,
+  );
+
+  if (
+    rows.length === 0 &&
+    !Array.isArray(payload) &&
+    !(
+      payload != null &&
+      typeof payload === "object" &&
+      Array.isArray((payload as Record<string, unknown>).structures)
+    )
+  ) {
+    const keys =
+      payload != null && typeof payload === "object"
+        ? Object.keys(payload as object).join(",")
+        : typeof payload;
+    console.warn(
+      `[StructurePnl] unexpected payload shape user=${userId} keys=${keys}`,
+    );
+  }
+
   const structures: BotStructure[] = [];
+  let dropped = 0;
   for (const row of rows) {
-    if (row == null || typeof row !== "object") continue;
+    if (row == null || typeof row !== "object") {
+      dropped += 1;
+      continue;
+    }
     const parsed = parseBotStructure(row as Record<string, unknown>);
     if (parsed) structures.push(parsed);
+    else dropped += 1;
   }
+  console.log(
+    `[StructurePnl] fetchBotStructures summary user=${userId}` +
+      ` raw=${rows.length} parsed=${structures.length} dropped=${dropped}`,
+  );
   return structures;
 }
 
@@ -1160,10 +1210,22 @@ export async function recomputeStructurePnlForUsers(
     ? [opts.userId]
     : await listEligibleStructurePnlUserIds(prisma);
 
+  console.log(
+    `[StructurePnl] recomputeStructurePnlForUsers start` +
+      ` count=${userIds.length}` +
+      ` userIds=[${userIds.join(",")}]`,
+  );
+
   const results: Record<string, StructurePnlUserResult> = {};
   for (const userId of userIds) {
+    console.log(`[StructurePnl] recompute start user=${userId}`);
     try {
       results[userId] = await recomputeStructurePnlForUser(prisma, userId);
+      console.log(
+        `[StructurePnl] recompute done user=${userId}` +
+          ` structures=${results[userId]!.structures}` +
+          ` closed=${results[userId]!.closed}`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[StructurePnl] recompute failed user=${userId}: ${msg}`);
@@ -1175,5 +1237,14 @@ export async function recomputeStructurePnlForUsers(
       };
     }
   }
+
+  const structuresTotal = Object.values(results).reduce(
+    (sum, r) => sum + r.structures,
+    0,
+  );
+  console.log(
+    `[StructurePnl] recomputeStructurePnlForUsers done` +
+      ` users=${userIds.length} structures=${structuresTotal}`,
+  );
   return results;
 }

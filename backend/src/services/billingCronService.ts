@@ -251,6 +251,11 @@ export async function runLateLedgerRecomputeCron(
     orderBy: { id: "asc" },
   });
 
+  console.info(
+    `[BillingCron] late ledger recompute flagged users=${users.length}` +
+      ` ids=[${users.map((u) => u.id).join(",")}]`,
+  );
+
   for (const user of users) {
     try {
       await runDeltaLedgerSyncForUsers(prisma, { userId: user.id });
