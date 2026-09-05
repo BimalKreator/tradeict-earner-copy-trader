@@ -723,6 +723,14 @@ export type LiveBotStructurePnl = {
   structure_net: number | null;
   computed_at: string | null;
   stale_seconds: number | null;
+  /** Optional pass-through from bot — for gross-vs-net card labels. */
+  short_gross: number | null;
+  wing_gross: number | null;
+  hedge_gross: number | null;
+  basket_gross: number | null;
+  structure_gross: number | null;
+  fees: number | null;
+  spread: number | null;
 };
 
 export type LiveBotStructure = {
@@ -733,6 +741,12 @@ export type LiveBotStructure = {
   legs: LiveBotStructureLeg[];
   hedge: Record<string, unknown> | null;
   pnl: LiveBotStructurePnl | null;
+  /** Gross leg sums by group — computed from legs[].leg_pnl (display only). */
+  group_gross: {
+    short: number | null;
+    protection: number | null;
+    hedge: number | null;
+  };
 };
 
 export type LiveBotStructureResult =
@@ -760,8 +774,23 @@ function parseOverviewLeg(raw: Record<string, unknown>): LiveBotStructureLeg | n
   };
 }
 
-function parseOverviewPnl(raw: Record<string, unknown> | null): LiveBotStructurePnl | null {
+function firstNumber(
+  raw: Record<string, unknown>,
+  keys: string[],
+): number | null {
+  for (const key of keys) {
+    const n = numberOrNull(raw[key]);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function parseOverviewPnl(
+  raw: Record<string, unknown> | null,
+  tradeExtras?: Record<string, unknown> | null,
+): LiveBotStructurePnl | null {
   if (raw == null) return null;
+  const extras = tradeExtras ?? {};
   return {
     hedge_net: numberOrNull(raw.hedge_net),
     short_net: numberOrNull(raw.short_net),
@@ -773,7 +802,45 @@ function parseOverviewPnl(raw: Record<string, unknown> | null): LiveBotStructure
         ? raw.computed_at.trim()
         : null,
     stale_seconds: numberOrNull(raw.stale_seconds),
+    short_gross: firstNumber(raw, ["short_gross"]),
+    wing_gross: firstNumber(raw, ["wing_gross"]),
+    hedge_gross: firstNumber(raw, ["hedge_gross"]),
+    basket_gross: firstNumber(
+      { ...extras, ...raw },
+      ["basket_gross", "gross_mtm", "gross"],
+    ),
+    structure_gross: firstNumber(raw, ["structure_gross"]),
+    fees: firstNumber(
+      { ...extras, ...raw },
+      ["fees", "fees_paid", "total_fees", "est_exit_fees"],
+    ),
+    spread: firstNumber(
+      { ...extras, ...raw },
+      [
+        "spread",
+        "expected_exit_spread_usd",
+        "exit_spread_usd",
+        "entry_spread_usd",
+        "slippage",
+        "hedge_est_exit_slippage_usd",
+      ],
+    ),
   };
+}
+
+function sumLegGrossByPrefix(
+  legs: LiveBotStructureLeg[],
+  prefix: string,
+): number | null {
+  let sum = 0;
+  let any = false;
+  for (const leg of legs) {
+    if (!leg.role.trim().toLowerCase().startsWith(prefix)) continue;
+    if (leg.leg_pnl == null || !Number.isFinite(leg.leg_pnl)) continue;
+    sum += leg.leg_pnl;
+    any = true;
+  }
+  return any ? Math.round(sum * 10000) / 10000 : null;
 }
 
 /**
@@ -830,8 +897,15 @@ export async function fetchBotSlaveStructureForUser(
 
   const pnl =
     active.pnl != null && typeof active.pnl === "object"
-      ? parseOverviewPnl(active.pnl as Record<string, unknown>)
+      ? parseOverviewPnl(active.pnl as Record<string, unknown>, active)
       : null;
+
+  // Prefer bot-provided group gross; otherwise sum legs (same numbers the UI shows).
+  const group_gross = {
+    short: pnl?.short_gross ?? sumLegGrossByPrefix(legs, "short_"),
+    protection: pnl?.wing_gross ?? sumLegGrossByPrefix(legs, "wing_"),
+    hedge: pnl?.hedge_gross ?? sumLegGrossByPrefix(legs, "hedge_"),
+  };
 
   const basketNumber = numberOrNull(active.basket_number);
 
@@ -845,11 +919,16 @@ export async function fetchBotSlaveStructureForUser(
       expiry_date:
         typeof active.expiry_date === "string" && active.expiry_date.trim()
           ? active.expiry_date.trim()
-          : null,
+          : hedge &&
+              typeof hedge.expiry_date === "string" &&
+              hedge.expiry_date.trim()
+            ? String(hedge.expiry_date).trim()
+            : null,
       basket_number: basketNumber != null ? Math.trunc(basketNumber) : null,
       legs,
       hedge,
       pnl,
+      group_gross,
     },
   };
 }
