@@ -740,7 +740,7 @@ function BotLiveTradesSection({
             ) : null}
           </td>
           <td
-            className={`px-3 py-2 text-right text-xs font-semibold tabular-nums sm:px-4 ${pnlTone(group.gross)}`}
+            className={`min-w-[6.5rem] px-3 py-2 text-right text-xs font-semibold tabular-nums sm:px-4 ${pnlTone(group.gross)}`}
           >
             {fmtPnlOrDash(group.gross)}
           </td>
@@ -758,7 +758,7 @@ function BotLiveTradesSection({
                 : ""
           }`}
         >
-          <td className="px-3 py-3 font-medium text-white sm:px-4">
+          <td className="px-3 py-3 text-left font-medium text-white sm:px-4">
             <span className="inline-flex flex-col gap-0.5">
               <span>{leg.label}</span>
               {leg.isWing ? (
@@ -768,22 +768,22 @@ function BotLiveTradesSection({
               ) : null}
             </span>
           </td>
-          <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+          <td className="px-3 py-3 text-right tabular-nums text-white/80 sm:px-4">
             {leg.strike != null && Number.isFinite(leg.strike)
               ? leg.strike.toLocaleString("en-US")
               : "—"}
           </td>
-          <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+          <td className="px-3 py-3 text-right tabular-nums text-white/80 sm:px-4">
             {fmtPrice(leg.entry)}
           </td>
-          <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+          <td className="px-3 py-3 text-right tabular-nums text-white/80 sm:px-4">
             {fmtPrice(leg.current)}
           </td>
-          <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+          <td className="px-3 py-3 text-right tabular-nums text-white/80 sm:px-4">
             {fmtQty(leg.qty)}
           </td>
           <td
-            className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${pnlTone(leg.pnl)}`}
+            className={`min-w-[6.5rem] px-3 py-3 text-right tabular-nums font-semibold sm:px-4 ${pnlTone(leg.pnl)}`}
           >
             {leg.pnl == null ? "—" : fmtPnlOrDash(leg.pnl)}
           </td>
@@ -984,25 +984,25 @@ function BotLiveTradesSection({
       <div className="overflow-hidden rounded-xl border border-glassBorder">
         <ResponsiveMoneyTable
           table={
-            <table className="w-full text-left text-sm">
+            <table className="w-full text-sm">
               <thead className="border-b border-glassBorder bg-white/[0.03]">
                 <tr>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="px-3 py-3 text-left font-medium text-white/60 sm:px-4">
                     Leg
                   </th>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
                     Strike
                   </th>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
                     Entry
                   </th>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
                     Current
                   </th>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="px-3 py-3 text-right font-medium text-white/60 sm:px-4">
                     Qty
                   </th>
-                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                  <th className="min-w-[6.5rem] px-3 py-3 text-right font-medium text-white/60 sm:px-4">
                     P&amp;L (gross)
                   </th>
                 </tr>
