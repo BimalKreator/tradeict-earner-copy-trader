@@ -43,17 +43,143 @@ type UserStrategyGroup = {
   masterOpenCount: number;
 };
 
-type BotOpenTrade = {
-  id: string;
-  strategyId: string;
-  strategyTitle: string;
-  botStrategyType?: string | null;
-  symbol: string;
-  entryPrice: number;
-  tradePnl: number;
-  pnl: number | null;
+type BotStructureLeg = {
+  role: string;
+  strike: number | null;
+  entry_price: number | null;
+  current_price: number | null;
+  quantity: number;
+  leg_pnl: number | null;
   status: string;
 };
+
+type BotStructurePnl = {
+  hedge_net: number | null;
+  short_net: number | null;
+  wing_net: number | null;
+  basket_net: number | null;
+  structure_net: number | null;
+  computed_at: string | null;
+  stale_seconds: number | null;
+};
+
+type BotStructure = {
+  status: string;
+  underlying: string | null;
+  expiry_date: string | null;
+  basket_number: number | null;
+  legs: BotStructureLeg[];
+  hedge: {
+    strike?: number | null;
+    quantity?: number | null;
+    call_entry?: number | null;
+    put_entry?: number | null;
+    call_now?: number | null;
+    put_now?: number | null;
+    hedge_net_mtm?: number | null;
+    expiry_date?: string | null;
+  } | null;
+  pnl: BotStructurePnl | null;
+};
+
+type BotStructureResponse = {
+  structure: BotStructure | null;
+  botUnavailable?: boolean;
+};
+
+type DisplayLegRow = {
+  key: string;
+  label: string;
+  isWing: boolean;
+  isHedge: boolean;
+  strike: number | null;
+  entry: number | null;
+  current: number | null;
+  qty: number | null;
+  pnl: number | null;
+};
+
+function roleLabel(role: string): string {
+  switch (role.trim().toLowerCase()) {
+    case "short_call":
+      return "Short Call";
+    case "short_put":
+      return "Short Put";
+    case "wing_call":
+      return "Wing Call";
+    case "wing_put":
+      return "Wing Put";
+    case "hedge_call":
+      return "Hedge Call";
+    case "hedge_put":
+      return "Hedge Put";
+    default:
+      return role.replace(/_/g, " ");
+  }
+}
+
+/** Build display rows from backend structure — no P&L math. */
+function buildDisplayLegs(structure: BotStructure): DisplayLegRow[] {
+  const rows: DisplayLegRow[] = structure.legs.map((leg, i) => {
+    const role = leg.role.trim().toLowerCase();
+    return {
+      key: `leg-${i}-${leg.role}`,
+      label: roleLabel(leg.role),
+      isWing: role.startsWith("wing"),
+      isHedge: false,
+      strike: leg.strike,
+      entry: leg.entry_price,
+      current: leg.current_price,
+      qty: leg.quantity,
+      pnl: leg.leg_pnl,
+    };
+  });
+
+  const hedge = structure.hedge;
+  if (hedge) {
+    const qty =
+      typeof hedge.quantity === "number" && Number.isFinite(hedge.quantity)
+        ? hedge.quantity
+        : null;
+    const strike =
+      typeof hedge.strike === "number" && Number.isFinite(hedge.strike)
+        ? hedge.strike
+        : null;
+    rows.push({
+      key: "hedge-call",
+      label: "Hedge Call",
+      isWing: false,
+      isHedge: true,
+      strike,
+      entry:
+        typeof hedge.call_entry === "number" ? hedge.call_entry : null,
+      current: typeof hedge.call_now === "number" ? hedge.call_now : null,
+      qty,
+      pnl: null,
+    });
+    rows.push({
+      key: "hedge-put",
+      label: "Hedge Put",
+      isWing: false,
+      isHedge: true,
+      strike,
+      entry: typeof hedge.put_entry === "number" ? hedge.put_entry : null,
+      current: typeof hedge.put_now === "number" ? hedge.put_now : null,
+      qty,
+      pnl: null,
+    });
+  }
+
+  return rows;
+}
+
+function pnlTone(n: number | null | undefined): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n === 0) {
+    return "text-white/70";
+  }
+  return n > 0 ? "text-emerald-400" : "text-red-400";
+}
+
 
 const usdPriceFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -80,6 +206,11 @@ function fmtPnl(n: number | null | undefined): string {
     return usdPnlFmt.format(n);
   }
   return usdPnlFmt.format(0);
+}
+
+function fmtPnlOrDash(n: number | null | undefined): string {
+  if (typeof n === "number" && Number.isFinite(n)) return fmtPnl(n);
+  return "—";
 }
 
 function fmtQty(n: number | null | undefined): string {
@@ -506,7 +637,21 @@ function LiveTradesStrategyTabs({
   );
 }
 
-function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
+function BotLiveTradesSection({
+  structure,
+  botUnavailable,
+}: {
+  structure: BotStructure | null;
+  botUnavailable: boolean;
+}) {
+  const legs = structure ? buildDisplayLegs(structure) : [];
+  const pnl = structure?.pnl ?? null;
+  const stale =
+    typeof pnl?.stale_seconds === "number" && Number.isFinite(pnl.stale_seconds)
+      ? pnl.stale_seconds
+      : null;
+  const showStale = stale != null && stale > 60;
+
   return (
     <section className="space-y-4">
       <div className="flex items-start gap-3">
@@ -518,11 +663,53 @@ function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
             Consistent Earning Strategy — Live Positions
           </h2>
           <p className="mt-1 text-sm text-white/50">
-            Open trades synced from Delta Bot (refreshes every{" "}
+            Live structure from Delta Bot (refreshes every{" "}
             {BOT_TRADES_REFRESH_MS / 1000}s).
           </p>
         </div>
       </div>
+
+      {botUnavailable ? (
+        <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-6 text-center text-sm text-amber-100/90">
+          Live bot data is temporarily unavailable. This does not mean your
+          trade is closed — try again in a moment.
+        </div>
+      ) : null}
+
+      {!botUnavailable && structure && showStale ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100/90">
+          Last updated {Math.round(stale!)}s ago
+        </div>
+      ) : null}
+
+      {!botUnavailable && structure && pnl ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-glassBorder bg-white/[0.03] px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-white/45">
+              Hedge P&amp;L
+            </p>
+            <p className={`mt-1 text-lg font-semibold tabular-nums ${pnlTone(pnl.hedge_net)}`}>
+              {fmtPnlOrDash(pnl.hedge_net)}
+            </p>
+          </div>
+          <div className="rounded-xl border border-glassBorder bg-white/[0.03] px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-white/45">
+              Basket P&amp;L
+            </p>
+            <p className={`mt-1 text-lg font-semibold tabular-nums ${pnlTone(pnl.basket_net)}`}>
+              {fmtPnlOrDash(pnl.basket_net)}
+            </p>
+          </div>
+          <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/10 px-4 py-3">
+            <p className="text-[11px] uppercase tracking-wide text-cyan-200/70">
+              Structure P&amp;L
+            </p>
+            <p className={`mt-1 text-lg font-semibold tabular-nums ${pnlTone(pnl.structure_net)}`}>
+              {fmtPnlOrDash(pnl.structure_net)}
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="overflow-hidden rounded-xl border border-glassBorder">
         <ResponsiveMoneyTable
@@ -531,143 +718,143 @@ function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
               <thead className="border-b border-glassBorder bg-white/[0.03]">
                 <tr>
                   <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                    Symbol
+                    Leg
                   </th>
                   <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                    Entry Price
+                    Strike
                   </th>
                   <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                    Current P&amp;L
+                    Entry
                   </th>
                   <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
-                    Status
+                    Current
+                  </th>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    Qty
+                  </th>
+                  <th className="px-3 py-3 font-medium text-white/60 sm:px-4">
+                    P&amp;L
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {trades.length === 0 ? (
+                {!botUnavailable && legs.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={4}
+                      colSpan={6}
                       className="px-4 py-10 text-center text-sm text-white/50"
                     >
                       No active trade
                     </td>
                   </tr>
                 ) : (
-                  trades.map((t) => {
-                    const pnl =
-                      Number.isFinite(t.tradePnl) && t.tradePnl !== 0
-                        ? t.tradePnl
-                        : typeof t.pnl === "number" && Number.isFinite(t.pnl)
-                          ? t.pnl
-                          : t.tradePnl;
-                    const positive = pnl > 0;
-                    const negative = pnl < 0;
-                    return (
-                      <tr
-                        key={t.id}
-                        className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02]"
+                  legs.map((leg) => (
+                    <tr
+                      key={leg.key}
+                      className={`border-b border-white/[0.06] last:border-0 hover:bg-white/[0.02] ${
+                        leg.isWing
+                          ? "bg-violet-500/[0.06]"
+                          : leg.isHedge
+                            ? "bg-sky-500/[0.05]"
+                            : ""
+                      }`}
+                    >
+                      <td className="px-3 py-3 font-medium text-white sm:px-4">
+                        <span className="inline-flex flex-col gap-0.5">
+                          <span>{leg.label}</span>
+                          {leg.isWing ? (
+                            <span className="text-[10px] font-normal uppercase tracking-wide text-violet-300/80">
+                              Protection
+                            </span>
+                          ) : null}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {leg.strike != null && Number.isFinite(leg.strike)
+                          ? leg.strike.toLocaleString("en-US")
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtPrice(leg.entry)}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtPrice(leg.current)}
+                      </td>
+                      <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
+                        {fmtQty(leg.qty)}
+                      </td>
+                      <td
+                        className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${pnlTone(leg.pnl)}`}
                       >
-                        <td className="px-3 py-3 font-medium text-white sm:px-4">
-                          {t.symbol || "—"}
-                        </td>
-                        <td className="px-3 py-3 tabular-nums text-white/80 sm:px-4">
-                          {fmtPrice(t.entryPrice)}
-                        </td>
-                        <td
-                          className={`px-3 py-3 tabular-nums font-semibold sm:px-4 ${
-                            positive
-                              ? "text-emerald-400"
-                              : negative
-                                ? "text-red-400"
-                                : "text-white/70"
-                          }`}
-                        >
-                          {fmtPnl(pnl)}
-                        </td>
-                        <td className="px-3 py-3 sm:px-4">
-                          <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
-                            {t.status || "OPEN"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })
+                        {leg.pnl == null ? "—" : fmtPnlOrDash(leg.pnl)}
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
           }
           cards={
-            trades.length === 0 ? (
+            !botUnavailable && legs.length === 0 ? (
               <div className="px-4 py-10 text-center text-sm text-white/50">
                 No active trade
               </div>
             ) : (
-              trades.map((t) => {
-                const pnl =
-                  Number.isFinite(t.tradePnl) && t.tradePnl !== 0
-                    ? t.tradePnl
-                    : typeof t.pnl === "number" && Number.isFinite(t.pnl)
-                      ? t.pnl
-                      : t.tradePnl;
-                const positive = pnl > 0;
-                const negative = pnl < 0;
-                return (
-                  <MoneyRowCard
-                    key={t.id}
-                    primary={t.symbol || "—"}
-                    secondary={
-                      <span className="tabular-nums">
-                        Entry {fmtPrice(t.entryPrice)}
-                      </span>
-                    }
-                    amount={
-                      <span
-                        className={`tabular-nums text-sm font-semibold ${
-                          positive
-                            ? "text-emerald-400"
-                            : negative
-                              ? "text-red-400"
-                              : "text-white/70"
-                        }`}
-                      >
-                        {fmtPnl(pnl)}
-                      </span>
-                    }
-                    status={
-                      <span className="inline-flex rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
-                        {t.status || "OPEN"}
-                      </span>
-                    }
-                    details={
-                      <div className="divide-y divide-white/5">
-                        <DetailRow
-                          label="Entry Price"
-                          value={fmtPrice(t.entryPrice)}
-                        />
-                        <DetailRow
-                          label="Current P&L"
-                          value={
-                            <span
-                              className={`tabular-nums font-semibold ${
-                                positive
-                                  ? "text-emerald-400"
-                                  : negative
-                                    ? "text-red-400"
-                                    : "text-white/70"
-                              }`}
-                            >
-                              {fmtPnl(pnl)}
-                            </span>
-                          }
-                        />
-                        <DetailRow label="Status" value={t.status || "OPEN"} />
-                      </div>
-                    }
-                  />
-                );
-              })
+              legs.map((leg) => (
+                <MoneyRowCard
+                  key={leg.key}
+                  primary={leg.label}
+                  secondary={
+                    <span className="tabular-nums">
+                      Strike{" "}
+                      {leg.strike != null && Number.isFinite(leg.strike)
+                        ? leg.strike.toLocaleString("en-US")
+                        : "—"}
+                      {leg.isWing ? " · Protection" : ""}
+                    </span>
+                  }
+                  amount={
+                    <span
+                      className={`tabular-nums text-sm font-semibold ${pnlTone(leg.pnl)}`}
+                    >
+                      {leg.pnl == null ? "—" : fmtPnlOrDash(leg.pnl)}
+                    </span>
+                  }
+                  status={
+                    <span
+                      className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                        leg.isWing
+                          ? "border-violet-500/40 bg-violet-500/15 text-violet-200"
+                          : leg.isHedge
+                            ? "border-sky-500/40 bg-sky-500/15 text-sky-200"
+                            : "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+                      }`}
+                    >
+                      {leg.isWing ? "Wing" : leg.isHedge ? "Hedge" : "Short"}
+                    </span>
+                  }
+                  details={
+                    <div className="divide-y divide-white/5">
+                      <DetailRow label="Entry" value={fmtPrice(leg.entry)} />
+                      <DetailRow
+                        label="Current"
+                        value={fmtPrice(leg.current)}
+                      />
+                      <DetailRow label="Qty" value={fmtQty(leg.qty)} />
+                      <DetailRow
+                        label="P&L"
+                        value={
+                          <span
+                            className={`tabular-nums font-semibold ${pnlTone(leg.pnl)}`}
+                          >
+                            {leg.pnl == null ? "—" : fmtPnlOrDash(leg.pnl)}
+                          </span>
+                        }
+                      />
+                    </div>
+                  }
+                />
+              ))
             )
           }
         />
@@ -678,7 +865,8 @@ function BotLiveTradesSection({ trades }: { trades: BotOpenTrade[] }) {
 
 export default function DashboardLiveTradesPage() {
   const [groups, setGroups] = useState<UserStrategyGroup[]>([]);
-  const [botTrades, setBotTrades] = useState<BotOpenTrade[]>([]);
+  const [botStructure, setBotStructure] = useState<BotStructure | null>(null);
+  const [botUnavailable, setBotUnavailable] = useState(false);
   const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -736,7 +924,7 @@ export default function DashboardLiveTradesPage() {
     if (!base) return;
     try {
       const res = await fetch(
-        `${base}/user/trades?status=OPEN&limit=100&t=${Date.now()}`,
+        `${base}/live-trades/bot-structure?t=${Date.now()}`,
         {
           cache: "no-store",
           headers: {
@@ -745,15 +933,9 @@ export default function DashboardLiveTradesPage() {
         },
       );
       if (!res.ok) return;
-      const body = (await res.json()) as { trades?: BotOpenTrade[] };
-      const rows = Array.isArray(body.trades) ? body.trades : [];
-      setBotTrades(
-        rows.filter(
-          (t) =>
-            typeof t.botStrategyType === "string" &&
-            t.botStrategyType.trim().length > 0,
-        ),
-      );
+      const body = (await res.json()) as BotStructureResponse;
+      setBotUnavailable(body.botUnavailable === true);
+      setBotStructure(body.structure ?? null);
     } catch {
       /* keep last snapshot */
     }
@@ -805,7 +987,7 @@ export default function DashboardLiveTradesPage() {
 
   const showFutureHedge = groups.length > 0;
   const showEmpty =
-    !loading && !showFutureHedge && botTrades.length === 0;
+    !loading && !showFutureHedge && botStructure == null && !botUnavailable;
 
   return (
     <div className="space-y-6 md:space-y-8">
@@ -856,7 +1038,10 @@ export default function DashboardLiveTradesPage() {
         </div>
       ) : (
         <div className="space-y-8">
-          <BotLiveTradesSection trades={botTrades} />
+          <BotLiveTradesSection
+            structure={botStructure}
+            botUnavailable={botUnavailable}
+          />
 
           {showFutureHedge ? (
             <div className="space-y-4">

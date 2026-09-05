@@ -704,3 +704,152 @@ export async function closeSlaveStructure(args: {
   }
   return closeSlaveStructureImpl(args);
 }
+
+export type LiveBotStructureLeg = {
+  role: string;
+  strike: number | null;
+  entry_price: number | null;
+  current_price: number | null;
+  quantity: number;
+  leg_pnl: number | null;
+  status: string;
+};
+
+export type LiveBotStructurePnl = {
+  hedge_net: number | null;
+  short_net: number | null;
+  wing_net: number | null;
+  basket_net: number | null;
+  structure_net: number | null;
+  computed_at: string | null;
+  stale_seconds: number | null;
+};
+
+export type LiveBotStructure = {
+  status: string;
+  underlying: string | null;
+  expiry_date: string | null;
+  basket_number: number | null;
+  legs: LiveBotStructureLeg[];
+  hedge: Record<string, unknown> | null;
+  pnl: LiveBotStructurePnl | null;
+};
+
+export type LiveBotStructureResult =
+  | { structure: LiveBotStructure }
+  | { structure: null }
+  | { structure: null; botUnavailable: true };
+
+function numberOrNull(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  const n = typeof value === "number" ? value : parseFloat(String(value));
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseOverviewLeg(raw: Record<string, unknown>): LiveBotStructureLeg | null {
+  const role = typeof raw.role === "string" ? raw.role.trim() : "";
+  if (!role) return null;
+  return {
+    role,
+    strike: numberOrNull(raw.strike),
+    entry_price: numberOrNull(raw.entry_price),
+    current_price: numberOrNull(raw.current_price),
+    quantity: Math.trunc(numberOrNull(raw.quantity) ?? 0),
+    leg_pnl: numberOrNull(raw.leg_pnl),
+    status: typeof raw.status === "string" ? raw.status : "open",
+  };
+}
+
+function parseOverviewPnl(raw: Record<string, unknown> | null): LiveBotStructurePnl | null {
+  if (raw == null) return null;
+  return {
+    hedge_net: numberOrNull(raw.hedge_net),
+    short_net: numberOrNull(raw.short_net),
+    wing_net: numberOrNull(raw.wing_net),
+    basket_net: numberOrNull(raw.basket_net),
+    structure_net: numberOrNull(raw.structure_net),
+    computed_at:
+      typeof raw.computed_at === "string" && raw.computed_at.trim().length > 0
+        ? raw.computed_at.trim()
+        : null,
+    stale_seconds: numberOrNull(raw.stale_seconds),
+  };
+}
+
+/**
+ * Live bot structure for the Earner Live Trades page — reads /api/slave/overview
+ * (same source BotSync polls). Does not touch Trade / billing tables.
+ */
+export async function fetchBotSlaveStructureForUser(
+  earnerUserId: string,
+): Promise<LiveBotStructureResult> {
+  const result = await botFetch("/api/slave/overview", { method: "GET" });
+  if (!result.ok || result.data == null) {
+    console.warn(
+      `[BotBridge] slave overview unavailable user=${earnerUserId} status=${result.status}`,
+    );
+    return { structure: null, botUnavailable: true };
+  }
+
+  const payload = result.data as Record<string, unknown>;
+  const slaves = Array.isArray(payload.slaves)
+    ? (payload.slaves as Record<string, unknown>[])
+    : [];
+  const want = earnerUserId.trim();
+  const match = slaves.find((s) => {
+    const id = typeof s.earner_user_id === "string" ? s.earner_user_id.trim() : "";
+    return id.length > 0 && id === want;
+  });
+
+  if (!match) {
+    return { structure: null };
+  }
+
+  const active =
+    match.active_slave_trade != null &&
+    typeof match.active_slave_trade === "object"
+      ? (match.active_slave_trade as Record<string, unknown>)
+      : null;
+
+  if (!active) {
+    return { structure: null };
+  }
+
+  const legsRaw = Array.isArray(active.legs) ? active.legs : [];
+  const legs: LiveBotStructureLeg[] = [];
+  for (const item of legsRaw) {
+    if (item == null || typeof item !== "object") continue;
+    const leg = parseOverviewLeg(item as Record<string, unknown>);
+    if (leg) legs.push(leg);
+  }
+
+  const hedge =
+    active.hedge != null && typeof active.hedge === "object"
+      ? (active.hedge as Record<string, unknown>)
+      : null;
+
+  const pnl =
+    active.pnl != null && typeof active.pnl === "object"
+      ? parseOverviewPnl(active.pnl as Record<string, unknown>)
+      : null;
+
+  const basketNumber = numberOrNull(active.basket_number);
+
+  return {
+    structure: {
+      status: typeof active.status === "string" ? active.status : "active",
+      underlying:
+        typeof active.underlying === "string" && active.underlying.trim()
+          ? active.underlying.trim()
+          : null,
+      expiry_date:
+        typeof active.expiry_date === "string" && active.expiry_date.trim()
+          ? active.expiry_date.trim()
+          : null,
+      basket_number: basketNumber != null ? Math.trunc(basketNumber) : null,
+      legs,
+      hedge,
+      pnl,
+    },
+  };
+}
